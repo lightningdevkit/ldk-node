@@ -14,6 +14,7 @@ use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::SocketAddress;
 use lightning_liquidity::lsps0::ser::LSPSRequestId;
 use lightning_liquidity::lsps1::client::LSPS1ClientConfig as LdkLSPS1ClientConfig;
+use lightning_liquidity::lsps1::event::LSPS1ClientEvent;
 use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1Options, LSPS1OrderId, LSPS1OrderParams,
 };
@@ -38,6 +39,167 @@ pub(crate) struct LSPS1Client {
 		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS1OrderStatus>>>,
 	pub(crate) pending_check_order_status_requests:
 		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS1OrderStatus>>>,
+}
+
+impl LSPS1Client {
+	pub(crate) async fn handle_event<L: Deref>(&self, event: LSPS1ClientEvent, logger: &L)
+	where
+		L::Target: LdkLogger,
+	{
+		match event {
+			LSPS1ClientEvent::SupportedOptionsReady {
+				request_id,
+				counterparty_node_id,
+				supported_options,
+			} => {
+				if counterparty_node_id != self.lsp_node_id {
+					debug_assert!(
+						false,
+						"Received response from unexpected LSP counterparty. This should never happen."
+					);
+					log_error!(
+						logger,
+						"Received response from unexpected LSP counterparty. This should never happen."
+					);
+					return;
+				}
+
+				if let Some(sender) =
+					self.pending_opening_params_requests.lock().expect("lock").remove(&request_id)
+				{
+					let response = LSPS1OpeningParamsResponse { supported_options };
+
+					match sender.send(response) {
+						Ok(()) => (),
+						Err(_) => {
+							log_error!(
+								logger,
+								"Failed to handle response for request {:?} from liquidity service",
+								request_id
+							);
+						},
+					}
+				} else {
+					debug_assert!(
+						false,
+						"Received response from liquidity service for unknown request."
+					);
+					log_error!(
+						logger,
+						"Received response from liquidity service for unknown request."
+					);
+				}
+			},
+			LSPS1ClientEvent::OrderCreated {
+				request_id,
+				counterparty_node_id,
+				order_id,
+				order,
+				payment,
+				channel,
+			} => {
+				if counterparty_node_id != self.lsp_node_id {
+					debug_assert!(
+						false,
+						"Received response from unexpected LSP counterparty. This should never happen."
+					);
+					log_error!(
+						logger,
+						"Received response from unexpected LSP counterparty. This should never happen."
+					);
+					return;
+				}
+
+				if let Some(sender) =
+					self.pending_create_order_requests.lock().expect("lock").remove(&request_id)
+				{
+					let response = LSPS1OrderStatus {
+						order_id,
+						order_params: order,
+						payment_options: payment.into(),
+						channel_state: channel,
+					};
+
+					match sender.send(response) {
+						Ok(()) => (),
+						Err(_) => {
+							log_error!(
+								logger,
+								"Failed to handle response for request {:?} from liquidity service",
+								request_id
+							);
+						},
+					}
+				} else {
+					debug_assert!(
+						false,
+						"Received response from liquidity service for unknown request."
+					);
+					log_error!(
+						logger,
+						"Received response from liquidity service for unknown request."
+					);
+				}
+			},
+			LSPS1ClientEvent::OrderStatus {
+				request_id,
+				counterparty_node_id,
+				order_id,
+				order,
+				payment,
+				channel,
+			} => {
+				if counterparty_node_id != self.lsp_node_id {
+					debug_assert!(
+						false,
+						"Received response from unexpected LSP counterparty. This should never happen."
+					);
+					log_error!(
+						logger,
+						"Received response from unexpected LSP counterparty. This should never happen."
+					);
+					return;
+				}
+
+				if let Some(sender) = self
+					.pending_check_order_status_requests
+					.lock()
+					.expect("lock")
+					.remove(&request_id)
+				{
+					let response = LSPS1OrderStatus {
+						order_id,
+						order_params: order,
+						payment_options: payment.into(),
+						channel_state: channel,
+					};
+
+					match sender.send(response) {
+						Ok(()) => (),
+						Err(_) => {
+							log_error!(
+								logger,
+								"Failed to handle response for request {:?} from liquidity service",
+								request_id
+							);
+						},
+					}
+				} else {
+					debug_assert!(
+						false,
+						"Received response from liquidity service for unknown request."
+					);
+					log_error!(
+						logger,
+						"Received response from liquidity service for unknown request."
+					);
+				}
+			},
+			_ => {
+				log_error!(logger, "Received unexpected LSPS1Client liquidity event!");
+			},
+		}
+	}
 }
 
 #[derive(Debug, Clone)]

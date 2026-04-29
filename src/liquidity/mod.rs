@@ -28,7 +28,6 @@ use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder,
 use lightning_liquidity::events::LiquidityEvent;
 use lightning_liquidity::lsps0::ser::{LSPSDateTime, LSPSRequestId};
 use lightning_liquidity::lsps1::client::LSPS1ClientConfig as LdkLSPS1ClientConfig;
-use lightning_liquidity::lsps1::event::LSPS1ClientEvent;
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
 use lightning_liquidity::lsps2::event::{LSPS2ClientEvent, LSPS2ServiceEvent};
 use lightning_liquidity::lsps2::msgs::{LSPS2OpeningFeeParams, LSPS2RawOpeningFeeParams};
@@ -47,7 +46,7 @@ use crate::types::{
 };
 use crate::{total_anchor_channels_reserve_sats, Config, Error};
 
-pub(crate) use client::lsps1::{LSPS1Client, LSPS1ClientConfig, LSPS1OpeningParamsResponse};
+pub(crate) use client::lsps1::{LSPS1Client, LSPS1ClientConfig};
 pub use client::lsps1::{LSPS1Liquidity, LSPS1OrderStatus};
 
 pub(crate) const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
@@ -374,173 +373,11 @@ where
 
 	pub(crate) async fn handle_next_event(&self) {
 		match self.liquidity_manager.next_event_async().await {
-			LiquidityEvent::LSPS1Client(LSPS1ClientEvent::SupportedOptionsReady {
-				request_id,
-				counterparty_node_id,
-				supported_options,
-			}) => {
+			LiquidityEvent::LSPS1Client(event) => {
 				if let Some(lsps1_client) = self.lsps1_client.as_ref() {
-					if counterparty_node_id != lsps1_client.lsp_node_id {
-						debug_assert!(
-							false,
-							"Received response from unexpected LSP counterparty. This should never happen."
-						);
-						log_error!(
-							self.logger,
-							"Received response from unexpected LSP counterparty. This should never happen."
-						);
-						return;
-					}
-
-					if let Some(sender) = lsps1_client
-						.pending_opening_params_requests
-						.lock()
-						.expect("lock")
-						.remove(&request_id)
-					{
-						let response = LSPS1OpeningParamsResponse { supported_options };
-
-						match sender.send(response) {
-							Ok(()) => (),
-							Err(_) => {
-								log_error!(
-									self.logger,
-									"Failed to handle response for request {:?} from liquidity service",
-									request_id
-								);
-							},
-						}
-					} else {
-						debug_assert!(
-							false,
-							"Received response from liquidity service for unknown request."
-						);
-						log_error!(
-							self.logger,
-							"Received response from liquidity service for unknown request."
-						);
-					}
+					lsps1_client.handle_event(event, &self.logger).await;
 				} else {
-					log_error!(
-						self.logger,
-						"Received unexpected LSPS1Client::SupportedOptionsReady event!"
-					);
-				}
-			},
-			LiquidityEvent::LSPS1Client(LSPS1ClientEvent::OrderCreated {
-				request_id,
-				counterparty_node_id,
-				order_id,
-				order,
-				payment,
-				channel,
-			}) => {
-				if let Some(lsps1_client) = self.lsps1_client.as_ref() {
-					if counterparty_node_id != lsps1_client.lsp_node_id {
-						debug_assert!(
-							false,
-							"Received response from unexpected LSP counterparty. This should never happen."
-						);
-						log_error!(
-							self.logger,
-							"Received response from unexpected LSP counterparty. This should never happen."
-						);
-						return;
-					}
-
-					if let Some(sender) = lsps1_client
-						.pending_create_order_requests
-						.lock()
-						.expect("lock")
-						.remove(&request_id)
-					{
-						let response = LSPS1OrderStatus {
-							order_id,
-							order_params: order,
-							payment_options: payment.into(),
-							channel_state: channel,
-						};
-
-						match sender.send(response) {
-							Ok(()) => (),
-							Err(_) => {
-								log_error!(
-									self.logger,
-									"Failed to handle response for request {:?} from liquidity service",
-									request_id
-								);
-							},
-						}
-					} else {
-						debug_assert!(
-							false,
-							"Received response from liquidity service for unknown request."
-						);
-						log_error!(
-							self.logger,
-							"Received response from liquidity service for unknown request."
-						);
-					}
-				} else {
-					log_error!(self.logger, "Received unexpected LSPS1Client::OrderCreated event!");
-				}
-			},
-			LiquidityEvent::LSPS1Client(LSPS1ClientEvent::OrderStatus {
-				request_id,
-				counterparty_node_id,
-				order_id,
-				order,
-				payment,
-				channel,
-			}) => {
-				if let Some(lsps1_client) = self.lsps1_client.as_ref() {
-					if counterparty_node_id != lsps1_client.lsp_node_id {
-						debug_assert!(
-							false,
-							"Received response from unexpected LSP counterparty. This should never happen."
-						);
-						log_error!(
-							self.logger,
-							"Received response from unexpected LSP counterparty. This should never happen."
-						);
-						return;
-					}
-
-					if let Some(sender) = lsps1_client
-						.pending_check_order_status_requests
-						.lock()
-						.expect("lock")
-						.remove(&request_id)
-					{
-						let response = LSPS1OrderStatus {
-							order_id,
-							order_params: order,
-							payment_options: payment.into(),
-							channel_state: channel,
-						};
-
-						match sender.send(response) {
-							Ok(()) => (),
-							Err(_) => {
-								log_error!(
-									self.logger,
-									"Failed to handle response for request {:?} from liquidity service",
-									request_id
-								);
-							},
-						}
-					} else {
-						debug_assert!(
-							false,
-							"Received response from liquidity service for unknown request."
-						);
-						log_error!(
-							self.logger,
-							"Received response from liquidity service for unknown request."
-						);
-					}
-				} else {
-					log_error!(self.logger, "Received unexpected LSPS1Client::OrderStatus event!");
+					log_error!(self.logger, "Received unexpected LSPS1Client event!");
 				}
 			},
 			LiquidityEvent::LSPS2Service(LSPS2ServiceEvent::GetInfo {
