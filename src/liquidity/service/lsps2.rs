@@ -6,17 +6,25 @@
 // accordance with one or both of these licenses.
 
 use std::ops::Deref;
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Transaction;
+use chrono::Utc;
 use lightning::events::HTLCHandlingFailureType;
 use lightning::ln::channelmanager::InterceptId;
 use lightning::ln::types::ChannelId;
+use lightning::sign::EntropySource;
+use lightning_liquidity::lsps0::ser::LSPSDateTime;
+use lightning_liquidity::lsps2::event::LSPS2ServiceEvent;
+use lightning_liquidity::lsps2::msgs::LSPS2RawOpeningFeeParams;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_types::payment::PaymentHash;
 
 use crate::logger::{log_error, LdkLogger};
+use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
+use crate::{total_anchor_channels_reserve_sats, Config};
 
 use super::super::LiquiditySource;
 
@@ -26,6 +34,266 @@ pub(crate) const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u32 = 72;
 pub(crate) struct LSPS2Service {
 	pub(crate) service_config: LSPS2ServiceConfig,
 	pub(crate) ldk_service_config: LdkLSPS2ServiceConfig,
+}
+
+impl LSPS2Service {
+	pub(crate) async fn handle_event<L: Deref>(
+		&self, event: LSPS2ServiceEvent, liquidity_manager: &Arc<LiquidityManager>,
+		channel_manager: &Arc<ChannelManager>, keys_manager: &Arc<KeysManager>,
+		peer_manager: &RwLock<Option<Weak<PeerManager>>>, wallet: &Arc<Wallet>,
+		config: &Arc<Config>, logger: &L,
+	) where
+		L::Target: LdkLogger,
+	{
+		match event {
+			LSPS2ServiceEvent::GetInfo { request_id, counterparty_node_id, token } => {
+				if let Some(lsps2_service_handler) =
+					liquidity_manager.lsps2_service_handler().as_ref()
+				{
+					let service_config = self.service_config.clone();
+
+					if let Some(required) = service_config.require_token {
+						if token != Some(required) {
+							log_error!(
+								logger,
+								"Rejecting LSPS2 request {:?} from counterparty {} as the client provided an invalid token.",
+								request_id,
+								counterparty_node_id
+							);
+							lsps2_service_handler.invalid_token_provided(&counterparty_node_id, request_id.clone()).unwrap_or_else(|e| {
+								debug_assert!(false, "Failed to reject LSPS2 request. This should never happen.");
+								log_error!(
+									logger,
+									"Failed to reject LSPS2 request {:?} from counterparty {} due to: {:?}. This should never happen.",
+									request_id,
+									counterparty_node_id,
+									e
+								);
+							});
+							return;
+						}
+					}
+
+					let valid_until = LSPSDateTime(Utc::now() + LSPS2_GETINFO_REQUEST_EXPIRY);
+					let opening_fee_params = LSPS2RawOpeningFeeParams {
+						min_fee_msat: service_config.min_channel_opening_fee_msat,
+						proportional: service_config.channel_opening_fee_ppm,
+						valid_until,
+						min_lifetime: service_config.min_channel_lifetime,
+						max_client_to_self_delay: service_config.max_client_to_self_delay,
+						min_payment_size_msat: service_config.min_payment_size_msat,
+						max_payment_size_msat: service_config.max_payment_size_msat,
+					};
+
+					let opening_fee_params_menu = vec![opening_fee_params];
+
+					if let Err(e) = lsps2_service_handler.opening_fee_params_generated(
+						&counterparty_node_id,
+						request_id,
+						opening_fee_params_menu,
+					) {
+						log_error!(
+							logger,
+							"Failed to handle generated opening fee params: {:?}",
+							e
+						);
+					}
+				} else {
+					log_error!(logger, "Failed to handle LSPS2ServiceEvent as LSPS2 liquidity service was not configured.",);
+					return;
+				}
+			},
+			LSPS2ServiceEvent::BuyRequest {
+				request_id,
+				counterparty_node_id,
+				opening_fee_params: _,
+				payment_size_msat,
+			} => {
+				if let Some(lsps2_service_handler) =
+					liquidity_manager.lsps2_service_handler().as_ref()
+				{
+					let service_config = self.service_config.clone();
+
+					let user_channel_id: u128 = u128::from_ne_bytes(
+						keys_manager.get_secure_random_bytes()[..16]
+							.try_into()
+							.expect("a 16-byte slice should convert into a [u8; 16]"),
+					);
+					let intercept_scid = channel_manager.get_intercept_scid();
+
+					if let Some(payment_size_msat) = payment_size_msat {
+						// We already check this in `lightning-liquidity`, but better safe than
+						// sorry.
+						//
+						// TODO: We might want to eventually send back an error here, but we
+						// currently can't and have to trust `lightning-liquidity` is doing the
+						// right thing.
+						//
+						// TODO: Eventually we also might want to make sure that we have sufficient
+						// liquidity for the channel opening here.
+						if payment_size_msat > service_config.max_payment_size_msat
+							|| payment_size_msat < service_config.min_payment_size_msat
+						{
+							log_error!(
+								logger,
+								"Rejecting to handle LSPS2 buy request {:?} from counterparty {} as the client requested an invalid payment size.",
+								request_id,
+								counterparty_node_id
+							);
+							return;
+						}
+					}
+
+					match lsps2_service_handler
+						.invoice_parameters_generated(
+							&counterparty_node_id,
+							request_id,
+							intercept_scid,
+							LSPS2_CHANNEL_CLTV_EXPIRY_DELTA,
+							service_config.client_trusts_lsp,
+							user_channel_id,
+						)
+						.await
+					{
+						Ok(()) => {},
+						Err(e) => {
+							log_error!(logger, "Failed to provide invoice parameters: {:?}", e);
+							return;
+						},
+					}
+				} else {
+					log_error!(logger, "Failed to handle LSPS2ServiceEvent as LSPS2 liquidity service was not configured.",);
+					return;
+				}
+			},
+			LSPS2ServiceEvent::OpenChannel {
+				their_network_key,
+				amt_to_forward_msat,
+				opening_fee_msat: _,
+				user_channel_id,
+				intercept_scid: _,
+			} => {
+				if liquidity_manager.lsps2_service_handler().is_none() {
+					log_error!(logger, "Failed to handle LSPS2ServiceEvent as LSPS2 liquidity service was not configured.",);
+					return;
+				};
+
+				let service_config = self.service_config.clone();
+
+				let init_features = if let Some(Some(peer_manager)) =
+					peer_manager.read().expect("lock").as_ref().map(|weak| weak.upgrade())
+				{
+					// Fail if we're not connected to the prospective channel partner.
+					if let Some(peer) = peer_manager.peer_by_node_id(&their_network_key) {
+						peer.init_features
+					} else {
+						// TODO: We just silently fail here. Eventually we will need to remember
+						// the pending requests and regularly retry opening the channel until we
+						// succeed.
+						log_error!(
+							logger,
+							"Failed to open LSPS2 channel to {} due to peer not being not connected.",
+							their_network_key,
+						);
+						return;
+					}
+				} else {
+					debug_assert!(false, "Failed to handle LSPS2ServiceEvent as peer manager isn't available. This should never happen.",);
+					log_error!(logger, "Failed to handle LSPS2ServiceEvent as peer manager isn't available. This should never happen.",);
+					return;
+				};
+
+				// Fail if we have insufficient onchain funds available.
+				let over_provisioning_msat = (amt_to_forward_msat
+					* service_config.channel_over_provisioning_ppm as u64)
+					/ 1_000_000;
+				let channel_amount_sats = (amt_to_forward_msat + over_provisioning_msat) / 1000;
+				let cur_anchor_reserve_sats =
+					total_anchor_channels_reserve_sats(channel_manager, config);
+				let spendable_amount_sats =
+					wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+				let required_funds_sats = channel_amount_sats
+					+ config.anchor_channels_config.as_ref().map_or(0, |c| {
+						if init_features.requires_anchors_zero_fee_htlc_tx()
+							&& !c.trusted_peers_no_reserve.contains(&their_network_key)
+						{
+							c.per_channel_reserve_sats
+						} else {
+							0
+						}
+					});
+				if spendable_amount_sats < required_funds_sats {
+					log_error!(logger,
+						"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
+						spendable_amount_sats, channel_amount_sats
+					);
+					// TODO: We just silently fail here. Eventually we will need to remember
+					// the pending requests and regularly retry opening the channel until we
+					// succeed.
+					return;
+				}
+
+				let mut config = channel_manager.get_current_config().clone();
+
+				// If we act as an LSPS2 service, the HTLC-value-in-flight must be 100% of the
+				// channel value to ensure we can forward the initial payment. That cap only
+				// applies to unannounced channels, so the channel must also be unannounced.
+				debug_assert_eq!(
+					config
+						.channel_handshake_config
+						.unannounced_channel_max_inbound_htlc_value_in_flight_percentage,
+					100
+				);
+				debug_assert!(!config.channel_handshake_config.announce_for_forwarding);
+				debug_assert!(config.accept_forwards_to_priv_channels);
+
+				// We set the forwarding fee to 0 for now as we're getting paid by the channel fee.
+				//
+				// TODO: revisit this decision eventually.
+				config.channel_config.forwarding_fee_base_msat = 0;
+				config.channel_config.forwarding_fee_proportional_millionths = 0;
+
+				let result = if service_config.disable_client_reserve {
+					channel_manager.create_channel_to_trusted_peer_0reserve(
+						their_network_key,
+						channel_amount_sats,
+						0,
+						user_channel_id,
+						None,
+						Some(config),
+					)
+				} else {
+					channel_manager.create_channel(
+						their_network_key,
+						channel_amount_sats,
+						0,
+						user_channel_id,
+						None,
+						Some(config),
+					)
+				};
+
+				match result {
+					Ok(_) => {},
+					Err(e) => {
+						// TODO: We just silently fail here. Eventually we will need to remember
+						// the pending requests and regularly retry opening the channel until we
+						// succeed.
+						let zero_reserve_string =
+							if service_config.disable_client_reserve { "0reserve " } else { "" };
+						log_error!(
+							logger,
+							"Failed to open LSPS2 {}channel to {}: {:?}",
+							zero_reserve_string,
+							their_network_key,
+							e
+						);
+						return;
+					},
+				}
+			},
+		}
+	}
 }
 
 /// Represents the configuration of the LSPS2 service.
