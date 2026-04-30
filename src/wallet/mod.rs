@@ -122,7 +122,7 @@ impl Wallet {
 	}
 
 	pub(crate) fn get_spks_for_cbf_sync(&self, stop_gap: usize) -> Vec<ScriptBuf> {
-		let wallet = self.inner.lock().unwrap();
+		let wallet = self.inner.lock().expect("lock");
 		let mut scripts: Vec<ScriptBuf> =
 			wallet.spk_index().revealed_spks(..).map(|((_, _), spk)| spk).collect();
 
@@ -140,7 +140,7 @@ impl Wallet {
 	}
 
 	pub(crate) fn latest_checkpoint(&self) -> bdk_chain::CheckPoint {
-		self.inner.lock().unwrap().latest_checkpoint()
+		self.inner.lock().expect("lock").latest_checkpoint()
 	}
 
 	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {

@@ -181,7 +181,7 @@ impl CbfChainSource {
 	///
 	/// Delegates to [`Self::build_cbf_node_static`], passing all needed fields.
 	fn build_cbf_node(&self) -> (CbfNode, Client) {
-		let wallet = self.onchain_wallet.lock().unwrap().clone();
+		let wallet = self.onchain_wallet.lock().expect("lock").clone();
 		Self::build_cbf_node_static(
 			&self.peers,
 			&self.sync_config,
@@ -262,14 +262,14 @@ impl CbfChainSource {
 	/// processing tasks — up to [`MAX_RESTART_RETRIES`] consecutive failures
 	/// with exponential backoff starting at [`INITIAL_BACKOFF_MS`].
 	pub(crate) fn start(&self, runtime: Arc<Runtime>, onchain_wallet: Arc<Wallet>) {
-		let mut status = self.cbf_runtime_status.lock().unwrap();
+		let mut status = self.cbf_runtime_status.lock().expect("lock");
 		if matches!(*status, CbfRuntimeStatus::Started { .. }) {
 			debug_assert!(false, "We shouldn't call start if we're already started");
 			return;
 		}
 
 		// Store the wallet reference for future restarts.
-		*self.onchain_wallet.lock().unwrap() = Some(Arc::clone(&onchain_wallet));
+		*self.onchain_wallet.lock().expect("lock") = Some(Arc::clone(&onchain_wallet));
 
 		let (node, client) = self.build_cbf_node();
 
@@ -338,7 +338,7 @@ impl CbfChainSource {
 								retries,
 								e,
 							);
-							*restart_status.lock().unwrap() = CbfRuntimeStatus::Stopped;
+							*restart_status.lock().expect("lock") = CbfRuntimeStatus::Stopped;
 							break;
 						}
 						log_error!(
@@ -375,7 +375,7 @@ impl CbfChainSource {
 						} = new_client;
 
 						// Swap the requester so callers pick up the new handle.
-						*restart_status.lock().unwrap() =
+						*restart_status.lock().expect("lock") =
 							CbfRuntimeStatus::Started { requester: new_requester };
 
 						current_node = new_node;
@@ -390,7 +390,7 @@ impl CbfChainSource {
 
 	/// Shut down the bip157 node and stop all background tasks.
 	pub(crate) fn stop(&self) {
-		let mut status = self.cbf_runtime_status.lock().unwrap();
+		let mut status = self.cbf_runtime_status.lock().expect("lock");
 		match &*status {
 			CbfRuntimeStatus::Started { requester } => {
 				let _ = requester.shutdown();
@@ -428,7 +428,7 @@ impl CbfChainSource {
 						tip.height,
 						tip.hash,
 					);
-					if let Some(tx) = state.sync_completion_tx.lock().unwrap().take() {
+					if let Some(tx) = state.sync_completion_tx.lock().expect("lock").take() {
 						let _ = tx.send(sync_update);
 					}
 				},
@@ -457,12 +457,12 @@ impl CbfChainSource {
 					if skip_height > 0 && indexed_filter.height() <= skip_height {
 						continue;
 					}
-					let scripts = state.watched_scripts.read().unwrap();
+					let scripts = state.watched_scripts.read().expect("lock");
 					if !scripts.is_empty() && indexed_filter.contains_any(scripts.iter()) {
 						state
 							.matched_block_hashes
 							.lock()
-							.unwrap()
+							.expect("lock")
 							.push((indexed_filter.height(), indexed_filter.block_hash()));
 					}
 					log_trace!(logger, "CBF received filter at height {}", indexed_filter.height(),);
@@ -472,7 +472,7 @@ impl CbfChainSource {
 	}
 
 	fn requester(&self) -> Result<Requester, Error> {
-		let status = self.cbf_runtime_status.lock().unwrap();
+		let status = self.cbf_runtime_status.lock().expect("lock");
 		match &*status {
 			CbfRuntimeStatus::Started { requester } if requester.is_running() => {
 				Ok(requester.clone())
@@ -500,21 +500,21 @@ impl CbfChainSource {
 	/// leaks between scans. The success path performs inline cleanup instead.
 	fn cleanup_scan_state(&self) {
 		self.filter_skip_height.store(0, Ordering::Release);
-		self.watched_scripts.write().unwrap().clear();
-		self.matched_block_hashes.lock().unwrap().clear();
-		if let Some(tx) = self.sync_completion_tx.lock().unwrap().take() {
+		self.watched_scripts.write().expect("lock").clear();
+		self.matched_block_hashes.lock().expect("lock").clear();
+		if let Some(tx) = self.sync_completion_tx.lock().expect("lock").take() {
 			drop(tx);
 		}
 	}
 
 	/// Register a transaction script for Lightning channel monitoring.
 	pub(crate) fn register_tx(&self, _txid: &Txid, script_pubkey: &Script) {
-		self.registered_scripts.lock().unwrap().push(script_pubkey.to_owned());
+		self.registered_scripts.lock().expect("lock").push(script_pubkey.to_owned());
 	}
 
 	/// Register a watched output script for Lightning channel monitoring.
 	pub(crate) fn register_output(&self, output: WatchedOutput) {
-		self.registered_scripts.lock().unwrap().push(output.script_pubkey.clone());
+		self.registered_scripts.lock().expect("lock").push(output.script_pubkey.clone());
 	}
 
 	/// Run a CBF filter scan: set watched scripts, trigger a rescan, wait for
@@ -530,11 +530,11 @@ impl CbfChainSource {
 		let _scan_guard = self.scan_lock.lock().await;
 
 		self.filter_skip_height.store(skip_before_height.unwrap_or(0), Ordering::Release);
-		self.matched_block_hashes.lock().unwrap().clear();
-		*self.watched_scripts.write().unwrap() = scripts;
+		self.matched_block_hashes.lock().expect("lock").clear();
+		*self.watched_scripts.write().expect("lock") = scripts;
 
 		let (tx, rx) = oneshot::channel();
-		*self.sync_completion_tx.lock().unwrap() = Some(tx);
+		*self.sync_completion_tx.lock().expect("lock") = Some(tx);
 
 		if let Err(e) = requester.rescan().map_err(|e| {
 			log_error!(self.logger, "Failed to trigger CBF rescan: {:?}", e);
@@ -547,8 +547,8 @@ impl CbfChainSource {
 		match rx.await {
 			Ok(sync_update) => {
 				self.filter_skip_height.store(0, Ordering::Release);
-				self.watched_scripts.write().unwrap().clear();
-				let matched = std::mem::take(&mut *self.matched_block_hashes.lock().unwrap());
+				self.watched_scripts.write().expect("lock").clear();
+				let matched = std::mem::take(&mut *self.matched_block_hashes.lock().expect("lock"));
 				Ok((sync_update, matched))
 			},
 			Err(e) => {
@@ -564,7 +564,7 @@ impl CbfChainSource {
 		&self, onchain_wallet: Arc<Wallet>,
 	) -> Result<(), Error> {
 		let receiver_res = {
-			let mut status_lock = self.onchain_wallet_sync_status.lock().unwrap();
+			let mut status_lock = self.onchain_wallet_sync_status.lock().expect("lock");
 			status_lock.register_or_subscribe_pending_sync()
 		};
 		if let Some(mut sync_receiver) = receiver_res {
@@ -638,7 +638,7 @@ impl CbfChainSource {
 		}
 		.await;
 
-		self.onchain_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+		self.onchain_wallet_sync_status.lock().expect("lock").propagate_result_to_subscribers(res);
 
 		res
 	}
@@ -660,7 +660,7 @@ impl CbfChainSource {
 		// unknown. This mirrors what the Bitcoind chain source does in
 		// `Wallet::block_connected` by inserting registered tx outputs.
 		let mut all_scripts = scripts;
-		all_scripts.extend(self.registered_scripts.lock().unwrap().iter().cloned());
+		all_scripts.extend(self.registered_scripts.lock().expect("lock").iter().cloned());
 		let skip_height =
 			onchain_wallet.latest_checkpoint().height().checked_sub(REORG_SAFETY_BLOCKS);
 		let (sync_update, matched) = self.run_filter_scan(all_scripts, skip_height).await?;
@@ -710,7 +710,7 @@ impl CbfChainSource {
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		let receiver_res = {
-			let mut status_lock = self.lightning_wallet_sync_status.lock().unwrap();
+			let mut status_lock = self.lightning_wallet_sync_status.lock().expect("lock");
 			status_lock.register_or_subscribe_pending_sync()
 		};
 		if let Some(mut sync_receiver) = receiver_res {
@@ -726,7 +726,7 @@ impl CbfChainSource {
 			let requester = self.requester()?;
 			let now = Instant::now();
 
-			let scripts: Vec<ScriptBuf> = self.registered_scripts.lock().unwrap().clone();
+			let scripts: Vec<ScriptBuf> = self.registered_scripts.lock().expect("lock").clone();
 			if scripts.is_empty() {
 				log_debug!(self.logger, "No registered scripts for CBF lightning sync.");
 			} else {
@@ -771,7 +771,10 @@ impl CbfChainSource {
 		}
 		.await;
 
-		self.lightning_wallet_sync_status.lock().unwrap().propagate_result_to_subscribers(res);
+		self.lightning_wallet_sync_status
+			.lock()
+			.expect("lock")
+			.propagate_result_to_subscribers(res);
 
 		res
 	}

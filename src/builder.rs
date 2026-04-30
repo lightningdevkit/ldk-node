@@ -1015,7 +1015,11 @@ impl ArcedNodeBuilder {
 		&self, peers: Vec<String>, sync_config: Option<CbfSyncConfig>,
 		fee_source_config: Option<FeeSourceConfig>,
 	) {
-		self.inner.write().unwrap().set_chain_source_cbf(peers, sync_config, fee_source_config);
+		self.inner.write().expect("lock").set_chain_source_cbf(
+			peers,
+			sync_config,
+			fee_source_config,
+		);
 	}
 
 	/// Configures the [`Node`] instance to connect to a Bitcoin Core node via RPC.
