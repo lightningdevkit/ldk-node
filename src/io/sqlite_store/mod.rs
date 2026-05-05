@@ -26,6 +26,8 @@ mod migrations;
 
 /// LDK Node's database file name.
 pub const SQLITE_DB_FILE_NAME: &str = "ldk_node_data.sqlite";
+/// LDK Node's backup database file name.
+pub const SQLITE_BACKUP_DB_FILE_NAME: &str = "ldk_node_data_backup.sqlite";
 /// LDK Node's table in which we store all data.
 pub const KV_TABLE_NAME: &str = "ldk_node_data";
 

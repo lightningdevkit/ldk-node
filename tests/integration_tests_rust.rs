@@ -30,6 +30,7 @@ use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::ElectrsD;
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
+use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
@@ -39,6 +40,7 @@ use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::KVStoreSync;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
@@ -2956,4 +2958,76 @@ async fn splice_in_with_all_balance() {
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn builder_configures_sqlite_backup_store() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let mut config_a = random_config(true);
+	config_a.store_type = TestStoreType::Sqlite;
+	let primary_dir = config_a.node_config.storage_dir_path.clone();
+	let backup_dir = common::random_storage_path();
+	let node_a = common::setup_node_with_builder(&chain_source, config_a.clone(), |builder| {
+		builder.set_backup_storage_dir_path(backup_dir.to_str().unwrap().to_owned());
+	});
+
+	let config_b = random_config(true);
+	let node_b = setup_node(&chain_source, config_b);
+
+	do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		false,
+		true,
+		true,
+		false,
+	)
+	.await;
+
+	let primary_store = SqliteStore::new(
+		primary_dir.into(),
+		Some(ldk_node::io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
+		Some(ldk_node::io::sqlite_store::KV_TABLE_NAME.to_string()),
+	)
+	.unwrap();
+
+	let backup_store = SqliteStore::new(
+		backup_dir,
+		Some(ldk_node::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME.to_string()),
+		Some(ldk_node::io::sqlite_store::KV_TABLE_NAME.to_string()),
+	)
+	.unwrap();
+
+	for (pn, sn, key) in [
+		("bdk_wallet", "", "descriptor"),
+		("bdk_wallet", "", "change_descriptor"),
+		("bdk_wallet", "", "network"),
+		("", "", "node_metrics"),
+		("", "", "events"),
+		("", "", "peers"),
+	] {
+		let primary = KVStoreSync::read(&primary_store, pn, sn, key).unwrap();
+		let backup = KVStoreSync::read(&backup_store, pn, sn, key).unwrap();
+
+		assert_eq!(backup, primary, "backup mismatch for {pn}/{sn}/{key}");
+	}
+}
+
+#[test]
+fn sqlite_backup_rejects_primary_storage_path() {
+	let mut config = random_config(false);
+	config.store_type = TestStoreType::Sqlite;
+
+	let primary_dir = config.node_config.storage_dir_path.clone();
+
+	setup_builder!(builder, config.node_config);
+	builder.set_backup_storage_dir_path(primary_dir);
+
+	let res = builder.build(config.node_entropy.into());
+
+	assert!(matches!(res, Err(ldk_node::BuildError::BackupStorePathConflict)));
 }
