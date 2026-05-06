@@ -115,8 +115,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(cycle_tests)]
 use std::{any::Any, sync::Weak};
 
-#[cfg(feature = "uniffi")]
-use crate::probing::ProbingConfig;
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use bip39;
 pub use bitcoin;
@@ -176,8 +174,6 @@ use payment::{
 	UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
-#[cfg(feature = "uniffi")]
-pub use probing::ArcedProbingConfigBuilder as ProbingConfigBuilder;
 use probing::{run_prober, Prober};
 use runtime::Runtime;
 pub use tokio;

@@ -149,6 +149,7 @@ pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
 use crate::error::Error;
 pub use crate::liquidity::LSPS1OrderStatus;
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
+pub use crate::probing::ProbingConfig;
 use crate::{hex_utils, SocketAddress, UserChannelId};
 
 uniffi::custom_type!(PublicKey, String, {
