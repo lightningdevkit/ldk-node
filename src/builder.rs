@@ -1212,6 +1212,38 @@ impl ArcedNodeBuilder {
 		self.inner.write().expect("lock").set_wallet_recovery_mode();
 	}
 
+	/// Configures a local SQLite backup store for disaster recovery.
+	///
+	/// When building with tiered storage, a SQLite store will be created at the
+	/// given directory path using [`SQLITE_BACKUP_DB_FILE_NAME`] as its database
+	/// file name. It receives a second durable copy of data written to the
+	/// primary store.
+	///
+	/// Writes and removals for primary-backed data only succeed once both the
+	/// primary and backup SQLite stores complete successfully.
+	///
+	/// The configured path must point to a distinct local directory from the
+	/// primary storage path. If the backup path equals the primary storage path,
+	/// building will fail with [`BuildError::BackupStorePathConflict`].
+	///
+	/// If not set, durable data will be stored only in the primary store.
+	///
+	/// [`SQLITE_BACKUP_DB_FILE_NAME`]: crate::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME
+	pub fn set_backup_storage_dir_path(&self, backup_storage_dir_path: String) {
+		self.inner.write().expect("lock").set_backup_storage_dir_path(backup_storage_dir_path);
+	}
+
+	/// Configures the ephemeral store for non-critical, frequently-accessed data.
+	///
+	/// When building with tiered storage, this store is used for ephemeral data like
+	/// the network graph and scorer data to reduce latency for reads. Data stored here
+	/// can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	pub fn set_ephemeral_store(&self, ephemeral_store: Arc<DynStore>) {
+		self.inner.write().expect("lock").set_ephemeral_store(ephemeral_store);
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {

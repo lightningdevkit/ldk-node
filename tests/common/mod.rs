@@ -457,9 +457,7 @@ impl Default for TestConfig {
 
 macro_rules! setup_builder {
 	($builder:ident, $config:expr) => {
-		#[cfg(feature = "uniffi")]
-		let $builder = Builder::from_config($config.clone());
-		#[cfg(not(feature = "uniffi"))]
+		#[allow(unused_mut)]
 		let mut $builder = Builder::from_config($config.clone());
 	};
 }
