@@ -401,7 +401,7 @@ pub enum PaymentKind {
 		/// See [`LdkChannelConfig::accept_underpaying_htlcs`] for more information.
 		///
 		/// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
-		lsp_fee_limits: LSPFeeLimits,
+		lsp_fee_limits: LSPS2Parameters,
 	},
 	/// A [BOLT 12] 'offer' payment, i.e., a payment for an [`Offer`].
 	///
@@ -529,7 +529,7 @@ impl_writeable_tlv_based_enum!(ConfirmationStatus,
 /// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct LSPFeeLimits {
+pub struct LSPS2Parameters {
 	/// The maximal total amount we allow any configured LSP withhold from us when forwarding the
 	/// payment.
 	pub max_total_opening_fee_msat: Option<u64>,
@@ -538,7 +538,7 @@ pub struct LSPFeeLimits {
 	pub max_proportional_opening_fee_ppm_msat: Option<u64>,
 }
 
-impl_writeable_tlv_based!(LSPFeeLimits, {
+impl_writeable_tlv_based!(LSPS2Parameters, {
 	(0, max_total_opening_fee_msat, option),
 	(2, max_proportional_opening_fee_ppm_msat, option),
 });
@@ -637,7 +637,7 @@ mod tests {
 		pub amount_msat: Option<u64>,
 		pub direction: PaymentDirection,
 		pub status: PaymentStatus,
-		pub lsp_fee_limits: Option<LSPFeeLimits>,
+		pub lsp_fee_limits: Option<LSPS2Parameters>,
 	}
 
 	impl_writeable_tlv_based!(OldPaymentDetails, {
@@ -695,7 +695,7 @@ mod tests {
 
 		// Test `Bolt11Jit` de/ser
 		{
-			let lsp_fee_limits = Some(LSPFeeLimits {
+			let lsp_fee_limits = Some(LSPS2Parameters {
 				max_total_opening_fee_msat: Some(46_000),
 				max_proportional_opening_fee_ppm_msat: Some(47_000),
 			});

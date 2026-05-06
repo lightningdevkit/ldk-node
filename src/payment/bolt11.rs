@@ -31,7 +31,7 @@ use crate::ffi::{maybe_deref, maybe_try_convert_enum, maybe_wrap};
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
-	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
+	LSPS2Parameters, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus,
 };
 use crate::peer_store::{PeerInfo, PeerStore};
@@ -206,7 +206,7 @@ impl Bolt11Payment {
 		// Register payment in payment store.
 		let payment_hash = invoice.payment_hash();
 		let payment_secret = invoice.payment_secret();
-		let lsp_fee_limits = LSPFeeLimits {
+		let lsp_fee_limits = LSPS2Parameters {
 			max_total_opening_fee_msat: lsp_total_opening_fee,
 			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
 		};
