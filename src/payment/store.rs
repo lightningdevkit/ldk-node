@@ -68,7 +68,6 @@ impl Writeable for PaymentDetails {
 	) -> Result<(), lightning::io::Error> {
 		write_tlv_fields!(writer, {
 			(0, self.id, required), // Used to be `hash` for v0.2.1 and prior
-			// 1 briefly used to be lsp_fee_limits, could probably be reused at some point in the future.
 			// 2 used to be `preimage` before it was moved to `kind` in v0.3.0
 			(2, None::<Option<PaymentPreimage>>, required),
 			(3, self.kind, required),
@@ -92,7 +91,6 @@ impl Readable for PaymentDetails {
 			.as_secs();
 		_init_and_read_len_prefixed_tlv_fields!(reader, {
 			(0, id, required), // Used to be `hash`
-			(1, lsp_fee_limits, option),
 			(2, preimage, required),
 			(3, kind_opt, option),
 			(4, secret, required),
@@ -129,7 +127,6 @@ impl Readable for PaymentDetails {
 			let hash = PaymentHash(id.0);
 
 			if secret.is_some() {
-				let _: Option<LSPS2Parameters> = lsp_fee_limits;
 				PaymentKind::Bolt11 { hash, preimage, secret, counterparty_skimmed_fee_msat: None }
 			} else {
 				PaymentKind::Spontaneous { hash, preimage }
@@ -605,12 +602,10 @@ mod tests {
 		pub amount_msat: Option<u64>,
 		pub direction: PaymentDirection,
 		pub status: PaymentStatus,
-		pub lsp_fee_limits: Option<LSPS2Parameters>,
 	}
 
 	impl_writeable_tlv_based!(OldPaymentDetails, {
 		(0, hash, required),
-		(1, lsp_fee_limits, option),
 		(2, preimage, required),
 		(4, secret, required),
 		(6, amount_msat, required),
@@ -636,7 +631,6 @@ mod tests {
 				amount_msat,
 				direction: PaymentDirection::Inbound,
 				status: PaymentStatus::Pending,
-				lsp_fee_limits: None,
 			};
 
 			let old_bolt11_encoded = old_bolt11_payment.encode();
@@ -667,54 +661,6 @@ mod tests {
 			}
 		}
 
-		// Test `Bolt11Jit` de/ser
-		{
-			let lsp_fee_limits = Some(LSPS2Parameters {
-				max_total_opening_fee_msat: Some(46_000),
-				max_proportional_opening_fee_ppm_msat: Some(47_000),
-			});
-
-			let old_bolt11_jit_payment = OldPaymentDetails {
-				hash,
-				preimage,
-				secret,
-				amount_msat,
-				direction: PaymentDirection::Inbound,
-				status: PaymentStatus::Pending,
-				lsp_fee_limits,
-			};
-
-			let old_bolt11_jit_encoded = old_bolt11_jit_payment.encode();
-			assert_eq!(
-				old_bolt11_jit_payment,
-				OldPaymentDetails::read(&mut &*old_bolt11_jit_encoded.clone()).unwrap()
-			);
-
-			let bolt11_jit_decoded = PaymentDetails::read(&mut &*old_bolt11_jit_encoded).unwrap();
-			let bolt11_jit_reencoded = bolt11_jit_decoded.encode();
-			assert_eq!(
-				bolt11_jit_decoded,
-				PaymentDetails::read(&mut &*bolt11_jit_reencoded).unwrap()
-			);
-
-			match bolt11_jit_decoded.kind {
-				PaymentKind::Bolt11 {
-					hash: h,
-					preimage: p,
-					secret: s,
-					counterparty_skimmed_fee_msat: c,
-				} => {
-					assert_eq!(hash, h);
-					assert_eq!(preimage, p);
-					assert_eq!(secret, s);
-					assert_eq!(None, c);
-				},
-				_ => {
-					panic!("Unexpected kind!");
-				},
-			}
-		}
-
 		// Test `Spontaneous` de/ser
 		{
 			let old_spontaneous_payment = OldPaymentDetails {
@@ -724,7 +670,6 @@ mod tests {
 				amount_msat,
 				direction: PaymentDirection::Inbound,
 				status: PaymentStatus::Pending,
-				lsp_fee_limits: None,
 			};
 
 			let old_spontaneous_encoded = old_spontaneous_payment.encode();
