@@ -374,9 +374,20 @@ impl CbfChainSource {
 							event_rx: new_event_rx,
 						} = new_client;
 
-						// Swap the requester so callers pick up the new handle.
-						*restart_status.lock().expect("lock") =
-							CbfRuntimeStatus::Started { requester: new_requester };
+						// Publish the new requester only if stop() did not fire during the
+						// backoff sleep. Otherwise the rebuilt node would outlive stop().
+						{
+							let mut status = restart_status.lock().expect("lock");
+							if matches!(*status, CbfRuntimeStatus::Stopped) {
+								let _ = new_requester.shutdown();
+								log_info!(
+									restart_logger,
+									"CBF restart aborted: stop() called during backoff."
+								);
+								break;
+							}
+							*status = CbfRuntimeStatus::Started { requester: new_requester };
+						}
 
 						current_node = new_node;
 						current_info_rx = new_info_rx;
