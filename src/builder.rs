@@ -1990,7 +1990,7 @@ fn build_with_store_internal(
 		let liquidity_source = runtime
 			.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
 		let custom_message_handler =
-			Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
+			Arc::new(NodeCustomMessageHandler::new(Arc::clone(&liquidity_source)));
 
 		(liquidity_source, custom_message_handler)
 	};
