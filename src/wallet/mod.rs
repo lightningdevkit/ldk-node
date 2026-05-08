@@ -10,6 +10,7 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use bdk_chain::indexer::keychain_txout::KeychainTxOutIndex;
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
@@ -121,22 +122,12 @@ impl Wallet {
 		self.inner.lock().expect("lock").start_sync_with_revealed_spks().build()
 	}
 
-	pub(crate) fn get_spks_for_cbf_sync(&self, stop_gap: usize) -> Vec<ScriptBuf> {
-		let wallet = self.inner.lock().expect("lock");
-		let mut scripts: Vec<ScriptBuf> =
-			wallet.spk_index().revealed_spks(..).map(|((_, _), spk)| spk).collect();
-
-		// For first sync when no scripts have been revealed yet, generate
-		// lookahead scripts up to the stop gap for both keychains.
-		if scripts.is_empty() {
-			for keychain in [KeychainKind::External, KeychainKind::Internal] {
-				for idx in 0..stop_gap as u32 {
-					scripts.push(wallet.peek_address(keychain, idx).address.script_pubkey());
-				}
-			}
-		}
-
-		scripts
+	/// Clone the wallet's keychain SPK index for use as the indexer of a sync-local
+	/// `IndexedTxGraph`. The clone preserves descriptors, currently-revealed range,
+	/// and the configured lookahead, so the chain source can compute the SPK set to
+	/// scan and the resulting `last_used_indices` independently of the live wallet.
+	pub(crate) fn spk_index_clone(&self) -> KeychainTxOutIndex<KeychainKind> {
+		self.inner.lock().expect("lock").spk_index().clone()
 	}
 
 	pub(crate) fn latest_checkpoint(&self) -> bdk_chain::CheckPoint {
