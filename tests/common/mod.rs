@@ -133,7 +133,7 @@ macro_rules! expect_channel_ready_event {
 		match event {
 			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
-				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
+				assert_eq!(counterparty_node_id, $counterparty_node_id);
 				$node.event_handled().unwrap();
 				user_channel_id
 			},
@@ -170,8 +170,7 @@ macro_rules! expect_channel_ready_events {
 			}
 		}
 		assert!(
-			ids.contains(&Some($counterparty_node_id_a))
-				&& ids.contains(&Some($counterparty_node_id_b)),
+			ids.contains(&$counterparty_node_id_a) && ids.contains(&$counterparty_node_id_b),
 			"Expected ChannelReady events from {:?} and {:?}, but got {:?}",
 			$counterparty_node_id_a,
 			$counterparty_node_id_b,

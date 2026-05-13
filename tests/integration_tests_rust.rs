@@ -1838,7 +1838,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// Verify the candidate that locked is the one that confirmed, not necessarily the last broadcast.
 	match node_a.next_event_async().await {
 		Event::ChannelReady { funding_txo, counterparty_node_id, .. } => {
-			assert_eq!(counterparty_node_id, Some(node_b.node_id()));
+			assert_eq!(counterparty_node_id, node_b.node_id());
 			assert_eq!(funding_txo, Some(winning_txo));
 			node_a.event_handled().unwrap();
 		},
@@ -1846,7 +1846,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	}
 	match node_b.next_event_async().await {
 		Event::ChannelReady { funding_txo, counterparty_node_id, .. } => {
-			assert_eq!(counterparty_node_id, Some(node_a.node_id()));
+			assert_eq!(counterparty_node_id, node_a.node_id());
 			assert_eq!(funding_txo, Some(winning_txo));
 			node_b.event_handled().unwrap();
 		},
@@ -4154,7 +4154,7 @@ async fn closed_channel_history_persists_after_restart() {
 		let user_channel_id = node_a
 			.list_channels()
 			.into_iter()
-			.find(|c| c.counterparty_node_id == node_b.node_id())
+			.find(|c| c.counterparty.node_id == node_b.node_id())
 			.map(|c| c.user_channel_id)
 			.expect("open channel not found");
 		node_a.close_channel(&user_channel_id, node_b.node_id()).unwrap();
