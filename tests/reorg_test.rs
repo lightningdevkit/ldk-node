@@ -112,11 +112,11 @@ proptest! {
 				let next_node = nodes.get((i + 1) % nodes.len()).unwrap();
 				let prev_node = nodes.get((i + nodes.len() - 1) % nodes.len()).unwrap();
 
-				assert!(user_channels.get(&Some(next_node.node_id())) != None);
-				assert!(user_channels.get(&Some(prev_node.node_id())) != None);
+				assert!(user_channels.get(&next_node.node_id()) != None);
+				assert!(user_channels.get(&prev_node.node_id()) != None);
 
 				let user_channel_id =
-					user_channels.get(&Some(next_node.node_id())).expect("Missing user channel for node");
+					user_channels.get(&next_node.node_id()).expect("Missing user channel for node");
 				node_channels_id.insert(node.node_id(), *user_channel_id);
 			}
 

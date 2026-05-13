@@ -6,6 +6,11 @@
 - Users of the VSS storage backend must upgrade their VSS server to at least version
   `v0.1.0-alpha.0` before upgrading LDK Node.
 
+## Serialization Compatibility
+- The `counterparty_node_id` field of the `ChannelReady` and `ChannelClosed` events is now
+  required. Events persisted by LDK Node v0.1.0 and prior that are missing this field will
+  fail to deserialize.
+
 ## Feature and API updates
 - The Bitcoin Core RPC and REST chain-source builder methods now accept an optional
   `wallet_rescan_from_height` argument. Passing a height lets fresh wallets rescan from a known

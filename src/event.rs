@@ -250,9 +250,7 @@ pub enum Event {
 		/// The `user_channel_id` of the channel.
 		user_channel_id: UserChannelId,
 		/// The `node_id` of the channel counterparty.
-		///
-		/// This will be `None` for events serialized by LDK Node v0.1.0 and prior.
-		counterparty_node_id: Option<PublicKey>,
+		counterparty_node_id: PublicKey,
 		/// The outpoint of the channel's funding transaction.
 		///
 		/// This represents the channel's current funding output, which may change when the
@@ -269,9 +267,7 @@ pub enum Event {
 		/// The `user_channel_id` of the channel.
 		user_channel_id: UserChannelId,
 		/// The `node_id` of the channel counterparty.
-		///
-		/// This will be `None` for events serialized by LDK Node v0.1.0 and prior.
-		counterparty_node_id: Option<PublicKey>,
+		counterparty_node_id: PublicKey,
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
 		reason: Option<ClosureReason>,
 		/// The channel's capacity in satoshis.
@@ -331,7 +327,7 @@ impl_writeable_tlv_based_enum!(Event,
 	},
 	(3, ChannelReady) => {
 		(0, channel_id, required),
-		(1, counterparty_node_id, option),
+		(1, counterparty_node_id, required),
 		(2, user_channel_id, required),
 		(3, funding_txo, option),
 	},
@@ -344,7 +340,7 @@ impl_writeable_tlv_based_enum!(Event,
 	},
 	(5, ChannelClosed) => {
 		(0, channel_id, required),
-		(1, counterparty_node_id, option),
+		(1, counterparty_node_id, required),
 		(2, user_channel_id, required),
 		(3, reason, upgradable_option),
 		(5, channel_capacity_sats, option),
@@ -1679,7 +1675,7 @@ where
 				let event = Event::ChannelReady {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
-					counterparty_node_id: Some(counterparty_node_id),
+					counterparty_node_id,
 					funding_txo,
 				};
 				match self.event_queue.add_event(event).await {
@@ -1770,7 +1766,7 @@ where
 				let event = Event::ChannelClosed {
 					channel_id,
 					user_channel_id,
-					counterparty_node_id: Some(counterparty_node_id),
+					counterparty_node_id,
 					reason: Some(reason),
 					channel_capacity_sats,
 					channel_funding_txo: funding_txo,
@@ -2080,6 +2076,7 @@ mod tests {
 	use std::sync::atomic::{AtomicU16, Ordering};
 	use std::time::Duration;
 
+	use bitcoin::secp256k1::{Secp256k1, SecretKey};
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
@@ -2143,10 +2140,13 @@ mod tests {
 		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);
 
+		let secp = Secp256k1::new();
+		let counterparty_node_id =
+			PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[1u8; 32]).unwrap());
 		let expected_event = Event::ChannelReady {
 			channel_id: ChannelId([23u8; 32]),
 			user_channel_id: UserChannelId(2323),
-			counterparty_node_id: None,
+			counterparty_node_id,
 			funding_txo: None,
 		};
 		event_queue.add_event(expected_event.clone()).await.unwrap();
@@ -2181,10 +2181,13 @@ mod tests {
 		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
 		assert_eq!(event_queue.next_event(), None);
 
+		let secp = Secp256k1::new();
+		let counterparty_node_id =
+			PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[1u8; 32]).unwrap());
 		let expected_event = Event::ChannelReady {
 			channel_id: ChannelId([23u8; 32]),
 			user_channel_id: UserChannelId(2323),
-			counterparty_node_id: None,
+			counterparty_node_id,
 			funding_txo: None,
 		};
 
