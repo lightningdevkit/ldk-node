@@ -139,6 +139,7 @@ impl SpontaneousPayment {
 
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
+					RetryableSendFailure::RouteNotFound => Err(Error::PaymentSendingFailed),
 					_ => {
 						let kind = PaymentKind::Spontaneous {
 							hash: payment_hash,

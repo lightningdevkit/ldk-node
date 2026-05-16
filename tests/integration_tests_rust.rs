@@ -2957,3 +2957,72 @@ async fn splice_in_with_all_balance() {
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_retry_on_routing_failure() {
+	/// Although `send()` technically allows retries for `Failed` statuses,
+	/// `RouteNotFound` should never persist a record to the store in the first place.
+	/// This asserts that the payment store remains clean after a routing failure.
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, true);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 500_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	let _funding_txo = open_channel_with_all(&node_a, &node_b, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let _user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("test-retry")).unwrap());
+
+	// set the payment sum more than channel capacity to fail with RouteNotFound due to liquidity constraint
+	let invoice = node_b
+		.bolt11_payment()
+		.receive(1_000_000_000, &invoice_description.clone().into(), 3600)
+		.unwrap();
+
+	// first attempt should fail with RouteNotFound as expected
+	let first_attempt = node_a.bolt11_payment().send(&invoice, None);
+	assert!(first_attempt.is_err());
+	assert_eq!(first_attempt.unwrap_err(), NodeError::PaymentSendingFailed);
+
+	// check that the payment is not in the store as HTCL was not sent
+	let payments = node_a.list_payments();
+	let payment_id = PaymentId(invoice.payment_hash().0);
+	let payment_in_store = payments.iter().find(|p| p.id == payment_id);
+
+	assert!(
+		payment_in_store.is_none(),
+		"Check not working: payment with RouteNotFound error was saved into payment_store!"
+	);
+
+	// second attempt to make sure that payment in the store and not treated as duplicate
+	let second_attempt = node_a.bolt11_payment().send(&invoice, None);
+	assert_ne!(second_attempt.unwrap_err(), NodeError::DuplicatePayment);
+	assert_eq!(second_attempt.unwrap_err(), NodeError::PaymentSendingFailed);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}

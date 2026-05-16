@@ -307,6 +307,7 @@ impl Bolt11Payment {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
+					RetryableSendFailure::RouteNotFound => Err(Error::PaymentSendingFailed),
 					_ => {
 						let kind = PaymentKind::Bolt11 {
 							hash: payment_hash,
@@ -422,6 +423,7 @@ impl Bolt11Payment {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				match e {
 					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
+					RetryableSendFailure::RouteNotFound => Err(Error::PaymentSendingFailed),
 					_ => {
 						let kind = PaymentKind::Bolt11 {
 							hash: payment_hash,
