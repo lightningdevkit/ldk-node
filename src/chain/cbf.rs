@@ -17,7 +17,7 @@ use bdk_wallet::{KeychainKind, Update};
 use bip157::chain::{BlockHeaderChanges, ChainState};
 use bip157::error::FetchBlockError;
 use bip157::{
-	BlockHash, Builder, Client, Event, HeaderCheckpoint, Info, Node as CbfNode, Requester,
+	BlockHash, Builder, Client, Event, HashCheckpoint, Info, Node as CbfNode, Requester,
 	SyncUpdate, TrustedPeer, Warning,
 };
 use bitcoin::constants::SUBSIDY_HALVING_INTERVAL;
@@ -242,7 +242,7 @@ impl CbfChainSource {
 				}
 			}
 			if cursor.height() > 0 {
-				let header_cp = HeaderCheckpoint::new(cursor.height(), cursor.hash());
+				let header_cp = HashCheckpoint::new(cursor.height(), cursor.hash());
 				builder = builder.chain_state(ChainState::Checkpoint(header_cp));
 				log_debug!(
 					logger,
@@ -548,7 +548,14 @@ impl CbfChainSource {
 		let (tx, rx) = oneshot::channel();
 		*self.sync_completion_tx.lock().expect("lock") = Some(tx);
 
-		if let Err(e) = requester.rescan().map_err(|e| {
+		// Delegate the skip to kyoto so it doesn't re-stream filters we would discard
+		// client-side via filter_skip_height. Without `_from`, kyoto replays from its
+		// build-time checkpoint (potentially genesis on a fresh wallet) every tick.
+		let rescan_res = match skip_before_height {
+			Some(h) => requester.rescan_from(h),
+			None => requester.rescan(),
+		};
+		if let Err(e) = rescan_res.map_err(|e| {
 			log_error!(self.logger, "Failed to trigger CBF rescan: {:?}", e);
 			Error::WalletOperationFailed
 		}) {
