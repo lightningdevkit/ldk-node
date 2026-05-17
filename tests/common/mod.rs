@@ -115,6 +115,7 @@ macro_rules! expect_channel_pending_event {
 	}};
 }
 
+#[allow(unused_imports)]
 pub(crate) use expect_channel_pending_event;
 
 macro_rules! expect_channel_ready_event {
@@ -141,8 +142,10 @@ macro_rules! expect_channel_ready_event {
 	}};
 }
 
+#[allow(unused_imports)]
 pub(crate) use expect_channel_ready_event;
 
+#[allow(unused_macros)]
 macro_rules! expect_channel_ready_events {
 	($node:expr, $counterparty_node_id_a:expr, $counterparty_node_id_b:expr) => {{
 		let mut ids = Vec::new();
@@ -177,6 +180,7 @@ macro_rules! expect_channel_ready_events {
 	}};
 }
 
+#[allow(unused_imports)]
 pub(crate) use expect_channel_ready_events;
 
 macro_rules! expect_splice_pending_event {
@@ -203,6 +207,7 @@ macro_rules! expect_splice_pending_event {
 	}};
 }
 
+#[allow(unused_imports)]
 pub(crate) use expect_splice_pending_event;
 
 macro_rules! expect_payment_received_event {
@@ -233,6 +238,7 @@ macro_rules! expect_payment_received_event {
 	}};
 }
 
+#[allow(unused_imports)]
 pub(crate) use expect_payment_received_event;
 
 macro_rules! expect_payment_claimable_event {
@@ -269,6 +275,7 @@ macro_rules! expect_payment_claimable_event {
 	}};
 }
 
+#[allow(unused_imports)]
 pub(crate) use expect_payment_claimable_event;
 
 macro_rules! expect_payment_successful_event {
@@ -299,6 +306,7 @@ macro_rules! expect_payment_successful_event {
 	}};
 }
 
+#[allow(unused_imports)]
 pub(crate) use expect_payment_successful_event;
 
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
@@ -464,6 +472,7 @@ macro_rules! setup_builder {
 	};
 }
 
+#[allow(unused_imports)]
 pub(crate) use setup_builder;
 
 #[cfg(any(cln_test, lnd_test, eclair_test))]
