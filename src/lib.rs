@@ -1582,6 +1582,14 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			if funding_template.prior_contribution().is_some() {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: a prior splice contribution is pending"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			}
+
 			let contribution = self
 				.runtime
 				.block_on(funding_template.splice_in(
@@ -1694,6 +1702,14 @@ impl Node {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
 					Error::ChannelSplicingFailed
 				})?;
+
+			if funding_template.prior_contribution().is_some() {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: a prior splice contribution is pending"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			}
 
 			let outputs = vec![bitcoin::TxOut {
 				value: Amount::from_sat(splice_amount_sats),
