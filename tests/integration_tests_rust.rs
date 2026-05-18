@@ -1067,7 +1067,16 @@ async fn splice_channel() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	let expected_splice_in_fee_sat = 255;
+	let expected_splice_in_fee_sat = 251;
+	let expected_splice_in_onchain_cost_sat = 254;
+
+	// LDK's fee calculation differs from BDK wallet's, which over pays on fees. Rather than giving
+	// the extra fees to the miner, LDK sends it to the channel balance since there may not be a
+	// change output.
+	//
+	// TODO: Some of the discrepancy is addressed upstream, so this number should be adjusted when
+	// updating the BDK wallet dependency. See: https://github.com/bitcoindevkit/bdk_wallet/pull/479
+	let expected_splice_in_lightning_balance_sat = 4_000_003;
 
 	let payments = node_b.list_payments();
 	let payment =
@@ -1076,9 +1085,12 @@ async fn splice_channel() {
 
 	assert_eq!(
 		node_b.list_balances().total_onchain_balance_sats,
-		premine_amount_sat - 4_000_000 - expected_splice_in_fee_sat
+		premine_amount_sat - 4_000_000 - expected_splice_in_onchain_cost_sat
 	);
-	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 4_000_000);
+	assert_eq!(
+		node_b.list_balances().total_lightning_balance_sats,
+		expected_splice_in_lightning_balance_sat
+	);
 
 	let payment_id =
 		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None).unwrap();
@@ -1093,7 +1105,10 @@ async fn splice_channel() {
 		node_a.list_balances().total_lightning_balance_sats,
 		4_000_000 - closing_transaction_fee_sat - anchor_output_sat + amount_msat / 1000
 	);
-	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 4_000_000 - amount_msat / 1000);
+	assert_eq!(
+		node_b.list_balances().total_lightning_balance_sats,
+		expected_splice_in_lightning_balance_sat - amount_msat / 1000
+	);
 
 	// Splice-out funds for Node A from the payment sent by Node B
 	let address = node_a.onchain_payment().new_address().unwrap();

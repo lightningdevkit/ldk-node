@@ -1699,15 +1699,8 @@ impl Node {
 				value: Amount::from_sat(splice_amount_sats),
 				script_pubkey: address.script_pubkey(),
 			}];
-			let contribution = self
-				.runtime
-				.block_on(funding_template.splice_out(
-					outputs,
-					min_feerate,
-					max_feerate,
-					Arc::clone(&self.wallet),
-				))
-				.map_err(|e| {
+			let contribution =
+				funding_template.splice_out(outputs, min_feerate, max_feerate).map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
