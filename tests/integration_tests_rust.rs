@@ -35,7 +35,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	UnifiedPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{BuildError, Builder, Event, NodeError, RecoveryMode};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -710,7 +710,7 @@ async fn onchain_wallet_recovery() {
 	// Now we start from scratch, only the seed remains the same.
 	let mut recovered_config = random_config(true);
 	recovered_config.node_entropy = original_node_entropy;
-	recovered_config.recovery_mode = true;
+	recovered_config.recovery_mode = Some(RecoveryMode::default());
 	let recovered_node = setup_node(&chain_source, recovered_config);
 
 	recovered_node.sync_wallets().unwrap();
@@ -741,6 +741,132 @@ async fn onchain_wallet_recovery() {
 		recovered_node.list_balances().spendable_onchain_balance_sats,
 		premine_amount_sat * 3
 	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_wallet_recovery_rescans_from_birthday_height() {
+	// End-to-end test for `RecoveryMode { rescan_from_height }` against a bitcoind chain
+	// source. The scenario:
+	//
+	// 1. Create a node at some "birthday" height and generate two receive addresses.
+	// 2. Shut the node down and drop all persisted state except the seed.
+	// 3. Advance the chain past the birthday.
+	// 4. Send funds to the addresses generated at the birthday height and confirm them.
+	// 5. Restart a fresh node with just the seed (no recovery mode). Its wallet birthday
+	//    is pinned at the current tip, which is above the blocks containing the funding
+	//    transactions — so the node must not see the funds.
+	// 6. Restart again with `RecoveryMode { rescan_from_height: Some(birthday) }`. Now
+	//    the wallet must find and report both funding transactions.
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	// We specifically exercise the bitcoind RPC backend because that's where
+	// `rescan_from_height` is honored precisely (via `get_block_hash_by_height`).
+	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
+
+	// Mine the initial 101 blocks so bitcoind's wallet can fund our later sends.
+	premine_blocks(&bitcoind.client, &electrsd.client).await;
+
+	// Step 1: bring up an "original" node at the birthday height and generate addresses.
+	let original_config = random_config(true);
+	let original_node_entropy = original_config.node_entropy;
+	let original_node = setup_node(&chain_source, original_config);
+
+	let premine_amount_sat = 100_000;
+
+	let addr_1 = original_node.onchain_payment().new_address().unwrap();
+	let addr_2 = original_node.onchain_payment().new_address().unwrap();
+
+	let birthday_height: u32 = bitcoind
+		.client
+		.get_blockchain_info()
+		.expect("failed to get blockchain info")
+		.blocks
+		.try_into()
+		.unwrap();
+
+	// Step 2: shut the node down and drop its state.
+	original_node.stop().unwrap();
+	drop(original_node);
+
+	// Step 3: advance the chain past the birthday, so a fresh node would otherwise pin its
+	// wallet birthday at a height above the funding transactions in step 4.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 10).await;
+
+	// Step 4: fund both addresses and confirm them.
+	let txid_1 = bitcoind
+		.client
+		.send_to_address(&addr_1, Amount::from_sat(premine_amount_sat))
+		.unwrap()
+		.0
+		.parse()
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid_1).await;
+	let txid_2 = bitcoind
+		.client
+		.send_to_address(&addr_2, Amount::from_sat(premine_amount_sat))
+		.unwrap()
+		.0
+		.parse()
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid_2).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+
+	// Step 5: restart a fresh node with only the seed and no recovery mode. It must NOT see
+	// the funds, because its wallet birthday sits above the funding transactions.
+	let mut pinned_config = random_config(true);
+	pinned_config.node_entropy = original_node_entropy;
+	let pinned_node = setup_node(&chain_source, pinned_config);
+	pinned_node.sync_wallets().unwrap();
+	assert_eq!(
+		pinned_node.list_balances().spendable_onchain_balance_sats,
+		0,
+		"fresh node without recovery mode should not find funds below its wallet birthday"
+	);
+	pinned_node.stop().unwrap();
+	drop(pinned_node);
+
+	// Step 6: restart with recovery mode rescanning from the birthday height. Funds must be
+	// re-discovered.
+	let mut recovered_config = random_config(true);
+	recovered_config.node_entropy = original_node_entropy;
+	recovered_config.recovery_mode =
+		Some(RecoveryMode { rescan_from_height: Some(birthday_height) });
+	let recovered_node = setup_node(&chain_source, recovered_config);
+	recovered_node.sync_wallets().unwrap();
+	assert_eq!(
+		recovered_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 2,
+		"node recovered with rescan_from_height should see funds sent to pre-birthday addresses"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn build_aborts_on_first_startup_bitcoind_tip_fetch_failure() {
+	// A fresh node pointed at an unreachable bitcoind RPC endpoint must not silently
+	// fall back to genesis as the wallet birthday. The build must abort cleanly so the
+	// misconfiguration surfaces immediately.
+	let config = random_config(false);
+	let entropy = config.node_entropy;
+
+	setup_builder!(builder, config.node_config);
+	// Pick a localhost port that is extremely unlikely to be bound. The kernel will
+	// refuse the connection immediately so the test does not have to wait for the
+	// chain-polling timeout.
+	let unreachable_port: u16 = 1;
+	builder.set_chain_source_bitcoind_rpc(
+		"127.0.0.1".to_string(),
+		unreachable_port,
+		"user".to_string(),
+		"password".to_string(),
+	);
+
+	let res = builder.build(entropy.into());
+	match res {
+		Err(BuildError::ChainTipFetchFailed) => {},
+		other => panic!(
+			"expected BuildError::ChainTipFetchFailed on fresh node with unreachable bitcoind, got {:?}",
+			other.map(|_| "Ok(_)")
+		),
+	}
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

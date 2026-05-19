@@ -125,9 +125,11 @@ impl ElectrumChainSource {
 			return Err(Error::FeerateEstimationUpdateFailed);
 		};
 		// If this is our first sync, do a full scan with the configured gap limit.
-		// Otherwise just do an incremental sync.
-		let incremental_sync =
+		// Otherwise just do an incremental sync. Also take one-shot priority over an incremental
+		// sync if the user opted into recovery mode via `NodeBuilder::set_wallet_recovery_mode`.
+		let has_prior_sync =
 			self.node_metrics.read().expect("lock").latest_onchain_wallet_sync_timestamp.is_some();
+		let incremental_sync = has_prior_sync && !onchain_wallet.take_force_full_scan();
 
 		let apply_wallet_update =
 			|update_res: Result<BdkUpdate, Error>, now: Instant| match update_res {
