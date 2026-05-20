@@ -5,6 +5,10 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 
 #[cfg(feature = "uniffi")]
+mod io;
+#[cfg(feature = "uniffi")]
+pub use io::*;
+#[cfg(feature = "uniffi")]
 mod types;
 
 #[cfg(feature = "uniffi")]
