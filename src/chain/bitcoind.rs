@@ -16,7 +16,7 @@ use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use bitcoin::{BlockHash, FeeRate, Network, OutPoint, Transaction, Txid};
 use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
-use lightning::chain::{BestBlock as BlockLocator, Listen};
+use lightning::chain::{BlockLocator, Listen};
 use lightning::util::ser::Writeable;
 use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::http::{HttpClientError, JsonResponse};
@@ -326,7 +326,7 @@ impl BitcoindChainSource {
 	}
 
 	pub(super) async fn poll_best_block(&self) -> Result<BlockLocator, Error> {
-		self.poll_chain_tip().await.map(|tip| tip.to_best_block())
+		self.poll_chain_tip().await.map(|tip| tip.to_block_locator())
 	}
 
 	async fn poll_chain_tip(&self) -> Result<ValidatedBlockHeader, Error> {
@@ -1365,7 +1365,7 @@ impl Listen for ChainListener {
 		self.output_sweeper.block_connected(block, height);
 	}
 
-	fn blocks_disconnected(&self, fork_point_block: lightning::chain::BestBlock) {
+	fn blocks_disconnected(&self, fork_point_block: lightning::chain::BlockLocator) {
 		self.onchain_wallet.blocks_disconnected(fork_point_block);
 		self.channel_manager.blocks_disconnected(fork_point_block);
 		self.chain_monitor.blocks_disconnected(fork_point_block);
