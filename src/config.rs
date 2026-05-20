@@ -266,6 +266,18 @@ pub struct HumanReadableNamesConfig {
 	/// * **DNS Server**: `8.8.8.8:53` (Google Public DNS)
 	/// * **Resolution Service**: Disabled (`false`)
 	pub resolution_config: HRNResolverConfig,
+	/// If set to true, enables resolving [LNURL-pay] links and the LN-Address LNURL fallback
+	/// via HTTP, in addition to the BIP 353 / bLIP-32 resolution method configured in
+	/// [`resolution_config`].
+	///
+	/// **Default:** `false`
+	///
+	/// **Note:** Enabling this may reveal our IP address to the recipient and information about
+	/// who we're paying to the LNURL endpoint we're querying.
+	///
+	/// [LNURL-pay]: https://github.com/lnurl/luds/blob/luds/06.md
+	/// [`resolution_config`]: Self::resolution_config
+	pub enable_lnurl_resolution: bool,
 }
 
 impl Default for HumanReadableNamesConfig {
@@ -276,6 +288,7 @@ impl Default for HumanReadableNamesConfig {
 					.expect("Socket address conversion failed."),
 				enable_hrn_resolution_service: false,
 			},
+			enable_lnurl_resolution: false,
 		}
 	}
 }

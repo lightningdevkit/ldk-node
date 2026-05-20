@@ -17,6 +17,7 @@ use bitcoin_payment_instructions::dns_resolver::DNSHrnResolver;
 use bitcoin_payment_instructions::hrn_resolution::{
 	HrnResolutionFuture, HrnResolver, HumanReadableName, LNURLResolutionFuture,
 };
+use bitcoin_payment_instructions::http_resolver::HTTPHrnResolver;
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
@@ -329,37 +330,85 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 >;
 
 #[derive(Clone)]
-pub enum HRNResolver {
+pub enum HRNResolverInner {
 	Onion(Arc<LDKOnionMessageDNSSECHrnResolver<Arc<Graph>, Arc<Logger>>>),
 	Local(Arc<DNSHrnResolver>),
 }
 
+#[derive(Clone)]
+pub struct HRNResolver {
+	inner: HRNResolverInner,
+	http: Option<Arc<HTTPHrnResolver>>,
+}
+
+impl HRNResolver {
+	pub(crate) fn new(inner: HRNResolverInner, http: Option<Arc<HTTPHrnResolver>>) -> Self {
+		Self { inner, http }
+	}
+}
+
 impl HrnResolver for HRNResolver {
 	fn resolve_hrn<'a>(&'a self, hrn: &'a HumanReadableName) -> HrnResolutionFuture<'a> {
-		match self {
-			HRNResolver::Onion(inner) => inner.resolve_hrn(hrn),
-			HRNResolver::Local(inner) => inner.resolve_hrn(hrn),
-		}
+		Box::pin(async move {
+			let primary = match &self.inner {
+				HRNResolverInner::Onion(inner) => inner.resolve_hrn(hrn).await,
+				HRNResolverInner::Local(inner) => inner.resolve_hrn(hrn).await,
+			};
+			match (primary, &self.http) {
+				(Ok(r), _) => Ok(r),
+				(Err(_), Some(http)) => http.resolve_hrn(hrn).await,
+				(Err(e), None) => Err(e),
+			}
+		})
 	}
 
 	fn resolve_lnurl<'a>(&'a self, url: &'a str) -> HrnResolutionFuture<'a> {
-		match self {
-			HRNResolver::Onion(inner) => inner.resolve_lnurl(url),
-			HRNResolver::Local(inner) => inner.resolve_lnurl(url),
-		}
+		Box::pin(async move {
+			let primary = match &self.inner {
+				HRNResolverInner::Onion(inner) => inner.resolve_lnurl(url).await,
+				HRNResolverInner::Local(inner) => inner.resolve_lnurl(url).await,
+			};
+			match (primary, &self.http) {
+				(Ok(r), _) => Ok(r),
+				(Err(_), Some(http)) => http.resolve_lnurl(url).await,
+				(Err(e), None) => Err(e),
+			}
+		})
 	}
 
 	fn resolve_lnurl_to_invoice<'a>(
 		&'a self, callback_url: String, amount: BPIAmount, expected_description_hash: [u8; 32],
 	) -> LNURLResolutionFuture<'a> {
-		match self {
-			HRNResolver::Onion(inner) => {
-				inner.resolve_lnurl_to_invoice(callback_url, amount, expected_description_hash)
-			},
-			HRNResolver::Local(inner) => {
-				inner.resolve_lnurl_to_invoice(callback_url, amount, expected_description_hash)
-			},
-		}
+		Box::pin(async move {
+			let primary = match &self.inner {
+				HRNResolverInner::Onion(inner) => {
+					inner
+						.resolve_lnurl_to_invoice(
+							callback_url.clone(),
+							amount,
+							expected_description_hash,
+						)
+						.await
+				},
+				HRNResolverInner::Local(inner) => {
+					inner
+						.resolve_lnurl_to_invoice(
+							callback_url.clone(),
+							amount,
+							expected_description_hash,
+						)
+						.await
+				},
+			};
+			match (primary, &self.http) {
+				(Ok(r), _) => Ok(r),
+				(Err(_), Some(http)) => {
+					http.resolve_lnurl_to_invoice(callback_url, amount, expected_description_hash)
+						.await
+				},
+				(Err(e), None) => Err(e),
+			}
+		})
 	}
 }
 

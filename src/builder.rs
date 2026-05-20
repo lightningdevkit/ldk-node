@@ -21,6 +21,7 @@ use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use bitcoin_payment_instructions::dns_resolver::DNSHrnResolver;
+use bitcoin_payment_instructions::http_resolver::HTTPHrnResolver;
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::{chainmonitor, BestBlock as BlockLocator};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
@@ -80,8 +81,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
-	PeerManager, PendingPaymentStore, SyncAndAsyncKVStore,
+	GossipSync, Graph, HRNResolver, HRNResolverInner, KeysManager, MessageRouter, OnionMessenger,
+	PaymentStore, PeerManager, PendingPaymentStore, SyncAndAsyncKVStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1752,7 +1753,7 @@ fn build_with_store_internal(
 		})?;
 	}
 
-	let hrn_resolver;
+	let hrn_resolver_inner;
 	let mut blip32_resolver = None;
 
 	let runtime_handle = runtime.handle();
@@ -1764,7 +1765,7 @@ fn build_with_store_internal(
 		HRNResolverConfig::Blip32 => {
 			let hrn_res =
 				Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(&network_graph)));
-			hrn_resolver = HRNResolver::Onion(Arc::clone(&hrn_res));
+			hrn_resolver_inner = HRNResolverInner::Onion(Arc::clone(&hrn_res));
 			blip32_resolver = Some(Arc::clone(&hrn_res));
 
 			hrn_res as Arc<dyn DNSResolverMessageHandler + Send + Sync>
@@ -1779,7 +1780,7 @@ fn build_with_store_internal(
 					BuildError::DNSResolverSetupFailed
 				})?;
 			let hrn_res = Arc::new(DNSHrnResolver(addr));
-			hrn_resolver = HRNResolver::Local(hrn_res);
+			hrn_resolver_inner = HRNResolverInner::Local(hrn_res);
 
 			if *enable_hrn_resolution_service {
 				if let Err(_) = may_announce_channel(&config) {
@@ -1802,6 +1803,13 @@ fn build_with_store_internal(
 			}
 		},
 	};
+
+	let http_hrn_resolver = if config.hrn_config.enable_lnurl_resolution {
+		Some(Arc::new(HTTPHrnResolver::new()))
+	} else {
+		None
+	};
+	let hrn_resolver = HRNResolver::new(hrn_resolver_inner, http_hrn_resolver);
 
 	// Initialize the PeerManager
 	let onion_messenger: Arc<OnionMessenger> =
