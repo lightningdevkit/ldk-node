@@ -34,8 +34,8 @@ use bitcoin::{
 	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
 };
 use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
+use electrsd::electrum_client::ElectrumApi;
 use electrsd::{corepc_node, ElectrsD};
-use electrum_client::ElectrumApi;
 use ldk_node::config::{
 	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
 	HumanReadableNamesConfig,

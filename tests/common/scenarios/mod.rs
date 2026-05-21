@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use bitcoin::Amount;
 use electrsd::corepc_node::Client as BitcoindClient;
-use electrum_client::ElectrumApi;
+use electrsd::electrum_client::ElectrumApi;
 use ldk_node::{Event, Node};
 
 use super::external_node::ExternalNode;

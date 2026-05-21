@@ -17,7 +17,7 @@ use common::scenarios::{
 };
 use electrsd::corepc_client::client_sync::Auth;
 use electrsd::corepc_node::Client as BitcoindClient;
-use electrum_client::Client as ElectrumClient;
+use electrsd::electrum_client::Client as ElectrumClient;
 
 /// Unlock all UTXOs in the given bitcoind wallet via JSON-RPC.
 async fn unlock_utxos(wallet_url: &str, user: &str, pass: &str) {
