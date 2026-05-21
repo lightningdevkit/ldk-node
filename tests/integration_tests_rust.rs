@@ -20,7 +20,7 @@ use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
 	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
 	expect_event, expect_payment_claimable_event, expect_payment_received_event,
-	expect_payment_successful_event, expect_splice_pending_event, generate_blocks_and_wait,
+	expect_payment_successful_event, expect_splice_negotiated_event, generate_blocks_and_wait,
 	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
@@ -1056,8 +1056,8 @@ async fn splice_channel() {
 	// Splice-in funds for Node B so that it has outbound liquidity to make a payment
 	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).unwrap();
 
-	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
-	expect_splice_pending_event!(node_b, node_a.node_id());
+	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
@@ -1114,8 +1114,8 @@ async fn splice_channel() {
 	let address = node_a.onchain_payment().new_address().unwrap();
 	node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, amount_msat / 1000).unwrap();
 
-	let txo = expect_splice_pending_event!(node_a, node_b.node_id());
-	expect_splice_pending_event!(node_b, node_a.node_id());
+	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 

@@ -270,8 +270,9 @@ pub enum Event {
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
 		reason: Option<ClosureReason>,
 	},
-	/// A channel splice is pending confirmation on-chain.
-	SplicePending {
+	/// A channel splice has been negotiated and the funding transaction is pending
+	/// confirmation on-chain.
+	SpliceNegotiated {
 		/// The `channel_id` of the channel.
 		channel_id: ChannelId,
 		/// The `user_channel_id` of the channel.
@@ -281,16 +282,14 @@ pub enum Event {
 		/// The outpoint of the channel's splice funding transaction.
 		new_funding_txo: OutPoint,
 	},
-	/// A channel splice has failed.
-	SpliceFailed {
+	/// A channel splice negotiation round has failed.
+	SpliceNegotiationFailed {
 		/// The `channel_id` of the channel.
 		channel_id: ChannelId,
 		/// The `user_channel_id` of the channel.
 		user_channel_id: UserChannelId,
 		/// The `node_id` of the channel counterparty.
 		counterparty_node_id: PublicKey,
-		/// The outpoint of the channel's splice funding transaction, if one was created.
-		abandoned_funding_txo: Option<OutPoint>,
 	},
 }
 
@@ -362,17 +361,17 @@ impl_writeable_tlv_based_enum!(Event,
 			node_id: legacy_next_node_id,
 		}])),
 	},
-	(8, SplicePending) => {
+	(8, SpliceNegotiated) => {
 		(1, channel_id, required),
 		(3, counterparty_node_id, required),
 		(5, user_channel_id, required),
 		(7, new_funding_txo, required),
 	},
-	(9, SpliceFailed) => {
+	(9, SpliceNegotiationFailed) => {
 		(1, channel_id, required),
 		(3, counterparty_node_id, required),
 		(5, user_channel_id, required),
-		(7, abandoned_funding_txo, option),
+		// TLV 7 (abandoned_funding_txo) may be set for LDK Node v0.7.
 	},
 );
 
@@ -1814,7 +1813,7 @@ where
 				},
 				Err(()) => log_error!(self.logger, "Failed signing funding transaction"),
 			},
-			LdkEvent::SplicePending {
+			LdkEvent::SpliceNegotiated {
 				channel_id,
 				user_channel_id,
 				counterparty_node_id,
@@ -1823,13 +1822,13 @@ where
 			} => {
 				log_info!(
 					self.logger,
-					"Channel {} with counterparty {} pending splice with funding_txo {}",
+					"Channel {} with counterparty {} negotiated splice with funding_txo {}",
 					channel_id,
 					counterparty_node_id,
 					new_funding_txo,
 				);
 
-				let event = Event::SplicePending {
+				let event = Event::SpliceNegotiated {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
 					counterparty_node_id,
@@ -1844,35 +1843,23 @@ where
 					},
 				};
 			},
-			LdkEvent::SpliceFailed {
+			LdkEvent::SpliceNegotiationFailed {
 				channel_id,
 				user_channel_id,
 				counterparty_node_id,
-				abandoned_funding_txo,
 				..
 			} => {
-				if let Some(funding_txo) = abandoned_funding_txo {
-					log_info!(
-						self.logger,
-						"Channel {} with counterparty {} failed splice with funding_txo {}",
-						channel_id,
-						counterparty_node_id,
-						funding_txo,
-					);
-				} else {
-					log_info!(
-						self.logger,
-						"Channel {} with counterparty {} failed splice",
-						channel_id,
-						counterparty_node_id,
-					);
-				}
+				log_info!(
+					self.logger,
+					"Channel {} with counterparty {} splice negotiation failed",
+					channel_id,
+					counterparty_node_id,
+				);
 
-				let event = Event::SpliceFailed {
+				let event = Event::SpliceNegotiationFailed {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
 					counterparty_node_id,
-					abandoned_funding_txo,
 				};
 
 				match self.event_queue.add_event(event).await {
