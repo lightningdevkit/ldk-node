@@ -1611,7 +1611,13 @@ where
 						version: bitcoin::transaction::Version::TWO,
 						lock_time: bitcoin::absolute::LockTime::ZERO,
 						input: vec![],
-						output: outputs,
+						output: outputs
+							.into_iter()
+							.map(|script_pubkey| bitcoin::TxOut {
+								value: bitcoin::Amount::ZERO,
+								script_pubkey,
+							})
+							.collect(),
 					};
 					if let Err(e) = self.wallet.cancel_tx(&tx) {
 						log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
