@@ -1313,6 +1313,7 @@ where
 						None,
 						expiry_secs,
 						Some(min_final_cltv_expiry_delta),
+						None,
 					)
 					.map_err(|e| {
 						log_error!(self.logger, "Failed to register inbound payment: {:?}", e);
@@ -1322,7 +1323,7 @@ where
 			},
 			None => self
 				.channel_manager
-				.create_inbound_payment(None, expiry_secs, Some(min_final_cltv_expiry_delta))
+				.create_inbound_payment(None, expiry_secs, Some(min_final_cltv_expiry_delta), None)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to register inbound payment: {:?}", e);
 					Error::InvoiceCreationFailed
