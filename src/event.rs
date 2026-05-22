@@ -1671,16 +1671,26 @@ where
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
 
 				let user_channel_id = UserChannelId(user_channel_id);
-				let is_outbound = self
+				let is_outbound_from_set = self
 					.outbound_channel_ids
 					.lock()
 					.expect("Lock poisoned")
 					.remove(&user_channel_id);
-				let is_announced = self
+				let is_announced_from_set = self
 					.announced_channel_ids
 					.lock()
 					.expect("Lock poisoned")
 					.remove(&user_channel_id);
+
+				// On replay (after a restart or after handle_event returns ReplayEvent),
+				// the channel is no longer in list_channels() and the in-memory sets are
+				// not repopulated for it, so .remove() returns false. Fall back to any
+				// already-persisted record so we don't overwrite correct values with false.
+				let (is_outbound, is_announced) = self
+					.closed_channel_store
+					.get(&user_channel_id)
+					.map(|existing| (existing.is_outbound, existing.is_announced))
+					.unwrap_or((is_outbound_from_set, is_announced_from_set));
 
 				let closed_at = SystemTime::now()
 					.duration_since(UNIX_EPOCH)
@@ -1703,19 +1713,22 @@ where
 					closed_at,
 				};
 
-				if let Err(e) = self.closed_channel_store.insert(record).await {
+				if let Err(e) = self.closed_channel_store.insert_or_update(record).await {
 					log_error!(
 						self.logger,
 						"Failed to persist closed channel {}: {}",
 						channel_id,
 						e
 					);
+					return Err(ReplayEvent());
 				}
 
 				let event = Event::ChannelClosed {
 					channel_id,
 					user_channel_id,
 					counterparty_node_id: counterparty_node_id
+						// Since LDK Node v0.2 this is expected to always be set. See
+						// CHANGELOG.md for details on the serialization compatibility break.
 						.expect("counterparty_node_id must be set for closed channels"),
 					reason: Some(reason),
 					channel_capacity_sats,
