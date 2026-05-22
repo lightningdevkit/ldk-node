@@ -1754,13 +1754,14 @@ where
 					closed_at,
 				};
 
-				if let Err(e) = self.closed_channel_store.insert(record).await {
+				if let Err(e) = self.closed_channel_store.insert_or_update(record).await {
 					log_error!(
 						self.logger,
 						"Failed to persist closed channel {}: {}",
 						channel_id,
 						e
 					);
+					return Err(ReplayEvent());
 				}
 
 				let event = Event::ChannelClosed {
