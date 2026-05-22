@@ -30,12 +30,21 @@ pub struct ClosedChannelDetails {
 	/// The local identifier of the channel.
 	pub user_channel_id: UserChannelId,
 	/// The node ID of the channel's counterparty.
+	///
+	/// Will be `None` if the channel was closed before the counterparty's node ID could be
+	/// determined (e.g., very early in the channel negotiation process).
 	pub counterparty_node_id: Option<PublicKey>,
 	/// The channel's funding transaction outpoint.
+	///
+	/// Will be `None` if the channel was closed before a funding transaction was established.
 	pub funding_txo: Option<OutPoint>,
 	/// The channel's capacity in satoshis.
+	///
+	/// Will be `None` if the channel was closed before the capacity was known.
 	pub channel_capacity_sats: Option<u64>,
 	/// Our local balance in millisatoshis at the time of channel closure.
+	///
+	/// Will be `None` if the local balance was not available at the time of closure.
 	pub last_local_balance_msat: Option<u64>,
 	/// Indicates whether we initiated the channel opening.
 	///
@@ -47,6 +56,9 @@ pub struct ClosedChannelDetails {
 	/// This will be `false` for channels opened prior to this field being tracked.
 	pub is_announced: bool,
 	/// The reason for the channel closure.
+	///
+	/// Will be `None` if the closure reason could not be decoded, e.g., if it was written by a
+	/// future version of LDK Node using a closure reason variant not yet known to this version.
 	pub closure_reason: Option<ClosureReason>,
 	/// The timestamp, in seconds since start of the UNIX epoch, when the channel was closed.
 	pub closed_at: u64,
