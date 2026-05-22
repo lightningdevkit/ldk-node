@@ -857,12 +857,14 @@ impl Node {
 		self.peer_manager.disconnect_all_peers();
 		log_debug!(self.logger, "Disconnected all network peers.");
 
-		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
-		self.runtime.wait_on_background_tasks();
-
-		// Stop any runtime-dependant chain sources.
+		// Stop any runtime-dependant chain sources before waiting on non-cancellable
+		// background tasks. Some chain sources own background tasks that only exit
+		// after their client/requester is shut down.
 		self.chain_source.stop();
 		log_debug!(self.logger, "Stopped chain sources.");
+
+		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
+		self.runtime.wait_on_background_tasks();
 
 		// Stop the background processor.
 		self.background_processor_stop_sender
