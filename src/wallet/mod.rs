@@ -37,7 +37,6 @@ use lightning::chain::chaininterface::{
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::{BlockLocator, ClaimId, Listen};
 use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::funding::FundingTxInput;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
@@ -47,7 +46,7 @@ use lightning::sign::{
 };
 use lightning::util::message_signing;
 use lightning::util::wallet_utils::{
-	CoinSelection, CoinSelectionSource, Input, Utxo, WalletSource,
+	CoinSelection, CoinSelectionSource, ConfirmedUtxo, Input, Utxo, WalletSource,
 };
 use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
@@ -942,7 +941,7 @@ impl Wallet {
 				locked_wallet
 					.tx_details(txin.previous_output.txid)
 					.map(|tx_details| tx_details.tx.deref().clone())
-					.map(|prevtx| FundingTxInput::new_p2wpkh(prevtx, txin.previous_output.vout))
+					.map(|prevtx| ConfirmedUtxo::new_p2wpkh(prevtx, txin.previous_output.vout))
 			})
 			.collect::<Result<Vec<_>, ()>>()?;
 
