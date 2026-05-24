@@ -121,7 +121,7 @@ impl Bolt11Payment {
 			// will know the preimage at this point.
 			let res = self
 				.channel_manager
-				.get_payment_preimage(payment_hash, payment_secret.clone())
+				.get_payment_preimage(payment_hash, payment_secret.clone(), None)
 				.ok();
 			debug_assert!(res.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
 			res
@@ -206,8 +206,10 @@ impl Bolt11Payment {
 			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
 		};
 		let id = PaymentId(payment_hash.0);
-		let preimage =
-			self.channel_manager.get_payment_preimage(payment_hash, payment_secret.clone()).ok();
+		let preimage = self
+			.channel_manager
+			.get_payment_preimage(payment_hash, payment_secret.clone(), None)
+			.ok();
 		let kind = PaymentKind::Bolt11Jit {
 			hash: payment_hash,
 			preimage,

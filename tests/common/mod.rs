@@ -34,8 +34,8 @@ use bitcoin::{
 	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
 };
 use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
+use electrsd::electrum_client::ElectrumApi;
 use electrsd::{corepc_node, ElectrsD};
-use electrum_client::ElectrumApi;
 use ldk_node::config::{
 	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
 	HumanReadableNamesConfig,
@@ -179,7 +179,7 @@ macro_rules! expect_channel_ready_events {
 
 pub(crate) use expect_channel_ready_events;
 
-macro_rules! expect_splice_pending_event {
+macro_rules! expect_splice_negotiated_event {
 	($node:expr, $counterparty_node_id:expr) => {{
 		let event = tokio::time::timeout(
 			std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
@@ -187,10 +187,10 @@ macro_rules! expect_splice_pending_event {
 		)
 		.await
 		.unwrap_or_else(|_| {
-			panic!("{} timed out waiting for SplicePending event after 60s", $node.node_id())
+			panic!("{} timed out waiting for SpliceNegotiated event after 60s", $node.node_id())
 		});
 		match event {
-			ref e @ Event::SplicePending { new_funding_txo, counterparty_node_id, .. } => {
+			ref e @ Event::SpliceNegotiated { new_funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
 				$node.event_handled().unwrap();
@@ -203,7 +203,7 @@ macro_rules! expect_splice_pending_event {
 	}};
 }
 
-pub(crate) use expect_splice_pending_event;
+pub(crate) use expect_splice_negotiated_event;
 
 macro_rules! expect_payment_received_event {
 	($node:expr, $amount_msat:expr) => {{
@@ -888,8 +888,8 @@ pub async fn splice_in_with_all(
 ) {
 	node_a.splice_in_with_all(user_channel_id, node_b.node_id()).unwrap();
 
-	let splice_txo = expect_splice_pending_event!(node_a, node_b.node_id());
-	expect_splice_pending_event!(node_b, node_a.node_id());
+	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(&electrsd.client, splice_txo.txid).await;
 }
 
@@ -1360,8 +1360,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_out_sat = funding_amount_sat / 2;
 	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
-	expect_splice_pending_event!(node_b, node_a.node_id());
+	expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();
@@ -1382,8 +1382,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_in_sat = splice_out_sat;
 	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
-	expect_splice_pending_event!(node_b, node_a.node_id());
+	expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();

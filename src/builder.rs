@@ -22,7 +22,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use bitcoin_payment_instructions::dns_resolver::DNSHrnResolver;
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
-use lightning::chain::{chainmonitor, BestBlock as BlockLocator};
+use lightning::chain::{chainmonitor, BlockLocator};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::{IgnoringMessageHandler, MessageHandler};

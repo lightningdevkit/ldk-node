@@ -145,7 +145,7 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::update_and_persist_node_metrics;
 pub use lightning;
-use lightning::chain::BestBlock as BlockLocator;
+use lightning::chain::BlockLocator;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
@@ -1582,6 +1582,14 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			if funding_template.prior_contribution().is_some() {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: a prior splice contribution is pending"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			}
+
 			let contribution = self
 				.runtime
 				.block_on(funding_template.splice_in(
@@ -1695,19 +1703,20 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			if funding_template.prior_contribution().is_some() {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: a prior splice contribution is pending"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			}
+
 			let outputs = vec![bitcoin::TxOut {
 				value: Amount::from_sat(splice_amount_sats),
 				script_pubkey: address.script_pubkey(),
 			}];
-			let contribution = self
-				.runtime
-				.block_on(funding_template.splice_out(
-					outputs,
-					min_feerate,
-					max_feerate,
-					Arc::clone(&self.wallet),
-				))
-				.map_err(|e| {
+			let contribution =
+				funding_template.splice_out(outputs, min_feerate, max_feerate).map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
