@@ -1,3 +1,10 @@
+# Pending
+
+## Serialization Compatibility
+- The `counterparty_node_id` field of the `ChannelReady` and `ChannelClosed` events is now
+  required. Events persisted by LDK Node v0.1.0 and prior that are missing this field will
+  fail to deserialize.
+
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
 

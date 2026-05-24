@@ -27,6 +27,10 @@ pub(crate) const PEER_INFO_PERSISTENCE_KEY: &str = "peers";
 pub(crate) const PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "payments";
 pub(crate) const PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
+/// The closed channel information will be persisted under this prefix.
+pub(crate) const CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "closed_channels";
+pub(crate) const CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
+
 /// The node metrics will be persisted under this key.
 pub(crate) const NODE_METRICS_PRIMARY_NAMESPACE: &str = "";
 pub(crate) const NODE_METRICS_SECONDARY_NAMESPACE: &str = "";
