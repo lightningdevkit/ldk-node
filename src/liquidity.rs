@@ -1304,9 +1304,9 @@ where
 
 		// LSPS2 requires min_final_cltv_expiry_delta to be at least 2 more than usual.
 		let min_final_cltv_expiry_delta = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
-		let (payment_hash, payment_secret) = match payment_hash {
+		let (payment_hash, payment_secret, payment_metadata) = match payment_hash {
 			Some(payment_hash) => {
-				let payment_secret = self
+				let (payment_secret, payment_metadata) = self
 					.channel_manager
 					.create_inbound_payment_for_hash(
 						payment_hash,
@@ -1319,7 +1319,7 @@ where
 						log_error!(self.logger, "Failed to register inbound payment: {:?}", e);
 						Error::InvoiceCreationFailed
 					})?;
-				(payment_hash, payment_secret)
+				(payment_hash, payment_secret, payment_metadata)
 			},
 			None => self
 				.channel_manager
@@ -1353,15 +1353,21 @@ where
 			invoice_builder = invoice_builder.amount_milli_satoshis(amount_msat).basic_mpp();
 		}
 
-		invoice_builder
-			.build_signed(|hash| {
+		let invoice = if let Some(payment_metadata) = payment_metadata {
+			invoice_builder.payment_metadata(payment_metadata).build_signed(|hash| {
 				Secp256k1::new()
 					.sign_ecdsa_recoverable(hash, &self.keys_manager.get_node_secret_key())
 			})
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to build and sign invoice: {}", e);
-				Error::InvoiceCreationFailed
+		} else {
+			invoice_builder.build_signed(|hash| {
+				Secp256k1::new()
+					.sign_ecdsa_recoverable(hash, &self.keys_manager.get_node_secret_key())
 			})
+		};
+		invoice.map_err(|e| {
+			log_error!(self.logger, "Failed to build and sign invoice: {}", e);
+			Error::InvoiceCreationFailed
+		})
 	}
 
 	pub(crate) async fn handle_channel_ready(

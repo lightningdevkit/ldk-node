@@ -40,18 +40,18 @@ default = []
 #lightning-macros = { version = "0.2.0" }
 #lightning-dns-resolver = { version = "0.3.0" }
 
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a", features = ["std"] }
-lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a" }
-lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a", features = ["std"] }
-lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a" }
-lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a", features = ["tokio"] }
-lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a" }
-lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a" }
-lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a", features = ["rest-client", "rpc-client", "tokio"] }
-lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
-lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a", features = ["std"] }
-lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a" }
-lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a" }
+lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182", features = ["std"] }
+lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182" }
+lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182", features = ["std"] }
+lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182" }
+lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182", features = ["tokio"] }
+lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182" }
+lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182" }
+lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182", features = ["rest-client", "rpc-client", "tokio"] }
+lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
+lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182", features = ["std"] }
+lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182" }
+lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182" }
 
 bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.22.0", default-features = false, features = ["async-https-rustls", "tokio"]}
@@ -81,13 +81,13 @@ async-trait = { version = "0.1", default-features = false }
 vss-client = { package = "vss-client-ng", version = "0.5" }
 prost = { version = "0.11.6", default-features = false}
 #bitcoin-payment-instructions = { version = "0.6" }
-bitcoin-payment-instructions = { git = "https://github.com/jkczyz/bitcoin-payment-instructions", rev = "c7d7ea849fcbe8cad385c93f8057cd68ecb994b7" }
+bitcoin-payment-instructions = { git = "https://github.com/tnull/bitcoin-payment-instructions", rev = "ed8657dee284f987b6791cd291d0f0f18811ee76" }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "10608650d455f4d535cbac73921be329d814854a", features = ["std", "_test_utils"] }
+lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "090e09f3992694040d3a55c1c798b3a92fb77182", features = ["std", "_test_utils"] }
 rand = { version = "0.9.2", default-features = false, features = ["std", "thread_rng", "os_rng"] }
 proptest = "1.0.0"
 regex = "1.5.6"

@@ -119,9 +119,14 @@ impl Bolt11Payment {
 		let preimage = if manual_claim_payment_hash.is_none() {
 			// If the user hasn't registered a custom payment hash, we're positive ChannelManager
 			// will know the preimage at this point.
+			let mut payment_metadata = invoice.payment_metadata().cloned();
 			let res = self
 				.channel_manager
-				.get_payment_preimage(payment_hash, payment_secret.clone(), None)
+				.get_payment_preimage_decrypt_metadata(
+					payment_hash,
+					payment_secret.clone(),
+					payment_metadata.as_deref_mut(),
+				)
 				.ok();
 			debug_assert!(res.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
 			res
@@ -206,9 +211,14 @@ impl Bolt11Payment {
 			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
 		};
 		let id = PaymentId(payment_hash.0);
+		let mut payment_metadata = invoice.payment_metadata().cloned();
 		let preimage = self
 			.channel_manager
-			.get_payment_preimage(payment_hash, payment_secret.clone(), None)
+			.get_payment_preimage_decrypt_metadata(
+				payment_hash,
+				payment_secret.clone(),
+				payment_metadata.as_deref_mut(),
+			)
 			.ok();
 		let kind = PaymentKind::Bolt11Jit {
 			hash: payment_hash,
