@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -45,6 +45,11 @@ const MIN_FEERATE_SAT_PER_KWU: u64 = 250;
 
 /// Number of recent blocks to look back for per-target fee rate estimation.
 const FEE_RATE_LOOKBACK_BLOCKS: usize = 6;
+
+/// Capacity of the per-block fee-rate cache. Sized at 2× the lookback so a tip
+/// advance of up to `FEE_RATE_LOOKBACK_BLOCKS` only ever incurs that many
+/// fresh `get_block` round trips, regardless of how many cycles ran before.
+const BLOCK_FEE_CACHE_CAPACITY: usize = FEE_RATE_LOOKBACK_BLOCKS * 2;
 
 /// Number of blocks to walk back from a component's persisted best block height
 /// for reorg safety when computing the incremental scan skip height.
@@ -100,6 +105,11 @@ pub(super) struct CbfChainSource {
 	lightning_wallet_sync_status: Mutex<WalletSyncStatus>,
 	/// Shared fee rate estimator, updated by this chain source.
 	fee_estimator: Arc<OnchainFeeEstimator>,
+	/// Cache of per-block fee rates so that, when the tip advances by N blocks,
+	/// the next refresh fetches only N new blocks rather than the full lookback.
+	/// FIFO bounded by [`BLOCK_FEE_CACHE_CAPACITY`]; eviction follows insertion order,
+	/// which matches the tip-backward walk pattern.
+	block_fee_cache: Mutex<VecDeque<(BlockHash, FeeRate)>>,
 	/// Persistent key-value store for node metrics.
 	kv_store: Arc<DynStore>,
 	/// Node configuration (network, storage path, etc.).
@@ -156,6 +166,7 @@ impl CbfChainSource {
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let onchain_wallet = Mutex::new(None);
+		let block_fee_cache = Mutex::new(VecDeque::with_capacity(BLOCK_FEE_CACHE_CAPACITY));
 		Ok(Self {
 			peers,
 			sync_config,
@@ -170,6 +181,7 @@ impl CbfChainSource {
 			onchain_wallet_sync_status,
 			lightning_wallet_sync_status,
 			fee_estimator,
+			block_fee_cache,
 			onchain_wallet,
 			kv_store,
 			config,
@@ -929,14 +941,54 @@ impl CbfChainSource {
 
 		let now = Instant::now();
 
-		// Fetch fee rates from the last N blocks for per-target estimation.
-		// We compute fee rates ourselves rather than using Requester::average_fee_rate,
-		// so we can sample multiple blocks and select percentiles per confirmation target.
-		let mut block_fee_rates: Vec<u64> = Vec::with_capacity(FEE_RATE_LOOKBACK_BLOCKS);
-		let mut current_hash = tip.hash;
+		// Sample the last N blocks for per-target estimation. We walk by height
+		// (decrementing a counter) rather than by `prev_blockhash` so that cache
+		// hits don't have to read any data out of the cached block — the hash for
+		// the next height comes from kyoto's local header chain via `get_header`.
+		let mut block_fee_rates: Vec<FeeRate> = Vec::with_capacity(FEE_RATE_LOOKBACK_BLOCKS);
+		let mut cache_hits = 0usize;
 
-		for _ in 0..FEE_RATE_LOOKBACK_BLOCKS {
-			// Check if we've exceeded the overall timeout for fee estimation.
+		for offset in 0..FEE_RATE_LOOKBACK_BLOCKS {
+			let Some(height) = tip.height.checked_sub(offset as u32) else { break };
+
+			// Map height → hash via kyoto's local header chain (no P2P round trip).
+			let current_hash = match requester.get_header(height).await {
+				Ok(Some(indexed_header)) => indexed_header.header.block_hash(),
+				Ok(None) => {
+					log_debug!(
+						self.logger,
+						"CBF header at height {} not yet in local chain; \
+						 skipping fee estimation cycle.",
+						height,
+					);
+					return Ok(None);
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to look up header at height {}: {:?}",
+						height,
+						e
+					);
+					return Err(Error::FeerateEstimationUpdateFailed);
+				},
+			};
+
+			// Cache lookup: linear scan over a small ring buffer (≤ BLOCK_FEE_CACHE_CAPACITY).
+			let cached = self.block_fee_cache.lock().expect("lock").iter().find_map(|(h, r)| {
+				if *h == current_hash {
+					Some(*r)
+				} else {
+					None
+				}
+			});
+			if let Some(fee_rate) = cached {
+				cache_hits += 1;
+				block_fee_rates.push(fee_rate);
+				continue;
+			}
+
+			// Cache miss: fetch the full block over P2P and compute the fee rate.
 			let remaining_timeout = timeout.saturating_sub(fetch_start.elapsed());
 			if remaining_timeout.is_zero() {
 				log_error!(self.logger, "Updating fee rate estimates timed out.");
@@ -974,7 +1026,6 @@ impl CbfChainSource {
 					},
 				};
 
-			let height = indexed_block.height;
 			let block = &indexed_block.block;
 			let weight_kwu = block.weight().to_kwu_floor();
 
@@ -1002,12 +1053,18 @@ impl CbfChainSource {
 				(block_fees.to_sat() / weight_kwu).max(MIN_FEERATE_SAT_PER_KWU)
 			};
 
-			block_fee_rates.push(fee_rate_sat_per_kwu);
-			// Walk backwards through the chain via prev_blockhash.
-			if height == 0 {
-				break;
+			let fee_rate = FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu);
+
+			// Insert into the cache, evicting the oldest entry if at capacity.
+			{
+				let mut cache = self.block_fee_cache.lock().expect("lock");
+				if cache.len() == BLOCK_FEE_CACHE_CAPACITY {
+					cache.pop_front();
+				}
+				cache.push_back((current_hash, fee_rate));
 			}
-			current_hash = block.header.prev_blockhash;
+
+			block_fee_rates.push(fee_rate);
 		}
 
 		if block_fee_rates.is_empty() {
@@ -1036,9 +1093,10 @@ impl CbfChainSource {
 
 		log_debug!(
 			self.logger,
-			"CBF fee rate estimation finished in {}ms ({} blocks sampled).",
+			"CBF fee rate estimation finished in {}ms ({} blocks sampled, {} cache hits).",
 			now.elapsed().as_millis(),
 			block_fee_rates.len(),
+			cache_hits,
 		);
 
 		Ok(Some(new_fee_rate_cache))
@@ -1281,7 +1339,7 @@ fn block_subsidy(height: u32) -> Amount {
 /// For medium targets (2-6 blocks), uses the 75th percentile.
 /// For standard targets (7-12 blocks), uses the median.
 /// For low-urgency targets (13+ blocks), uses the 25th percentile.
-fn select_fee_rate_for_target(sorted_rates: &[u64], num_blocks: usize) -> FeeRate {
+fn select_fee_rate_for_target(sorted_rates: &[FeeRate], num_blocks: usize) -> FeeRate {
 	if sorted_rates.is_empty() {
 		return FeeRate::from_sat_per_kwu(MIN_FEERATE_SAT_PER_KWU);
 	}
@@ -1297,7 +1355,7 @@ fn select_fee_rate_for_target(sorted_rates: &[u64], num_blocks: usize) -> FeeRat
 		len / 4
 	};
 
-	FeeRate::from_sat_per_kwu(sorted_rates[idx.min(len - 1)])
+	sorted_rates[idx.min(len - 1)]
 }
 
 #[cfg(test)]
@@ -1318,7 +1376,7 @@ mod tests {
 
 	#[test]
 	fn select_fee_rate_single_element_returns_it_for_all_buckets() {
-		let rates = [5000u64];
+		let rates = [FeeRate::from_sat_per_kwu(5000)];
 		// Every urgency bucket should return the single available rate.
 		for num_blocks in [1, 3, 6, 12, 144, 1008] {
 			let rate = select_fee_rate_for_target(&rates, num_blocks);
@@ -1334,7 +1392,7 @@ mod tests {
 	#[test]
 	fn select_fee_rate_picks_correct_percentile() {
 		// 6 sorted rates: indices 0..5
-		let rates = [100, 200, 300, 400, 500, 600];
+		let rates: [FeeRate; 6] = [100, 200, 300, 400, 500, 600].map(FeeRate::from_sat_per_kwu);
 		// 1-block (most urgent): highest → index 5 → 600
 		assert_eq!(select_fee_rate_for_target(&rates, 1), FeeRate::from_sat_per_kwu(600));
 		// 6-block (medium): 75th percentile → (6*3)/4 = 4 → 500
@@ -1348,7 +1406,7 @@ mod tests {
 	#[test]
 	fn select_fee_rate_monotonic_urgency() {
 		// More urgent targets should never produce lower rates than less urgent ones.
-		let rates = [250, 500, 1000, 2000, 4000, 8000];
+		let rates: [FeeRate; 6] = [250, 500, 1000, 2000, 4000, 8000].map(FeeRate::from_sat_per_kwu);
 		let urgent = select_fee_rate_for_target(&rates, 1);
 		let medium = select_fee_rate_for_target(&rates, 6);
 		let standard = select_fee_rate_for_target(&rates, 12);
@@ -1381,7 +1439,7 @@ mod tests {
 		// proves the optimized multi-block approach is backwards-compatible.
 
 		let uniform_rate = 3000u64;
-		let rates = [uniform_rate; 6];
+		let rates = [FeeRate::from_sat_per_kwu(uniform_rate); 6];
 		for target in get_all_conf_targets() {
 			let num_blocks = get_num_block_defaults_for_target(target);
 			let optimized = select_fee_rate_for_target(&rates, num_blocks);
@@ -1423,7 +1481,7 @@ mod tests {
 
 	#[test]
 	fn select_fee_rate_two_elements() {
-		let rates = [1000, 5000];
+		let rates: [FeeRate; 2] = [1000, 5000].map(FeeRate::from_sat_per_kwu);
 		// 1-block: index 1 (highest) → 5000
 		assert_eq!(select_fee_rate_for_target(&rates, 1), FeeRate::from_sat_per_kwu(5000));
 		// 6-block: (2*3)/4 = 1 → 5000
@@ -1437,7 +1495,8 @@ mod tests {
 	#[test]
 	fn select_fee_rate_all_targets_use_valid_indices() {
 		for size in 1..=6 {
-			let rates: Vec<u64> = (1..=size).map(|i| i as u64 * 1000).collect();
+			let rates: Vec<FeeRate> =
+				(1..=size).map(|i| FeeRate::from_sat_per_kwu(i as u64 * 1000)).collect();
 			for target in get_all_conf_targets() {
 				let num_blocks = get_num_block_defaults_for_target(target);
 				let _ = select_fee_rate_for_target(&rates, num_blocks);
