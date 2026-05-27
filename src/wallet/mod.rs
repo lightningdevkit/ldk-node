@@ -326,23 +326,20 @@ impl Wallet {
 						}
 					}
 
-					if !unconfirmed_outbound_txids.is_empty() {
-						let txs_to_broadcast: Vec<Transaction> = unconfirmed_outbound_txids
-							.iter()
-							.filter_map(|txid| {
-								locked_wallet.tx_details(*txid).map(|d| (*d.tx).clone())
-							})
-							.collect();
-
-						if !txs_to_broadcast.is_empty() {
-							let tx_count = txs_to_broadcast.len();
-							self.broadcaster.broadcast_unclassified_transactions(txs_to_broadcast);
-							log_info!(
-								self.logger,
-								"Rebroadcast {} unconfirmed transactions on chain tip change",
-								tx_count
-							);
-						}
+					let count: usize = unconfirmed_outbound_txids
+						.into_iter()
+						.filter_map(|txid| {
+							let tx = locked_wallet.tx_details(txid).map(|d| (*d.tx).clone())?;
+							self.broadcaster.broadcast_unclassified_transactions(vec![tx]);
+							Some(())
+						})
+						.count();
+					if count != 0 {
+						log_info!(
+							self.logger,
+							"Rebroadcast {} unconfirmed transactions on chain tip change",
+							count,
+						);
 					}
 				},
 				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
