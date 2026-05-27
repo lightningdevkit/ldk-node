@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bitcoin::{Script, Transaction, Txid};
+use bitcoin::{Script, Txid};
 use lightning::chain::{BlockLocator, Filter};
 
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
@@ -512,16 +512,16 @@ impl ChainSource {
 							continue;
 						},
 					};
-					let txs: Vec<Transaction> = package.into_transactions();
+					let package = package.into_sorted_transactions();
 					match &self.kind {
 						ChainSourceKind::Esplora(esplora_chain_source) => {
-							esplora_chain_source.process_broadcast_package(txs).await
+							esplora_chain_source.process_transaction_broadcast(package).await
 						},
 						ChainSourceKind::Electrum(electrum_chain_source) => {
-							electrum_chain_source.process_broadcast_package(txs).await
+							electrum_chain_source.process_transaction_broadcast(package).await
 						},
 						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
-							bitcoind_chain_source.process_broadcast_package(txs).await
+							bitcoind_chain_source.process_transaction_broadcast(package).await
 						},
 					}
 				}
