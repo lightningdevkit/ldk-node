@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bdk_esplora::EsploraAsyncExt;
-use bitcoin::{FeeRate, Network, Script, Transaction, Txid};
+use bitcoin::{FeeRate, Network, Script, Txid};
 use esplora_client::AsyncClient as EsploraAsyncClient;
 use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
@@ -24,6 +24,7 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
+use crate::tx_broadcaster::TransactionBroadcast;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
 
@@ -355,8 +356,8 @@ impl EsploraChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
-		for tx in &package {
+	pub(crate) async fn process_transaction_broadcast(&self, txs: TransactionBroadcast) {
+		for tx in txs.iter() {
 			let txid = tx.compute_txid();
 			let timeout_fut = tokio::time::timeout(
 				Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),

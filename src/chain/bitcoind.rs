@@ -41,6 +41,7 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::tx_broadcaster::TransactionBroadcast;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
 
@@ -571,12 +572,12 @@ impl BitcoindChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
+	pub(crate) async fn process_transaction_broadcast(&self, txs: TransactionBroadcast) {
 		// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
 		// features, we should eventually switch to use `submitpackage` via the
 		// `rust-bitcoind-json-rpc` crate rather than just broadcasting individual
 		// transactions.
-		for tx in &package {
+		for tx in txs.iter() {
 			let txid = tx.compute_txid();
 			let timeout_fut = tokio::time::timeout(
 				Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),

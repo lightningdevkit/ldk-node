@@ -455,13 +455,13 @@ impl ChainSource {
 				Some(next_package) = receiver.recv() => {
 					match &self.kind {
 						ChainSourceKind::Esplora(esplora_chain_source) => {
-							esplora_chain_source.process_broadcast_package(next_package).await
+							esplora_chain_source.process_transaction_broadcast(next_package).await
 						},
 						ChainSourceKind::Electrum(electrum_chain_source) => {
-							electrum_chain_source.process_broadcast_package(next_package).await
+							electrum_chain_source.process_transaction_broadcast(next_package).await
 						},
 						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
-							bitcoind_chain_source.process_broadcast_package(next_package).await
+							bitcoind_chain_source.process_transaction_broadcast(next_package).await
 						},
 					}
 				}
