@@ -34,6 +34,7 @@ use crate::fee_estimator::{
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
+use crate::tx_broadcaster::SortedTransactions;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::PersistedNodeMetrics;
 
@@ -344,7 +345,7 @@ impl ElectrumChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
+	pub(crate) async fn process_transaction_broadcast(&self, txs: SortedTransactions) {
 		let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
 			self.electrum_runtime_status.read().expect("lock").client().as_ref()
 		{
@@ -354,7 +355,7 @@ impl ElectrumChainSource {
 			return;
 		};
 
-		for tx in package {
+		for tx in txs.into_inner() {
 			electrum_client.broadcast(tx).await;
 		}
 	}
