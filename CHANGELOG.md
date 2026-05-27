@@ -1,3 +1,9 @@
+# Pending
+
+## Compatibility Notes
+- Pending JIT-channel payments created before upgrading may fail after upgrade because the
+  prior LSPS2 fee-limit state stored in `PaymentKind::Bolt11Jit` is not migrated.
+
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
 
@@ -419,4 +425,3 @@ integrated LDK and BDK-based wallets.
 
 **Note:** This release is still considered experimental, should not be run in
 production, and no compatibility guarantees are given until the release of 0.1.
-

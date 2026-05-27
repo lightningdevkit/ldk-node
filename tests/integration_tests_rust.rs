@@ -1880,7 +1880,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
 	let client_payment = client_node.payment(&client_payment_id).unwrap();
 	match client_payment.kind {
-		PaymentKind::Bolt11Jit { counterparty_skimmed_fee_msat, .. } => {
+		PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, Some(service_fee_msat));
 		},
 		_ => panic!("Unexpected payment kind"),
@@ -1955,7 +1955,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
 	let client_payment = client_node.payment(&client_payment_id).unwrap();
 	match client_payment.kind {
-		PaymentKind::Bolt11Jit { counterparty_skimmed_fee_msat, .. } => {
+		PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, Some(service_fee_msat));
 		},
 		_ => panic!("Unexpected payment kind"),

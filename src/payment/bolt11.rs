@@ -13,6 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
+use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, OptionalBolt11PaymentParams, PaymentId,
 };
@@ -31,7 +32,7 @@ use crate::ffi::{maybe_deref, maybe_try_convert_enum, maybe_wrap};
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
-	LSPFeeLimits, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
+	LSPS2Parameters, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus,
 };
 use crate::peer_store::{PeerInfo, PeerStore};
@@ -47,6 +48,16 @@ type Bolt11Invoice = Arc<crate::ffi::Bolt11Invoice>;
 type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
 #[cfg(feature = "uniffi")]
 type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
+
+/// Metadata carried in BOLT11 invoice `payment_metadata`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaymentMetadata {
+	pub(crate) lsps2_parameters: Option<LSPS2Parameters>,
+}
+
+impl_writeable_tlv_based!(PaymentMetadata, {
+	(0, lsps2_parameters, option),
+});
 
 /// A payment handler allowing to create and pay [BOLT 11] invoices.
 ///
@@ -119,9 +130,14 @@ impl Bolt11Payment {
 		let preimage = if manual_claim_payment_hash.is_none() {
 			// If the user hasn't registered a custom payment hash, we're positive ChannelManager
 			// will know the preimage at this point.
+			let mut payment_metadata = invoice.payment_metadata().cloned();
 			let res = self
 				.channel_manager
-				.get_payment_preimage(payment_hash, payment_secret.clone(), None)
+				.get_payment_preimage_decrypt_metadata(
+					payment_hash,
+					payment_secret.clone(),
+					payment_metadata.as_deref_mut(),
+				)
 				.ok();
 			debug_assert!(res.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
 			res
@@ -132,6 +148,7 @@ impl Bolt11Payment {
 			hash: payment_hash,
 			preimage,
 			secret: Some(payment_secret.clone()),
+			counterparty_skimmed_fee_msat: None,
 		};
 		let payment = PaymentDetails::new(
 			id,
@@ -172,50 +189,47 @@ impl Bolt11Payment {
 		log_info!(self.logger, "Connected to LSP {}@{}. ", peer_info.node_id, peer_info.address);
 
 		let liquidity_source = Arc::clone(&liquidity_source);
-		let (invoice, lsp_total_opening_fee, lsp_prop_opening_fee) =
-			self.runtime.block_on(async move {
-				if let Some(amount_msat) = amount_msat {
-					liquidity_source
-						.lsps2_receive_to_jit_channel(
-							amount_msat,
-							description,
-							expiry_secs,
-							max_total_lsp_fee_limit_msat,
-							payment_hash,
-						)
-						.await
-						.map(|(invoice, total_fee)| (invoice, Some(total_fee), None))
-				} else {
-					liquidity_source
-						.lsps2_receive_variable_amount_to_jit_channel(
-							description,
-							expiry_secs,
-							max_proportional_lsp_fee_limit_ppm_msat,
-							payment_hash,
-						)
-						.await
-						.map(|(invoice, prop_fee)| (invoice, None, Some(prop_fee)))
-				}
-			})?;
+		let invoice = self.runtime.block_on(async move {
+			if let Some(amount_msat) = amount_msat {
+				liquidity_source
+					.lsps2_receive_to_jit_channel(
+						amount_msat,
+						description,
+						expiry_secs,
+						max_total_lsp_fee_limit_msat,
+						payment_hash,
+					)
+					.await
+			} else {
+				liquidity_source
+					.lsps2_receive_variable_amount_to_jit_channel(
+						description,
+						expiry_secs,
+						max_proportional_lsp_fee_limit_ppm_msat,
+						payment_hash,
+					)
+					.await
+			}
+		})?;
 
 		// Register payment in payment store.
 		let payment_hash = invoice.payment_hash();
 		let payment_secret = invoice.payment_secret();
-		let lsp_fee_limits = LSPFeeLimits {
-			max_total_opening_fee_msat: lsp_total_opening_fee,
-			max_proportional_opening_fee_ppm_msat: lsp_prop_opening_fee,
-		};
 		let id = PaymentId(payment_hash.0);
+		let mut payment_metadata = invoice.payment_metadata().cloned();
 		let preimage = self
 			.channel_manager
-			.get_payment_preimage(payment_hash, payment_secret.clone(), None)
+			.get_payment_preimage_decrypt_metadata(
+				payment_hash,
+				payment_secret.clone(),
+				payment_metadata.as_deref_mut(),
+			)
 			.ok();
-		let kind = PaymentKind::Bolt11Jit {
+		let kind = PaymentKind::Bolt11 {
 			hash: payment_hash,
 			preimage,
 			secret: Some(payment_secret.clone()),
 			counterparty_skimmed_fee_msat: None,
-			lsp_fee_limits,
 		};
 		let payment = PaymentDetails::new(
 			id,
@@ -231,6 +245,37 @@ impl Bolt11Payment {
 		self.peer_store.add_peer(peer_info)?;
 
 		Ok(invoice)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use lightning::util::ser::{Readable, Writeable};
+
+	use super::*;
+
+	#[test]
+	fn empty_metadata_roundtrips() {
+		let metadata = PaymentMetadata { lsps2_parameters: None };
+
+		let encoded = metadata.encode();
+		let decoded = PaymentMetadata::read(&mut &*encoded).unwrap();
+
+		assert_eq!(metadata, decoded);
+	}
+
+	#[test]
+	fn lsps2_parameters_roundtrip() {
+		let lsps2_parameters = LSPS2Parameters {
+			max_total_opening_fee_msat: Some(42_000),
+			max_proportional_opening_fee_ppm_msat: Some(17_000),
+		};
+		let metadata = PaymentMetadata { lsps2_parameters: Some(lsps2_parameters) };
+
+		let encoded = metadata.encode();
+		let decoded = PaymentMetadata::read(&mut &*encoded).unwrap();
+
+		assert_eq!(metadata, decoded);
 	}
 }
 
@@ -285,6 +330,7 @@ impl Bolt11Payment {
 					hash: payment_hash,
 					preimage: None,
 					secret: payment_secret,
+					counterparty_skimmed_fee_msat: None,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -314,6 +360,7 @@ impl Bolt11Payment {
 							hash: payment_hash,
 							preimage: None,
 							secret: payment_secret,
+							counterparty_skimmed_fee_msat: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -399,6 +446,7 @@ impl Bolt11Payment {
 					hash: payment_hash,
 					preimage: None,
 					secret: payment_secret,
+					counterparty_skimmed_fee_msat: None,
 				};
 
 				let payment = PaymentDetails::new(
@@ -429,6 +477,7 @@ impl Bolt11Payment {
 							hash: payment_hash,
 							preimage: None,
 							secret: payment_secret,
+							counterparty_skimmed_fee_msat: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -483,7 +532,7 @@ impl Bolt11Payment {
 			// For payments requested via `receive*_via_jit_channel_for_hash()`
 			// `skimmed_fee_msat` held by LSP must be taken into account.
 			let skimmed_fee_msat = match details.kind {
-				PaymentKind::Bolt11Jit {
+				PaymentKind::Bolt11 {
 					counterparty_skimmed_fee_msat: Some(skimmed_fee_msat),
 					..
 				} => skimmed_fee_msat,
@@ -676,7 +725,7 @@ impl Bolt11Payment {
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
-	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11Jit::counterparty_skimmed_fee_msat
+	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
 	pub fn receive_via_jit_channel_for_hash(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: PaymentHash,
@@ -743,7 +792,7 @@ impl Bolt11Payment {
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
-	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11Jit::counterparty_skimmed_fee_msat
+	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
 	pub fn receive_variable_amount_via_jit_channel_for_hash(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: PaymentHash,

@@ -50,6 +50,7 @@ use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
+use crate::payment::PaymentMetadata;
 use crate::runtime::Runtime;
 use crate::types::{
 	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
@@ -580,6 +581,36 @@ where
 		}
 	}
 
+	fn fail_claimable_payment(
+		&self, payment_id: PaymentId, payment_hash: &PaymentHash,
+	) -> Result<(), ReplayEvent> {
+		self.channel_manager.fail_htlc_backwards(payment_hash);
+
+		let update = PaymentDetailsUpdate {
+			hash: Some(Some(*payment_hash)),
+			status: Some(PaymentStatus::Failed),
+			..PaymentDetailsUpdate::new(payment_id)
+		};
+		match self.payment_store.update(update) {
+			Ok(_) => Ok(()),
+			Err(e) => {
+				log_error!(self.logger, "Failed to access payment store: {}", e);
+				Err(ReplayEvent())
+			},
+		}
+	}
+
+	fn lsps2_max_total_opening_fee_msat(payment_metadata: &[u8], amount_msat: u64) -> Option<u64> {
+		let metadata = PaymentMetadata::read(&mut &payment_metadata[..]).ok()?;
+		let lsps2_parameters = metadata.lsps2_parameters?;
+		lsps2_parameters.max_total_opening_fee_msat.or_else(|| {
+			lsps2_parameters.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
+				// If it's a variable amount payment, compute the actual fee.
+				compute_opening_fee(amount_msat, 0, max_prop_fee)
+			})
+		})
+	}
+
 	pub async fn handle_event(&self, event: LdkEvent) -> Result<(), ReplayEvent> {
 		match event {
 			LdkEvent::FundingGenerationReady {
@@ -693,7 +724,8 @@ where
 				..
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
-				if let Some(info) = self.payment_store.get(&payment_id) {
+				let payment_info = self.payment_store.get(&payment_id);
+				if let Some(info) = payment_info.as_ref() {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
 							self.logger,
@@ -716,14 +748,13 @@ where
 					}
 
 					if info.status == PaymentStatus::Succeeded
-						|| matches!(info.kind, PaymentKind::Spontaneous { .. })
+						|| matches!(&info.kind, PaymentKind::Spontaneous { .. })
 					{
-						let stored_preimage = match info.kind {
+						let stored_preimage = match &info.kind {
 							PaymentKind::Bolt11 { preimage, .. }
-							| PaymentKind::Bolt11Jit { preimage, .. }
 							| PaymentKind::Bolt12Offer { preimage, .. }
 							| PaymentKind::Bolt12Refund { preimage, .. }
-							| PaymentKind::Spontaneous { preimage, .. } => preimage,
+							| PaymentKind::Spontaneous { preimage, .. } => *preimage,
 							_ => None,
 						};
 
@@ -758,22 +789,28 @@ where
 							},
 						};
 					}
+				}
 
-					let max_total_opening_fee_msat = match info.kind {
-						PaymentKind::Bolt11Jit { lsp_fee_limits, .. } => {
-							lsp_fee_limits
-								.max_total_opening_fee_msat
-								.or_else(|| {
-									lsp_fee_limits.max_proportional_opening_fee_ppm_msat.and_then(
-										|max_prop_fee| {
-											// If it's a variable amount payment, compute the actual fee.
-											compute_opening_fee(amount_msat, 0, max_prop_fee)
-										},
-									)
-								})
-								.unwrap_or(0)
-						},
-						_ => 0,
+				if counterparty_skimmed_fee_msat > 0 {
+					let max_total_opening_fee_msat = match &purpose {
+						PaymentPurpose::Bolt11InvoicePayment { .. } => onion_fields
+							.as_ref()
+							.and_then(|fields| fields.payment_metadata.as_ref())
+							.and_then(|metadata| {
+								Self::lsps2_max_total_opening_fee_msat(metadata, amount_msat)
+							}),
+						_ => None,
+					};
+
+					let Some(max_total_opening_fee_msat) = max_total_opening_fee_msat else {
+						log_info!(
+							self.logger,
+							"Refusing inbound payment with hash {} as the counterparty withheld {}msat without valid BOLT11 LSPS2 payment metadata",
+							hex_utils::to_string(&payment_hash.0),
+							counterparty_skimmed_fee_msat,
+						);
+						self.fail_claimable_payment(payment_id, &payment_hash)?;
+						return Ok(());
 					};
 
 					if counterparty_skimmed_fee_msat > max_total_opening_fee_msat {
@@ -784,26 +821,13 @@ where
 							counterparty_skimmed_fee_msat,
 							max_total_opening_fee_msat,
 						);
-						self.channel_manager.fail_htlc_backwards(&payment_hash);
-
-						let update = PaymentDetailsUpdate {
-							hash: Some(Some(payment_hash)),
-							status: Some(PaymentStatus::Failed),
-							..PaymentDetailsUpdate::new(payment_id)
-						};
-						match self.payment_store.update(update) {
-							Ok(_) => return Ok(()),
-							Err(e) => {
-								log_error!(self.logger, "Failed to access payment store: {}", e);
-								return Err(ReplayEvent());
-							},
-						};
+						self.fail_claimable_payment(payment_id, &payment_hash)?;
+						return Ok(());
 					}
 
-					// If the LSP skimmed anything, update our stored payment.
-					if counterparty_skimmed_fee_msat > 0 {
-						match info.kind {
-							PaymentKind::Bolt11Jit { .. } => {
+					if let Some(info) = payment_info.as_ref() {
+						match &info.kind {
+							PaymentKind::Bolt11 { .. } => {
 								let update = PaymentDetailsUpdate {
 									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
 									..PaymentDetailsUpdate::new(payment_id)
@@ -816,16 +840,17 @@ where
 									},
 								};
 							}
-							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for JIT payments."),
+							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for BOLT11 payments."),
 						}
 					}
+				}
 
+				if let Some(info) = payment_info {
 					// If this is known by the store but ChannelManager doesn't know the preimage,
 					// the payment has been registered via `_for_hash` variants and needs to be manually claimed via
 					// user interaction.
 					match info.kind {
-						PaymentKind::Bolt11 { preimage, .. }
-						| PaymentKind::Bolt11Jit { preimage, .. } => {
+						PaymentKind::Bolt11 { preimage, .. } => {
 							if purpose.preimage().is_none() {
 								debug_assert!(
 									preimage.is_none(),
@@ -1890,7 +1915,57 @@ mod tests {
 
 	use super::*;
 	use crate::io::test_utils::InMemoryStore;
+	use crate::payment::store::LSPS2Parameters;
 	use crate::types::DynStoreWrapper;
+
+	#[test]
+	fn lsps2_payment_metadata_decodes_total_fee_limit() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: Some(42_000),
+				max_proportional_opening_fee_ppm_msat: None,
+			}),
+		};
+
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+				&metadata.encode(),
+				100_000
+			),
+			Some(42_000)
+		);
+	}
+
+	#[test]
+	fn lsps2_payment_metadata_missing_or_malformed_limit_is_rejected() {
+		let empty_metadata = PaymentMetadata { lsps2_parameters: None }.encode();
+		let metadata_without_fee_limit = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: None,
+				max_proportional_opening_fee_ppm_msat: None,
+			}),
+		}
+		.encode();
+
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+				&empty_metadata,
+				100_000
+			),
+			None
+		);
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(&[0xff], 100_000),
+			None
+		);
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+				&metadata_without_fee_limit,
+				100_000
+			),
+			None
+		);
+	}
 
 	#[tokio::test]
 	async fn event_queue_persistence() {
