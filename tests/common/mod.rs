@@ -420,6 +420,8 @@ pub(crate) enum TestStoreType {
 	TestSyncStore,
 	Sqlite,
 	FilesystemStore,
+	#[cfg(feature = "postgres")]
+	Postgres,
 }
 
 impl Default for TestStoreType {
@@ -598,6 +600,32 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
 		TestStoreType::FilesystemStore => {
 			builder.build_with_fs_store(config.node_entropy.into()).unwrap()
+		},
+		#[cfg(feature = "postgres")]
+		TestStoreType::Postgres => {
+			use ldk_node::io::postgres_store::POSTGRES_TEST_URL_ENV_VAR;
+
+			dotenvy::dotenv().ok();
+			let table_name = format!(
+				"test_{}",
+				config
+					.node_config
+					.storage_dir_path
+					.chars()
+					.filter(|c| c.is_ascii_alphanumeric())
+					.collect::<String>()
+			);
+			let connection_string = std::env::var(POSTGRES_TEST_URL_ENV_VAR)
+				.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string());
+			builder
+				.build_with_postgres_store(
+					config.node_entropy.into(),
+					connection_string,
+					None,
+					Some(table_name),
+					None,
+				)
+				.unwrap()
 		},
 	};
 

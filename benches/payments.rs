@@ -1,3 +1,10 @@
+// This file is Copyright its original authors, visible in version control history.
+//
+// This file is licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
+// accordance with one or both of these licenses.
+
 #[path = "../tests/common/mod.rs"]
 mod common;
 
@@ -8,7 +15,7 @@ use bitcoin::hex::DisplayHex;
 use bitcoin::Amount;
 use common::{
 	expect_channel_ready_event, generate_blocks_and_wait, premine_and_distribute_funds,
-	random_chain_source, setup_bitcoind_and_electrsd, setup_two_nodes_with_store,
+	setup_bitcoind_and_electrsd, setup_two_nodes_with_store, TestChainSource,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 use ldk_node::{Event, Node};
@@ -17,6 +24,12 @@ use rand::RngCore;
 use tokio::task::{self};
 
 use crate::common::open_channel_push_amt;
+
+#[derive(Clone, Copy)]
+struct StoreBenchConfig {
+	name: &'static str,
+	store_type: common::TestStoreType,
+}
 
 fn spawn_payment(node_a: Arc<Node>, node_b: Arc<Node>, amount_msat: u64) {
 	let mut preimage_bytes = [0u8; 32];
@@ -117,78 +130,113 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 }
 
 fn payment_benchmark(c: &mut Criterion) {
+	dotenvy::dotenv().ok();
+
 	// Set up two nodes. Because this is slow, we reuse the same nodes for each sample.
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
 
-	let (node_a, node_b) = setup_two_nodes_with_store(
-		&chain_source,
-		false,
-		true,
-		false,
-		common::TestStoreType::Sqlite,
-	);
+	let store_configs = store_bench_configs();
 
-	let runtime =
-		tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
-
-	let node_a = Arc::new(node_a);
-	let node_b = Arc::new(node_b);
-
-	// Fund the nodes and setup a channel between them. The criterion function cannot be async, so we need to execute
-	// the setup using a runtime.
-	let node_a_cloned = Arc::clone(&node_a);
-	let node_b_cloned = Arc::clone(&node_b);
-	runtime.block_on(async move {
-		let address_a = node_a_cloned.onchain_payment().new_address().unwrap();
-		let premine_sat = 25_000_000;
-		premine_and_distribute_funds(
-			&bitcoind.client,
-			&electrsd.client,
-			vec![address_a],
-			Amount::from_sat(premine_sat),
-		)
-		.await;
-		node_a_cloned.sync_wallets().unwrap();
-		node_b_cloned.sync_wallets().unwrap();
-		open_channel_push_amt(
-			&node_a_cloned,
-			&node_b_cloned,
-			16_000_000,
-			Some(1_000_000_000),
-			false,
-			&electrsd,
-		)
-		.await;
-		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-		node_a_cloned.sync_wallets().unwrap();
-		node_b_cloned.sync_wallets().unwrap();
-		expect_channel_ready_event!(node_a_cloned, node_b_cloned.node_id());
-		expect_channel_ready_event!(node_b_cloned, node_a_cloned.node_id());
-	});
+	let runtime = benchmark_runtime();
 
 	let mut group = c.benchmark_group("payments");
 	group.sample_size(10);
 
-	group.bench_function("payments", |b| {
-		// Use custom timing so that sending back the money at the end of each iteration isn't included in the
-		// measurement.
-		b.to_async(&runtime).iter_custom(|iter| {
+	for store_config in store_configs {
+		let (node_a, node_b) =
+			setup_two_nodes_with_store(&chain_source, false, true, false, store_config.store_type);
+
+		let node_a = Arc::new(node_a);
+		let node_b = Arc::new(node_b);
+
+		// Fund the nodes and setup a channel between them. The criterion function cannot be async,
+		// so we need to execute the setup using a runtime.
+		let node_a_cloned = Arc::clone(&node_a);
+		let node_b_cloned = Arc::clone(&node_b);
+		runtime.block_on(async {
+			let address_a = node_a_cloned.onchain_payment().new_address().unwrap();
+			let premine_sat = 25_000_000;
+			premine_and_distribute_funds(
+				&bitcoind.client,
+				&electrsd.client,
+				vec![address_a],
+				Amount::from_sat(premine_sat),
+			)
+			.await;
+			node_a_cloned.sync_wallets().unwrap();
+			node_b_cloned.sync_wallets().unwrap();
+			open_channel_push_amt(
+				&node_a_cloned,
+				&node_b_cloned,
+				16_000_000,
+				Some(1_000_000_000),
+				false,
+				&electrsd,
+			)
+			.await;
+			generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+			node_a_cloned.sync_wallets().unwrap();
+			node_b_cloned.sync_wallets().unwrap();
+			expect_channel_ready_event!(node_a_cloned, node_b_cloned.node_id());
+			expect_channel_ready_event!(node_b_cloned, node_a_cloned.node_id());
+		});
+
+		group.bench_function(store_config.name, |b| {
+			// Use custom timing so that sending back the money at the end of each iteration isn't
+			// included in the measurement.
 			let node_a = Arc::clone(&node_a);
 			let node_b = Arc::clone(&node_b);
+			b.to_async(&runtime).iter_custom(|iter| {
+				let node_a = Arc::clone(&node_a);
+				let node_b = Arc::clone(&node_b);
 
-			async move {
-				let mut total = Duration::ZERO;
-				for _i in 0..iter {
-					let node_a = Arc::clone(&node_a);
-					let node_b = Arc::clone(&node_b);
+				async move {
+					let mut total = Duration::ZERO;
+					for _i in 0..iter {
+						let node_a = Arc::clone(&node_a);
+						let node_b = Arc::clone(&node_b);
 
-					total += send_payments(node_a, node_b).await;
+						total += send_payments(node_a, node_b).await;
+					}
+					total
 				}
-				total
-			}
+			});
 		});
-	});
+	}
+}
+
+fn benchmark_runtime() -> tokio::runtime::Runtime {
+	let mut builder = tokio::runtime::Builder::new_multi_thread();
+	builder.worker_threads(4).enable_all();
+	#[cfg(tokio_unstable)]
+	builder.enable_eager_driver_handoff();
+	builder.build().unwrap()
+}
+
+fn store_bench_configs() -> Vec<StoreBenchConfig> {
+	#[cfg(not(feature = "postgres"))]
+	{
+		vec![
+			StoreBenchConfig { name: "sqlite", store_type: common::TestStoreType::Sqlite },
+			StoreBenchConfig {
+				name: "filesystem",
+				store_type: common::TestStoreType::FilesystemStore,
+			},
+		]
+	}
+
+	#[cfg(feature = "postgres")]
+	{
+		vec![
+			StoreBenchConfig { name: "sqlite", store_type: common::TestStoreType::Sqlite },
+			StoreBenchConfig {
+				name: "filesystem",
+				store_type: common::TestStoreType::FilesystemStore,
+			},
+			StoreBenchConfig { name: "postgres", store_type: common::TestStoreType::Postgres },
+		]
+	}
 }
 
 criterion_group!(benches, payment_benchmark);
