@@ -80,6 +80,31 @@ impl EsploraChainSource {
 		})
 	}
 
+	pub(super) async fn validate_zero_fee_commitments_support(&self) -> Result<(), Error> {
+		// This could still accept an Esplora server running against Bitcoin Core v26
+		// through v28, which does not relay ephemeral dust.
+		self.esplora_client.submit_package(&super::dummy_package(), None, None).await.map_err(
+			|e| {
+				if let esplora_client::Error::HttpResponse { status: 404, message } = e {
+					log_error!(
+						self.logger,
+						"Esplora server does not support submitpackage: {}",
+						message
+					);
+					Error::ChainSourceNotSupported
+				} else {
+					log_error!(
+						self.logger,
+						"Failed to check support for submitpackage on the Esplora server: {}",
+						e
+					);
+					Error::ConnectionFailed
+				}
+			},
+		)?;
+		Ok(())
+	}
+
 	pub(super) async fn sync_onchain_wallet(
 		&self, onchain_wallet: Arc<Wallet>,
 	) -> Result<(), Error> {
