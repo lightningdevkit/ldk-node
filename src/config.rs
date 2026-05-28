@@ -54,7 +54,8 @@ pub const DEFAULT_LOG_FILENAME: &'static str = "ldk_node.log";
 /// The default storage directory.
 pub const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
 
-// The default Esplora server we're using.
+// The default Esplora server we're using. It supports `submitpackage`, check using POST on the
+// `/txs/package` endpoint.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold

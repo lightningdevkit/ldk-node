@@ -424,6 +424,14 @@ impl ElectrumRuntimeClient {
 				Error::ConnectionFailed
 			})?,
 		);
+		if config.anchor_channels_config.is_some() {
+			electrum_client.transaction_broadcast_package(&super::dummy_package()).map_err(
+				|e| {
+					log_error!(logger, "Electrum server does not support submit package: {:?}", e);
+					Error::ConnectionFailed
+				},
+			)?;
+		}
 		let bdk_electrum_client = Arc::new(BdkElectrumClient::new(Arc::clone(&electrum_client)));
 		let tx_sync = Arc::new(
 			ElectrumSyncClient::new(server_url.clone(), Arc::clone(&logger)).map_err(|e| {

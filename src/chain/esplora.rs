@@ -41,7 +41,7 @@ pub(super) struct EsploraChainSource {
 }
 
 impl EsploraChainSource {
-	pub(crate) fn new(
+	pub(crate) async fn new(
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
 		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
@@ -57,6 +57,15 @@ impl EsploraChainSource {
 		let esplora_client = client_builder.build_async().map_err(|e| {
 			log_error!(logger, "Failed to build Esplora client: {}", e);
 		})?;
+
+		if config.anchor_channels_config.is_some() {
+			esplora_client.submit_package(&super::dummy_package(), None, None).await.map_err(
+				|e| {
+					log_error!(logger, "Esplora server does not support submit package: {:?}", e);
+				},
+			)?;
+		}
+
 		let tx_sync =
 			Arc::new(EsploraSyncClient::from_client(esplora_client.clone(), Arc::clone(&logger)));
 
