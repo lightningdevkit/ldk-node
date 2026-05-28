@@ -4542,6 +4542,8 @@ async fn build_0_7_0_node(
 		#[cfg(feature = "storage-sqlite")]
 		TestStoreType::Sqlite => builder_old.build().unwrap(),
 		TestStoreType::TestSyncStore => panic!("TestSyncStore not supported in v0.7.0 builder"),
+		#[cfg(feature = "storage-postgres")]
+		TestStoreType::Postgres => panic!("Postgres not supported in v0.7.0 builder"),
 	};
 
 	node_old.start().unwrap();

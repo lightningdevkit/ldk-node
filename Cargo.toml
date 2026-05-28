@@ -189,6 +189,7 @@ check-cfg = [
 [[bench]]
 name = "payments"
 harness = false
+required-features = ["chain-bitcoind"]
 
 [[bench]]
 name = "database"
