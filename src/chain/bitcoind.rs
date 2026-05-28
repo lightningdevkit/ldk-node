@@ -119,6 +119,30 @@ impl BitcoindChainSource {
 		self.api_client.utxo_source()
 	}
 
+	pub(super) async fn validate_zero_fee_commitments_support(&self) -> Result<(), Error> {
+		let node_version_result = tokio::time::timeout(
+			Duration::from_secs(CHAIN_POLLING_TIMEOUT_SECS),
+			self.api_client.get_node_version(),
+		)
+		.await
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to get node version: {:?}", e);
+			Error::ConnectionFailed
+		})?;
+
+		let node_version = node_version_result.map_err(|e| {
+			log_error!(self.logger, "Failed to get node version: {:?}", e);
+			Error::ConnectionFailed
+		})?;
+
+		// v26 first shipped the `submitpackage` RPC, but we need v29 to relay ephemeral dust
+		if node_version < 290000 {
+			log_error!(self.logger, "Bitcoin backend MUST be greater than or equal to v29");
+			return Err(Error::ChainSourceNotSupported);
+		}
+		Ok(())
+	}
+
 	pub(super) async fn continuously_sync_wallets(
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
 		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
@@ -746,6 +770,31 @@ impl BitcoindClient {
 			Self::Rpc { rpc_client, .. } => UtxoSourceClient::Rpc(Arc::clone(&rpc_client)),
 			Self::Rest { rest_client, .. } => UtxoSourceClient::Rest(Arc::clone(&rest_client)),
 		}
+	}
+
+	pub(crate) async fn get_node_version(&self) -> Result<u64, BitcoindClientError> {
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::get_node_version_inner(Arc::clone(rpc_client))
+					.await
+					.map_err(BitcoindClientError::Rpc)
+			},
+			BitcoindClient::Rest { rpc_client, .. } => {
+				// Bitcoin Core's REST interface does not support `getnetworkinfo`
+				// so we use the RPC client.
+				Self::get_node_version_inner(Arc::clone(rpc_client))
+					.await
+					.map_err(BitcoindClientError::Rpc)
+			},
+		}
+	}
+
+	async fn get_node_version_inner(rpc_client: Arc<RpcClient>) -> Result<u64, RpcClientError> {
+		rpc_client.call_method::<serde_json::Value>("getnetworkinfo", &[]).await.and_then(|value| {
+			value["version"].as_u64().ok_or(RpcClientError::InvalidData(String::from(
+				"The version field in the `getnetworkinfo` response should be a u64",
+			)))
+		})
 	}
 
 	/// Broadcasts the provided transaction.

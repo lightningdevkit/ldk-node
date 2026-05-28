@@ -60,7 +60,8 @@ pub const DEFAULT_LOG_FILENAME: &'static str = "ldk_node.log";
 /// The default storage directory.
 pub const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
 
-// The default Esplora server we're using.
+// The default Esplora server we're using. It supports `submitpackage`, check using POST on the
+// `/txs/package` endpoint.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
 
 /// The default stop gap used for BDK full scans of the on-chain wallet.
@@ -305,10 +306,11 @@ impl Default for HumanReadableNamesConfig {
 ///
 /// ### Defaults
 ///
-/// | Parameter                  | Value  |
-/// |----------------------------|--------|
-/// | `trusted_peers_no_reserve` | []     |
-/// | `per_channel_reserve_sats` | 25000  |
+/// | Parameter                     | Value  |
+/// |-------------------------------|--------|
+/// | `trusted_peers_no_reserve`    | []     |
+/// | `per_channel_reserve_sats`    | 25000  |
+/// | `enable_zero_fee_commitments` | false  |
 ///
 ///
 /// [BOLT 3]: https://github.com/lightning/bolts/blob/master/03-transactions.md#htlc-timeout-and-htlc-success-transactions
@@ -344,6 +346,21 @@ pub struct AnchorChannelsConfig {
 	/// might not suffice to successfully spend the Anchor output and have the HTLC transactions
 	/// confirmed on-chain, i.e., you may want to adjust this value accordingly.
 	pub per_channel_reserve_sats: u64,
+	/// If set, we will first attempt to negotiate `option_zero_fee_commitments` before falling
+	/// back to `option_anchors_zero_fee_htlc_tx` and `option_static_remotekey`, as supported by
+	/// the peer. Zero-fee commitment channels remove all commitment feerate negotiation from
+	/// the channel, which eliminates a very common source of channel force-closures. These
+	/// channels instead source *all* the fees required to confirm the commitment from the
+	/// anchor reserve of the channel closer at the time of force-close. If set, your chain
+	/// source *must* support the `submitpackage` Bitcoin Core RPC, and relay [TRUC], [P2A],
+	/// and [Ephemeral Dust].
+	/// See [BOLT 3] for more technical details.
+	///
+	/// [TRUC]: https://github.com/bitcoin/bips/blob/master/bip-0431.mediawiki
+	/// [P2A]: https://github.com/bitcoin/bips/blob/master/bip-0433.mediawiki
+	/// [Ephemeral Dust]: https://bitcoincore.org/en/releases/29.0
+	/// [BOLT 3]: https://github.com/lightning/bolts/blob/master/03-transactions.md#shared_anchor-output-zero_fee_commitments
+	pub enable_zero_fee_commitments: bool,
 }
 
 impl Default for AnchorChannelsConfig {
@@ -351,6 +368,7 @@ impl Default for AnchorChannelsConfig {
 		Self {
 			trusted_peers_no_reserve: Vec::new(),
 			per_channel_reserve_sats: DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS,
+			enable_zero_fee_commitments: false,
 		}
 	}
 }

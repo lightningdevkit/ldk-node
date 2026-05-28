@@ -306,6 +306,53 @@ impl ElectrumChainSource {
 		Ok(())
 	}
 
+	pub(crate) async fn validate_zero_fee_commitments_support(&self) -> Result<(), Error> {
+		let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
+			self.electrum_runtime_status.read().expect("lock").client().as_ref()
+		{
+			Arc::clone(client)
+		} else {
+			debug_assert!(
+				false,
+				"We should have started the chain source before checking submitpackage support"
+			);
+			return Err(Error::ConnectionFailed);
+		};
+
+		// TODO: Use `protocol_version` API once shipped in
+		// https://github.com/bitcoindevkit/rust-electrum-client/pull/213.
+		//
+		// This could still accept an Electrum server running against Bitcoin Core v26
+		// through v28, which does not relay ephemeral dust.
+		let spawn_fut = electrum_client.runtime.spawn_blocking({
+			let electrum_client = Arc::clone(&electrum_client.electrum_client);
+			move || electrum_client.transaction_broadcast_package(&super::dummy_package())
+		});
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
+			spawn_fut,
+		);
+
+		match timeout_fut.await {
+			Ok(Ok(Ok(_))) => Ok(()),
+			Ok(Ok(Err(
+				e @ (electrum_client::Error::Protocol(_)
+				| electrum_client::Error::AllAttemptsErrored(_)),
+			))) => {
+				log_error!(self.logger, "Electrum server does not support submitpackage: {:?}", e);
+				Err(Error::ChainSourceNotSupported)
+			},
+			e => {
+				log_error!(
+					self.logger,
+					"Failed to check support for submitpackage on the Electrum server: {:?}",
+					e
+				);
+				Err(Error::ConnectionFailed)
+			},
+		}
+	}
+
 	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
 		let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
 			self.electrum_runtime_status.read().expect("lock").client().as_ref()
