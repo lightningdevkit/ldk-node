@@ -25,6 +25,7 @@ panic = 'abort'     # Abort on panic
 
 [features]
 default = []
+bench = []
 postgres = ["dep:tokio-postgres", "dep:native-tls", "dep:postgres-native-tls"]
 
 [dependencies]
@@ -96,6 +97,7 @@ rand = { version = "0.9.2", default-features = false, features = ["std", "thread
 proptest = "1.0.0"
 regex = "1.5.6"
 criterion = { version = "0.7.0", features = ["async_tokio"] }
+dotenvy = "0.15"
 ldk-node-062 = { package = "ldk-node", version = "=0.6.2" }
 ldk-node-070 = { package = "ldk-node", version = "=0.7.0" }
 
@@ -139,6 +141,11 @@ check-cfg = [
 [[bench]]
 name = "payments"
 harness = false
+
+[[bench]]
+name = "database"
+harness = false
+required-features = ["bench"]
 
 #[patch.crates-io]
 #lightning = { path = "../rust-lightning/lightning" }
