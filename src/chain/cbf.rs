@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bdk_chain::indexer::keychain_txout::KeychainTxOutIndex;
@@ -115,7 +115,7 @@ pub(super) struct CbfChainSource {
 	/// Node configuration (network, storage path, etc.).
 	config: Arc<Config>,
 	/// On-chain wallet reference for deriving chain_state checkpoints on restart.
-	onchain_wallet: Mutex<Option<Arc<Wallet>>>,
+	onchain_wallet: Mutex<Option<Weak<Wallet>>>,
 	/// Logger instance.
 	logger: Arc<Logger>,
 	/// Shared node metrics (sync timestamps, etc.).
@@ -194,7 +194,7 @@ impl CbfChainSource {
 	///
 	/// Delegates to [`Self::build_cbf_node_static`], passing all needed fields.
 	fn build_cbf_node(&self) -> (CbfNode, Client) {
-		let wallet = self.onchain_wallet.lock().expect("lock").clone();
+		let wallet = self.onchain_wallet.lock().expect("lock").as_ref().and_then(Weak::upgrade);
 		Self::build_cbf_node_static(
 			&self.peers,
 			&self.sync_config,
@@ -281,8 +281,9 @@ impl CbfChainSource {
 			return;
 		}
 
-		// Store the wallet reference for future restarts.
-		*self.onchain_wallet.lock().expect("lock") = Some(Arc::clone(&onchain_wallet));
+		// Store a weak wallet reference for future restarts without creating a
+		// Wallet -> ChainSource -> Wallet reference cycle.
+		*self.onchain_wallet.lock().expect("lock") = Some(Arc::downgrade(&onchain_wallet));
 
 		let (node, client) = self.build_cbf_node();
 
@@ -304,7 +305,7 @@ impl CbfChainSource {
 		let restart_peers = self.peers.clone();
 		let restart_sync_config = self.sync_config.clone();
 		let restart_config = Arc::clone(&self.config);
-		let restart_wallet = Arc::clone(&onchain_wallet);
+		let restart_wallet = Arc::downgrade(&onchain_wallet);
 
 		runtime.spawn_background_task(async move {
 			let mut current_node = node;
@@ -373,11 +374,19 @@ impl CbfChainSource {
 						event_handle.abort();
 
 						// Rebuild the node from scratch.
+						let Some(wallet) = restart_wallet.upgrade() else {
+							log_info!(
+								restart_logger,
+								"CBF restart aborted: on-chain wallet was dropped."
+							);
+							*restart_status.lock().expect("lock") = CbfRuntimeStatus::Stopped;
+							break;
+						};
 						let (new_node, new_client) = Self::build_cbf_node_static(
 							&restart_peers,
 							&restart_sync_config,
 							&restart_config,
-							Some(&restart_wallet),
+							Some(&wallet),
 							&restart_logger,
 						);
 						let Client {
@@ -423,6 +432,7 @@ impl CbfChainSource {
 			CbfRuntimeStatus::Stopped => {},
 		}
 		*status = CbfRuntimeStatus::Stopped;
+		*self.onchain_wallet.lock().expect("lock") = None;
 	}
 
 	async fn process_info_messages(mut info_rx: mpsc::Receiver<Info>, logger: Arc<Logger>) {
