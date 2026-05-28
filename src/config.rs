@@ -54,7 +54,8 @@ pub const DEFAULT_LOG_FILENAME: &'static str = "ldk_node.log";
 /// The default storage directory.
 pub const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
 
-// The default Esplora server we're using.
+// The default Esplora server we're using. It supports `submitpackage`, check using POST on the
+// `/txs/package` endpoint.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
 
 // The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
@@ -288,10 +289,11 @@ impl Default for HumanReadableNamesConfig {
 ///
 /// ### Defaults
 ///
-/// | Parameter                  | Value  |
-/// |----------------------------|--------|
-/// | `trusted_peers_no_reserve` | []     |
-/// | `per_channel_reserve_sats` | 25000  |
+/// | Parameter                     | Value  |
+/// |-------------------------------|--------|
+/// | `trusted_peers_no_reserve`    | []     |
+/// | `per_channel_reserve_sats`    | 25000  |
+/// | `enable_zero_fee_commitments` | false  |
 ///
 ///
 /// [BOLT 3]: https://github.com/lightning/bolts/blob/master/03-transactions.md#htlc-timeout-and-htlc-success-transactions
@@ -327,6 +329,12 @@ pub struct AnchorChannelsConfig {
 	/// might not suffice to successfully spend the Anchor output and have the HTLC transactions
 	/// confirmed on-chain, i.e., you may want to adjust this value accordingly.
 	pub per_channel_reserve_sats: u64,
+	/// In addition to `option_anchors_zero_fee_htlc_tx`, we will also attempt to negotiate
+	/// `option_zero_fee_commitments`. Zero-fee commitment channels remove all commitment
+	/// feerate negotiation from the channel, and instead source *all* the fees required to
+	/// confirm the commitment from the anchor reserve at the time of broadcast.
+	/// See [BOLT 3] for more technical details.
+	pub enable_zero_fee_commitments: bool,
 }
 
 impl Default for AnchorChannelsConfig {
@@ -334,6 +342,7 @@ impl Default for AnchorChannelsConfig {
 		Self {
 			trusted_peers_no_reserve: Vec::new(),
 			per_channel_reserve_sats: DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS,
+			enable_zero_fee_commitments: false,
 		}
 	}
 }
