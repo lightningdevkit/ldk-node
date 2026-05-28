@@ -28,6 +28,7 @@ codegen-units = 1   # Reduce number of codegen units to increase optimizations.
 panic = 'abort'     # Abort on panic
 
 [features]
+bench = ["storage-sqlite", "storage-filesystem"]
 default = [
 	"chain-esplora",
 	"chain-electrum",
@@ -188,6 +189,11 @@ check-cfg = [
 [[bench]]
 name = "payments"
 harness = false
+
+[[bench]]
+name = "database"
+harness = false
+required-features = ["bench"]
 
 #[patch.crates-io]
 #lightning = { path = "../rust-lightning/lightning" }

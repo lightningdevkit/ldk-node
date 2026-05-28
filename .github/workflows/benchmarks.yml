@@ -45,4 +45,4 @@ jobs:
           echo "ELECTRS_EXE=$( pwd )/bin/electrs-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
       - name: Run benchmarks
         run: |
-          RUSTFLAGS="--cfg tokio_unstable" cargo bench
+          RUSTFLAGS="--cfg tokio_unstable" cargo test --benches --features bench
