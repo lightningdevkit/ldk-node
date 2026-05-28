@@ -295,6 +295,31 @@ impl ElectrumChainSource {
 		Ok(())
 	}
 
+	pub(crate) async fn validate_zero_fee_commitments_support(&self) -> Result<(), Error> {
+		let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
+			self.electrum_runtime_status.read().expect("lock").client().as_ref()
+		{
+			Arc::clone(client)
+		} else {
+			debug_assert!(
+				false,
+				"We should have started the chain source before checking submitpackage support"
+			);
+			return Err(Error::ChainSourceNotSupported);
+		};
+
+		// TODO: Use `protocol_version` API once shipped in
+		// https://github.com/bitcoindevkit/rust-electrum-client/pull/213
+		electrum_client
+			.electrum_client
+			.transaction_broadcast_package(&super::dummy_package())
+			.map_err(|e| {
+				log_error!(self.logger, "Electrum server does not support submitpackage: {:?}", e);
+				Error::ChainSourceNotSupported
+			})?;
+		Ok(())
+	}
+
 	pub(crate) async fn process_transaction_broadcast(&self, txs: TransactionBroadcast) {
 		let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
 			self.electrum_runtime_status.read().expect("lock").client().as_ref()

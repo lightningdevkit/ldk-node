@@ -77,6 +77,16 @@ impl EsploraChainSource {
 		})
 	}
 
+	pub(super) async fn validate_zero_fee_commitments_support(&self) -> Result<(), Error> {
+		self.esplora_client.submit_package(&super::dummy_package(), None, None).await.map_err(
+			|e| {
+				log_error!(self.logger, "Esplora server does not support submitpackage: {:?}", e);
+				Error::ChainSourceNotSupported
+			},
+		)?;
+		Ok(())
+	}
+
 	pub(super) async fn sync_onchain_wallet(
 		&self, onchain_wallet: Arc<Wallet>,
 	) -> Result<(), Error> {

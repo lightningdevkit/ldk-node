@@ -285,9 +285,28 @@ impl Node {
 			e
 		})?;
 
-		// Block to ensure we update our fee rate cache once on startup
+		let any_current_0fc_channels =
+			self.chain_monitor.list_monitors().into_iter().any(|channel_id| {
+				self.chain_monitor
+					.get_monitor(channel_id)
+					.map(|monitor| {
+						monitor.channel_type_features().requires_anchor_zero_fee_commitments()
+					})
+					.unwrap_or(false)
+			});
+
+		// Block to ensure we update our fee rate cache once on startup.
+		// Also take this opportunity to make sure our chain source supports any current or
+		// future 0FC channels.
 		let chain_source = Arc::clone(&self.chain_source);
-		self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await })?;
+		self.runtime.block_on(async move {
+			tokio::try_join!(
+				chain_source.update_fee_rate_estimates(),
+				chain_source.validate_zero_fee_commitments_support_if_required(
+					any_current_0fc_channels || self.config.anchor_channels_config.is_some()
+				)
+			)
+		})?;
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
