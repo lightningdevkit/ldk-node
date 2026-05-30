@@ -43,7 +43,6 @@ use lightning::util::persist::{
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
 use lightning_dns_resolver::OMDomainResolver;
-use lightning_persister::fs_store::v1::FilesystemStore;
 use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
@@ -59,8 +58,9 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
-	read_all_objects, read_event_queue, read_external_pathfinding_scores_from_cache,
-	read_network_graph, read_node_metrics, read_output_sweeper, read_peer_info, read_scorer,
+	open_or_migrate_fs_store, read_all_objects, read_event_queue,
+	read_external_pathfinding_scores_from_cache, read_network_graph, read_node_metrics,
+	read_output_sweeper, read_peer_info, read_scorer,
 };
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
@@ -644,18 +644,19 @@ impl NodeBuilder {
 		self.build_with_store_and_logger(node_entropy, kv_store, logger)
 	}
 
-	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
+	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
 	/// previously configured.
+	///
+	/// If the storage directory contains data from a v1 filesystem store, it will be
+	/// automatically migrated to the v2 format.
+	///
+	/// [`FilesystemStoreV2`]: lightning_persister::fs_store::v2::FilesystemStoreV2
 	pub fn build_with_fs_store(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
 		storage_dir_path.push("fs_store");
 
-		fs::create_dir_all(storage_dir_path.clone()).map_err(|e| {
-			log_error!(logger, "Failed to setup Filesystem store: {}", e);
-			BuildError::StoragePathAccessFailed
-		})?;
-		let kv_store = FilesystemStore::new(storage_dir_path);
+		let kv_store = open_or_migrate_fs_store(storage_dir_path)?;
 		self.build_with_store_and_logger(node_entropy, kv_store, logger)
 	}
 
@@ -1115,7 +1116,7 @@ impl ArcedNodeBuilder {
 		self.inner.read().expect("lock").build(*node_entropy).map(Arc::new)
 	}
 
-	/// Builds a [`Node`] instance with a [`FilesystemStore`] backend and according to the options
+	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
 	/// previously configured.
 	pub fn build_with_fs_store(
 		&self, node_entropy: Arc<NodeEntropy>,

@@ -416,6 +416,7 @@ pub(crate) enum TestChainSource<'a> {
 pub(crate) enum TestStoreType {
 	TestSyncStore,
 	Sqlite,
+	FilesystemStore,
 }
 
 impl Default for TestStoreType {
@@ -592,6 +593,9 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
+		TestStoreType::FilesystemStore => {
+			builder.build_with_fs_store(config.node_entropy.into()).unwrap()
+		},
 	};
 
 	if config.recovery_mode {

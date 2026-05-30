@@ -10,7 +10,7 @@ use std::io::Write;
 use std::ops::Deref;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
@@ -26,14 +26,16 @@ use lightning::routing::scoring::{
 	ChannelLiquidities, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
 };
 use lightning::util::persist::{
-	KVStore, KVStoreSync, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
-	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_KEY,
-	OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
-	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-	SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+	migrate_kv_store_data, KVStore, KVStoreSync, KVSTORE_NAMESPACE_KEY_ALPHABET,
+	KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+	OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
+	OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
+use lightning_persister::fs_store::v1::FilesystemStore;
+use lightning_persister::fs_store::v2::{FilesystemStoreV2, FilesystemStoreV2Error};
 use lightning_types::string::PrintableString;
 
 use super::*;
@@ -47,7 +49,7 @@ use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
-use crate::{Error, EventQueue, NodeMetrics};
+use crate::{BuildError, Error, EventQueue, NodeMetrics};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
 
@@ -619,10 +621,108 @@ pub(crate) fn read_bdk_wallet_change_set(
 	Ok(Some(change_set))
 }
 
+/// Opens a [`FilesystemStoreV2`], automatically migrating from v1 format if necessary.
+///
+/// If the directory contains v1 data (files at the top level), the data is migrated to v2 format
+/// in a temporary directory, the original is renamed to `fs_store_v1_backup`, and the migrated
+/// directory is moved into place.
+pub(crate) fn open_or_migrate_fs_store(
+	storage_dir_path: PathBuf,
+) -> Result<FilesystemStoreV2, BuildError> {
+	let parent_dir = storage_dir_path.parent().ok_or(BuildError::StoragePathAccessFailed)?;
+	fs::create_dir_all(parent_dir).map_err(|_| BuildError::StoragePathAccessFailed)?;
+	recover_incomplete_fs_store_migration(&storage_dir_path)?;
+	if !storage_dir_path.exists() {
+		fs::create_dir_all(storage_dir_path.clone())
+			.map_err(|_| BuildError::StoragePathAccessFailed)?;
+	}
+
+	match FilesystemStoreV2::new(storage_dir_path.clone()) {
+		Ok(store) => Ok(store),
+		Err(FilesystemStoreV2Error::V1DataDetected(_)) => {
+			// The directory contains v1 data, migrate to v2.
+			let mut v1_store = FilesystemStore::new(storage_dir_path.clone());
+
+			let v2_dir = fs_store_sibling_path(&storage_dir_path, "fs_store_v2_migrating");
+			fs::create_dir_all(v2_dir.clone()).map_err(|_| BuildError::StoragePathAccessFailed)?;
+			let mut v2_store = FilesystemStoreV2::new(v2_dir.clone())
+				.map_err(|_| BuildError::KVStoreSetupFailed)?;
+
+			migrate_kv_store_data(&mut v1_store, &mut v2_store)
+				.map_err(|_| BuildError::KVStoreSetupFailed)?;
+
+			// Swap directories: rename v1 out of the way, move v2 into place.
+			let backup_dir = fs_store_sibling_path(&storage_dir_path, "fs_store_v1_backup");
+			fs::rename(&storage_dir_path, &backup_dir)
+				.map_err(|_| BuildError::KVStoreSetupFailed)?;
+			fs::rename(&v2_dir, &storage_dir_path).map_err(|_| BuildError::KVStoreSetupFailed)?;
+
+			// fsync the renames
+			fs::File::open(parent_dir)
+				.and_then(|f| f.sync_all())
+				.map_err(|_| BuildError::KVStoreSetupFailed)?;
+
+			FilesystemStoreV2::new(storage_dir_path).map_err(|_| BuildError::KVStoreSetupFailed)
+		},
+		Err(_) => Err(BuildError::KVStoreSetupFailed),
+	}
+}
+
+fn fs_store_sibling_path(storage_dir_path: &Path, file_name: &str) -> PathBuf {
+	let mut sibling_path = storage_dir_path.to_path_buf();
+	sibling_path.set_file_name(file_name);
+	sibling_path
+}
+
+fn recover_incomplete_fs_store_migration(storage_dir_path: &Path) -> Result<(), BuildError> {
+	let v2_dir = fs_store_sibling_path(storage_dir_path, "fs_store_v2_migrating");
+	let backup_dir = fs_store_sibling_path(storage_dir_path, "fs_store_v1_backup");
+
+	if storage_dir_path.exists() {
+		if v2_dir.exists() {
+			// The original store is still in place, so a temp migration dir is from a crash before
+			// the rename step and can be discarded before retrying migration.
+			fs::remove_dir_all(&v2_dir).map_err(|_| BuildError::KVStoreSetupFailed)?;
+		}
+		return Ok(());
+	}
+
+	if backup_dir.exists() {
+		if v2_dir.exists() {
+			// Prefer retrying from the v1 backup instead of deciding here whether the temp v2 dir is
+			// usable. open_or_migrate_fs_store owns the actual v1-to-v2 migration.
+			fs::remove_dir_all(&v2_dir).map_err(|_| BuildError::KVStoreSetupFailed)?;
+		}
+		// The crash happened after moving v1 aside; restore it so normal startup can migrate it.
+		fs::rename(&backup_dir, storage_dir_path).map_err(|_| BuildError::KVStoreSetupFailed)?;
+		return Ok(());
+	}
+
+	if v2_dir.exists() {
+		// There is no v1 backup to retry from. Move the temp dir into place and let
+		// open_or_migrate_fs_store decide whether it is a valid v2 store.
+		fs::rename(&v2_dir, storage_dir_path).map_err(|_| BuildError::KVStoreSetupFailed)?;
+	}
+
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-	use super::read_or_generate_seed_file;
+	use std::fs;
+	use std::path::{Path, PathBuf};
+
+	use lightning::util::persist::{migrate_kv_store_data, KVStoreSync};
+	use lightning_persister::fs_store::v1::FilesystemStore;
+	use lightning_persister::fs_store::v2::FilesystemStoreV2;
+
 	use super::test_utils::random_storage_path;
+	use super::{open_or_migrate_fs_store, read_or_generate_seed_file};
+
+	const TEST_PRIMARY_NAMESPACE: &str = "test_primary_namespace";
+	const TEST_SECONDARY_NAMESPACE: &str = "test_secondary_namespace";
+	const TEST_KEY: &str = "test_key";
+	const TEST_VALUE: &[u8] = b"test_value";
 
 	#[test]
 	fn generated_seed_is_readable() {
@@ -631,5 +731,159 @@ mod tests {
 		let expected_seed_bytes = read_or_generate_seed_file(&rand_path.to_str().unwrap()).unwrap();
 		let read_seed_bytes = read_or_generate_seed_file(&rand_path.to_str().unwrap()).unwrap();
 		assert_eq!(expected_seed_bytes, read_seed_bytes);
+	}
+
+	#[test]
+	fn fs_store_migration_recovers_before_v1_backup_rename() {
+		let fs_store_path = fs_store_path();
+		let mut v1_store = write_v1_test_data(&fs_store_path);
+		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
+		let mut v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
+		migrate_kv_store_data(&mut v1_store, &mut v2_store).unwrap();
+
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		assert_eq!(
+			KVStoreSync::read(
+				&migrated_store,
+				TEST_PRIMARY_NAMESPACE,
+				TEST_SECONDARY_NAMESPACE,
+				TEST_KEY
+			)
+			.unwrap(),
+			TEST_VALUE
+		);
+		assert!(fs_store_path.exists());
+		assert!(!v2_migrating_path.exists());
+	}
+
+	#[test]
+	fn fs_store_migration_recovers_after_v1_backup_rename() {
+		let fs_store_path = fs_store_path();
+		let mut v1_store = write_v1_test_data(&fs_store_path);
+		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
+		let mut v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
+		migrate_kv_store_data(&mut v1_store, &mut v2_store).unwrap();
+
+		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
+		fs::rename(&fs_store_path, backup_path).unwrap();
+
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		assert_eq!(
+			KVStoreSync::read(
+				&migrated_store,
+				TEST_PRIMARY_NAMESPACE,
+				TEST_SECONDARY_NAMESPACE,
+				TEST_KEY
+			)
+			.unwrap(),
+			TEST_VALUE
+		);
+		assert!(fs_store_path.exists());
+		assert!(!v2_migrating_path.exists());
+	}
+
+	#[test]
+	fn fs_store_migration_recovers_after_v2_rename() {
+		let fs_store_path = fs_store_path();
+		let mut v1_store = write_v1_test_data(&fs_store_path);
+		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
+		let mut v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
+		migrate_kv_store_data(&mut v1_store, &mut v2_store).unwrap();
+
+		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
+		fs::rename(&fs_store_path, &backup_path).unwrap();
+		fs::rename(&v2_migrating_path, &fs_store_path).unwrap();
+
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		assert_eq!(
+			KVStoreSync::read(
+				&migrated_store,
+				TEST_PRIMARY_NAMESPACE,
+				TEST_SECONDARY_NAMESPACE,
+				TEST_KEY
+			)
+			.unwrap(),
+			TEST_VALUE
+		);
+		assert!(fs_store_path.exists());
+		assert!(backup_path.exists());
+		assert!(!v2_migrating_path.exists());
+	}
+
+	#[test]
+	fn fs_store_migration_recovers_backup_without_migrating_dir() {
+		let fs_store_path = fs_store_path();
+		write_v1_test_data(&fs_store_path);
+
+		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
+		fs::rename(&fs_store_path, backup_path).unwrap();
+
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		assert_eq!(
+			KVStoreSync::read(
+				&migrated_store,
+				TEST_PRIMARY_NAMESPACE,
+				TEST_SECONDARY_NAMESPACE,
+				TEST_KEY
+			)
+			.unwrap(),
+			TEST_VALUE
+		);
+		assert!(fs_store_path.exists());
+		assert!(!sibling_path(&fs_store_path, "fs_store_v1_backup").exists());
+	}
+
+	#[test]
+	fn fs_store_migration_recovers_unexpected_migrating_dir_without_backup() {
+		let fs_store_path = fs_store_path();
+		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
+		let v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
+		KVStoreSync::write(
+			&v2_store,
+			TEST_PRIMARY_NAMESPACE,
+			TEST_SECONDARY_NAMESPACE,
+			TEST_KEY,
+			TEST_VALUE.to_vec(),
+		)
+		.unwrap();
+
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		assert_eq!(
+			KVStoreSync::read(
+				&migrated_store,
+				TEST_PRIMARY_NAMESPACE,
+				TEST_SECONDARY_NAMESPACE,
+				TEST_KEY
+			)
+			.unwrap(),
+			TEST_VALUE
+		);
+		assert!(fs_store_path.exists());
+		assert!(!v2_migrating_path.exists());
+	}
+
+	fn fs_store_path() -> PathBuf {
+		let mut fs_store_path = random_storage_path();
+		fs_store_path.push("fs_store");
+		fs_store_path
+	}
+
+	fn sibling_path(path: &Path, file_name: &str) -> PathBuf {
+		let mut sibling_path = path.to_path_buf();
+		sibling_path.set_file_name(file_name);
+		sibling_path
+	}
+
+	fn write_v1_test_data(fs_store_path: &Path) -> FilesystemStore {
+		let v1_store = FilesystemStore::new(fs_store_path.to_path_buf());
+		KVStoreSync::write(
+			&v1_store,
+			TEST_PRIMARY_NAMESPACE,
+			TEST_SECONDARY_NAMESPACE,
+			TEST_KEY,
+			TEST_VALUE.to_vec(),
+		)
+		.unwrap();
+		v1_store
 	}
 }
