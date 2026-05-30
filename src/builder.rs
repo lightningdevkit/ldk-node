@@ -32,7 +32,6 @@ use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{
 	CombinedScorer, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
-	ProbabilisticScoringFeeParameters,
 };
 use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::config::HTLCInterceptionFlags;
@@ -49,7 +48,8 @@ use crate::chain::ChainSource;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
-	TorConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
+	ProbabilisticScoringFeeParameters, TorConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME,
+	DEFAULT_LOG_LEVEL,
 };
 use crate::connection::ConnectionManager;
 use crate::entropy::NodeEntropy;
@@ -463,6 +463,14 @@ impl NodeBuilder {
 	/// The external scores are merged into the local scoring system to improve routing.
 	pub fn set_pathfinding_scores_source(&mut self, url: String) -> &mut Self {
 		self.pathfinding_scores_sync_config = Some(PathfindingScoresSyncConfig { url });
+		self
+	}
+
+	/// Sets the scoring fee parameters used for payment pathfinding.
+	pub fn set_scoring_fee_parameters(
+		&mut self, scoring_fee_parameters: ProbabilisticScoringFeeParameters,
+	) -> &mut Self {
+		self.config.scoring_fee_parameters = scoring_fee_parameters;
 		self
 	}
 
@@ -1044,6 +1052,13 @@ impl ArcedNodeBuilder {
 	/// The external scores are merged into the local scoring system to improve routing.
 	pub fn set_pathfinding_scores_source(&self, url: String) {
 		self.inner.write().expect("lock").set_pathfinding_scores_source(url);
+	}
+
+	/// Sets the scoring fee parameters used for payment pathfinding.
+	pub fn set_scoring_fee_parameters(
+		&self, scoring_fee_parameters: ProbabilisticScoringFeeParameters,
+	) {
+		self.inner.write().expect("lock").set_scoring_fee_parameters(scoring_fee_parameters);
 	}
 
 	/// Configures the [`Node`] instance to source inbound liquidity from the given LSP.
@@ -1857,7 +1872,7 @@ fn build_with_store_internal(
 		},
 	}
 
-	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
+	let scoring_fee_params = config.scoring_fee_parameters.clone().into();
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
