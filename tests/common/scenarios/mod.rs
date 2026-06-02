@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use bitcoin::Amount;
 use electrsd::corepc_node::Client as BitcoindClient;
-use electrum_client::ElectrumApi;
+use electrsd::electrum_client::ElectrumApi;
 use ldk_node::{Event, Node};
 
 use super::external_node::ExternalNode;
@@ -240,7 +240,7 @@ pub(crate) async fn splice_in_scenario<E: ElectrumApi>(
 	.await;
 	let ext_node_id = peer.get_node_id().await.unwrap();
 	node.splice_in(&user_ch, ext_node_id, 500_000).unwrap();
-	expect_splice_pending_event!(node, ext_node_id);
+	expect_splice_negotiated_event!(node, ext_node_id);
 	generate_blocks_and_wait(bitcoind, electrs, 6).await;
 	sync_wallets_with_retry(node).await;
 	expect_channel_ready_event!(node, ext_node_id);

@@ -35,9 +35,8 @@ use lightning::chain::chaininterface::{
 	BroadcasterInterface, INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
 };
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
-use lightning::chain::{BestBlock as BlockLocator, ClaimId, Listen};
+use lightning::chain::{BlockLocator, ClaimId, Listen};
 use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::funding::FundingTxInput;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
@@ -47,7 +46,7 @@ use lightning::sign::{
 };
 use lightning::util::message_signing;
 use lightning::util::wallet_utils::{
-	CoinSelection, CoinSelectionSource, Input, Utxo, WalletSource,
+	CoinSelection, CoinSelectionSource, ConfirmedUtxo, Input, Utxo, WalletSource,
 };
 use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
@@ -574,7 +573,7 @@ impl Wallet {
 				witness_utxo: Some(input.previous_utxo.clone()),
 				..Default::default()
 			};
-			let weight = Weight::from_wu(input.satisfaction_weight);
+			let weight = ldk_to_bdk_satisfaction_weight(input.satisfaction_weight);
 			tx_builder.only_witness_utxo().exclude_unconfirmed();
 			tx_builder.add_foreign_utxo(input.outpoint, psbt_input, weight).map_err(|e| {
 				log_error!(self.logger, "Failed to add shared input for fee estimation: {e}");
@@ -916,7 +915,7 @@ impl Wallet {
 				witness_utxo: Some(input.previous_utxo.clone()),
 				..Default::default()
 			};
-			let weight = Weight::from_wu(input.satisfaction_weight);
+			let weight = ldk_to_bdk_satisfaction_weight(input.satisfaction_weight);
 			tx_builder.add_foreign_utxo(input.outpoint, psbt_input, weight).map_err(|_| ())?;
 		}
 
@@ -942,7 +941,7 @@ impl Wallet {
 				locked_wallet
 					.tx_details(txin.previous_output.txid)
 					.map(|tx_details| tx_details.tx.deref().clone())
-					.map(|prevtx| FundingTxInput::new_p2wpkh(prevtx, txin.previous_output.vout))
+					.map(|prevtx| ConfirmedUtxo::new_p2wpkh(prevtx, txin.previous_output.vout))
 			})
 			.collect::<Result<Vec<_>, ()>>()?;
 
@@ -958,8 +957,7 @@ impl Wallet {
 		let change_output = unsigned_tx
 			.output
 			.into_iter()
-			.filter(|txout| must_pay_to.iter().all(|output| output != txout))
-			.next();
+			.find(|txout| must_pay_to.iter().all(|output| output != txout));
 
 		if change_output.is_some() {
 			locked_wallet.persist(&mut locked_persister).map_err(|e| {
@@ -1715,6 +1713,28 @@ impl ChangeDestinationSource for WalletKeysManager {
 				.map_err(|_| ())
 		}
 	}
+}
+
+/// Convert LDK's `Input::satisfaction_weight` to the value BDK's
+/// [`bdk_wallet::TxBuilder::add_foreign_utxo`] expects.
+///
+/// LDK and BDK disagree on what `satisfaction_weight` includes for a SegWit input. LDK
+/// treats it as the full weight of the spent input's `script_sig` and `witness` *each
+/// with their lengths included* — i.e., the empty `script_sig` length byte (4 WU) and
+/// the witness-elements-count varint (1 WU) are part of the value. BDK adds
+/// `TxIn::default().segwit_weight()` internally, which already accounts for those same
+/// 5 WU (an empty TxIn has a 1-byte empty `script_sig` length and a 1-byte empty
+/// witness-count varint). Passing LDK's value directly to BDK therefore double-counts
+/// 5 WU per foreign input, which inflates BDK's fee estimate and ultimately funnels the
+/// surplus into the new funding output during splice negotiation.
+fn ldk_to_bdk_satisfaction_weight(ldk_satisfaction_weight: u64) -> Weight {
+	const EMPTY_SCRIPT_SIG_WEIGHT: u64 =
+		1 /* empty script_sig length byte */ * WITNESS_SCALE_FACTOR as u64;
+	const EMPTY_WITNESS_COUNT_WEIGHT: u64 = 1 /* witness elements count varint */;
+	Weight::from_wu(
+		ldk_satisfaction_weight
+			.saturating_sub(EMPTY_SCRIPT_SIG_WEIGHT + EMPTY_WITNESS_COUNT_WEIGHT),
+	)
 }
 
 // FIXME/TODO: This is copied-over from bdk_wallet and only used to generate `WalletEvent`s after

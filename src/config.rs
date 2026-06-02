@@ -681,7 +681,7 @@ impl From<MaxDustHTLCExposure> for LdkMaxDustHTLCExposure {
 	}
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 /// The role of the node in an asynchronous payments context.
 ///

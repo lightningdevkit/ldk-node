@@ -68,7 +68,6 @@ impl Writeable for PaymentDetails {
 	) -> Result<(), lightning::io::Error> {
 		write_tlv_fields!(writer, {
 			(0, self.id, required), // Used to be `hash` for v0.2.1 and prior
-			// 1 briefly used to be lsp_fee_limits, could probably be reused at some point in the future.
 			// 2 used to be `preimage` before it was moved to `kind` in v0.3.0
 			(2, None::<Option<PaymentPreimage>>, required),
 			(3, self.kind, required),
@@ -92,7 +91,6 @@ impl Readable for PaymentDetails {
 			.as_secs();
 		_init_and_read_len_prefixed_tlv_fields!(reader, {
 			(0, id, required), // Used to be `hash`
-			(1, lsp_fee_limits, option),
 			(2, preimage, required),
 			(3, kind_opt, option),
 			(4, secret, required),
@@ -129,18 +127,7 @@ impl Readable for PaymentDetails {
 			let hash = PaymentHash(id.0);
 
 			if secret.is_some() {
-				if let Some(lsp_fee_limits) = lsp_fee_limits {
-					let counterparty_skimmed_fee_msat = None;
-					PaymentKind::Bolt11Jit {
-						hash,
-						preimage,
-						secret,
-						counterparty_skimmed_fee_msat,
-						lsp_fee_limits,
-					}
-				} else {
-					PaymentKind::Bolt11 { hash, preimage, secret }
-				}
+				PaymentKind::Bolt11 { hash, preimage, secret, counterparty_skimmed_fee_msat: None }
 			} else {
 				PaymentKind::Spontaneous { hash, preimage }
 			}
@@ -225,9 +212,6 @@ impl StorableObject for PaymentDetails {
 				PaymentKind::Bolt11 { ref mut preimage, .. } => {
 					update_if_necessary!(*preimage, preimage_opt)
 				},
-				PaymentKind::Bolt11Jit { ref mut preimage, .. } => {
-					update_if_necessary!(*preimage, preimage_opt)
-				},
 				PaymentKind::Bolt12Offer { ref mut preimage, .. } => {
 					update_if_necessary!(*preimage, preimage_opt)
 				},
@@ -244,9 +228,6 @@ impl StorableObject for PaymentDetails {
 		if let Some(secret_opt) = update.secret {
 			match self.kind {
 				PaymentKind::Bolt11 { ref mut secret, .. } => {
-					update_if_necessary!(*secret, secret_opt)
-				},
-				PaymentKind::Bolt11Jit { ref mut secret, .. } => {
 					update_if_necessary!(*secret, secret_opt)
 				},
 				PaymentKind::Bolt12Offer { ref mut secret, .. } => {
@@ -269,12 +250,12 @@ impl StorableObject for PaymentDetails {
 
 		if let Some(skimmed_fee_msat) = update.counterparty_skimmed_fee_msat {
 			match self.kind {
-				PaymentKind::Bolt11Jit { ref mut counterparty_skimmed_fee_msat, .. } => {
+				PaymentKind::Bolt11 { ref mut counterparty_skimmed_fee_msat, .. } => {
 					update_if_necessary!(*counterparty_skimmed_fee_msat, skimmed_fee_msat);
 				},
 				_ => debug_assert!(
 					false,
-					"We should only ever override counterparty_skimmed_fee_msat for JIT payments"
+					"We should only ever override counterparty_skimmed_fee_msat for BOLT11 payments"
 				),
 			}
 		}
@@ -375,33 +356,14 @@ pub enum PaymentKind {
 		preimage: Option<PaymentPreimage>,
 		/// The secret used by the payment.
 		secret: Option<PaymentSecret>,
-	},
-	/// A [BOLT 11] payment intended to open an [bLIP-52 / LSPS 2] just-in-time channel.
-	///
-	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
-	/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
-	Bolt11Jit {
-		/// The payment hash, i.e., the hash of the `preimage`.
-		hash: PaymentHash,
-		/// The pre-image used by the payment.
-		preimage: Option<PaymentPreimage>,
-		/// The secret used by the payment.
-		secret: Option<PaymentSecret>,
 		/// The value, in thousands of a satoshi, that was deducted from this payment as an extra
 		/// fee taken by our channel counterparty.
 		///
-		/// Will only be `Some` once we received the payment. Will always be `None` for LDK Node
-		/// v0.4 and prior.
+		/// Will only ever be `Some` for inbound payments received via an [bLIP-52 / LSPS 2]
+		/// just-in-time channel, and only after the payment is observed; `None` otherwise.
+		///
+		/// [bLIP-52 / LSPS 2]: https://github.com/lightning/blips/blob/master/blip-0052.md
 		counterparty_skimmed_fee_msat: Option<u64>,
-		/// Limits applying to how much fee we allow an LSP to deduct from the payment amount.
-		///
-		/// Allowing them to deduct this fee from the first inbound payment will pay for the LSP's
-		/// channel opening fees.
-		///
-		/// See [`LdkChannelConfig::accept_underpaying_htlcs`] for more information.
-		///
-		/// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
-		lsp_fee_limits: LSPFeeLimits,
 	},
 	/// A [BOLT 12] 'offer' payment, i.e., a payment for an [`Offer`].
 	///
@@ -465,15 +427,19 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 	},
 	(2, Bolt11) => {
 		(0, hash, required),
+		(1, counterparty_skimmed_fee_msat, option),
 		(2, preimage, option),
 		(4, secret, option),
 	},
-	(4, Bolt11Jit) => {
+	(4, Bolt11) => {
 		(0, hash, required),
 		(1, counterparty_skimmed_fee_msat, option),
 		(2, preimage, option),
 		(4, secret, option),
-		(6, lsp_fee_limits, required),
+		(6, _legacy_lsps2_parameters, (legacy, LSPS2Parameters,
+			|_| Ok(()),
+			|_: &PaymentKind| None::<Option<LSPS2Parameters>>
+		)),
 	},
 	(6, Bolt12Offer) => {
 		(0, hash, option),
@@ -529,7 +495,7 @@ impl_writeable_tlv_based_enum!(ConfirmationStatus,
 /// [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
-pub struct LSPFeeLimits {
+pub struct LSPS2Parameters {
 	/// The maximal total amount we allow any configured LSP withhold from us when forwarding the
 	/// payment.
 	pub max_total_opening_fee_msat: Option<u64>,
@@ -538,7 +504,7 @@ pub struct LSPFeeLimits {
 	pub max_proportional_opening_fee_ppm_msat: Option<u64>,
 }
 
-impl_writeable_tlv_based!(LSPFeeLimits, {
+impl_writeable_tlv_based!(LSPS2Parameters, {
 	(0, max_total_opening_fee_msat, option),
 	(2, max_proportional_opening_fee_ppm_msat, option),
 });
@@ -580,7 +546,6 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 	fn from(value: &PaymentDetails) -> Self {
 		let (hash, preimage, secret) = match value.kind {
 			PaymentKind::Bolt11 { hash, preimage, secret, .. } => (Some(hash), preimage, secret),
-			PaymentKind::Bolt11Jit { hash, preimage, secret, .. } => (Some(hash), preimage, secret),
 			PaymentKind::Bolt12Offer { hash, preimage, secret, .. } => (hash, preimage, secret),
 			PaymentKind::Bolt12Refund { hash, preimage, secret, .. } => (hash, preimage, secret),
 			PaymentKind::Spontaneous { hash, preimage, .. } => (Some(hash), preimage, None),
@@ -593,7 +558,7 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 		};
 
 		let counterparty_skimmed_fee_msat = match value.kind {
-			PaymentKind::Bolt11Jit { counterparty_skimmed_fee_msat, .. } => {
+			PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
 				Some(counterparty_skimmed_fee_msat)
 			},
 			_ => None,
@@ -623,7 +588,7 @@ impl StorableObjectUpdate<PaymentDetails> for PaymentDetailsUpdate {
 
 #[cfg(test)]
 mod tests {
-	use lightning::util::ser::Readable;
+	use lightning::util::ser::{Readable, Writeable};
 
 	use super::*;
 
@@ -637,12 +602,10 @@ mod tests {
 		pub amount_msat: Option<u64>,
 		pub direction: PaymentDirection,
 		pub status: PaymentStatus,
-		pub lsp_fee_limits: Option<LSPFeeLimits>,
 	}
 
 	impl_writeable_tlv_based!(OldPaymentDetails, {
 		(0, hash, required),
-		(1, lsp_fee_limits, option),
 		(2, preimage, required),
 		(4, secret, required),
 		(6, amount_msat, required),
@@ -668,7 +631,6 @@ mod tests {
 				amount_msat,
 				direction: PaymentDirection::Inbound,
 				status: PaymentStatus::Pending,
-				lsp_fee_limits: None,
 			};
 
 			let old_bolt11_encoded = old_bolt11_payment.encode();
@@ -682,60 +644,16 @@ mod tests {
 			assert_eq!(bolt11_decoded, PaymentDetails::read(&mut &*bolt11_reencoded).unwrap());
 
 			match bolt11_decoded.kind {
-				PaymentKind::Bolt11 { hash: h, preimage: p, secret: s } => {
-					assert_eq!(hash, h);
-					assert_eq!(preimage, p);
-					assert_eq!(secret, s);
-				},
-				_ => {
-					panic!("Unexpected kind!");
-				},
-			}
-		}
-
-		// Test `Bolt11Jit` de/ser
-		{
-			let lsp_fee_limits = Some(LSPFeeLimits {
-				max_total_opening_fee_msat: Some(46_000),
-				max_proportional_opening_fee_ppm_msat: Some(47_000),
-			});
-
-			let old_bolt11_jit_payment = OldPaymentDetails {
-				hash,
-				preimage,
-				secret,
-				amount_msat,
-				direction: PaymentDirection::Inbound,
-				status: PaymentStatus::Pending,
-				lsp_fee_limits,
-			};
-
-			let old_bolt11_jit_encoded = old_bolt11_jit_payment.encode();
-			assert_eq!(
-				old_bolt11_jit_payment,
-				OldPaymentDetails::read(&mut &*old_bolt11_jit_encoded.clone()).unwrap()
-			);
-
-			let bolt11_jit_decoded = PaymentDetails::read(&mut &*old_bolt11_jit_encoded).unwrap();
-			let bolt11_jit_reencoded = bolt11_jit_decoded.encode();
-			assert_eq!(
-				bolt11_jit_decoded,
-				PaymentDetails::read(&mut &*bolt11_jit_reencoded).unwrap()
-			);
-
-			match bolt11_jit_decoded.kind {
-				PaymentKind::Bolt11Jit {
+				PaymentKind::Bolt11 {
 					hash: h,
 					preimage: p,
 					secret: s,
 					counterparty_skimmed_fee_msat: c,
-					lsp_fee_limits: l,
 				} => {
 					assert_eq!(hash, h);
 					assert_eq!(preimage, p);
 					assert_eq!(secret, s);
 					assert_eq!(None, c);
-					assert_eq!(lsp_fee_limits, Some(l));
 				},
 				_ => {
 					panic!("Unexpected kind!");
@@ -752,7 +670,6 @@ mod tests {
 				amount_msat,
 				direction: PaymentDirection::Inbound,
 				status: PaymentStatus::Pending,
-				lsp_fee_limits: None,
 			};
 
 			let old_spontaneous_encoded = old_spontaneous_payment.encode();
@@ -778,5 +695,69 @@ mod tests {
 				},
 			}
 		}
+	}
+
+	#[derive(Clone, Debug, PartialEq, Eq)]
+	struct LegacyBolt11JitKind {
+		hash: PaymentHash,
+		counterparty_skimmed_fee_msat: Option<u64>,
+		preimage: Option<PaymentPreimage>,
+		secret: Option<PaymentSecret>,
+		lsp_fee_limits: LSPS2Parameters,
+	}
+
+	impl_writeable_tlv_based!(LegacyBolt11JitKind, {
+		(0, hash, required),
+		(1, counterparty_skimmed_fee_msat, option),
+		(2, preimage, option),
+		(4, secret, option),
+		(6, lsp_fee_limits, required),
+	});
+
+	#[test]
+	fn legacy_bolt11_jit_kind_decodes_as_bolt11() {
+		let hash = PaymentHash([42u8; 32]);
+		let preimage = Some(PaymentPreimage([43u8; 32]));
+		let secret = Some(PaymentSecret([44u8; 32]));
+		let counterparty_skimmed_fee_msat = Some(7_777u64);
+		let lsp_fee_limits = LSPS2Parameters {
+			max_total_opening_fee_msat: Some(46_000),
+			max_proportional_opening_fee_ppm_msat: Some(47_000),
+		};
+
+		let legacy = LegacyBolt11JitKind {
+			hash,
+			counterparty_skimmed_fee_msat,
+			preimage,
+			secret,
+			lsp_fee_limits,
+		};
+		let legacy_encoded = legacy.encode();
+		assert_eq!(legacy, LegacyBolt11JitKind::read(&mut &*legacy_encoded.clone()).unwrap());
+
+		let mut on_disk = Vec::with_capacity(legacy_encoded.len() + 1);
+		4u8.write(&mut on_disk).unwrap();
+		on_disk.extend_from_slice(&legacy_encoded);
+
+		let decoded = PaymentKind::read(&mut &*on_disk).unwrap();
+
+		match decoded {
+			PaymentKind::Bolt11 {
+				hash: h,
+				preimage: p,
+				secret: s,
+				counterparty_skimmed_fee_msat: c,
+			} => {
+				assert_eq!(hash, h);
+				assert_eq!(preimage, p);
+				assert_eq!(secret, s);
+				assert_eq!(counterparty_skimmed_fee_msat, c);
+			},
+			other => panic!("Expected Bolt11, got {:?}", other),
+		}
+
+		let reencoded = decoded.encode();
+		assert_eq!(reencoded[0], 2);
+		assert_eq!(decoded, PaymentKind::read(&mut &*reencoded).unwrap());
 	}
 }

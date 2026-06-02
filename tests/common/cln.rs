@@ -9,8 +9,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use clightningrpc::lightningrpc::LightningRPC;
-use clightningrpc::lightningrpc::PayOptions;
+use clightningrpc::lightningrpc::{LightningRPC, PayOptions};
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use serde_json::json;

@@ -21,6 +21,7 @@ use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
 use lightning::routing::router::{RouteHint, RouteHintHop};
 use lightning::sign::EntropySource;
+use lightning::util::ser::Writeable;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::events::LiquidityEvent;
 use lightning_liquidity::lsps0::ser::{LSPSDateTime, LSPSRequestId};
@@ -41,6 +42,8 @@ use tokio::sync::oneshot;
 use crate::builder::BuildError;
 use crate::connection::ConnectionManager;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
+use crate::payment::store::LSPS2Parameters;
+use crate::payment::PaymentMetadata;
 use crate::runtime::Runtime;
 use crate::types::{
 	Broadcaster, ChannelManager, DynStore, KeysManager, LiquidityManager, PeerManager, Wallet,
@@ -1113,7 +1116,7 @@ where
 	pub(crate) async fn lsps2_receive_to_jit_channel(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: Option<PaymentHash>,
-	) -> Result<(Bolt11Invoice, u64), Error> {
+	) -> Result<Bolt11Invoice, Error> {
 		let fee_response = self.lsps2_request_opening_fee_params().await?;
 
 		let (min_total_fee_msat, min_opening_params) = fee_response
@@ -1159,22 +1162,27 @@ where
 
 		let buy_response =
 			self.lsps2_send_buy_request(Some(amount_msat), min_opening_params).await?;
+		let lsps2_parameters = LSPS2Parameters {
+			max_total_opening_fee_msat: Some(min_total_fee_msat),
+			max_proportional_opening_fee_ppm_msat: None,
+		};
 		let invoice = self.lsps2_create_jit_invoice(
 			buy_response,
 			Some(amount_msat),
 			description,
 			expiry_secs,
 			payment_hash,
+			lsps2_parameters,
 		)?;
 
 		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
-		Ok((invoice, min_total_fee_msat))
+		Ok(invoice)
 	}
 
 	pub(crate) async fn lsps2_receive_variable_amount_to_jit_channel(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
-	) -> Result<(Bolt11Invoice, u64), Error> {
+	) -> Result<Bolt11Invoice, Error> {
 		let fee_response = self.lsps2_request_opening_fee_params().await?;
 
 		let (min_prop_fee_ppm_msat, min_opening_params) = fee_response
@@ -1207,16 +1215,21 @@ where
 		);
 
 		let buy_response = self.lsps2_send_buy_request(None, min_opening_params).await?;
+		let lsps2_parameters = LSPS2Parameters {
+			max_total_opening_fee_msat: None,
+			max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
+		};
 		let invoice = self.lsps2_create_jit_invoice(
 			buy_response,
 			None,
 			description,
 			expiry_secs,
 			payment_hash,
+			lsps2_parameters,
 		)?;
 
 		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
-		Ok((invoice, min_prop_fee_ppm_msat))
+		Ok(invoice)
 	}
 
 	async fn lsps2_request_opening_fee_params(&self) -> Result<LSPS2FeeResponse, Error> {
@@ -1298,31 +1311,39 @@ where
 	fn lsps2_create_jit_invoice(
 		&self, buy_response: LSPS2BuyResponse, amount_msat: Option<u64>,
 		description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		payment_hash: Option<PaymentHash>,
+		payment_hash: Option<PaymentHash>, lsps2_parameters: LSPS2Parameters,
 	) -> Result<Bolt11Invoice, Error> {
 		let lsps2_client = self.lsps2_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		// LSPS2 requires min_final_cltv_expiry_delta to be at least 2 more than usual.
 		let min_final_cltv_expiry_delta = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
-		let (payment_hash, payment_secret) = match payment_hash {
+		let encoded_payment_metadata =
+			PaymentMetadata { lsps2_parameters: Some(lsps2_parameters) }.encode();
+		let (payment_hash, payment_secret, payment_metadata) = match payment_hash {
 			Some(payment_hash) => {
-				let payment_secret = self
+				let (payment_secret, payment_metadata) = self
 					.channel_manager
 					.create_inbound_payment_for_hash(
 						payment_hash,
 						None,
 						expiry_secs,
 						Some(min_final_cltv_expiry_delta),
+						Some(encoded_payment_metadata),
 					)
 					.map_err(|e| {
 						log_error!(self.logger, "Failed to register inbound payment: {:?}", e);
 						Error::InvoiceCreationFailed
 					})?;
-				(payment_hash, payment_secret)
+				(payment_hash, payment_secret, payment_metadata)
 			},
 			None => self
 				.channel_manager
-				.create_inbound_payment(None, expiry_secs, Some(min_final_cltv_expiry_delta))
+				.create_inbound_payment(
+					None,
+					expiry_secs,
+					Some(min_final_cltv_expiry_delta),
+					Some(encoded_payment_metadata),
+				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to register inbound payment: {:?}", e);
 					Error::InvoiceCreationFailed
@@ -1352,15 +1373,21 @@ where
 			invoice_builder = invoice_builder.amount_milli_satoshis(amount_msat).basic_mpp();
 		}
 
-		invoice_builder
-			.build_signed(|hash| {
+		let invoice = if let Some(payment_metadata) = payment_metadata {
+			invoice_builder.payment_metadata(payment_metadata).build_signed(|hash| {
 				Secp256k1::new()
 					.sign_ecdsa_recoverable(hash, &self.keys_manager.get_node_secret_key())
 			})
-			.map_err(|e| {
-				log_error!(self.logger, "Failed to build and sign invoice: {}", e);
-				Error::InvoiceCreationFailed
+		} else {
+			invoice_builder.build_signed(|hash| {
+				Secp256k1::new()
+					.sign_ecdsa_recoverable(hash, &self.keys_manager.get_node_secret_key())
 			})
+		};
+		invoice.map_err(|e| {
+			log_error!(self.logger, "Failed to build and sign invoice: {}", e);
+			Error::InvoiceCreationFailed
+		})
 	}
 
 	pub(crate) async fn handle_channel_ready(

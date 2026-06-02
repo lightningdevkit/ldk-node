@@ -16,7 +16,7 @@ use common::scenarios::{
 };
 use electrsd::corepc_client::client_sync::Auth;
 use electrsd::corepc_node::Client as BitcoindClient;
-use electrum_client::Client as ElectrumClient;
+use electrsd::electrum_client::Client as ElectrumClient;
 
 async fn setup_clients() -> (BitcoindClient, ElectrumClient, TestClnNode) {
 	let bitcoind = BitcoindClient::new_with_auth(

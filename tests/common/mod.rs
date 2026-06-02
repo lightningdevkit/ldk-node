@@ -34,8 +34,8 @@ use bitcoin::{
 	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
 };
 use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
+use electrsd::electrum_client::ElectrumApi;
 use electrsd::{corepc_node, ElectrsD};
-use electrum_client::ElectrumApi;
 use ldk_node::config::{
 	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
 	HumanReadableNamesConfig,
@@ -179,7 +179,7 @@ macro_rules! expect_channel_ready_events {
 
 pub(crate) use expect_channel_ready_events;
 
-macro_rules! expect_splice_pending_event {
+macro_rules! expect_splice_negotiated_event {
 	($node:expr, $counterparty_node_id:expr) => {{
 		let event = tokio::time::timeout(
 			std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
@@ -187,10 +187,10 @@ macro_rules! expect_splice_pending_event {
 		)
 		.await
 		.unwrap_or_else(|_| {
-			panic!("{} timed out waiting for SplicePending event after 60s", $node.node_id())
+			panic!("{} timed out waiting for SpliceNegotiated event after 60s", $node.node_id())
 		});
 		match event {
-			ref e @ Event::SplicePending { new_funding_txo, counterparty_node_id, .. } => {
+			ref e @ Event::SpliceNegotiated { new_funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
 				$node.event_handled().unwrap();
@@ -203,7 +203,7 @@ macro_rules! expect_splice_pending_event {
 	}};
 }
 
-pub(crate) use expect_splice_pending_event;
+pub(crate) use expect_splice_negotiated_event;
 
 macro_rules! expect_payment_received_event {
 	($node:expr, $amount_msat:expr) => {{
@@ -416,6 +416,7 @@ pub(crate) enum TestChainSource<'a> {
 pub(crate) enum TestStoreType {
 	TestSyncStore,
 	Sqlite,
+	FilesystemStore,
 }
 
 impl Default for TestStoreType {
@@ -592,6 +593,9 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
 		},
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
+		TestStoreType::FilesystemStore => {
+			builder.build_with_fs_store(config.node_entropy.into()).unwrap()
+		},
 	};
 
 	if config.recovery_mode {
@@ -888,8 +892,8 @@ pub async fn splice_in_with_all(
 ) {
 	node_a.splice_in_with_all(user_channel_id, node_b.node_id()).unwrap();
 
-	let splice_txo = expect_splice_pending_event!(node_a, node_b.node_id());
-	expect_splice_pending_event!(node_b, node_a.node_id());
+	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(&electrsd.client, splice_txo.txid).await;
 }
 
@@ -1360,8 +1364,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_out_sat = funding_amount_sat / 2;
 	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
-	expect_splice_pending_event!(node_b, node_a.node_id());
+	expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();
@@ -1382,8 +1386,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_in_sat = splice_out_sat;
 	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
 
-	expect_splice_pending_event!(node_a, node_b.node_id());
-	expect_splice_pending_event!(node_b, node_a.node_id());
+	expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();
@@ -1543,6 +1547,49 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		generate_blocks_and_wait(&bitcoind, electrsd, 5).await;
 		node_a.sync_wallets().unwrap();
 		node_b.sync_wallets().unwrap();
+	} else {
+		assert_eq!(node_a.list_balances().lightning_balances.len(), 1);
+		assert!(node_a.list_balances().pending_balances_from_channel_closures.is_empty());
+		let node_a_blocks_to_go = match node_a.list_balances().lightning_balances[0] {
+			LightningBalance::ClaimableAwaitingConfirmations {
+				counterparty_node_id,
+				confirmation_height,
+				..
+			} => {
+				assert_eq!(counterparty_node_id, node_b.node_id());
+				let cur_height = node_a.status().current_best_block.height;
+				let blocks_to_go = confirmation_height - cur_height;
+				blocks_to_go
+			},
+			_ => panic!("Unexpected balance state!"),
+		};
+
+		assert_eq!(node_b.list_balances().lightning_balances.len(), 1);
+		assert!(node_b.list_balances().pending_balances_from_channel_closures.is_empty());
+		let node_b_blocks_to_go = match node_b.list_balances().lightning_balances[0] {
+			LightningBalance::ClaimableAwaitingConfirmations {
+				counterparty_node_id,
+				confirmation_height,
+				..
+			} => {
+				assert_eq!(counterparty_node_id, node_a.node_id());
+				let cur_height = node_b.status().current_best_block.height;
+				let blocks_to_go = confirmation_height - cur_height;
+				blocks_to_go
+			},
+			_ => panic!("Unexpected balance state!"),
+		};
+
+		assert_eq!(node_a_blocks_to_go, node_b_blocks_to_go);
+
+		generate_blocks_and_wait(&bitcoind, electrsd, node_a_blocks_to_go as usize).await;
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+
+		assert!(node_a.list_balances().lightning_balances.is_empty());
+		assert!(node_a.list_balances().pending_balances_from_channel_closures.is_empty());
+		assert!(node_b.list_balances().lightning_balances.is_empty());
+		assert!(node_b.list_balances().pending_balances_from_channel_closures.is_empty());
 	}
 
 	let sum_of_all_payments_sat = (push_msat

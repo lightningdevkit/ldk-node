@@ -12,12 +12,12 @@ use bitcoin::hashes::{sha256, Hash};
 use bitcoin::hex::DisplayHex;
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::lightning::ln::msgs::SocketAddress;
+use lnd_grpc_rust::lnrpc::payment::PaymentStatus;
 use lnd_grpc_rust::lnrpc::{
-	payment::PaymentStatus, CloseChannelRequest as LndCloseChannelRequest,
-	ConnectPeerRequest as LndConnectPeerRequest, DisconnectPeerRequest as LndDisconnectPeerRequest,
-	GetInfoRequest as LndGetInfoRequest, Invoice as LndInvoice,
-	LightningAddress as LndLightningAddress, ListChannelsRequest as LndListChannelsRequest,
-	OpenChannelRequest as LndOpenChannelRequest,
+	CloseChannelRequest as LndCloseChannelRequest, ConnectPeerRequest as LndConnectPeerRequest,
+	DisconnectPeerRequest as LndDisconnectPeerRequest, GetInfoRequest as LndGetInfoRequest,
+	Invoice as LndInvoice, LightningAddress as LndLightningAddress,
+	ListChannelsRequest as LndListChannelsRequest, OpenChannelRequest as LndOpenChannelRequest,
 };
 use lnd_grpc_rust::routerrpc::SendPaymentRequest;
 use lnd_grpc_rust::{connect, LndClient};

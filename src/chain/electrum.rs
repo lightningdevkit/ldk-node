@@ -394,7 +394,9 @@ impl ElectrumRuntimeClient {
 	) -> Result<Self, Error> {
 		let electrum_config = ElectrumConfigBuilder::new()
 			.retry(ELECTRUM_CLIENT_NUM_RETRIES)
-			.timeout(Some(sync_config.timeouts_config.per_request_timeout_secs))
+			.timeout(Some(Duration::from_secs(
+				sync_config.timeouts_config.per_request_timeout_secs as u64,
+			)))
 			.build();
 
 		let electrum_client = Arc::new(
@@ -578,7 +580,7 @@ impl ElectrumRuntimeClient {
 		let confirmation_targets = get_all_conf_targets();
 		for target in confirmation_targets {
 			let num_blocks = get_num_block_defaults_for_target(target);
-			batch.estimate_fee(num_blocks);
+			batch.estimate_fee(num_blocks, None);
 		}
 
 		let spawn_fut = self.runtime.spawn_blocking(move || electrum_client.batch_call(&batch));

@@ -113,16 +113,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(cycle_tests)]
 use std::{any::Any, sync::Weak};
 
+use crate::ffi::maybe_wrap;
 pub use balance::{BalanceDetails, LightningBalance, PendingSweepBalance};
 pub use bip39;
 pub use bitcoin;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::BlockHash;
 #[cfg(feature = "uniffi")]
 pub use bitcoin::FeeRate;
 #[cfg(not(feature = "uniffi"))]
 use bitcoin::FeeRate;
-use bitcoin::{Address, Amount, Network};
+use bitcoin::{Address, Amount, BlockHash, Network};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -146,13 +146,14 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::update_and_persist_node_metrics;
 pub use lightning;
-use lightning::chain::BestBlock as BlockLocator;
+use lightning::chain::BlockLocator;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 pub use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::msgs::SocketAddress;
+use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
+use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStoreSync;
@@ -161,6 +162,7 @@ use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
 pub use lightning_liquidity;
 pub use lightning_types;
+use lightning_types::features::NodeFeatures as LdkNodeFeatures;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
 use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -183,6 +185,11 @@ pub use vss_client;
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
+
+#[cfg(not(feature = "uniffi"))]
+type NodeFeatures = LdkNodeFeatures;
+#[cfg(feature = "uniffi")]
+type NodeFeatures = Arc<crate::ffi::NodeFeatures>;
 
 #[cfg(feature = "uniffi")]
 uniffi::include_scaffolding!("ldk_node");
@@ -776,6 +783,7 @@ impl Node {
 			locked_node_metrics.latest_pathfinding_scores_sync_timestamp;
 		let latest_node_announcement_broadcast_timestamp =
 			locked_node_metrics.latest_node_announcement_broadcast_timestamp;
+		let node_features = maybe_wrap(self.node_features());
 
 		NodeStatus {
 			is_running,
@@ -787,6 +795,7 @@ impl Node {
 			latest_rgs_snapshot_timestamp,
 			latest_pathfinding_scores_sync_timestamp,
 			latest_node_announcement_broadcast_timestamp,
+			node_features,
 		}
 	}
 
@@ -1583,6 +1592,14 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			if funding_template.prior_contribution().is_some() {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: a prior splice contribution is pending"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			}
+
 			let contribution = self
 				.runtime
 				.block_on(funding_template.splice_in(
@@ -1696,19 +1713,20 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			if funding_template.prior_contribution().is_some() {
+				log_error!(
+					self.logger,
+					"Failed to splice channel: a prior splice contribution is pending"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			}
+
 			let outputs = vec![bitcoin::TxOut {
 				value: Amount::from_sat(splice_amount_sats),
 				script_pubkey: address.script_pubkey(),
 			}];
-			let contribution = self
-				.runtime
-				.block_on(funding_template.splice_out(
-					outputs,
-					min_feerate,
-					max_feerate,
-					Arc::clone(&self.wallet),
-				))
-				.map_err(|e| {
+			let contribution =
+				funding_template.splice_out(outputs, min_feerate, max_feerate).map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
@@ -2054,6 +2072,28 @@ impl Node {
 			Error::PersistenceFailed
 		})
 	}
+
+	/// Return the features used in node announcement.
+	fn node_features(&self) -> LdkNodeFeatures {
+		let gossip_features = match self.gossip_source.as_gossip_sync() {
+			lightning_background_processor::GossipSync::P2P(p2p_gossip_sync) => {
+				p2p_gossip_sync.provided_node_features()
+			},
+			lightning_background_processor::GossipSync::Rapid(_) => LdkNodeFeatures::empty(),
+			lightning_background_processor::GossipSync::None => {
+				unreachable!("We must always have a gossip sync!")
+			},
+		};
+		self.channel_manager.node_features()
+			| self.chain_monitor.provided_node_features()
+			| self.onion_messenger.provided_node_features()
+			| gossip_features
+			| self
+				.liquidity_source
+				.as_ref()
+				.map(|ls| ls.liquidity_manager().provided_node_features())
+				.unwrap_or_else(LdkNodeFeatures::empty)
+	}
 }
 
 impl Drop for Node {
@@ -2115,6 +2155,8 @@ pub struct NodeStatus {
 	///
 	/// Will be `None` if we have no public channels or we haven't broadcasted yet.
 	pub latest_node_announcement_broadcast_timestamp: Option<u64>,
+	/// The features advertised in this node's `node_announcement` message.
+	pub node_features: NodeFeatures,
 }
 
 /// Status fields that are persisted across restarts.
