@@ -16,16 +16,19 @@ use crate::io::utils::{
 	write_bdk_wallet_tx_graph,
 };
 use crate::logger::{log_error, LdkLogger, Logger};
+use crate::runtime::Runtime;
 use crate::types::DynStore;
+
 pub(crate) struct KVStoreWalletPersister {
 	latest_change_set: Option<ChangeSet>,
 	kv_store: Arc<DynStore>,
+	runtime: Arc<Runtime>,
 	logger: Arc<Logger>,
 }
 
 impl KVStoreWalletPersister {
-	pub(crate) fn new(kv_store: Arc<DynStore>, logger: Arc<Logger>) -> Self {
-		Self { latest_change_set: None, kv_store, logger }
+	pub(crate) fn new(kv_store: Arc<DynStore>, runtime: Arc<Runtime>, logger: Arc<Logger>) -> Self {
+		Self { latest_change_set: None, kv_store, runtime, logger }
 	}
 }
 
@@ -38,7 +41,9 @@ impl WalletPersister for KVStoreWalletPersister {
 			return Ok(latest_change_set.clone());
 		}
 
-		let change_set_opt = read_bdk_wallet_change_set(&*persister.kv_store, &*persister.logger)?;
+		let change_set_opt = persister
+			.runtime
+			.block_on(read_bdk_wallet_change_set(&*persister.kv_store, &*persister.logger))?;
 
 		let change_set = match change_set_opt {
 			Some(persisted_change_set) => persisted_change_set,
@@ -84,7 +89,11 @@ impl WalletPersister for KVStoreWalletPersister {
 				));
 			} else {
 				latest_change_set.descriptor = Some(descriptor.clone());
-				write_bdk_wallet_descriptor(&descriptor, &*persister.kv_store, &*persister.logger)?;
+				persister.runtime.block_on(write_bdk_wallet_descriptor(
+					&descriptor,
+					&*persister.kv_store,
+					&*persister.logger,
+				))?;
 			}
 		}
 
@@ -103,11 +112,11 @@ impl WalletPersister for KVStoreWalletPersister {
 				));
 			} else {
 				latest_change_set.change_descriptor = Some(change_descriptor.clone());
-				write_bdk_wallet_change_descriptor(
+				persister.runtime.block_on(write_bdk_wallet_change_descriptor(
 					&change_descriptor,
 					&*persister.kv_store,
 					&*persister.logger,
-				)?;
+				))?;
 			}
 		}
 
@@ -124,7 +133,11 @@ impl WalletPersister for KVStoreWalletPersister {
 				));
 			} else {
 				latest_change_set.network = Some(network);
-				write_bdk_wallet_network(&network, &*persister.kv_store, &*persister.logger)?;
+				persister.runtime.block_on(write_bdk_wallet_network(
+					&network,
+					&*persister.kv_store,
+					&*persister.logger,
+				))?;
 			}
 		}
 
@@ -144,29 +157,29 @@ impl WalletPersister for KVStoreWalletPersister {
 		// particular order.
 		if !change_set.indexer.is_empty() {
 			latest_change_set.indexer.merge(change_set.indexer.clone());
-			write_bdk_wallet_indexer(
+			persister.runtime.block_on(write_bdk_wallet_indexer(
 				&latest_change_set.indexer,
 				&*persister.kv_store,
 				Arc::clone(&persister.logger),
-			)?;
+			))?;
 		}
 
 		if !change_set.tx_graph.is_empty() {
 			latest_change_set.tx_graph.merge(change_set.tx_graph.clone());
-			write_bdk_wallet_tx_graph(
+			persister.runtime.block_on(write_bdk_wallet_tx_graph(
 				&latest_change_set.tx_graph,
 				&*persister.kv_store,
 				Arc::clone(&persister.logger),
-			)?;
+			))?;
 		}
 
 		if !change_set.local_chain.is_empty() {
 			latest_change_set.local_chain.merge(change_set.local_chain.clone());
-			write_bdk_wallet_local_chain(
+			persister.runtime.block_on(write_bdk_wallet_local_chain(
 				&latest_change_set.local_chain,
 				&*persister.kv_store,
 				Arc::clone(&persister.logger),
-			)?;
+			))?;
 		}
 
 		Ok(())

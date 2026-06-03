@@ -1537,8 +1537,11 @@ fn build_with_store_internal(
 
 	let descriptor = Bip84(xprv, KeychainKind::External);
 	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
-	let mut wallet_persister =
-		KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger));
+	let mut wallet_persister = KVStoreWalletPersister::new(
+		Arc::clone(&kv_store),
+		Arc::clone(&runtime),
+		Arc::clone(&logger),
+	);
 	let wallet_opt = BdkWallet::load()
 		.descriptor(KeychainKind::External, Some(descriptor.clone()))
 		.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
