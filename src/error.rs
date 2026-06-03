@@ -63,6 +63,8 @@ pub enum Error {
 	TxSyncFailed,
 	/// A transaction sync operation timed out.
 	TxSyncTimeout,
+	/// Accessing the chain source to look up a block failed.
+	ChainAccessFailed,
 	/// A gossip updating operation failed.
 	GossipUpdateFailed,
 	/// A gossip updating operation timed out.
@@ -171,6 +173,7 @@ impl fmt::Display for Error {
 			Self::OnchainTxSigningFailed => write!(f, "Failed to sign given transaction."),
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
 			Self::TxSyncTimeout => write!(f, "Syncing transactions timed out."),
+			Self::ChainAccessFailed => write!(f, "Failed to access the chain source."),
 			Self::GossipUpdateFailed => write!(f, "Failed to update gossip data."),
 			Self::GossipUpdateTimeout => write!(f, "Updating gossip data timed out."),
 			Self::LiquidityRequestFailed => write!(f, "Failed to request inbound liquidity."),

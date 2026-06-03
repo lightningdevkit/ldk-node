@@ -61,6 +61,7 @@ interface Builder {
 	[Throws=BuildError]
 	void set_async_payments_role(AsyncPaymentsRole? role);
 	void set_wallet_recovery_mode();
+	void set_wallet_birthday_height(u32 height);
 	[Throws=BuildError]
 	Node build(NodeEntropy node_entropy);
 	[Throws=BuildError]
@@ -194,6 +195,7 @@ enum NodeError {
 	"OnchainTxSigningFailed",
 	"TxSyncFailed",
 	"TxSyncTimeout",
+	"ChainAccessFailed",
 	"GossipUpdateFailed",
 	"GossipUpdateTimeout",
 	"LiquidityRequestFailed",

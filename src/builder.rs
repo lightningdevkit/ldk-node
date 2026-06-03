@@ -639,6 +639,11 @@ impl NodeBuilder {
 	/// first transaction. If unknown, use a conservative estimate.
 	///
 	/// This only takes effect when creating a new wallet (not when loading existing state).
+	///
+	/// If [`set_wallet_recovery_mode`] is also set, the birthday height takes precedence and
+	/// the wallet is checkpointed at the birthday block.
+	///
+	/// [`set_wallet_recovery_mode`]: Self::set_wallet_recovery_mode
 	pub fn set_wallet_birthday_height(&mut self, height: u32) -> &mut Self {
 		self.wallet_birthday_height = Some(height);
 		self
@@ -1386,8 +1391,8 @@ fn build_with_store_internal(
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool,
-	wallet_birthday_height: Option<u32>, seed_bytes: [u8; 64],
-	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	wallet_birthday_height: Option<u32>, seed_bytes: [u8; 64], runtime: Arc<Runtime>,
+	logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1619,10 +1624,8 @@ fn build_with_store_internal(
 							birthday_hash
 						);
 						let mut latest_checkpoint = wallet.latest_checkpoint();
-						let block_id = bdk_chain::BlockId {
-							height: birthday_height,
-							hash: birthday_hash,
-						};
+						let block_id =
+							bdk_chain::BlockId { height: birthday_height, hash: birthday_hash };
 						latest_checkpoint = latest_checkpoint.insert(block_id);
 						let update = bdk_wallet::Update {
 							chain: Some(latest_checkpoint),
@@ -1634,30 +1637,17 @@ fn build_with_store_internal(
 						})?;
 					},
 					Err(e) => {
+						// A birthday was explicitly set but we couldn't fetch the block hash
+						// for it. Silently checkpointing at the chain tip would defeat the
+						// feature: the wallet would scan from tip and recover nothing, leaving
+						// the user to assume their seed is wrong. Fail loudly instead.
 						log_error!(
 							logger,
-							"Failed to fetch block hash at birthday height {}: {:?}. \
-							 Falling back to current tip.",
+							"Failed to fetch block hash at birthday height {}: {}",
 							birthday_height,
 							e
 						);
-						// Fall back to current tip
-						if let Some(best_block) = chain_tip_opt {
-							let mut latest_checkpoint = wallet.latest_checkpoint();
-							let block_id = bdk_chain::BlockId {
-								height: best_block.height,
-								hash: best_block.block_hash,
-							};
-							latest_checkpoint = latest_checkpoint.insert(block_id);
-							let update = bdk_wallet::Update {
-								chain: Some(latest_checkpoint),
-								..Default::default()
-							};
-							wallet.apply_update(update).map_err(|e| {
-								log_error!(logger, "Failed to apply fallback checkpoint: {}", e);
-								BuildError::WalletSetupFailed
-							})?;
-						}
+						return Err(BuildError::WalletSetupFailed);
 					},
 				}
 			} else if !recovery_mode {
