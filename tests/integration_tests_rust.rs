@@ -1206,6 +1206,24 @@ async fn rbf_splice_channel() {
 	let original_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
+	// Sync so the original splice candidate is recorded as a canonical wallet transaction before
+	// the RBF below replaces it. This makes the post-RBF sync observe the original candidate being
+	// replaced (a `WalletEvent::TxReplaced`), which must not drop the payment's funding details.
+	//
+	// This is a best-effort regression guard rather than a deterministic one: with the
+	// funding-details-preservation fix in place the splice still graduates correctly, but without
+	// it the resulting inconsistency only surfaces intermittently (via a timing-dependent
+	// `debug_assert` in the chain-tip handler), so a reverted fix is caught probabilistically.
+	//
+	// TODO: Make this deterministic. If funding payments carried a durable classification in the
+	// main payment store (e.g. a `tx_type` on `PaymentKind::Onchain`, as in
+	// lightningdevkit/ldk-node#791), a dropped funding-details record would be a detectable
+	// contradiction on `ChannelReady` rather than a timing-dependent assert, letting this test
+	// fail reliably whenever the fix is reverted.
+	wait_for_tx(&electrsd.client, original_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
 	// splice_in should fail when there's a pending splice (RBF guard)
 	assert_eq!(
 		node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000),
