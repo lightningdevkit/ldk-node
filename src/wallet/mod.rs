@@ -1539,6 +1539,23 @@ impl Wallet {
 			Error::InvalidPaymentId
 		})?;
 
+		// Funding transactions (channel opens and splices) are driven by LDK's funding/splice
+		// lifecycle, not the on-chain wallet. Replacing one via on-chain RBF would broadcast a
+		// transaction LDK isn't tracking (and, for splices, can't sign). Fee-bumping a pending
+		// splice goes through `bump_channel_funding_fee` instead.
+		if self
+			.pending_payment_store
+			.get(&payment_id)
+			.map_or(false, |p| p.funding_details.is_some())
+		{
+			log_error!(
+				self.logger,
+				"Cannot RBF funding payment {} via bump_fee_rbf; use bump_channel_funding_fee instead",
+				payment_id,
+			);
+			return Err(Error::InvalidPaymentId);
+		}
+
 		if let PaymentKind::Onchain { status, .. } = &payment.kind {
 			match status {
 				ConfirmationStatus::Confirmed { .. } => {
