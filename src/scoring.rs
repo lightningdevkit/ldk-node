@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use lightning::routing::scoring::ChannelLiquidities;
@@ -13,12 +13,12 @@ use crate::io::utils::write_external_pathfinding_scores_to_cache;
 use crate::logger::LdkLogger;
 use crate::runtime::Runtime;
 use crate::types::DynStore;
-use crate::{update_and_persist_node_metrics, Logger, NodeMetrics, Scorer};
+use crate::{update_and_persist_node_metrics, Logger, PersistedNodeMetrics, Scorer};
 
 /// Start a background task that periodically downloads scores via an external url and merges them into the local
 /// pathfinding scores.
 pub fn setup_background_pathfinding_scores_sync(
-	url: String, scorer: Arc<Mutex<crate::types::Scorer>>, node_metrics: Arc<RwLock<NodeMetrics>>,
+	url: String, scorer: Arc<Mutex<crate::types::Scorer>>, node_metrics: Arc<PersistedNodeMetrics>,
 	kv_store: Arc<DynStore>, logger: Arc<Logger>, runtime: Arc<Runtime>,
 	mut stop_receiver: tokio::sync::watch::Receiver<()>,
 ) {
@@ -51,7 +51,7 @@ pub fn setup_background_pathfinding_scores_sync(
 }
 
 async fn sync_external_scores(
-	logger: &Logger, scorer: &Mutex<Scorer>, node_metrics: &RwLock<NodeMetrics>,
+	logger: &Logger, scorer: &Mutex<Scorer>, node_metrics: &PersistedNodeMetrics,
 	kv_store: Arc<DynStore>, url: &String,
 ) -> () {
 	let request = bitreq::get(url)
@@ -86,9 +86,10 @@ async fn sync_external_scores(
 				.duration_since(SystemTime::UNIX_EPOCH)
 				.expect("system time must be after Unix epoch");
 			scorer.lock().expect("lock").merge(liquidities, duration_since_epoch);
-			update_and_persist_node_metrics(&node_metrics, &*kv_store, logger, |m| {
+			update_and_persist_node_metrics(node_metrics, &*kv_store, logger, |m| {
 				m.latest_pathfinding_scores_sync_timestamp = Some(duration_since_epoch.as_secs());
 			})
+			.await
 			.unwrap_or_else(|e| {
 				log_error!(logger, "Persisting node metrics failed: {}", e);
 			});

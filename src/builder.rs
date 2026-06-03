@@ -85,7 +85,7 @@ use crate::types::{
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
-use crate::{Node, NodeMetrics};
+use crate::{Node, NodeMetrics, PersistedNodeMetrics};
 
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
@@ -1415,10 +1415,10 @@ fn build_with_store_internal(
 
 	// Initialize the status fields.
 	let node_metrics = match node_metris_res {
-		Ok(metrics) => Arc::new(RwLock::new(metrics)),
+		Ok(metrics) => Arc::new(PersistedNodeMetrics::new(metrics)),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
-				Arc::new(RwLock::new(NodeMetrics::default()))
+				Arc::new(PersistedNodeMetrics::new(NodeMetrics::default()))
 			} else {
 				log_error!(logger, "Failed to read node metrics from store: {}", e);
 				return Err(BuildError::ReadFailed);

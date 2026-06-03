@@ -243,7 +243,7 @@ pub struct Node {
 	payment_store: Arc<PaymentStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
-	node_metrics: Arc<RwLock<NodeMetrics>>,
+	node_metrics: Arc<PersistedNodeMetrics>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: HRNResolver,
@@ -556,6 +556,7 @@ impl Node {
 									Arc::clone(&bcast_logger),
 									|m| m.latest_node_announcement_broadcast_timestamp = unix_time_secs_opt,
 								)
+								.await
 								.unwrap_or_else(|e| {
 									log_error!(bcast_logger, "Persistence failed: {}", e);
 								});
@@ -2182,6 +2183,42 @@ impl Default for NodeMetrics {
 			latest_pathfinding_scores_sync_timestamp: None,
 			latest_node_announcement_broadcast_timestamp: None,
 		}
+	}
+}
+
+pub(crate) struct PersistedNodeMetrics {
+	metrics: RwLock<NodeMetrics>,
+	mutation_lock: tokio::sync::Mutex<()>,
+}
+
+impl PersistedNodeMetrics {
+	pub(crate) fn new(metrics: NodeMetrics) -> Self {
+		Self { metrics: RwLock::new(metrics), mutation_lock: tokio::sync::Mutex::new(()) }
+	}
+
+	/// Returns the current in-memory metrics.
+	///
+	/// The async mutation lock serializes persistence updates, but this synchronous reader cannot
+	/// wait on it. Until metrics reads are async, callers may observe metrics changes that are
+	/// still being persisted.
+	pub(crate) fn read(
+		&self,
+	) -> std::sync::LockResult<std::sync::RwLockReadGuard<'_, NodeMetrics>> {
+		self.metrics.read()
+	}
+
+	/// Returns the in-memory metrics write lock.
+	///
+	/// Persistence updates should go through `update_and_persist_node_metrics` so writers are
+	/// serialized by the async mutation lock.
+	pub(crate) fn write(
+		&self,
+	) -> std::sync::LockResult<std::sync::RwLockWriteGuard<'_, NodeMetrics>> {
+		self.metrics.write()
+	}
+
+	pub(crate) async fn lock_mutation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+		self.mutation_lock.lock().await
 	}
 }
 

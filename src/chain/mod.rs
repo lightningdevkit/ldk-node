@@ -10,7 +10,7 @@ mod electrum;
 mod esplora;
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bitcoin::{Script, Txid};
@@ -27,7 +27,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, NodeMetrics};
+use crate::{Error, PersistedNodeMetrics};
 
 pub(crate) enum WalletSyncStatus {
 	Completed,
@@ -100,7 +100,7 @@ impl ChainSource {
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
-		node_metrics: Arc<RwLock<NodeMetrics>>,
+		node_metrics: Arc<PersistedNodeMetrics>,
 	) -> Result<(Self, Option<BlockLocator>), ()> {
 		let esplora_chain_source = EsploraChainSource::new(
 			server_url,
@@ -121,7 +121,7 @@ impl ChainSource {
 		server_url: String, sync_config: ElectrumSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
-		node_metrics: Arc<RwLock<NodeMetrics>>,
+		node_metrics: Arc<PersistedNodeMetrics>,
 	) -> (Self, Option<BlockLocator>) {
 		let electrum_chain_source = ElectrumChainSource::new(
 			server_url,
@@ -141,7 +141,7 @@ impl ChainSource {
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
-		node_metrics: Arc<RwLock<NodeMetrics>>,
+		node_metrics: Arc<PersistedNodeMetrics>,
 	) -> (Self, Option<BlockLocator>) {
 		let bitcoind_chain_source = BitcoindChainSource::new_rpc(
 			rpc_host,
@@ -164,7 +164,7 @@ impl ChainSource {
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, rest_client_config: BitcoindRestClientConfig,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
 	) -> (Self, Option<BlockLocator>) {
 		let bitcoind_chain_source = BitcoindChainSource::new_rest(
 			rpc_host,
