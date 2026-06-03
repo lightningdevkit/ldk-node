@@ -29,6 +29,7 @@ use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
+use crate::runtime::Runtime;
 use crate::types::{ChannelManager, KeysManager, PaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
@@ -59,6 +60,7 @@ type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 /// [`Node::bolt12_payment`]: crate::Node::bolt12_payment
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct Bolt12Payment {
+	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore>,
@@ -70,11 +72,13 @@ pub struct Bolt12Payment {
 
 impl Bolt12Payment {
 	pub(crate) fn new(
-		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		payment_store: Arc<PaymentStore>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
-		logger: Arc<Logger>, async_payments_role: Option<AsyncPaymentsRole>,
+		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
+		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore>, config: Arc<Config>,
+		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
 		Self {
+			runtime,
 			channel_manager,
 			keys_manager,
 			payment_store,
@@ -163,7 +167,7 @@ impl Bolt12Payment {
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
-				self.payment_store.insert(payment)?;
+				self.runtime.block_on(self.payment_store.insert(payment))?;
 
 				Ok(payment_id)
 			},
@@ -188,7 +192,7 @@ impl Bolt12Payment {
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
-						self.payment_store.insert(payment)?;
+						self.runtime.block_on(self.payment_store.insert(payment))?;
 						Err(Error::PaymentSendingFailed)
 					},
 				}
@@ -325,7 +329,7 @@ impl Bolt12Payment {
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
-				self.payment_store.insert(payment)?;
+				self.runtime.block_on(self.payment_store.insert(payment))?;
 
 				Ok(payment_id)
 			},
@@ -350,7 +354,7 @@ impl Bolt12Payment {
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
-						self.payment_store.insert(payment)?;
+						self.runtime.block_on(self.payment_store.insert(payment))?;
 						Err(Error::InvoiceRequestCreationFailed)
 					},
 				}
@@ -457,7 +461,7 @@ impl Bolt12Payment {
 			PaymentStatus::Pending,
 		);
 
-		self.payment_store.insert(payment)?;
+		self.runtime.block_on(self.payment_store.insert(payment))?;
 
 		Ok(maybe_wrap(invoice))
 	}
@@ -526,7 +530,7 @@ impl Bolt12Payment {
 			PaymentStatus::Pending,
 		);
 
-		self.payment_store.insert(payment)?;
+		self.runtime.block_on(self.payment_store.insert(payment))?;
 
 		Ok(maybe_wrap(refund))
 	}

@@ -158,7 +158,7 @@ impl Bolt11Payment {
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
-		self.payment_store.insert(payment)?;
+		self.runtime.block_on(self.payment_store.insert(payment))?;
 
 		Ok(invoice)
 	}
@@ -239,7 +239,7 @@ impl Bolt11Payment {
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
-		self.payment_store.insert(payment)?;
+		self.runtime.block_on(self.payment_store.insert(payment))?;
 
 		// Persist LSP peer to make sure we reconnect on restart.
 		self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
@@ -341,7 +341,7 @@ impl Bolt11Payment {
 					PaymentStatus::Pending,
 				);
 
-				self.payment_store.insert(payment)?;
+				self.runtime.block_on(self.payment_store.insert(payment))?;
 
 				Ok(payment_id)
 			},
@@ -371,7 +371,7 @@ impl Bolt11Payment {
 							PaymentStatus::Failed,
 						);
 
-						self.payment_store.insert(payment)?;
+						self.runtime.block_on(self.payment_store.insert(payment))?;
 						Err(Error::PaymentSendingFailed)
 					},
 				}
@@ -457,7 +457,7 @@ impl Bolt11Payment {
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
-				self.payment_store.insert(payment)?;
+				self.runtime.block_on(self.payment_store.insert(payment))?;
 
 				Ok(payment_id)
 			},
@@ -488,7 +488,7 @@ impl Bolt11Payment {
 							PaymentStatus::Failed,
 						);
 
-						self.payment_store.insert(payment)?;
+						self.runtime.block_on(self.payment_store.insert(payment))?;
 						Err(Error::PaymentSendingFailed)
 					},
 				}
@@ -582,7 +582,7 @@ impl Bolt11Payment {
 			..PaymentDetailsUpdate::new(payment_id)
 		};
 
-		match self.payment_store.update(update) {
+		match self.runtime.block_on(self.payment_store.update(update)) {
 			Ok(DataStoreUpdateResult::Updated) | Ok(DataStoreUpdateResult::Unchanged) => (),
 			Ok(DataStoreUpdateResult::NotFound) => {
 				log_error!(

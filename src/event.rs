@@ -581,7 +581,7 @@ where
 		}
 	}
 
-	fn fail_claimable_payment(
+	async fn fail_claimable_payment(
 		&self, payment_id: PaymentId, payment_hash: &PaymentHash,
 	) -> Result<(), ReplayEvent> {
 		self.channel_manager.fail_htlc_backwards(payment_hash);
@@ -591,7 +591,7 @@ where
 			status: Some(PaymentStatus::Failed),
 			..PaymentDetailsUpdate::new(payment_id)
 		};
-		match self.payment_store.update(update) {
+		match self.payment_store.update(update).await {
 			Ok(_) => Ok(()),
 			Err(e) => {
 				log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -738,7 +738,7 @@ where
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
-						match self.payment_store.update(update) {
+						match self.payment_store.update(update).await {
 							Ok(_) => return Ok(()),
 							Err(e) => {
 								log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -781,7 +781,7 @@ where
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
-						match self.payment_store.update(update) {
+						match self.payment_store.update(update).await {
 							Ok(_) => return Ok(()),
 							Err(e) => {
 								log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -809,7 +809,7 @@ where
 							hex_utils::to_string(&payment_hash.0),
 							counterparty_skimmed_fee_msat,
 						);
-						self.fail_claimable_payment(payment_id, &payment_hash)?;
+						self.fail_claimable_payment(payment_id, &payment_hash).await?;
 						return Ok(());
 					};
 
@@ -821,7 +821,7 @@ where
 							counterparty_skimmed_fee_msat,
 							max_total_opening_fee_msat,
 						);
-						self.fail_claimable_payment(payment_id, &payment_hash)?;
+						self.fail_claimable_payment(payment_id, &payment_hash).await?;
 						return Ok(());
 					}
 
@@ -832,14 +832,14 @@ where
 									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
 									..PaymentDetailsUpdate::new(payment_id)
 								};
-								match self.payment_store.update(update) {
+								match self.payment_store.update(update).await {
 									Ok(_) => (),
 									Err(e) => {
 										log_error!(self.logger, "Failed to access payment store: {}", e);
 										return Err(ReplayEvent());
 									},
 								};
-							}
+							},
 							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for BOLT11 payments."),
 						}
 					}
@@ -923,7 +923,7 @@ where
 							PaymentStatus::Pending,
 						);
 
-						match self.payment_store.insert(payment) {
+						match self.payment_store.insert(payment).await {
 							Ok(false) => (),
 							Ok(true) => {
 								log_error!(
@@ -964,7 +964,7 @@ where
 							PaymentStatus::Pending,
 						);
 
-						match self.payment_store.insert(payment) {
+						match self.payment_store.insert(payment).await {
 							Ok(false) => (),
 							Ok(true) => {
 								log_error!(
@@ -1004,7 +1004,7 @@ where
 						status: Some(PaymentStatus::Failed),
 						..PaymentDetailsUpdate::new(payment_id)
 					};
-					match self.payment_store.update(update) {
+					match self.payment_store.update(update).await {
 						Ok(_) => return Ok(()),
 						Err(e) => {
 							log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -1072,7 +1072,7 @@ where
 					},
 				};
 
-				match self.payment_store.update(update) {
+				match self.payment_store.update(update).await {
 					Ok(DataStoreUpdateResult::Updated) | Ok(DataStoreUpdateResult::Unchanged) => (
 						// No need to do anything if the idempotent update was applied, which might
 						// be the result of a replayed event.
@@ -1134,7 +1134,7 @@ where
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
-				match self.payment_store.update(update) {
+				match self.payment_store.update(update).await {
 					Ok(_) => {},
 					Err(e) => {
 						log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -1189,7 +1189,7 @@ where
 					status: Some(PaymentStatus::Failed),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
-				match self.payment_store.update(update) {
+				match self.payment_store.update(update).await {
 					Ok(_) => {},
 					Err(e) => {
 						log_error!(self.logger, "Failed to access payment store: {}", e);

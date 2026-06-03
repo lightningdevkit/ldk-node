@@ -22,6 +22,7 @@ use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
+use crate::runtime::Runtime;
 use crate::types::{ChannelManager, CustomTlvRecord, KeysManager, PaymentStore};
 
 // The default `final_cltv_expiry_delta` we apply when not set.
@@ -34,6 +35,7 @@ const LDK_DEFAULT_FINAL_CLTV_EXPIRY_DELTA: u32 = 144;
 /// [`Node::spontaneous_payment`]: crate::Node::spontaneous_payment
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct SpontaneousPayment {
+	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore>,
@@ -44,11 +46,11 @@ pub struct SpontaneousPayment {
 
 impl SpontaneousPayment {
 	pub(crate) fn new(
-		channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		payment_store: Arc<PaymentStore>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
-		logger: Arc<Logger>,
+		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
+		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore>, config: Arc<Config>,
+		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 	) -> Self {
-		Self { channel_manager, keys_manager, payment_store, config, is_running, logger }
+		Self { runtime, channel_manager, keys_manager, payment_store, config, is_running, logger }
 	}
 
 	fn send_inner(
@@ -130,7 +132,7 @@ impl SpontaneousPayment {
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
-				self.payment_store.insert(payment)?;
+				self.runtime.block_on(self.payment_store.insert(payment))?;
 
 				Ok(payment_id)
 			},
@@ -153,7 +155,7 @@ impl SpontaneousPayment {
 							PaymentStatus::Failed,
 						);
 
-						self.payment_store.insert(payment)?;
+						self.runtime.block_on(self.payment_store.insert(payment))?;
 						Err(Error::PaymentSendingFailed)
 					},
 				}

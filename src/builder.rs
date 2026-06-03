@@ -1622,6 +1622,7 @@ fn build_with_store_internal(
 		Arc::clone(&fee_estimator),
 		Arc::clone(&chain_source),
 		Arc::clone(&payment_store),
+		Arc::clone(&runtime),
 		Arc::clone(&config),
 		Arc::clone(&logger),
 		Arc::clone(&pending_payment_store),
