@@ -87,6 +87,9 @@ pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 // The time in-between peer reconnection attempts.
 pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(60);
 
+// The upper bound on the per-peer exponential backoff applied to failed reconnection attempts.
+pub(crate) const PEER_RECONNECTION_MAX_INTERVAL: Duration = Duration::from_secs(60 * 30);
+
 // The time in-between RGS sync attempts.
 pub(crate) const RGS_SYNC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 

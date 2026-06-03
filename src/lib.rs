@@ -484,11 +484,45 @@ impl Node {
 								.map(|peer| peer.counterparty_node_id)
 								.collect::<Vec<_>>();
 
-							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
-								let _ = connect_cm.do_connect_peer(
+							let persisted_peers = connect_peer_store.list_peers();
+							let persisted_node_ids = persisted_peers
+								.iter()
+								.map(|peer| peer.node_id)
+								.collect::<Vec<_>>();
+							connect_cm.prune_reconnect_state(&persisted_node_ids);
+
+							// Anchor this tick's backoff bookkeeping to the tick instant
+							// rather than each attempt's completion time, so retries stay
+							// aligned with the loop's wakeups.
+							let tick_start = Instant::now();
+
+							for peer_info in persisted_peers.iter() {
+								if pm_peers.contains(&peer_info.node_id) {
+									// A connected peer (e.g., via an inbound connection) is
+									// proven reachable: reset any backoff so a future
+									// disconnect is retried promptly again. Note we only
+									// observe this at tick time: an inbound connection that
+									// comes and goes entirely within one tick keeps its
+									// backoff.
+									connect_cm.clear_reconnect_state(&peer_info.node_id);
+									continue;
+								}
+								if connect_cm.has_pending_connection(&peer_info.node_id) {
+									// Another task is already dialing this peer, possibly
+									// towards a different address. Don't join it: its result
+									// shouldn't drive our backoff for the persisted address.
+									continue;
+								}
+								if !connect_cm.is_reconnect_due(&peer_info.node_id) {
+									continue;
+								}
+								let res = connect_cm.do_connect_peer(
 									peer_info.node_id,
 									peer_info.address.clone(),
 									).await;
+								if res.is_err() {
+									connect_cm.record_reconnect_failure(&peer_info.node_id, tick_start);
+								}
 							}
 						}
 				}
@@ -1221,6 +1255,7 @@ impl Node {
 				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
 			},
 		}
+		self.connection_manager.clear_reconnect_state(&counterparty_node_id);
 
 		self.peer_manager.disconnect_by_node_id(counterparty_node_id);
 		Ok(())

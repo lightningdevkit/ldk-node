@@ -1655,6 +1655,7 @@ where
 							);
 							return Err(ReplayEvent());
 						}
+						self.connection_manager.clear_reconnect_state(&counterparty_node_id);
 					}
 				}
 
