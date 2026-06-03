@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::impl_writeable_tlv_based;
-use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 
 use crate::io::{
@@ -27,6 +27,7 @@ where
 	L::Target: LdkLogger,
 {
 	peers: RwLock<HashMap<PublicKey, PeerInfo>>,
+	mutation_lock: tokio::sync::Mutex<()>,
 	kv_store: Arc<DynStore>,
 	logger: L,
 }
@@ -37,44 +38,60 @@ where
 {
 	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let peers = RwLock::new(HashMap::new());
-		Self { peers, kv_store, logger }
+		let mutation_lock = tokio::sync::Mutex::new(());
+		Self { peers, mutation_lock, kv_store, logger }
 	}
 
-	pub(crate) fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
-		let mut locked_peers = self.peers.write().expect("lock");
-
-		if locked_peers.contains_key(&peer_info.node_id) {
-			return Ok(());
-		}
-
-		locked_peers.insert(peer_info.node_id, peer_info);
-		self.persist_peers(&*locked_peers)
+	pub(crate) async fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
+		let _guard = self.mutation_lock.lock().await;
+		let data = {
+			let mut locked_peers = self.peers.write().expect("lock");
+			if locked_peers.contains_key(&peer_info.node_id) {
+				return Ok(());
+			}
+			locked_peers.insert(peer_info.node_id, peer_info);
+			PeerStoreSerWrapper(&locked_peers).encode()
+		};
+		self.persist_peers(data).await
 	}
 
-	pub(crate) fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
-		let mut locked_peers = self.peers.write().expect("lock");
-
-		locked_peers.remove(node_id);
-		self.persist_peers(&*locked_peers)
+	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
+		let _guard = self.mutation_lock.lock().await;
+		let data = {
+			let mut locked_peers = self.peers.write().expect("lock");
+			locked_peers.remove(node_id);
+			PeerStoreSerWrapper(&locked_peers).encode()
+		};
+		self.persist_peers(data).await
 	}
 
+	/// Returns the current in-memory peer set.
+	///
+	/// The async mutation lock serializes `add_peer` and `remove_peer`, but this synchronous
+	/// reader cannot wait on it. Until peer-store reads are async, callers may observe peer
+	/// changes that are still being persisted.
 	pub(crate) fn list_peers(&self) -> Vec<PeerInfo> {
 		self.peers.read().expect("lock").values().cloned().collect()
 	}
 
+	/// Returns the current in-memory peer info for `node_id`.
+	///
+	/// The async mutation lock serializes `add_peer` and `remove_peer`, but this synchronous
+	/// reader cannot wait on it. Until peer-store reads are async, callers may observe peer
+	/// changes that are still being persisted.
 	pub(crate) fn get_peer(&self, node_id: &PublicKey) -> Option<PeerInfo> {
 		self.peers.read().expect("lock").get(node_id).cloned()
 	}
 
-	fn persist_peers(&self, locked_peers: &HashMap<PublicKey, PeerInfo>) -> Result<(), Error> {
-		let data = PeerStoreSerWrapper(&*locked_peers).encode();
-		KVStoreSync::write(
+	async fn persist_peers(&self, data: Vec<u8>) -> Result<(), Error> {
+		KVStore::write(
 			&*self.kv_store,
 			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 			PEER_INFO_PERSISTENCE_KEY,
 			data,
 		)
+		.await
 		.map_err(|e| {
 			log_error!(
 				self.logger,
@@ -101,7 +118,8 @@ where
 		let (kv_store, logger) = args;
 		let read_peers: PeerStoreDeserWrapper = Readable::read(reader)?;
 		let peers: RwLock<HashMap<PublicKey, PeerInfo>> = RwLock::new(read_peers.0);
-		Ok(Self { peers, kv_store, logger })
+		let mutation_lock = tokio::sync::Mutex::new(());
+		Ok(Self { peers, mutation_lock, kv_store, logger })
 	}
 }
 
@@ -158,8 +176,8 @@ mod tests {
 	use crate::io::test_utils::InMemoryStore;
 	use crate::types::DynStoreWrapper;
 
-	#[test]
-	fn peer_info_persistence() {
+	#[tokio::test]
+	async fn peer_info_persistence() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let logger = Arc::new(TestLogger::new());
 		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
@@ -170,22 +188,24 @@ mod tests {
 		.unwrap();
 		let address = SocketAddress::from_str("127.0.0.1:9738").unwrap();
 		let expected_peer_info = PeerInfo { node_id, address };
-		assert!(KVStoreSync::read(
+		assert!(KVStore::read(
 			&*store,
 			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 			PEER_INFO_PERSISTENCE_KEY,
 		)
+		.await
 		.is_err());
-		peer_store.add_peer(expected_peer_info.clone()).unwrap();
+		peer_store.add_peer(expected_peer_info.clone()).await.unwrap();
 
 		// Check we can read back what we persisted.
-		let persisted_bytes = KVStoreSync::read(
+		let persisted_bytes = KVStore::read(
 			&*store,
 			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 			PEER_INFO_PERSISTENCE_KEY,
 		)
+		.await
 		.unwrap();
 		let deser_peer_store =
 			PeerStore::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();

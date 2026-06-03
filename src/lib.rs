@@ -1121,7 +1121,7 @@ impl Node {
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
 
 		if persist {
-			self.peer_store.add_peer(peer_info)?;
+			self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
 		}
 
 		Ok(())
@@ -1138,7 +1138,7 @@ impl Node {
 
 		log_info!(self.logger, "Disconnecting peer {}..", counterparty_node_id);
 
-		match self.peer_store.remove_peer(&counterparty_node_id) {
+		match self.runtime.block_on(self.peer_store.remove_peer(&counterparty_node_id)) {
 			Ok(()) => {},
 			Err(e) => {
 				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
@@ -1255,7 +1255,7 @@ impl Node {
 					zero_reserve_string,
 					peer_info.node_id
 				);
-				self.peer_store.add_peer(peer_info)?;
+				self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
@@ -1861,7 +1861,7 @@ impl Node {
 
 			// Check if this was the last open channel, if so, forget the peer.
 			if open_channels.len() == 1 {
-				self.peer_store.remove_peer(&counterparty_node_id)?;
+				self.runtime.block_on(self.peer_store.remove_peer(&counterparty_node_id))?;
 			}
 		}
 

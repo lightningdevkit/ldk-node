@@ -242,7 +242,7 @@ impl Bolt11Payment {
 		self.payment_store.insert(payment)?;
 
 		// Persist LSP peer to make sure we reconnect on restart.
-		self.peer_store.add_peer(peer_info)?;
+		self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
 
 		Ok(invoice)
 	}
