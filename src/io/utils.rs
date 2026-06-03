@@ -719,7 +719,7 @@ mod tests {
 	use std::fs;
 	use std::path::{Path, PathBuf};
 
-	use lightning::util::persist::{migrate_kv_store_data, KVStoreSync};
+	use lightning::util::persist::{migrate_kv_store_data_async, KVStore};
 	use lightning_persister::fs_store::v1::FilesystemStore;
 	use lightning_persister::fs_store::v2::FilesystemStoreV2;
 
@@ -743,19 +743,20 @@ mod tests {
 	#[tokio::test]
 	async fn fs_store_migration_recovers_before_v1_backup_rename() {
 		let fs_store_path = fs_store_path();
-		let mut v1_store = write_v1_test_data(&fs_store_path);
+		let v1_store = write_v1_test_data(&fs_store_path).await;
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
-		let mut v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
-		migrate_kv_store_data(&mut v1_store, &mut v2_store).unwrap();
+		let v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
+		migrate_kv_store_data_async(&v1_store, &v2_store).await.unwrap();
 
 		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
-			KVStoreSync::read(
+			KVStore::read(
 				&migrated_store,
 				TEST_PRIMARY_NAMESPACE,
 				TEST_SECONDARY_NAMESPACE,
 				TEST_KEY
 			)
+			.await
 			.unwrap(),
 			TEST_VALUE
 		);
@@ -766,22 +767,23 @@ mod tests {
 	#[tokio::test]
 	async fn fs_store_migration_recovers_after_v1_backup_rename() {
 		let fs_store_path = fs_store_path();
-		let mut v1_store = write_v1_test_data(&fs_store_path);
+		let v1_store = write_v1_test_data(&fs_store_path).await;
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
-		let mut v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
-		migrate_kv_store_data(&mut v1_store, &mut v2_store).unwrap();
+		let v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
+		migrate_kv_store_data_async(&v1_store, &v2_store).await.unwrap();
 
 		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
 		fs::rename(&fs_store_path, backup_path).unwrap();
 
 		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
-			KVStoreSync::read(
+			KVStore::read(
 				&migrated_store,
 				TEST_PRIMARY_NAMESPACE,
 				TEST_SECONDARY_NAMESPACE,
 				TEST_KEY
 			)
+			.await
 			.unwrap(),
 			TEST_VALUE
 		);
@@ -792,10 +794,10 @@ mod tests {
 	#[tokio::test]
 	async fn fs_store_migration_recovers_after_v2_rename() {
 		let fs_store_path = fs_store_path();
-		let mut v1_store = write_v1_test_data(&fs_store_path);
+		let v1_store = write_v1_test_data(&fs_store_path).await;
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
-		let mut v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
-		migrate_kv_store_data(&mut v1_store, &mut v2_store).unwrap();
+		let v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
+		migrate_kv_store_data_async(&v1_store, &v2_store).await.unwrap();
 
 		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
 		fs::rename(&fs_store_path, &backup_path).unwrap();
@@ -803,12 +805,13 @@ mod tests {
 
 		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
-			KVStoreSync::read(
+			KVStore::read(
 				&migrated_store,
 				TEST_PRIMARY_NAMESPACE,
 				TEST_SECONDARY_NAMESPACE,
 				TEST_KEY
 			)
+			.await
 			.unwrap(),
 			TEST_VALUE
 		);
@@ -820,19 +823,20 @@ mod tests {
 	#[tokio::test]
 	async fn fs_store_migration_recovers_backup_without_migrating_dir() {
 		let fs_store_path = fs_store_path();
-		write_v1_test_data(&fs_store_path);
+		write_v1_test_data(&fs_store_path).await;
 
 		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
 		fs::rename(&fs_store_path, backup_path).unwrap();
 
 		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
-			KVStoreSync::read(
+			KVStore::read(
 				&migrated_store,
 				TEST_PRIMARY_NAMESPACE,
 				TEST_SECONDARY_NAMESPACE,
 				TEST_KEY
 			)
+			.await
 			.unwrap(),
 			TEST_VALUE
 		);
@@ -845,23 +849,25 @@ mod tests {
 		let fs_store_path = fs_store_path();
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
 		let v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
-		KVStoreSync::write(
+		KVStore::write(
 			&v2_store,
 			TEST_PRIMARY_NAMESPACE,
 			TEST_SECONDARY_NAMESPACE,
 			TEST_KEY,
 			TEST_VALUE.to_vec(),
 		)
+		.await
 		.unwrap();
 
 		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
-			KVStoreSync::read(
+			KVStore::read(
 				&migrated_store,
 				TEST_PRIMARY_NAMESPACE,
 				TEST_SECONDARY_NAMESPACE,
 				TEST_KEY
 			)
+			.await
 			.unwrap(),
 			TEST_VALUE
 		);
@@ -881,15 +887,16 @@ mod tests {
 		sibling_path
 	}
 
-	fn write_v1_test_data(fs_store_path: &Path) -> FilesystemStore {
+	async fn write_v1_test_data(fs_store_path: &Path) -> FilesystemStore {
 		let v1_store = FilesystemStore::new(fs_store_path.to_path_buf());
-		KVStoreSync::write(
+		KVStore::write(
 			&v1_store,
 			TEST_PRIMARY_NAMESPACE,
 			TEST_SECONDARY_NAMESPACE,
 			TEST_KEY,
 			TEST_VALUE.to_vec(),
 		)
+		.await
 		.unwrap();
 		v1_store
 	}
