@@ -906,6 +906,23 @@ pub async fn open_channel_push_amt(
 	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
 	should_announce: bool, electrsd: &ElectrsD,
 ) -> OutPoint {
+	let funding_txo = open_channel_to_pending(
+		node_a,
+		node_b,
+		funding_amount_sat,
+		push_amount_msat,
+		should_announce,
+	)
+	.await;
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+
+	funding_txo
+}
+
+pub async fn open_channel_to_pending(
+	node_a: &TestNode, node_b: &TestNode, funding_amount_sat: u64, push_amount_msat: Option<u64>,
+	should_announce: bool,
+) -> OutPoint {
 	if should_announce {
 		node_a
 			.open_announced_channel(
@@ -932,7 +949,6 @@ pub async fn open_channel_push_amt(
 	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
 	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
 	assert_eq!(funding_txo_a, funding_txo_b);
-	wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
 
 	funding_txo_a
 }
