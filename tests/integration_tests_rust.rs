@@ -1338,6 +1338,63 @@ async fn rbf_splice_channel() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn bump_fee_rbf_rejects_funding_payment() {
+	// A channel-funding or splice transaction is driven by LDK's funding/splice lifecycle, not the
+	// on-chain wallet. `bump_fee_rbf` must reject such payments — replacing the funding transaction
+	// via plain wallet RBF would broadcast a transaction LDK isn't tracking (and, for splices,
+	// can't even sign). Fee-bumping a pending splice goes through `bump_channel_funding_fee` instead.
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Splice-in to create a pending splice payment.
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+
+	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+
+	// Make node_b's wallet aware of the splice transaction so `bump_fee_rbf` reaches its funding
+	// guard rather than failing earlier for a transaction it can't find.
+	wait_for_tx(&electrsd.client, txo.txid).await;
+	node_b.sync_wallets().unwrap();
+
+	// The splice payment is an on-chain, outbound, unconfirmed record, so it passes
+	// `bump_fee_rbf`'s other guards; it must nonetheless be rejected as a funding payment.
+	let splice_payment_id = PaymentId(txo.txid.to_byte_array());
+	assert_eq!(
+		node_b.onchain_payment().bump_fee_rbf(splice_payment_id, None),
+		Err(NodeError::InvalidPaymentId),
+	);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn simple_bolt12_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
