@@ -19,6 +19,7 @@ use common::{
 };
 use criterion::{criterion_group, criterion_main, Criterion};
 use ldk_node::{Event, Node};
+use lightning::ln::channelmanager::PaymentId;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use rand::RngCore;
 use tokio::task::{self};
@@ -115,7 +116,7 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 	// Send back the money for the next iteration.
 	let mut preimage_bytes = [0u8; 32];
 	rand::rng().fill_bytes(&mut preimage_bytes);
-	node_b
+	let return_payment_id = node_b
 		.spontaneous_payment()
 		.send_with_preimage(
 			amount_msat * total_payments,
@@ -125,8 +126,29 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 		)
 		.ok()
 		.unwrap();
+	wait_for_payment_success(&node_b, return_payment_id).await;
 
 	duration
+}
+
+async fn wait_for_payment_success(node: &Node, expected_payment_id: PaymentId) {
+	loop {
+		match node.next_event_async().await {
+			Event::PaymentSuccessful { payment_id: Some(payment_id), .. }
+				if payment_id == expected_payment_id =>
+			{
+				node.event_handled().unwrap();
+				break;
+			},
+			Event::PaymentFailed { payment_id, payment_hash, .. } => {
+				node.event_handled().unwrap();
+				panic!("Return payment {:?} failed with hash {:?}", payment_id, payment_hash);
+			},
+			_ => {
+				node.event_handled().unwrap();
+			},
+		}
+	}
 }
 
 fn payment_benchmark(c: &mut Criterion) {
