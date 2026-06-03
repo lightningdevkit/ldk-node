@@ -13,11 +13,12 @@ use std::time::{Duration, Instant};
 
 use bitcoin::Amount;
 use common::{
-	expect_event, generate_blocks_and_wait, premine_and_distribute_funds, random_config,
-	setup_bitcoind_and_electrsd, setup_node,
+	expect_channel_pending_event, expect_channel_ready_event, expect_event,
+	generate_blocks_and_wait, premine_and_distribute_funds, random_config,
+	setup_bitcoind_and_electrsd, setup_node, setup_two_nodes_with_store,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
-use electrsd::corepc_node::Node as BitcoinD;
+use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use ldk_node::{Event, Node};
 use lightning::ln::channelmanager::PaymentId;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
@@ -34,6 +35,7 @@ fn operations_benchmark(c: &mut Criterion) {
 	dotenvy::dotenv().ok();
 
 	forwarding_benchmark(c);
+	channel_open_benchmark(c);
 }
 
 fn forwarding_benchmark(c: &mut Criterion) {
@@ -79,6 +81,72 @@ fn benchmark_runtime() -> tokio::runtime::Runtime {
 	#[cfg(tokio_unstable)]
 	builder.enable_eager_driver_handoff();
 	builder.build().unwrap()
+}
+
+fn channel_open_benchmark(c: &mut Criterion) {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
+	let runtime = benchmark_runtime();
+
+	let mut group = c.benchmark_group("channel_open");
+	group.sample_size(10);
+
+	for store_config in store_bench_configs() {
+		if !should_register_bench("channel_open", store_config.name) {
+			continue;
+		}
+		let (node_a, node_b) =
+			setup_two_nodes_with_store(&chain_source, false, true, false, store_config.store_type);
+		let node_a = Arc::new(node_a);
+		let node_b = Arc::new(node_b);
+
+		// connect nodes
+		node_a
+			.connect(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				true,
+			)
+			.unwrap();
+
+		runtime.block_on(async {
+			let address_a = node_a.onchain_payment().new_address().unwrap();
+			premine_and_distribute_funds(
+				&bitcoind.client,
+				&electrsd.client,
+				vec![address_a],
+				Amount::from_sat(35_000_000),
+			)
+			.await;
+			node_a.sync_wallets().unwrap();
+		});
+
+		let node_a = Arc::clone(&node_a);
+		let node_b = Arc::clone(&node_b);
+		let bitcoind_client = &bitcoind.client;
+		let electrsd_ref = &electrsd;
+
+		group.bench_function(store_config.name, |b| {
+			b.to_async(&runtime).iter_custom(|iter| {
+				let node_a = Arc::clone(&node_a);
+				let node_b = Arc::clone(&node_b);
+
+				async move {
+					let mut total = Duration::ZERO;
+					for _ in 0..iter {
+						total += open_channel(
+							Arc::clone(&node_a),
+							Arc::clone(&node_b),
+							bitcoind_client,
+							electrsd_ref,
+						)
+						.await;
+					}
+					total
+				}
+			});
+		});
+	}
 }
 
 /// Returns whether the benchmark identified by `group/name` matches the CLI filters.
@@ -255,6 +323,38 @@ async fn wait_for_forwarding_path(nodes: &[Arc<Node>]) {
 	}
 
 	panic!("Timed out waiting for forwarding path readiness");
+}
+
+async fn open_channel(
+	node_a: Arc<Node>, node_b: Arc<Node>, bitcoind: &BitcoindClient, electrsd: &electrsd::ElectrsD,
+) -> Duration {
+	let start = Instant::now();
+
+	node_a
+		.open_channel(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			100_000,
+			None,
+			None,
+		)
+		.unwrap();
+
+	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
+	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
+	let duration = start.elapsed();
+
+	assert_eq!(funding_txo_a, funding_txo_b);
+	common::wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
+
+	generate_blocks_and_wait(bitcoind, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	expect_channel_ready_event!(node_a, node_b.node_id());
+
+	duration
 }
 
 async fn wait_for_payment_success(node: &Node, expected_payment_id: PaymentId) {
