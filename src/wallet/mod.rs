@@ -161,10 +161,12 @@ impl Wallet {
 				})?;
 
 				let mut locked_persister = self.persister.lock().expect("lock");
-				locked_wallet.persist(&mut locked_persister).map_err(|e| {
-					log_error!(self.logger, "Failed to persist wallet: {}", e);
-					Error::PersistenceFailed
-				})?;
+				self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(
+					|e| {
+						log_error!(self.logger, "Failed to persist wallet: {}", e);
+						Error::PersistenceFailed
+					},
+				)?;
 
 				Ok(())
 			},
@@ -214,7 +216,7 @@ impl Wallet {
 		})?;
 
 		let mut locked_persister = self.persister.lock().expect("lock");
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
@@ -474,7 +476,7 @@ impl Wallet {
 		}
 
 		let mut locked_persister = self.persister.lock().expect("lock");
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
@@ -492,7 +494,7 @@ impl Wallet {
 		let mut locked_persister = self.persister.lock().expect("lock");
 
 		let address_info = locked_wallet.reveal_next_address(KeychainKind::External);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
@@ -504,7 +506,7 @@ impl Wallet {
 		let mut locked_persister = self.persister.lock().expect("lock");
 
 		let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
@@ -516,7 +518,7 @@ impl Wallet {
 		let mut locked_persister = self.persister.lock().expect("lock");
 
 		locked_wallet.cancel_tx(tx);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
@@ -854,10 +856,12 @@ impl Wallet {
 			}
 
 			let mut locked_persister = self.persister.lock().expect("lock");
-			locked_wallet.persist(&mut locked_persister).map_err(|e| {
-				log_error!(self.logger, "Failed to persist wallet: {}", e);
-				Error::PersistenceFailed
-			})?;
+			self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(
+				|e| {
+					log_error!(self.logger, "Failed to persist wallet: {}", e);
+					Error::PersistenceFailed
+				},
+			)?;
 
 			psbt.extract_tx().map_err(|e| {
 				log_error!(self.logger, "Failed to extract transaction: {}", e);
@@ -972,10 +976,12 @@ impl Wallet {
 			.find(|txout| must_pay_to.iter().all(|output| output != txout));
 
 		if change_output.is_some() {
-			locked_wallet.persist(&mut locked_persister).map_err(|e| {
-				log_error!(self.logger, "Failed to persist wallet: {}", e);
-				()
-			})?;
+			self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(
+				|e| {
+					log_error!(self.logger, "Failed to persist wallet: {}", e);
+					()
+				},
+			)?;
 		}
 
 		Ok(CoinSelection { confirmed_utxos, change_output })
@@ -1080,7 +1086,7 @@ impl Wallet {
 		let mut locked_persister = self.persister.lock().expect("lock");
 
 		let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			()
 		})?;
@@ -1399,7 +1405,7 @@ impl Wallet {
 		}
 
 		let mut locked_persister = self.persister.lock().expect("lock");
-		locked_wallet.persist(&mut locked_persister).map_err(|e| {
+		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet after fee bump of {}: {}", txid, e);
 			Error::PersistenceFailed
 		})?;
@@ -1501,7 +1507,7 @@ impl Listen for Wallet {
 		};
 
 		let mut locked_persister = self.persister.lock().expect("lock");
-		match locked_wallet.persist(&mut locked_persister) {
+		match self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)) {
 			Ok(_) => (),
 			Err(e) => {
 				log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
