@@ -50,7 +50,7 @@ use ldk_node::{
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-use lightning::util::persist::{KVStore, KVStoreSync};
+use lightning::util::persist::KVStore;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_persister::fs_store::v1::FilesystemStore;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -1700,32 +1700,6 @@ impl KVStore for TestSyncStore {
 	}
 }
 
-impl KVStoreSync for TestSyncStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> lightning::io::Result<Vec<u8>> {
-		self.inner.read_internal(primary_namespace, secondary_namespace, key)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> lightning::io::Result<()> {
-		self.inner.write_internal(primary_namespace, secondary_namespace, key, buf)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> lightning::io::Result<()> {
-		self.inner.remove_internal(primary_namespace, secondary_namespace, key, lazy)
-	}
-
-	fn list(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> lightning::io::Result<Vec<String>> {
-		self.inner.list_internal(primary_namespace, secondary_namespace)
-	}
-}
-
 struct TestSyncStoreInner {
 	serializer: tokio::sync::RwLock<()>,
 	test_store: InMemoryStore,
@@ -1749,36 +1723,6 @@ impl TestSyncStoreInner {
 		.unwrap();
 		let test_store = InMemoryStore::new();
 		Self { serializer, fs_store, sqlite_store, test_store }
-	}
-
-	fn do_list(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> lightning::io::Result<Vec<String>> {
-		let fs_res = KVStoreSync::list(&self.fs_store, primary_namespace, secondary_namespace);
-		let sqlite_res =
-			KVStoreSync::list(&self.sqlite_store, primary_namespace, secondary_namespace);
-		let test_res = KVStoreSync::list(&self.test_store, primary_namespace, secondary_namespace);
-
-		match fs_res {
-			Ok(mut list) => {
-				list.sort();
-
-				let mut sqlite_list = sqlite_res.unwrap();
-				sqlite_list.sort();
-				assert_eq!(list, sqlite_list);
-
-				let mut test_list = test_res.unwrap();
-				test_list.sort();
-				assert_eq!(list, test_list);
-
-				Ok(list)
-			},
-			Err(e) => {
-				assert!(sqlite_res.is_err());
-				assert!(test_res.is_err());
-				Err(e)
-			},
-		}
 	}
 
 	async fn do_list_async(
@@ -1928,124 +1872,5 @@ impl TestSyncStoreInner {
 				Err(e)
 			},
 		}
-	}
-
-	fn read_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> lightning::io::Result<Vec<u8>> {
-		let _guard = self.serializer.blocking_read();
-
-		let fs_res = KVStoreSync::read(&self.fs_store, primary_namespace, secondary_namespace, key);
-		let sqlite_res =
-			KVStoreSync::read(&self.sqlite_store, primary_namespace, secondary_namespace, key);
-		let test_res =
-			KVStoreSync::read(&self.test_store, primary_namespace, secondary_namespace, key);
-
-		match fs_res {
-			Ok(read) => {
-				assert_eq!(read, sqlite_res.unwrap());
-				assert_eq!(read, test_res.unwrap());
-				Ok(read)
-			},
-			Err(e) => {
-				assert!(sqlite_res.is_err());
-				assert_eq!(e.kind(), unsafe { sqlite_res.unwrap_err_unchecked().kind() });
-				assert!(test_res.is_err());
-				assert_eq!(e.kind(), unsafe { test_res.unwrap_err_unchecked().kind() });
-				Err(e)
-			},
-		}
-	}
-
-	fn write_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> lightning::io::Result<()> {
-		let _guard = self.serializer.blocking_write();
-		let fs_res = KVStoreSync::write(
-			&self.fs_store,
-			primary_namespace,
-			secondary_namespace,
-			key,
-			buf.clone(),
-		);
-		let sqlite_res = KVStoreSync::write(
-			&self.sqlite_store,
-			primary_namespace,
-			secondary_namespace,
-			key,
-			buf.clone(),
-		);
-		let test_res = KVStoreSync::write(
-			&self.test_store,
-			primary_namespace,
-			secondary_namespace,
-			key,
-			buf.clone(),
-		);
-
-		assert!(self
-			.do_list(primary_namespace, secondary_namespace)
-			.unwrap()
-			.contains(&key.to_string()));
-
-		match fs_res {
-			Ok(()) => {
-				assert!(sqlite_res.is_ok());
-				assert!(test_res.is_ok());
-				Ok(())
-			},
-			Err(e) => {
-				assert!(sqlite_res.is_err());
-				assert!(test_res.is_err());
-				Err(e)
-			},
-		}
-	}
-
-	fn remove_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> lightning::io::Result<()> {
-		let _guard = self.serializer.blocking_write();
-		let fs_res =
-			KVStoreSync::remove(&self.fs_store, primary_namespace, secondary_namespace, key, lazy);
-		let sqlite_res = KVStoreSync::remove(
-			&self.sqlite_store,
-			primary_namespace,
-			secondary_namespace,
-			key,
-			lazy,
-		);
-		let test_res = KVStoreSync::remove(
-			&self.test_store,
-			primary_namespace,
-			secondary_namespace,
-			key,
-			lazy,
-		);
-
-		assert!(!self
-			.do_list(primary_namespace, secondary_namespace)
-			.unwrap()
-			.contains(&key.to_string()));
-
-		match fs_res {
-			Ok(()) => {
-				assert!(sqlite_res.is_ok());
-				assert!(test_res.is_ok());
-				Ok(())
-			},
-			Err(e) => {
-				assert!(sqlite_res.is_err());
-				assert!(test_res.is_err());
-				Err(e)
-			},
-		}
-	}
-
-	fn list_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> lightning::io::Result<Vec<String>> {
-		let _guard = self.serializer.blocking_read();
-		self.do_list(primary_namespace, secondary_namespace)
 	}
 }

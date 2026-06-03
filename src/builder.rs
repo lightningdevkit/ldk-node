@@ -81,7 +81,7 @@ use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
 	GossipSync, Graph, HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
-	PeerManager, PendingPaymentStore, SyncAndAsyncKVStore,
+	PeerManager, PendingPaymentStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -176,17 +176,17 @@ pub enum BuildError {
 	RuntimeSetupFailed,
 	/// We failed to read data from the [`KVStore`].
 	///
-	/// [`KVStore`]: lightning::util::persist::KVStoreSync
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	ReadFailed,
 	/// We failed to write data to the [`KVStore`].
 	///
-	/// [`KVStore`]: lightning::util::persist::KVStoreSync
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	WriteFailed,
 	/// We failed to access the given `storage_dir_path`.
 	StoragePathAccessFailed,
 	/// We failed to setup our [`KVStore`].
 	///
-	/// [`KVStore`]: lightning::util::persist::KVStoreSync
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	KVStoreSetupFailed,
 	/// We failed to setup the onchain wallet.
 	WalletSetupFailed,
@@ -826,7 +826,7 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
@@ -845,14 +845,14 @@ impl NodeBuilder {
 		}
 	}
 
-	fn build_with_store_and_logger<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	fn build_with_store_and_logger<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
 		let runtime = self.setup_runtime(&logger)?;
 		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
 	}
 
-	fn build_with_store_runtime_and_logger<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	fn build_with_store_runtime_and_logger<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, runtime: Arc<Runtime>, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
 		let seed_bytes = node_entropy.to_seed_bytes();
@@ -1346,7 +1346,7 @@ impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
 	// this so its not needed.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)

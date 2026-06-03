@@ -156,7 +156,7 @@ use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
-use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::KVStore;
 use lightning::util::wallet_utils::{Input, Wallet as LdkWallet};
 use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
@@ -180,7 +180,7 @@ use types::{
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 pub use vss_client;
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
@@ -2062,20 +2062,21 @@ impl Node {
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
 	/// a limited view of the network.
 	pub fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
-		KVStoreSync::read(
-			&*self.kv_store,
-			lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-			lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-			lightning::util::persist::SCORER_PERSISTENCE_KEY,
-		)
-		.map_err(|e| {
-			log_error!(
-				self.logger,
-				"Failed to access store while exporting pathfinding scores: {}",
-				e
-			);
-			Error::PersistenceFailed
-		})
+		self.runtime
+			.block_on(KVStore::read(
+				&*self.kv_store,
+				lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				lightning::util::persist::SCORER_PERSISTENCE_KEY,
+			))
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to access store while exporting pathfinding scores: {}",
+					e
+				);
+				Error::PersistenceFailed
+			})
 	}
 
 	/// Return the features used in node announcement.

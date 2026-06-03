@@ -11,9 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use lightning::io;
-use lightning::util::persist::{
-	KVStore, KVStoreSync, PageToken, PaginatedKVStore, PaginatedKVStoreSync, PaginatedListResponse,
-};
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 
 const IN_MEMORY_PAGE_SIZE: usize = 50;
 
@@ -127,30 +125,6 @@ impl KVStore for InMemoryStore {
 	}
 }
 
-impl KVStoreSync for InMemoryStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		self.read_internal(primary_namespace, secondary_namespace, key)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		self.write_internal(primary_namespace, secondary_namespace, key, buf)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> io::Result<()> {
-		self.remove_internal(primary_namespace, secondary_namespace, key, lazy)
-	}
-
-	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		self.list_internal(primary_namespace, secondary_namespace)
-	}
-}
-
 impl InMemoryStore {
 	fn list_paginated_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
@@ -201,14 +175,6 @@ impl InMemoryStore {
 		let page: Vec<String> = page.into_iter().map(|(k, _)| k.clone()).collect();
 
 		Ok(PaginatedListResponse { keys: page, next_page_token })
-	}
-}
-
-impl PaginatedKVStoreSync for InMemoryStore {
-	fn list_paginated(
-		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
-	) -> io::Result<PaginatedListResponse> {
-		self.list_paginated_internal(primary_namespace, secondary_namespace, page_token)
 	}
 }
 

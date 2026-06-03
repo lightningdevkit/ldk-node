@@ -5,6 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::future::Future;
 use std::panic::RefUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ use lightning::ln::functional_test_utils::{
 	TestChanMonCfg,
 };
 use lightning::util::persist::{
-	KVStore, KVStoreSync, MonitorName, ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+	KVStore, MonitorName, ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
 	ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
 	CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
 	KVSTORE_NAMESPACE_KEY_MAX_LEN,
@@ -168,7 +169,32 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
-pub(crate) fn do_read_write_remove_list_persist<K: KVStoreSync + RefUnwindSafe>(kv_store: &K) {
+async fn catch_future_unwind<F: Future>(future: F) -> std::thread::Result<F::Output> {
+	let mut future = std::pin::pin!(future);
+	std::future::poll_fn(|cx| {
+		match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+			Ok(std::task::Poll::Ready(output)) => std::task::Poll::Ready(Ok(output)),
+			Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+			Err(panic) => std::task::Poll::Ready(Err(panic)),
+		}
+	})
+	.await
+}
+
+async fn assert_invalid_write_fails<K: KVStore + RefUnwindSafe>(
+	kv_store: &K, primary_namespace: &str, secondary_namespace: &str, key: &str, data: Vec<u8>,
+) {
+	let res = std::panic::catch_unwind(|| {
+		KVStore::write(kv_store, primary_namespace, secondary_namespace, key, data)
+	});
+	if let Ok(fut) = res {
+		if let Ok(write_res) = catch_future_unwind(fut).await {
+			assert!(write_res.is_err());
+		}
+	}
+}
+
+pub(crate) async fn do_read_write_remove_list_persist<K: KVStore + RefUnwindSafe>(kv_store: &K) {
 	let data = vec![42u8; 32];
 
 	let primary_namespace = "testspace";
@@ -176,45 +202,46 @@ pub(crate) fn do_read_write_remove_list_persist<K: KVStoreSync + RefUnwindSafe>(
 	let key = "testkey";
 
 	// Test the basic KVStore operations.
-	kv_store.write(primary_namespace, secondary_namespace, key, data.clone()).unwrap();
+	KVStore::write(kv_store, primary_namespace, secondary_namespace, key, data.clone())
+		.await
+		.unwrap();
 
 	// Test empty primary/secondary namespaces are allowed, but not empty primary namespace and non-empty
 	// secondary primary_namespace, and not empty key.
-	kv_store.write("", "", key, data.clone()).unwrap();
-	let res =
-		std::panic::catch_unwind(|| kv_store.write("", secondary_namespace, key, data.clone()));
-	assert!(res.is_err());
-	let res = std::panic::catch_unwind(|| {
-		kv_store.write(primary_namespace, secondary_namespace, "", data.clone())
-	});
-	assert!(res.is_err());
+	KVStore::write(kv_store, "", "", key, data.clone()).await.unwrap();
+	assert_invalid_write_fails(kv_store, "", secondary_namespace, key, data.clone()).await;
+	assert_invalid_write_fails(kv_store, primary_namespace, secondary_namespace, "", data.clone())
+		.await;
 
-	let listed_keys = kv_store.list(primary_namespace, secondary_namespace).unwrap();
+	let listed_keys =
+		KVStore::list(kv_store, primary_namespace, secondary_namespace).await.unwrap();
 	assert_eq!(listed_keys.len(), 1);
 	assert_eq!(listed_keys[0], key);
 
-	let read_data = kv_store.read(primary_namespace, secondary_namespace, key).unwrap();
+	let read_data =
+		KVStore::read(kv_store, primary_namespace, secondary_namespace, key).await.unwrap();
 	assert_eq!(data, &*read_data);
 
-	kv_store.remove(primary_namespace, secondary_namespace, key, false).unwrap();
+	KVStore::remove(kv_store, primary_namespace, secondary_namespace, key, false).await.unwrap();
 
-	let listed_keys = kv_store.list(primary_namespace, secondary_namespace).unwrap();
+	let listed_keys =
+		KVStore::list(kv_store, primary_namespace, secondary_namespace).await.unwrap();
 	assert_eq!(listed_keys.len(), 0);
 
 	// Ensure we have no issue operating with primary_namespace/secondary_namespace/key being KVSTORE_NAMESPACE_KEY_MAX_LEN
 	let max_chars: String = std::iter::repeat('A').take(KVSTORE_NAMESPACE_KEY_MAX_LEN).collect();
-	kv_store.write(&max_chars, &max_chars, &max_chars, data.clone()).unwrap();
+	KVStore::write(kv_store, &max_chars, &max_chars, &max_chars, data.clone()).await.unwrap();
 
-	let listed_keys = kv_store.list(&max_chars, &max_chars).unwrap();
+	let listed_keys = KVStore::list(kv_store, &max_chars, &max_chars).await.unwrap();
 	assert_eq!(listed_keys.len(), 1);
 	assert_eq!(listed_keys[0], max_chars);
 
-	let read_data = kv_store.read(&max_chars, &max_chars, &max_chars).unwrap();
+	let read_data = KVStore::read(kv_store, &max_chars, &max_chars, &max_chars).await.unwrap();
 	assert_eq!(data, &*read_data);
 
-	kv_store.remove(&max_chars, &max_chars, &max_chars, false).unwrap();
+	KVStore::remove(kv_store, &max_chars, &max_chars, &max_chars, false).await.unwrap();
 
-	let listed_keys = kv_store.list(&max_chars, &max_chars).unwrap();
+	let listed_keys = KVStore::list(kv_store, &max_chars, &max_chars).await.unwrap();
 	assert_eq!(listed_keys.len(), 0);
 }
 
