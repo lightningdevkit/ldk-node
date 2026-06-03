@@ -1859,8 +1859,16 @@ impl Node {
 					})?;
 			}
 
-			// Check if this was the last open channel, if so, forget the peer.
-			if open_channels.len() == 1 {
+			// If this was the last open channel and we're closing cooperatively, forget the peer
+			// since we have no further reason to reconnect.
+
+			// For force-closes we intentionally keep the peer in the store so the background reconnection
+			// task keeps firing and can drive the channel_reestablish recovery flow.
+			// This is especially important against LND peers, which don't always handle force-closure error messages correctly.
+
+			// Note that this means a force-closed peer is retained until the user explicitly calls Node::disconnect.
+
+			if open_channels.len() == 1 && !force {
 				self.peer_store.remove_peer(&counterparty_node_id)?;
 			}
 		}
