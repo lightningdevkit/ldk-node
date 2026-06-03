@@ -1176,13 +1176,13 @@ impl CbfChainSource {
 			tokio::task::spawn_blocking(move || {
 				let electrum_config = electrum_client::ConfigBuilder::new()
 					.retry(3)
-					.timeout(Some(per_request_timeout))
+					.timeout(Some(Duration::from_secs(per_request_timeout.into())))
 					.build();
 				let client = electrum_client::Client::from_config(&server_url, electrum_config)
 					.map_err(|_| Error::FeerateEstimationUpdateFailed)?;
 				let mut batch = electrum_client::Batch::default();
 				for target in confirmation_targets {
-					batch.estimate_fee(get_num_block_defaults_for_target(target));
+					batch.estimate_fee(get_num_block_defaults_for_target(target), None);
 				}
 				client.batch_call(&batch).map_err(|_| Error::FeerateEstimationUpdateFailed)
 			}),
