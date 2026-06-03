@@ -473,11 +473,22 @@ impl Node {
 								.map(|peer| peer.counterparty_node_id)
 								.collect::<Vec<_>>();
 
-							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
-								let _ = connect_cm.do_connect_peer(
+							for peer_info in connect_peer_store.list_peers().iter() {
+								if pm_peers.contains(&peer_info.node_id) {
+									// A connected peer (e.g., via an inbound connection) is
+									// proven reachable: reset any backoff so a future
+									// disconnect is retried promptly again.
+									connect_cm.clear_reconnect_state(&peer_info.node_id);
+									continue;
+								}
+								if !connect_cm.is_reconnect_due(&peer_info.node_id) {
+									continue;
+								}
+								let res = connect_cm.do_connect_peer(
 									peer_info.node_id,
 									peer_info.address.clone(),
 									).await;
+								connect_cm.record_reconnect_attempt(&peer_info.node_id, &res);
 							}
 						}
 				}
@@ -1144,6 +1155,7 @@ impl Node {
 				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
 			},
 		}
+		self.connection_manager.clear_reconnect_state(&counterparty_node_id);
 
 		self.peer_manager.disconnect_by_node_id(counterparty_node_id);
 		Ok(())
@@ -1862,6 +1874,7 @@ impl Node {
 			// Check if this was the last open channel, if so, forget the peer.
 			if open_channels.len() == 1 {
 				self.peer_store.remove_peer(&counterparty_node_id)?;
+				self.connection_manager.clear_reconnect_state(&counterparty_node_id);
 			}
 		}
 
