@@ -1570,13 +1570,19 @@ async fn test_node_announcement_propagation() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
-	// Wait until node_b broadcasts a node announcement
-	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+	let has_node_announcement = |node: &ldk_node::Node, node_id: bitcoin::secp256k1::PublicKey| {
+		node.network_graph()
+			.node(&NodeId::from_pubkey(&node_id))
+			.map_or(false, |info| info.announcement_info.is_some())
+	};
+
+	while node_a.status().latest_node_announcement_broadcast_timestamp.is_none()
+		|| node_b.status().latest_node_announcement_broadcast_timestamp.is_none()
+		|| !has_node_announcement(&node_b, node_a.node_id())
+		|| !has_node_announcement(&node_a, node_b.node_id())
+	{
 		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 	}
-
-	// Sleep to make sure the node announcement propagates
-	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
 	// Get node info from the other node's perspective
 	let node_a_info = node_b.network_graph().node(&NodeId::from_pubkey(&node_a.node_id())).unwrap();
