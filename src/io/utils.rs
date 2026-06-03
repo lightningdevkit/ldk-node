@@ -26,12 +26,12 @@ use lightning::routing::scoring::{
 	ChannelLiquidities, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
 };
 use lightning::util::persist::{
-	migrate_kv_store_data, KVStore, KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
-	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_KEY,
-	OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE, OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE,
-	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-	SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+	migrate_kv_store_data_async, KVStore, KVSTORE_NAMESPACE_KEY_ALPHABET,
+	KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+	OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
+	OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+	SCORER_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning_persister::fs_store::v1::FilesystemStore;
@@ -632,7 +632,7 @@ pub(crate) async fn read_bdk_wallet_change_set(
 /// If the directory contains v1 data (files at the top level), the data is migrated to v2 format
 /// in a temporary directory, the original is renamed to `fs_store_v1_backup`, and the migrated
 /// directory is moved into place.
-pub(crate) fn open_or_migrate_fs_store(
+pub(crate) async fn open_or_migrate_fs_store(
 	storage_dir_path: PathBuf,
 ) -> Result<FilesystemStoreV2, BuildError> {
 	let parent_dir = storage_dir_path.parent().ok_or(BuildError::StoragePathAccessFailed)?;
@@ -647,14 +647,15 @@ pub(crate) fn open_or_migrate_fs_store(
 		Ok(store) => Ok(store),
 		Err(FilesystemStoreV2Error::V1DataDetected(_)) => {
 			// The directory contains v1 data, migrate to v2.
-			let mut v1_store = FilesystemStore::new(storage_dir_path.clone());
+			let v1_store = FilesystemStore::new(storage_dir_path.clone());
 
 			let v2_dir = fs_store_sibling_path(&storage_dir_path, "fs_store_v2_migrating");
 			fs::create_dir_all(v2_dir.clone()).map_err(|_| BuildError::StoragePathAccessFailed)?;
-			let mut v2_store = FilesystemStoreV2::new(v2_dir.clone())
+			let v2_store = FilesystemStoreV2::new(v2_dir.clone())
 				.map_err(|_| BuildError::KVStoreSetupFailed)?;
 
-			migrate_kv_store_data(&mut v1_store, &mut v2_store)
+			migrate_kv_store_data_async(&v1_store, &v2_store)
+				.await
 				.map_err(|_| BuildError::KVStoreSetupFailed)?;
 
 			// Swap directories: rename v1 out of the way, move v2 into place.
@@ -739,15 +740,15 @@ mod tests {
 		assert_eq!(expected_seed_bytes, read_seed_bytes);
 	}
 
-	#[test]
-	fn fs_store_migration_recovers_before_v1_backup_rename() {
+	#[tokio::test]
+	async fn fs_store_migration_recovers_before_v1_backup_rename() {
 		let fs_store_path = fs_store_path();
 		let mut v1_store = write_v1_test_data(&fs_store_path);
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
 		let mut v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
 		migrate_kv_store_data(&mut v1_store, &mut v2_store).unwrap();
 
-		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
 			KVStoreSync::read(
 				&migrated_store,
@@ -762,8 +763,8 @@ mod tests {
 		assert!(!v2_migrating_path.exists());
 	}
 
-	#[test]
-	fn fs_store_migration_recovers_after_v1_backup_rename() {
+	#[tokio::test]
+	async fn fs_store_migration_recovers_after_v1_backup_rename() {
 		let fs_store_path = fs_store_path();
 		let mut v1_store = write_v1_test_data(&fs_store_path);
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
@@ -773,7 +774,7 @@ mod tests {
 		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
 		fs::rename(&fs_store_path, backup_path).unwrap();
 
-		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
 			KVStoreSync::read(
 				&migrated_store,
@@ -788,8 +789,8 @@ mod tests {
 		assert!(!v2_migrating_path.exists());
 	}
 
-	#[test]
-	fn fs_store_migration_recovers_after_v2_rename() {
+	#[tokio::test]
+	async fn fs_store_migration_recovers_after_v2_rename() {
 		let fs_store_path = fs_store_path();
 		let mut v1_store = write_v1_test_data(&fs_store_path);
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
@@ -800,7 +801,7 @@ mod tests {
 		fs::rename(&fs_store_path, &backup_path).unwrap();
 		fs::rename(&v2_migrating_path, &fs_store_path).unwrap();
 
-		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
 			KVStoreSync::read(
 				&migrated_store,
@@ -816,15 +817,15 @@ mod tests {
 		assert!(!v2_migrating_path.exists());
 	}
 
-	#[test]
-	fn fs_store_migration_recovers_backup_without_migrating_dir() {
+	#[tokio::test]
+	async fn fs_store_migration_recovers_backup_without_migrating_dir() {
 		let fs_store_path = fs_store_path();
 		write_v1_test_data(&fs_store_path);
 
 		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
 		fs::rename(&fs_store_path, backup_path).unwrap();
 
-		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
 			KVStoreSync::read(
 				&migrated_store,
@@ -839,8 +840,8 @@ mod tests {
 		assert!(!sibling_path(&fs_store_path, "fs_store_v1_backup").exists());
 	}
 
-	#[test]
-	fn fs_store_migration_recovers_unexpected_migrating_dir_without_backup() {
+	#[tokio::test]
+	async fn fs_store_migration_recovers_unexpected_migrating_dir_without_backup() {
 		let fs_store_path = fs_store_path();
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
 		let v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
@@ -853,7 +854,7 @@ mod tests {
 		)
 		.unwrap();
 
-		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
 			KVStoreSync::read(
 				&migrated_store,

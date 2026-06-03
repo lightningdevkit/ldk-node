@@ -697,11 +697,12 @@ impl NodeBuilder {
 	/// [`FilesystemStoreV2`]: lightning_persister::fs_store::v2::FilesystemStoreV2
 	pub fn build_with_fs_store(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let runtime = self.setup_runtime(&logger)?;
 		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
 		storage_dir_path.push("fs_store");
 
-		let kv_store = open_or_migrate_fs_store(storage_dir_path)?;
-		self.build_with_store_and_logger(node_entropy, kv_store, logger)
+		let kv_store = runtime.block_on(open_or_migrate_fs_store(storage_dir_path))?;
+		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
