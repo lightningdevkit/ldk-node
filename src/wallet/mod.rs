@@ -410,6 +410,18 @@ impl Wallet {
 						continue;
 					};
 
+					// Funding records (channel opens and splices) track their active candidate and
+					// status through `classify_*` and the Lightning lifecycle handlers. A replaced
+					// candidate is expected during splice RBF and must not reset the record or drop
+					// its funding details, so leave such records untouched here.
+					if self
+						.pending_payment_store
+						.get(&payment_id)
+						.map_or(false, |p| p.funding_details.is_some())
+					{
+						continue;
+					}
+
 					// Collect all conflict txids
 					let mut conflict_txids: Vec<Txid> =
 						conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
