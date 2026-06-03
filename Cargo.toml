@@ -192,6 +192,10 @@ harness = false
 required-features = ["chain-bitcoind"]
 
 [[bench]]
+name = "operations"
+harness = false
+
+[[bench]]
 name = "database"
 harness = false
 required-features = ["bench"]
