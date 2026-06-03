@@ -129,6 +129,7 @@ pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
+pub use chain::FeeSourceConfig;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
 	LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
@@ -275,10 +276,12 @@ impl Node {
 		);
 
 		// Start up any runtime-dependant chain sources (e.g. Electrum)
-		self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
-			log_error!(self.logger, "Failed to start chain syncing: {}", e);
-			e
-		})?;
+		self.chain_source.start(Arc::clone(&self.runtime), Arc::clone(&self.wallet)).map_err(
+			|e| {
+				log_error!(self.logger, "Failed to start chain syncing: {}", e);
+				e
+			},
+		)?;
 
 		// Block to ensure we update our fee rate cache once on startup
 		let chain_source = Arc::clone(&self.chain_source);
@@ -732,12 +735,14 @@ impl Node {
 		self.peer_manager.disconnect_all_peers();
 		log_debug!(self.logger, "Disconnected all network peers.");
 
-		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
-		self.runtime.wait_on_background_tasks();
-
-		// Stop any runtime-dependant chain sources.
+		// Stop any runtime-dependant chain sources before waiting on non-cancellable
+		// background tasks. Some chain sources own background tasks that only exit
+		// after their client/requester is shut down.
 		self.chain_source.stop();
 		log_debug!(self.logger, "Stopped chain sources.");
+
+		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
+		self.runtime.wait_on_background_tasks();
 
 		// Stop the background processor.
 		self.background_processor_stop_sender

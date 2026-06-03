@@ -10,6 +10,7 @@ use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use bdk_chain::indexer::keychain_txout::KeychainTxOutIndex;
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
@@ -119,6 +120,18 @@ impl Wallet {
 
 	pub(crate) fn get_incremental_sync_request(&self) -> SyncRequest<(KeychainKind, u32)> {
 		self.inner.lock().expect("lock").start_sync_with_revealed_spks().build()
+	}
+
+	/// Clone the wallet's keychain SPK index for use as the indexer of a sync-local
+	/// `IndexedTxGraph`. The clone preserves descriptors, currently-revealed range,
+	/// and the configured lookahead, so the chain source can compute the SPK set to
+	/// scan and the resulting `last_used_indices` independently of the live wallet.
+	pub(crate) fn spk_index_clone(&self) -> KeychainTxOutIndex<KeychainKind> {
+		self.inner.lock().expect("lock").spk_index().clone()
+	}
+
+	pub(crate) fn latest_checkpoint(&self) -> bdk_chain::CheckPoint {
+		self.inner.lock().expect("lock").latest_checkpoint()
 	}
 
 	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {
@@ -1161,9 +1174,15 @@ impl Wallet {
 
 		let kind = PaymentKind::Onchain { txid, status: confirmation_status };
 
-		let fee = locked_wallet.calculate_fee(tx).unwrap_or(Amount::ZERO);
+		let fee = match locked_wallet.calculate_fee(tx) {
+			Ok(fee) => Some(fee),
+			Err(e) => {
+				log_error!(self.logger, "Failed to calculate fee for tx {}: {:?}", txid, e);
+				None
+			},
+		};
 		let (sent, received) = locked_wallet.sent_and_received(tx);
-		let fee_sat = fee.to_sat();
+		let fee_sat = fee.map_or(0, |f| f.to_sat());
 
 		let (direction, amount_msat) = if sent > received {
 			(
@@ -1186,7 +1205,7 @@ impl Wallet {
 			payment_id,
 			kind,
 			amount_msat,
-			Some(fee_sat * 1000),
+			fee.map(|f| f.to_sat() * 1000),
 			direction,
 			payment_status,
 		)
