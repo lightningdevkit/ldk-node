@@ -38,7 +38,7 @@ jobs:
 
       - name: Build and Deploy VSS Server
         run: |
-          cd vss-server/rust
+          cd vss-server
           RUSTFLAGS=--cfg=noop_authorizer cargo run --no-default-features server/vss-server-config.toml&
       - name: Run VSS Integration tests
         run: |
