@@ -42,6 +42,8 @@ use ldk_node::config::{
 	HumanReadableNamesConfig,
 };
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
+#[cfg(feature = "postgres")]
+use ldk_node::io::postgres_store::POSTGRES_TEST_URL_ENV_VAR;
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus, TransactionType};
 use ldk_node::probing::ProbingConfig;
@@ -2052,7 +2054,7 @@ impl TestSyncStoreInner {
 /// `TEST_POSTGRES_URL` environment variable.
 #[cfg(feature = "postgres")]
 pub(crate) fn test_connection_string() -> String {
-	std::env::var("TEST_POSTGRES_URL")
+	std::env::var(POSTGRES_TEST_URL_ENV_VAR)
 		.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string())
 }
 
