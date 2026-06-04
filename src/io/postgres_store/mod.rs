@@ -33,6 +33,9 @@ pub const DEFAULT_DB_NAME: &str = "ldk_db";
 /// The default table in which we store all data.
 pub const DEFAULT_KV_TABLE_NAME: &str = "ldk_data";
 
+/// Environment variable used by PostgreSQL tests and benchmarks.
+pub const POSTGRES_TEST_URL_ENV_VAR: &str = "TEST_POSTGRES_URL";
+
 // The current schema version for the PostgreSQL store.
 const SCHEMA_VERSION: u16 = 1;
 
@@ -858,7 +861,8 @@ mod tests {
 	use crate::io::test_utils::{do_read_write_remove_list_persist, do_test_store};
 
 	fn test_connection_string() -> String {
-		std::env::var("TEST_POSTGRES_URL")
+		dotenvy::dotenv().ok();
+		std::env::var(POSTGRES_TEST_URL_ENV_VAR)
 			.unwrap_or_else(|_| "postgres://postgres:postgres@localhost/ldk_node_tests".to_string())
 	}
 
