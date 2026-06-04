@@ -13,7 +13,7 @@ use std::fmt;
 use std::future::Future;
 #[cfg(test)]
 use std::panic::RefUnwindSafe;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -45,6 +45,7 @@ use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
 use crate::entropy::NodeEntropy;
 use crate::io::utils::check_namespace_key_validity;
 use crate::lnurl_auth::LNURL_AUTH_HARDENED_CHILD_INDEX;
+use crate::runtime::StoreRuntime;
 
 type CustomRetryPolicy = FilteredRetryPolicy<
 	JitteredRetryPolicy<
@@ -85,13 +86,8 @@ pub struct VssStore {
 	// Version counter to ensure that writes are applied in the correct order. It is assumed that read and list
 	// operations aren't sensitive to the order of execution.
 	next_version: AtomicU64,
-	// A VSS-internal runtime we use to avoid any deadlocks we could hit when waiting on a spawned
-	// blocking task to finish while the blocked thread had acquired the reactor. In particular,
-	// this works around a previously-hit case where a concurrent call to
-	// `PeerManager::process_pending_events` -> `ChannelManager::get_and_clear_pending_msg_events`
-	// would deadlock when trying to acquire sync `Mutex` locks that are held by the thread
-	// currently being blocked waiting on the VSS operation to finish.
-	internal_runtime: Option<tokio::runtime::Runtime>,
+	// A VSS-internal runtime that drives VSS I/O independently from the node runtime.
+	internal_runtime: Option<Arc<StoreRuntime>>,
 }
 
 impl VssStore {
@@ -100,52 +96,46 @@ impl VssStore {
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> io::Result<Self> {
 		let next_version = AtomicU64::new(1);
-		let internal_runtime = tokio::runtime::Builder::new_multi_thread()
-			.enable_all()
-			.thread_name_fn(|| {
-				static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-				let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-				format!("ldk-node-vss-runtime-{}", id)
-			})
-			.worker_threads(INTERNAL_RUNTIME_WORKERS)
-			.max_blocking_threads(INTERNAL_RUNTIME_WORKERS)
-			.build()
-			.map_err(|e| {
-				io::Error::new(io::ErrorKind::Other, format!("Failed to build VSS runtime: {}", e))
-			})?;
+		let internal_runtime =
+			Arc::new(StoreRuntime::new("ldk-node-vss-runtime", INTERNAL_RUNTIME_WORKERS, "VSS")?);
 
 		let (data_encryption_key, obfuscation_master_key) =
 			derive_data_encryption_and_obfuscation_keys(&vss_seed);
 		let key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
+		let setup_key_obfuscator = KeyObfuscator::new(obfuscation_master_key);
 
 		let mut entropy_seed = [0u8; 32];
 		getrandom::fill(&mut entropy_seed).expect("Failed to generate random bytes");
 		let entropy_source = RandomBytes::new(entropy_seed);
+		let setup_entropy_source = RandomBytes::new(entropy_seed);
 
-		let sync_retry_policy = retry_policy();
-		let blocking_client = VssClient::new_with_headers(
+		let setup_retry_policy = retry_policy();
+		let setup_client = VssClient::new_with_headers(
 			base_url.clone(),
-			sync_retry_policy,
-			header_provider.clone(),
+			setup_retry_policy,
+			Arc::clone(&header_provider),
 		);
-
-		let runtime_handle = internal_runtime.handle();
-		let schema_version = tokio::task::block_in_place(|| {
-			runtime_handle.block_on(async {
-				determine_and_write_schema_version(
-					&blocking_client,
-					&store_id,
-					data_encryption_key,
-					&key_obfuscator,
-					&entropy_source,
-				)
-				.await
-			})
-		})?;
 
 		let async_retry_policy = retry_policy();
 		let async_client =
 			VssClient::new_with_headers(base_url, async_retry_policy, header_provider);
+
+		let setup_store_id = store_id.clone();
+		let runtime_handle = internal_runtime.handle().clone();
+		let schema_version = std::thread::spawn(move || {
+			runtime_handle.block_on(async {
+				determine_and_write_schema_version(
+					&setup_client,
+					&setup_store_id,
+					data_encryption_key,
+					&setup_key_obfuscator,
+					&setup_entropy_source,
+				)
+				.await
+			})
+		})
+		.join()
+		.map_err(|_| io::Error::new(io::ErrorKind::Other, "VSS schema setup task panicked"))??;
 
 		let inner = Arc::new(VssStoreInner::new(
 			schema_version,
@@ -157,6 +147,10 @@ impl VssStore {
 		));
 
 		Ok(Self { inner, next_version, internal_runtime: Some(internal_runtime) })
+	}
+
+	fn internal_runtime(&self) -> Arc<StoreRuntime> {
+		Arc::clone(self.internal_runtime.as_ref().expect("VSS runtime must be available"))
 	}
 	/// Returns a [`VssStoreBuilder`] allowing to build a [`VssStore`].
 	pub fn builder(
@@ -200,10 +194,16 @@ impl KVStore for VssStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
+		let runtime = self.internal_runtime();
 		async move {
-			inner
-				.read_internal(&inner.async_client, primary_namespace, secondary_namespace, key)
-				.await
+			let task = runtime.spawn(async move {
+				inner
+					.read_internal(&inner.async_client, primary_namespace, secondary_namespace, key)
+					.await
+			});
+			task.await.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("VSS runtime task failed: {}", e))
+			})?
 		}
 	}
 	fn write(
@@ -215,19 +215,25 @@ impl KVStore for VssStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
+		let runtime = self.internal_runtime();
 		async move {
-			inner
-				.write_internal(
-					&inner.async_client,
-					inner_lock_ref,
-					locking_key,
-					version,
-					primary_namespace,
-					secondary_namespace,
-					key,
-					buf,
-				)
-				.await
+			let task = runtime.spawn(async move {
+				inner
+					.write_internal(
+						&inner.async_client,
+						inner_lock_ref,
+						locking_key,
+						version,
+						primary_namespace,
+						secondary_namespace,
+						key,
+						buf,
+					)
+					.await
+			});
+			task.await.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("VSS runtime task failed: {}", e))
+			})?
 		}
 	}
 	fn remove(
@@ -239,6 +245,7 @@ impl KVStore for VssStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
+		let runtime = self.internal_runtime();
 		let fut = async move {
 			inner
 				.remove_internal(
@@ -254,10 +261,15 @@ impl KVStore for VssStore {
 		};
 		async move {
 			if lazy {
-				tokio::task::spawn(async move { fut.await });
+				runtime.spawn(async move {
+					let _ = fut.await;
+				});
 				Ok(())
 			} else {
-				fut.await
+				let task = runtime.spawn(fut);
+				task.await.map_err(|e| {
+					io::Error::new(io::ErrorKind::Other, format!("VSS runtime task failed: {}", e))
+				})?
 			}
 		}
 	}
@@ -267,16 +279,27 @@ impl KVStore for VssStore {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
+		let runtime = self.internal_runtime();
 		async move {
-			inner.list_internal(&inner.async_client, primary_namespace, secondary_namespace).await
+			let task = runtime.spawn(async move {
+				inner
+					.list_internal(&inner.async_client, primary_namespace, secondary_namespace)
+					.await
+			});
+			task.await.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("VSS runtime task failed: {}", e))
+			})?
 		}
 	}
 }
 
 impl Drop for VssStore {
 	fn drop(&mut self) {
-		let internal_runtime = self.internal_runtime.take();
-		tokio::task::block_in_place(move || drop(internal_runtime));
+		if let Some(runtime) = self.internal_runtime.take() {
+			if let Ok(runtime) = Arc::try_unwrap(runtime) {
+				runtime.shutdown_background();
+			}
+		}
 	}
 }
 
