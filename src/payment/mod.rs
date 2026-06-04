@@ -11,6 +11,7 @@ pub(crate) mod asynchronous;
 mod bolt11;
 mod bolt12;
 mod onchain;
+pub(crate) mod payjoin;
 pub(crate) mod pending_payment_store;
 mod spontaneous;
 pub(crate) mod store;
@@ -20,6 +21,7 @@ pub use bolt11::Bolt11Payment;
 pub(crate) use bolt11::PaymentMetadata;
 pub use bolt12::Bolt12Payment;
 pub use onchain::OnchainPayment;
+pub use payjoin::PayjoinPayment;
 pub use pending_payment_store::PendingPaymentDetails;
 pub use spontaneous::SpontaneousPayment;
 pub use store::{
