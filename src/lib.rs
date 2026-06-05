@@ -300,11 +300,19 @@ impl Node {
 
 		self.runtime.allow_cancellable_background_task_spawns();
 
-		// Start up any runtime-dependant chain sources (e.g. Electrum)
-		self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
-			log_error!(self.logger, "Failed to start chain syncing: {}", e);
-			e
-		})?;
+		// Start up any runtime-dependant chain sources (e.g. Electrum, CBF)
+		self.chain_source
+			.start(
+				Arc::clone(&self.runtime),
+				Arc::clone(&self.wallet),
+				Arc::clone(&self.channel_manager),
+				Arc::clone(&self.chain_monitor),
+				Arc::clone(&self.output_sweeper),
+			)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to start chain syncing: {}", e);
+				e
+			})?;
 
 		let manager_owns_any_0fc_channels =
 			self.channel_manager.list_channels().into_iter().any(|channel| {

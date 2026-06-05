@@ -36,7 +36,7 @@ use lightning::chain::chaininterface::{
 	INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
 };
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
-use lightning::chain::{BlockLocator, ClaimId, Listen};
+use lightning::chain::{BlockLocator, ClaimId, Filter, Listen};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::UnsignedGossipMessage;
@@ -141,6 +141,10 @@ impl Wallet {
 			.collect()
 	}
 
+	pub(crate) fn latest_checkpoint(&self) -> bdk_chain::local_chain::CheckPoint {
+		self.inner.lock().expect("lock").latest_checkpoint()
+	}
+
 	pub(crate) fn current_best_block(&self) -> BlockLocator {
 		let checkpoint = self.inner.lock().expect("lock").latest_checkpoint();
 		let mut current_block = Some(checkpoint.clone());
@@ -210,6 +214,24 @@ impl Wallet {
 		})?;
 
 		Ok(())
+	}
+
+	pub(crate) fn list_revealed_scripts(&self) -> Vec<ScriptBuf> {
+		self.inner
+			.lock()
+			.expect("lock")
+			.spk_index()
+			.revealed_spks(..)
+			.map(|((_keychain, _index), spk)| spk)
+			.collect()
+	}
+
+	/// Register scripts that BDK revealed at index time (e.g. change outputs, which `create_tx`
+	/// only peeks) with the chain source's watch set. No-op for non-CBF backends.
+	fn register_revealed_scripts(&self, _locked_wallet: &PersistedWallet<KVStoreWalletPersister>) {
+		// TODO(cbf): diff `last_revealed_index(keychain)` against a per-keychain cursor and
+		// `chain_source.register_script(spk)` the delta for both keychains.
+		todo!()
 	}
 
 	async fn update_payment_store(&self, mut events: Vec<WalletEvent>) -> Result<(), Error> {
@@ -515,6 +537,7 @@ impl Wallet {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
+		self.chain_source.register_script(address_info.script_pubkey());
 		Ok(address_info.address)
 	}
 
@@ -529,6 +552,7 @@ impl Wallet {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
+		self.chain_source.register_script(address_info.script_pubkey());
 		Ok(address_info.address)
 	}
 
@@ -1126,6 +1150,7 @@ impl Wallet {
 		locked_persister.persist_changeset(change_set).await.map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 		})?;
+		self.chain_source.register_script(address_info.script_pubkey());
 		Ok(address_info.address.script_pubkey())
 	}
 

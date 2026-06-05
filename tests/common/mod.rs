@@ -475,7 +475,10 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 				assert_eq!(actual_counterparty_node_id, counterparty_node_id);
 				let cur_height = node.status().current_best_block.height;
 				let blocks_to_go = confirmation_height - cur_height;
-				generate_blocks_and_wait(bitcoind, electrsd, blocks_to_go as usize).await;
+				let new_height =
+					generate_blocks_and_wait(bitcoind, electrsd, blocks_to_go as usize).await;
+				wait_for_node_tip(node, new_height).await;
+				wait_for_node_tip(peer_node, new_height).await;
 				node.sync_wallets().unwrap();
 				peer_node.sync_wallets().unwrap();
 			},
@@ -490,7 +493,9 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 		if node.list_balances().lightning_balances.is_empty() {
 			break;
 		}
-		generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+		let new_height = generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+		wait_for_node_tip(node, new_height).await;
+		wait_for_node_tip(peer_node, new_height).await;
 		node.sync_wallets().unwrap();
 		peer_node.sync_wallets().unwrap();
 	}
@@ -500,7 +505,9 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 	assert_eq!(balances.pending_balances_from_channel_closures.len(), 1);
 	match balances.pending_balances_from_channel_closures[0] {
 		PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {
-			generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+			let new_height = generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+			wait_for_node_tip(node, new_height).await;
+			wait_for_node_tip(peer_node, new_height).await;
 			node.sync_wallets().unwrap();
 			peer_node.sync_wallets().unwrap();
 
@@ -515,7 +522,9 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 		_ => panic!("Unexpected balance state!"),
 	}
 
-	generate_blocks_and_wait(bitcoind, electrsd, 5).await;
+	let new_height = generate_blocks_and_wait(bitcoind, electrsd, 5).await;
+	wait_for_node_tip(node, new_height).await;
+	wait_for_node_tip(peer_node, new_height).await;
 	node.sync_wallets().unwrap();
 	peer_node.sync_wallets().unwrap();
 }
@@ -737,7 +746,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 
 pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
-) {
+) -> usize {
 	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	print!("Generating {} blocks...", num);
@@ -746,9 +755,11 @@ pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
-	wait_for_block(bitcoind, electrs, cur_height as usize + num).await;
+	let new_height = cur_height as usize + num;
+	wait_for_block(bitcoind, electrs, new_height).await;
 	print!(" Done!");
 	println!("\n");
+	return new_height;
 }
 
 pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
@@ -845,6 +856,13 @@ pub(crate) async fn wait_for_channel_ready_to_send(
 		counterparty,
 		min_amount_msat,
 	);
+}
+
+pub(crate) async fn wait_for_node_tip(node: &Node, height: usize) {
+	exponential_backoff_poll(|| {
+		(node.status().current_best_block.height as usize >= height).then_some(())
+	})
+	.await;
 }
 
 pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> T
@@ -1156,7 +1174,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	wait_for_tx(electrsd, funding_txo_a.txid).await;
 
 	if !allow_0conf {
-		generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+		let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+		wait_for_node_tip(&node_a, new_height).await;
+		wait_for_node_tip(&node_b, new_height).await;
 	}
 
 	node_a.sync_wallets().unwrap();
@@ -1528,7 +1548,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 
 	// Mine a block to give time for the HTLC to resolve
-	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	wait_for_node_tip(&node_a, new_height).await;
+	wait_for_node_tip(&node_b, new_height).await;
 
 	println!("\nB splices out to pay A");
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
@@ -1540,7 +1562,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	wait_for_node_tip(&node_a, new_height).await;
+	wait_for_node_tip(&node_b, new_height).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1562,7 +1586,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	wait_for_node_tip(&node_a, new_height).await;
+	wait_for_node_tip(&node_b, new_height).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1635,7 +1661,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	wait_for_outpoint_spend(electrsd, funding_txo_b).await;
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	wait_for_node_tip(&node_a, new_height).await;
+	wait_for_node_tip(&node_b, new_height).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1680,7 +1708,10 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 		assert_eq!(node_a_blocks_to_go, node_b_blocks_to_go);
 
-		generate_blocks_and_wait(&bitcoind, electrsd, node_a_blocks_to_go as usize).await;
+		let new_height =
+			generate_blocks_and_wait(&bitcoind, electrsd, node_a_blocks_to_go as usize).await;
+		wait_for_node_tip(&node_a, new_height).await;
+		wait_for_node_tip(&node_b, new_height).await;
 		node_a.sync_wallets().unwrap();
 		node_b.sync_wallets().unwrap();
 
