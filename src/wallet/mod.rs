@@ -295,7 +295,7 @@ impl Wallet {
 					if payment_status == PaymentStatus::Pending {
 						let pending_payment =
 							self.create_pending_payment_from_tx(payment, Vec::new());
-						self.persist_pending(pending_payment)?;
+						self.persist_pending_payment(pending_payment)?;
 					} else {
 						self.payment_store.insert_or_update(payment)?;
 					}
@@ -390,7 +390,7 @@ impl Wallet {
 						ConfirmationStatus::Unconfirmed,
 					);
 					let pending_payment = self.create_pending_payment_from_tx(payment, Vec::new());
-					self.persist_pending(pending_payment)?;
+					self.persist_pending_payment(pending_payment)?;
 				},
 				WalletEvent::TxReplaced { txid, conflicts, .. } => {
 					let Some(payment_id) = self.find_payment_by_txid(txid) else {
@@ -456,7 +456,7 @@ impl Wallet {
 						ConfirmationStatus::Unconfirmed,
 					);
 					let pending_payment = self.create_pending_payment_from_tx(payment, Vec::new());
-					self.persist_pending(pending_payment)?;
+					self.persist_pending_payment(pending_payment)?;
 				},
 				_ => {
 					continue;
@@ -1280,7 +1280,7 @@ impl Wallet {
 	/// Writes a [`PendingPaymentDetails`] and its inner [`PaymentDetails`] to their
 	/// respective stores in a fixed order. Callers that need to keep the two stores in
 	/// sync should always go through this.
-	fn persist_pending(&self, pending: PendingPaymentDetails) -> Result<(), Error> {
+	fn persist_pending_payment(&self, pending: PendingPaymentDetails) -> Result<(), Error> {
 		self.payment_store.insert_or_update(pending.details.clone())?;
 		self.pending_payment_store.insert_or_update(pending)?;
 		Ok(())
@@ -1489,7 +1489,7 @@ impl Wallet {
 		pending.details.kind =
 			PaymentKind::Onchain { txid: event_txid, status: confirmation_status };
 
-		self.persist_pending(pending)?;
+		self.persist_pending_payment(pending)?;
 
 		Ok(true)
 	}
@@ -1743,7 +1743,7 @@ impl Wallet {
 		);
 
 		let pending_payment = self.create_pending_payment_from_tx(new_payment, Vec::new());
-		self.persist_pending(pending_payment)?;
+		self.persist_pending_payment(pending_payment)?;
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
 
@@ -1807,7 +1807,7 @@ impl Wallet {
 		let pending =
 			PendingPaymentDetails::with_funding_details(details, Vec::new(), funding_details);
 
-		self.persist_pending(pending)?;
+		self.persist_pending_payment(pending)?;
 		log_debug!(
 			self.logger,
 			"Recorded channel-funding broadcast {} for channel {}",
@@ -1890,7 +1890,7 @@ impl Wallet {
 		let pending =
 			PendingPaymentDetails::with_funding_details(details, Vec::new(), funding_details);
 
-		self.persist_pending(pending)?;
+		self.persist_pending_payment(pending)?;
 		log_debug!(
 			self.logger,
 			"Recorded interactive-funding broadcast {} ({} candidates, {} channels)",
