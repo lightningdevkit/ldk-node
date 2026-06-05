@@ -3,6 +3,7 @@ on: [push, pull_request]
 
 jobs:
   semver-checks:
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     steps:
       - name: Checkout source code

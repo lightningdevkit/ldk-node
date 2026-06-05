@@ -8,6 +8,7 @@ concurrency:
 
 jobs:
   benchmark:
+    timeout-minutes: 60
     runs-on: ubuntu-latest
     env:
       TOOLCHAIN: stable
