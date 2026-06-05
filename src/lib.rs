@@ -1595,7 +1595,7 @@ impl Node {
 			if funding_template.prior_contribution().is_some() {
 				log_error!(
 					self.logger,
-					"Failed to splice channel: a prior splice contribution is pending; use rbf_channel instead"
+					"Failed to splice channel: a prior splice contribution is pending; use bump_channel_funding_fee instead"
 				);
 				return Err(Error::ChannelSplicingFailed);
 			}
@@ -1716,7 +1716,7 @@ impl Node {
 			if funding_template.prior_contribution().is_some() {
 				log_error!(
 					self.logger,
-					"Failed to splice channel: a prior splice contribution is pending; use rbf_channel instead"
+					"Failed to splice channel: a prior splice contribution is pending; use bump_channel_funding_fee instead"
 				);
 				return Err(Error::ChannelSplicingFailed);
 			}
@@ -1761,7 +1761,7 @@ impl Node {
 	/// # Experimental API
 	///
 	/// This API is experimental and may change in the future.
-	pub fn rbf_channel(
+	pub fn bump_channel_funding_fee(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
 		let open_channels =

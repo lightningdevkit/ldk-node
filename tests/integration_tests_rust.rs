@@ -1194,9 +1194,9 @@ async fn rbf_splice_channel() {
 	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
-	// rbf_channel should fail when there's no pending splice
+	// bump_channel_funding_fee should fail when there's no pending splice
 	assert_eq!(
-		node_b.rbf_channel(&user_channel_id_b, node_a.node_id()),
+		node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id()),
 		Err(NodeError::ChannelSplicingFailed),
 	);
 
@@ -1219,8 +1219,8 @@ async fn rbf_splice_channel() {
 		Err(NodeError::ChannelSplicingFailed),
 	);
 
-	// rbf_channel should succeed when there's a pending splice
-	node_b.rbf_channel(&user_channel_id_b, node_a.node_id()).unwrap();
+	// bump_channel_funding_fee should succeed when there's a pending splice
+	node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id()).unwrap();
 
 	let rbf_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
