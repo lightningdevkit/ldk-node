@@ -282,7 +282,7 @@ private func makeRustCall<T, E: Swift.Error>(
     _ callback: (UnsafeMutablePointer<RustCallStatus>) -> T,
     errorHandler: ((RustBuffer) throws -> E)?
 ) throws -> T {
-    uniffiEnsureInitialized()
+    uniffiEnsureLdkNodeInitialized()
     var callStatus = RustCallStatus.init()
     let returnedVal = callback(&callStatus)
     try uniffiCheckCallStatus(callStatus: callStatus, errorHandler: errorHandler)
@@ -353,9 +353,10 @@ private func uniffiTraitInterfaceCallWithError<T, E>(
         callStatus.pointee.errorBuf = FfiConverterString.lower(String(describing: error))
     }
 }
-fileprivate class UniffiHandleMap<T> {
-    private var map: [UInt64: T] = [:]
+fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
+    // All mutation happens with this lock held, which is why we implement @unchecked Sendable.
     private let lock = NSLock()
+    private var map: [UInt64: T] = [:]
     private var currentHandle: UInt64 = 1
 
     func insert(obj: T) -> UInt64 {
@@ -395,7 +396,13 @@ fileprivate class UniffiHandleMap<T> {
 
 
 // Public interface members begin here.
-
+// Magic number for the Rust proxy to call using the same mechanism as every other method,
+// to free the callback once it's dropped by Rust.
+private let IDX_CALLBACK_FREE: Int32 = 0
+// Callback return codes
+private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
+private let UNIFFI_CALLBACK_ERROR: Int32 = 1
+private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -547,47 +554,104 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 
-public protocol Bolt11InvoiceProtocol : AnyObject {
+/**
+ * Represents a syntactically and semantically correct lightning BOLT11 invoice.
+ */
+public protocol Bolt11InvoiceProtocol: AnyObject, Sendable {
     
+    /**
+     * Returns the amount if specified in the invoice as millisatoshis.
+     */
     func amountMilliSatoshis()  -> UInt64?
     
+    /**
+     * Returns the currency for which the invoice was issued
+     */
     func currency()  -> Currency
     
+    /**
+     * Returns the invoice's expiry time (in seconds), if present, otherwise [`DEFAULT_EXPIRY_TIME`].
+     *
+     * [`DEFAULT_EXPIRY_TIME`]: lightning_invoice::DEFAULT_EXPIRY_TIME
+     */
     func expiryTimeSeconds()  -> UInt64
     
+    /**
+     * Returns a list of all fallback addresses as [`Address`]es
+     */
     func fallbackAddresses()  -> [Address]
     
+    /**
+     * Return the description or a hash of it for longer ones
+     */
     func invoiceDescription()  -> Bolt11InvoiceDescription
     
+    /**
+     * Returns whether the invoice has expired.
+     */
     func isExpired()  -> Bool
     
+    /**
+     * Returns the invoice's `min_final_cltv_expiry_delta` time, if present, otherwise
+     * [`DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA`].
+     *
+     * [`DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA`]: lightning_invoice::DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA
+     */
     func minFinalCltvExpiryDelta()  -> UInt64
     
+    /**
+     * Returns the network for which the invoice was issued
+     */
     func network()  -> Network
     
+    /**
+     * Returns the hash to which we will receive the preimage on completion of the payment
+     */
     func paymentHash()  -> PaymentHash
     
+    /**
+     * Get the payment secret if one was included in the invoice
+     */
     func paymentSecret()  -> PaymentSecret
     
+    /**
+     * Recover the payee's public key (only to be used if none was included in the invoice)
+     */
     func recoverPayeePubKey()  -> PublicKey
     
+    /**
+     * Returns a list of all routes included in the invoice as the underlying hints
+     */
     func routeHints()  -> [[RouteHintHop]]
     
+    /**
+     * Returns the `Bolt11Invoice`'s timestamp as seconds since the Unix epoch
+     */
     func secondsSinceEpoch()  -> UInt64
     
+    /**
+     * Returns the seconds remaining until the invoice expires.
+     */
     func secondsUntilExpiry()  -> UInt64
     
-    func signableHash()  -> [UInt8]
+    /**
+     * The hash of the [`RawBolt11Invoice`] that was signed.
+     *
+     * [`RawBolt11Invoice`]: lightning_invoice::RawBolt11Invoice
+     */
+    func signableHash()  -> Data
     
+    /**
+     * Returns whether the expiry time would pass at the given point in time.
+     * `at_time_seconds` is the timestamp as seconds since the Unix epoch.
+     */
     func wouldExpire(atTimeSeconds: UInt64)  -> Bool
     
 }
-
-open class Bolt11Invoice:
-    CustomDebugStringConvertible,
-    CustomStringConvertible,
-    Equatable,
-    Bolt11InvoiceProtocol {
+/**
+ * Represents a syntactically and semantically correct lightning BOLT11 invoice.
+ */
+open class Bolt11Invoice: Bolt11InvoiceProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -601,6 +665,9 @@ open class Bolt11Invoice:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -634,8 +701,8 @@ open class Bolt11Invoice:
     }
 
     
-public static func fromStr(invoiceStr: String)throws  -> Bolt11Invoice {
-    return try  FfiConverterTypeBolt11Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+public static func fromStr(invoiceStr: String)throws  -> Bolt11Invoice  {
+    return try  FfiConverterTypeBolt11Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_constructor_bolt11invoice_from_str(
         FfiConverterString.lower(invoiceStr),$0
     )
@@ -644,112 +711,168 @@ public static func fromStr(invoiceStr: String)throws  -> Bolt11Invoice {
     
 
     
-open func amountMilliSatoshis() -> UInt64? {
+    /**
+     * Returns the amount if specified in the invoice as millisatoshis.
+     */
+open func amountMilliSatoshis() -> UInt64?  {
     return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_amount_milli_satoshis(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func currency() -> Currency {
-    return try!  FfiConverterTypeCurrency.lift(try! rustCall() {
+    /**
+     * Returns the currency for which the invoice was issued
+     */
+open func currency() -> Currency  {
+    return try!  FfiConverterTypeCurrency_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_currency(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func expiryTimeSeconds() -> UInt64 {
+    /**
+     * Returns the invoice's expiry time (in seconds), if present, otherwise [`DEFAULT_EXPIRY_TIME`].
+     *
+     * [`DEFAULT_EXPIRY_TIME`]: lightning_invoice::DEFAULT_EXPIRY_TIME
+     */
+open func expiryTimeSeconds() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_expiry_time_seconds(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func fallbackAddresses() -> [Address] {
+    /**
+     * Returns a list of all fallback addresses as [`Address`]es
+     */
+open func fallbackAddresses() -> [Address]  {
     return try!  FfiConverterSequenceTypeAddress.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_fallback_addresses(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func invoiceDescription() -> Bolt11InvoiceDescription {
-    return try!  FfiConverterTypeBolt11InvoiceDescription.lift(try! rustCall() {
+    /**
+     * Return the description or a hash of it for longer ones
+     */
+open func invoiceDescription() -> Bolt11InvoiceDescription  {
+    return try!  FfiConverterTypeBolt11InvoiceDescription_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_invoice_description(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func isExpired() -> Bool {
+    /**
+     * Returns whether the invoice has expired.
+     */
+open func isExpired() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_is_expired(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func minFinalCltvExpiryDelta() -> UInt64 {
+    /**
+     * Returns the invoice's `min_final_cltv_expiry_delta` time, if present, otherwise
+     * [`DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA`].
+     *
+     * [`DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA`]: lightning_invoice::DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA
+     */
+open func minFinalCltvExpiryDelta() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_min_final_cltv_expiry_delta(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func network() -> Network {
-    return try!  FfiConverterTypeNetwork.lift(try! rustCall() {
+    /**
+     * Returns the network for which the invoice was issued
+     */
+open func network() -> Network  {
+    return try!  FfiConverterTypeNetwork_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_network(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func paymentHash() -> PaymentHash {
-    return try!  FfiConverterTypePaymentHash.lift(try! rustCall() {
+    /**
+     * Returns the hash to which we will receive the preimage on completion of the payment
+     */
+open func paymentHash() -> PaymentHash  {
+    return try!  FfiConverterTypePaymentHash_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_payment_hash(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func paymentSecret() -> PaymentSecret {
-    return try!  FfiConverterTypePaymentSecret.lift(try! rustCall() {
+    /**
+     * Get the payment secret if one was included in the invoice
+     */
+open func paymentSecret() -> PaymentSecret  {
+    return try!  FfiConverterTypePaymentSecret_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_payment_secret(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func recoverPayeePubKey() -> PublicKey {
-    return try!  FfiConverterTypePublicKey.lift(try! rustCall() {
+    /**
+     * Recover the payee's public key (only to be used if none was included in the invoice)
+     */
+open func recoverPayeePubKey() -> PublicKey  {
+    return try!  FfiConverterTypePublicKey_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_recover_payee_pub_key(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func routeHints() -> [[RouteHintHop]] {
+    /**
+     * Returns a list of all routes included in the invoice as the underlying hints
+     */
+open func routeHints() -> [[RouteHintHop]]  {
     return try!  FfiConverterSequenceSequenceTypeRouteHintHop.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_route_hints(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func secondsSinceEpoch() -> UInt64 {
+    /**
+     * Returns the `Bolt11Invoice`'s timestamp as seconds since the Unix epoch
+     */
+open func secondsSinceEpoch() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_seconds_since_epoch(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func secondsUntilExpiry() -> UInt64 {
+    /**
+     * Returns the seconds remaining until the invoice expires.
+     */
+open func secondsUntilExpiry() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_seconds_until_expiry(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func signableHash() -> [UInt8] {
-    return try!  FfiConverterSequenceUInt8.lift(try! rustCall() {
+    /**
+     * The hash of the [`RawBolt11Invoice`] that was signed.
+     *
+     * [`RawBolt11Invoice`]: lightning_invoice::RawBolt11Invoice
+     */
+open func signableHash() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_signable_hash(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func wouldExpire(atTimeSeconds: UInt64) -> Bool {
+    /**
+     * Returns whether the expiry time would pass at the given point in time.
+     * `at_time_seconds` is the timestamp as seconds since the Unix epoch.
+     */
+open func wouldExpire(atTimeSeconds: UInt64) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_would_expire(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(atTimeSeconds),$0
@@ -777,13 +900,17 @@ open func wouldExpire(atTimeSeconds: UInt64) -> Bool {
         return try!  FfiConverterBool.lift(
             try! rustCall() {
     uniffi_ldk_node_fn_method_bolt11invoice_uniffi_trait_eq_eq(self.uniffiClonePointer(),
-        FfiConverterTypeBolt11Invoice.lower(other),$0
+        FfiConverterTypeBolt11Invoice_lower(other),$0
     )
 }
         )
     }
 
 }
+extension Bolt11Invoice: CustomDebugStringConvertible {}
+extension Bolt11Invoice: CustomStringConvertible {}
+extension Bolt11Invoice: Equatable {}
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -820,8 +947,6 @@ public struct FfiConverterTypeBolt11Invoice: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -839,40 +964,256 @@ public func FfiConverterTypeBolt11Invoice_lower(_ value: Bolt11Invoice) -> Unsaf
 
 
 
-public protocol Bolt11PaymentProtocol : AnyObject {
+
+
+/**
+ * A payment handler allowing to create and pay [BOLT 11] invoices.
+ *
+ * Should be retrieved by calling [`Node::bolt11_payment`].
+ *
+ * [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+ * [`Node::bolt11_payment`]: crate::Node::bolt11_payment
+ */
+public protocol Bolt11PaymentProtocol: AnyObject, Sendable {
     
+    /**
+     * Allows to attempt manually claiming payments with the given preimage that have previously
+     * been registered via [`receive_for_hash`] or [`receive_variable_amount_for_hash`].
+     *
+     * This should be called in reponse to a [`PaymentClaimable`] event as soon as the preimage is
+     * available.
+     *
+     * Will check that the payment is known, and that the given preimage and claimable amount
+     * match our expectations before attempting to claim the payment, and will return an error
+     * otherwise.
+     *
+     * When claiming the payment has succeeded, a [`PaymentReceived`] event will be emitted.
+     *
+     * [`receive_for_hash`]: Self::receive_for_hash
+     * [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     * [`PaymentReceived`]: crate::Event::PaymentReceived
+     */
     func claimForHash(paymentHash: PaymentHash, claimableAmountMsat: UInt64, preimage: PaymentPreimage) throws 
     
+    /**
+     * Allows to manually fail payments with the given hash that have previously
+     * been registered via [`receive_for_hash`] or [`receive_variable_amount_for_hash`].
+     *
+     * This should be called in reponse to a [`PaymentClaimable`] event if the payment needs to be
+     * failed back, e.g., if the correct preimage can't be retrieved in time before the claim
+     * deadline has been reached.
+     *
+     * Will check that the payment is known before failing the payment, and will return an error
+     * otherwise.
+     *
+     * [`receive_for_hash`]: Self::receive_for_hash
+     * [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     */
     func failForHash(paymentHash: PaymentHash) throws 
     
+    /**
+     * Returns a payable invoice that can be used to request and receive a payment of the amount
+     * given.
+     *
+     * The inbound payment will be automatically claimed upon arrival.
+     */
     func receive(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32) throws  -> Bolt11Invoice
     
+    /**
+     * Returns a payable invoice that can be used to request a payment of the amount
+     * given for the given payment hash.
+     *
+     * We will register the given payment hash and emit a [`PaymentClaimable`] event once
+     * the inbound payment arrives.
+     *
+     * **Note:** users *MUST* handle this event and claim the payment manually via
+     * [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+     * payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+     * [`fail_for_hash`].
+     *
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     * [`claim_for_hash`]: Self::claim_for_hash
+     * [`fail_for_hash`]: Self::fail_for_hash
+     */
     func receiveForHash(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, paymentHash: PaymentHash) throws  -> Bolt11Invoice
     
+    /**
+     * Returns a payable invoice that can be used to request and receive a payment for which the
+     * amount is to be determined by the user, also known as a "zero-amount" invoice.
+     *
+     * The inbound payment will be automatically claimed upon arrival.
+     */
     func receiveVariableAmount(description: Bolt11InvoiceDescription, expirySecs: UInt32) throws  -> Bolt11Invoice
     
+    /**
+     * Returns a payable invoice that can be used to request a payment for the given payment hash
+     * and the amount to be determined by the user, also known as a "zero-amount" invoice.
+     *
+     * We will register the given payment hash and emit a [`PaymentClaimable`] event once
+     * the inbound payment arrives.
+     *
+     * **Note:** users *MUST* handle this event and claim the payment manually via
+     * [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+     * payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+     * [`fail_for_hash`].
+     *
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     * [`claim_for_hash`]: Self::claim_for_hash
+     * [`fail_for_hash`]: Self::fail_for_hash
+     */
     func receiveVariableAmountForHash(description: Bolt11InvoiceDescription, expirySecs: UInt32, paymentHash: PaymentHash) throws  -> Bolt11Invoice
     
+    /**
+     * Returns a payable invoice that can be used to request a variable amount payment (also known
+     * as "zero-amount" invoice) and receive it via a newly created just-in-time (JIT) channel.
+     *
+     * When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+     * to us, supplying just-in-time inbound liquidity.
+     *
+     * If set, `max_proportional_lsp_fee_limit_ppm_msat` will limit how much proportional fee, in
+     * parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
+     * We'll use its cheapest offer otherwise.
+     *
+     * [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+     */
     func receiveVariableAmountViaJitChannel(description: Bolt11InvoiceDescription, expirySecs: UInt32, maxProportionalLspFeeLimitPpmMsat: UInt64?) throws  -> Bolt11Invoice
     
+    /**
+     * Returns a payable invoice that can be used to request a variable amount payment (also known
+     * as "zero-amount" invoice) and receive it via a newly created just-in-time (JIT) channel.
+     *
+     * When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+     * to us, supplying just-in-time inbound liquidity.
+     *
+     * If set, `max_proportional_lsp_fee_limit_ppm_msat` will limit how much proportional fee, in
+     * parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
+     * We'll use its cheapest offer otherwise.
+     *
+     * We will register the given payment hash and emit a [`PaymentClaimable`] event once
+     * the inbound payment arrives. The check that [`counterparty_skimmed_fee_msat`] is within the limits
+     * is performed *before* emitting the event.
+     *
+     * **Note:** users *MUST* handle this event and claim the payment manually via
+     * [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+     * payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+     * [`fail_for_hash`].
+     *
+     * [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     * [`claim_for_hash`]: Self::claim_for_hash
+     * [`fail_for_hash`]: Self::fail_for_hash
+     * [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
+     */
     func receiveVariableAmountViaJitChannelForHash(description: Bolt11InvoiceDescription, expirySecs: UInt32, maxProportionalLspFeeLimitPpmMsat: UInt64?, paymentHash: PaymentHash) throws  -> Bolt11Invoice
     
-    func receiveViaJitChannel(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, maxLspFeeLimitMsat: UInt64?) throws  -> Bolt11Invoice
+    /**
+     * Returns a payable invoice that can be used to request a payment of the amount given and
+     * receive it via a newly created just-in-time (JIT) channel.
+     *
+     * When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+     * to us, supplying just-in-time inbound liquidity.
+     *
+     * If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
+     * channel to us. We'll use its cheapest offer otherwise.
+     *
+     * [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+     */
+    func receiveViaJitChannel(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, maxTotalLspFeeLimitMsat: UInt64?) throws  -> Bolt11Invoice
     
-    func receiveViaJitChannelForHash(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, maxLspFeeLimitMsat: UInt64?, paymentHash: PaymentHash) throws  -> Bolt11Invoice
+    /**
+     * Returns a payable invoice that can be used to request a payment of the amount given and
+     * receive it via a newly created just-in-time (JIT) channel.
+     *
+     * When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+     * to us, supplying just-in-time inbound liquidity.
+     *
+     * If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
+     * channel to us. We'll use its cheapest offer otherwise.
+     *
+     * We will register the given payment hash and emit a [`PaymentClaimable`] event once
+     * the inbound payment arrives. The check that [`counterparty_skimmed_fee_msat`] is within the limits
+     * is performed *before* emitting the event.
+     *
+     * **Note:** users *MUST* handle this event and claim the payment manually via
+     * [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+     * payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+     * [`fail_for_hash`].
+     *
+     * [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     * [`claim_for_hash`]: Self::claim_for_hash
+     * [`fail_for_hash`]: Self::fail_for_hash
+     * [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
+     */
+    func receiveViaJitChannelForHash(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, maxTotalLspFeeLimitMsat: UInt64?, paymentHash: PaymentHash) throws  -> Bolt11Invoice
     
+    /**
+     * Send a payment given an invoice.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
     func send(invoice: Bolt11Invoice, routeParameters: RouteParametersConfig?) throws  -> PaymentId
     
+    /**
+     * Sends payment probes over all paths of a route that would be used to pay the given invoice.
+     *
+     * This may be used to send "pre-flight" probes, i.e., to train our scorer before conducting
+     * the actual payment. Note this is only useful if there likely is sufficient time for the
+     * probe to settle before sending out the actual payment, e.g., when waiting for user
+     * confirmation in a wallet UI.
+     *
+     * Otherwise, there is a chance the probe could take up some liquidity needed to complete the
+     * actual payment. Users should therefore be cautious and might avoid sending probes if
+     * liquidity is scarce and/or they don't expect the probe to return before they send the
+     * payment. To mitigate this issue, channels with available liquidity less than the required
+     * amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
+     * pre-flight probes.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
     func sendProbes(invoice: Bolt11Invoice, routeParameters: RouteParametersConfig?) throws 
     
+    /**
+     * Sends payment probes over all paths of a route that would be used to pay the given
+     * zero-value invoice using the given amount.
+     *
+     * This can be used to send pre-flight probes for a so-called "zero-amount" invoice, i.e., an
+     * invoice that leaves the amount paid to be determined by the user.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     *
+     * See [`Self::send_probes`] for more information.
+     */
     func sendProbesUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64, routeParameters: RouteParametersConfig?) throws 
     
+    /**
+     * Send a payment given an invoice and an amount in millisatoshis.
+     *
+     * This will fail if the amount given is less than the value required by the given invoice.
+     *
+     * This can be used to pay a so-called "zero-amount" invoice, i.e., an invoice that leaves the
+     * amount paid to be determined by the user.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
     func sendUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64, routeParameters: RouteParametersConfig?) throws  -> PaymentId
     
 }
-
-open class Bolt11Payment:
-    Bolt11PaymentProtocol {
+/**
+ * A payment handler allowing to create and pay [BOLT 11] invoices.
+ *
+ * Should be retrieved by calling [`Node::bolt11_payment`].
+ *
+ * [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+ * [`Node::bolt11_payment`]: crate::Node::bolt11_payment
+ */
+open class Bolt11Payment: Bolt11PaymentProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -886,6 +1227,9 @@ open class Bolt11Payment:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -921,136 +1265,336 @@ open class Bolt11Payment:
     
 
     
-open func claimForHash(paymentHash: PaymentHash, claimableAmountMsat: UInt64, preimage: PaymentPreimage)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Allows to attempt manually claiming payments with the given preimage that have previously
+     * been registered via [`receive_for_hash`] or [`receive_variable_amount_for_hash`].
+     *
+     * This should be called in reponse to a [`PaymentClaimable`] event as soon as the preimage is
+     * available.
+     *
+     * Will check that the payment is known, and that the given preimage and claimable amount
+     * match our expectations before attempting to claim the payment, and will return an error
+     * otherwise.
+     *
+     * When claiming the payment has succeeded, a [`PaymentReceived`] event will be emitted.
+     *
+     * [`receive_for_hash`]: Self::receive_for_hash
+     * [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     * [`PaymentReceived`]: crate::Event::PaymentReceived
+     */
+open func claimForHash(paymentHash: PaymentHash, claimableAmountMsat: UInt64, preimage: PaymentPreimage)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_claim_for_hash(self.uniffiClonePointer(),
-        FfiConverterTypePaymentHash.lower(paymentHash),
+        FfiConverterTypePaymentHash_lower(paymentHash),
         FfiConverterUInt64.lower(claimableAmountMsat),
-        FfiConverterTypePaymentPreimage.lower(preimage),$0
+        FfiConverterTypePaymentPreimage_lower(preimage),$0
     )
 }
 }
     
-open func failForHash(paymentHash: PaymentHash)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Allows to manually fail payments with the given hash that have previously
+     * been registered via [`receive_for_hash`] or [`receive_variable_amount_for_hash`].
+     *
+     * This should be called in reponse to a [`PaymentClaimable`] event if the payment needs to be
+     * failed back, e.g., if the correct preimage can't be retrieved in time before the claim
+     * deadline has been reached.
+     *
+     * Will check that the payment is known before failing the payment, and will return an error
+     * otherwise.
+     *
+     * [`receive_for_hash`]: Self::receive_for_hash
+     * [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     */
+open func failForHash(paymentHash: PaymentHash)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_fail_for_hash(self.uniffiClonePointer(),
-        FfiConverterTypePaymentHash.lower(paymentHash),$0
+        FfiConverterTypePaymentHash_lower(paymentHash),$0
     )
 }
 }
     
-open func receive(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32)throws  -> Bolt11Invoice {
-    return try  FfiConverterTypeBolt11Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a payable invoice that can be used to request and receive a payment of the amount
+     * given.
+     *
+     * The inbound payment will be automatically claimed upon arrival.
+     */
+open func receive(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32)throws  -> Bolt11Invoice  {
+    return try  FfiConverterTypeBolt11Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_receive(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
-        FfiConverterTypeBolt11InvoiceDescription.lower(description),
+        FfiConverterTypeBolt11InvoiceDescription_lower(description),
         FfiConverterUInt32.lower(expirySecs),$0
     )
 })
 }
     
-open func receiveForHash(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, paymentHash: PaymentHash)throws  -> Bolt11Invoice {
-    return try  FfiConverterTypeBolt11Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a payable invoice that can be used to request a payment of the amount
+     * given for the given payment hash.
+     *
+     * We will register the given payment hash and emit a [`PaymentClaimable`] event once
+     * the inbound payment arrives.
+     *
+     * **Note:** users *MUST* handle this event and claim the payment manually via
+     * [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+     * payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+     * [`fail_for_hash`].
+     *
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     * [`claim_for_hash`]: Self::claim_for_hash
+     * [`fail_for_hash`]: Self::fail_for_hash
+     */
+open func receiveForHash(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, paymentHash: PaymentHash)throws  -> Bolt11Invoice  {
+    return try  FfiConverterTypeBolt11Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_receive_for_hash(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
-        FfiConverterTypeBolt11InvoiceDescription.lower(description),
+        FfiConverterTypeBolt11InvoiceDescription_lower(description),
         FfiConverterUInt32.lower(expirySecs),
-        FfiConverterTypePaymentHash.lower(paymentHash),$0
+        FfiConverterTypePaymentHash_lower(paymentHash),$0
     )
 })
 }
     
-open func receiveVariableAmount(description: Bolt11InvoiceDescription, expirySecs: UInt32)throws  -> Bolt11Invoice {
-    return try  FfiConverterTypeBolt11Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a payable invoice that can be used to request and receive a payment for which the
+     * amount is to be determined by the user, also known as a "zero-amount" invoice.
+     *
+     * The inbound payment will be automatically claimed upon arrival.
+     */
+open func receiveVariableAmount(description: Bolt11InvoiceDescription, expirySecs: UInt32)throws  -> Bolt11Invoice  {
+    return try  FfiConverterTypeBolt11Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_receive_variable_amount(self.uniffiClonePointer(),
-        FfiConverterTypeBolt11InvoiceDescription.lower(description),
+        FfiConverterTypeBolt11InvoiceDescription_lower(description),
         FfiConverterUInt32.lower(expirySecs),$0
     )
 })
 }
     
-open func receiveVariableAmountForHash(description: Bolt11InvoiceDescription, expirySecs: UInt32, paymentHash: PaymentHash)throws  -> Bolt11Invoice {
-    return try  FfiConverterTypeBolt11Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a payable invoice that can be used to request a payment for the given payment hash
+     * and the amount to be determined by the user, also known as a "zero-amount" invoice.
+     *
+     * We will register the given payment hash and emit a [`PaymentClaimable`] event once
+     * the inbound payment arrives.
+     *
+     * **Note:** users *MUST* handle this event and claim the payment manually via
+     * [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+     * payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+     * [`fail_for_hash`].
+     *
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     * [`claim_for_hash`]: Self::claim_for_hash
+     * [`fail_for_hash`]: Self::fail_for_hash
+     */
+open func receiveVariableAmountForHash(description: Bolt11InvoiceDescription, expirySecs: UInt32, paymentHash: PaymentHash)throws  -> Bolt11Invoice  {
+    return try  FfiConverterTypeBolt11Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_receive_variable_amount_for_hash(self.uniffiClonePointer(),
-        FfiConverterTypeBolt11InvoiceDescription.lower(description),
+        FfiConverterTypeBolt11InvoiceDescription_lower(description),
         FfiConverterUInt32.lower(expirySecs),
-        FfiConverterTypePaymentHash.lower(paymentHash),$0
+        FfiConverterTypePaymentHash_lower(paymentHash),$0
     )
 })
 }
     
-open func receiveVariableAmountViaJitChannel(description: Bolt11InvoiceDescription, expirySecs: UInt32, maxProportionalLspFeeLimitPpmMsat: UInt64?)throws  -> Bolt11Invoice {
-    return try  FfiConverterTypeBolt11Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a payable invoice that can be used to request a variable amount payment (also known
+     * as "zero-amount" invoice) and receive it via a newly created just-in-time (JIT) channel.
+     *
+     * When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+     * to us, supplying just-in-time inbound liquidity.
+     *
+     * If set, `max_proportional_lsp_fee_limit_ppm_msat` will limit how much proportional fee, in
+     * parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
+     * We'll use its cheapest offer otherwise.
+     *
+     * [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+     */
+open func receiveVariableAmountViaJitChannel(description: Bolt11InvoiceDescription, expirySecs: UInt32, maxProportionalLspFeeLimitPpmMsat: UInt64?)throws  -> Bolt11Invoice  {
+    return try  FfiConverterTypeBolt11Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_receive_variable_amount_via_jit_channel(self.uniffiClonePointer(),
-        FfiConverterTypeBolt11InvoiceDescription.lower(description),
+        FfiConverterTypeBolt11InvoiceDescription_lower(description),
         FfiConverterUInt32.lower(expirySecs),
         FfiConverterOptionUInt64.lower(maxProportionalLspFeeLimitPpmMsat),$0
     )
 })
 }
     
-open func receiveVariableAmountViaJitChannelForHash(description: Bolt11InvoiceDescription, expirySecs: UInt32, maxProportionalLspFeeLimitPpmMsat: UInt64?, paymentHash: PaymentHash)throws  -> Bolt11Invoice {
-    return try  FfiConverterTypeBolt11Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a payable invoice that can be used to request a variable amount payment (also known
+     * as "zero-amount" invoice) and receive it via a newly created just-in-time (JIT) channel.
+     *
+     * When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+     * to us, supplying just-in-time inbound liquidity.
+     *
+     * If set, `max_proportional_lsp_fee_limit_ppm_msat` will limit how much proportional fee, in
+     * parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
+     * We'll use its cheapest offer otherwise.
+     *
+     * We will register the given payment hash and emit a [`PaymentClaimable`] event once
+     * the inbound payment arrives. The check that [`counterparty_skimmed_fee_msat`] is within the limits
+     * is performed *before* emitting the event.
+     *
+     * **Note:** users *MUST* handle this event and claim the payment manually via
+     * [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+     * payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+     * [`fail_for_hash`].
+     *
+     * [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     * [`claim_for_hash`]: Self::claim_for_hash
+     * [`fail_for_hash`]: Self::fail_for_hash
+     * [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
+     */
+open func receiveVariableAmountViaJitChannelForHash(description: Bolt11InvoiceDescription, expirySecs: UInt32, maxProportionalLspFeeLimitPpmMsat: UInt64?, paymentHash: PaymentHash)throws  -> Bolt11Invoice  {
+    return try  FfiConverterTypeBolt11Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_receive_variable_amount_via_jit_channel_for_hash(self.uniffiClonePointer(),
-        FfiConverterTypeBolt11InvoiceDescription.lower(description),
+        FfiConverterTypeBolt11InvoiceDescription_lower(description),
         FfiConverterUInt32.lower(expirySecs),
         FfiConverterOptionUInt64.lower(maxProportionalLspFeeLimitPpmMsat),
-        FfiConverterTypePaymentHash.lower(paymentHash),$0
+        FfiConverterTypePaymentHash_lower(paymentHash),$0
     )
 })
 }
     
-open func receiveViaJitChannel(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, maxLspFeeLimitMsat: UInt64?)throws  -> Bolt11Invoice {
-    return try  FfiConverterTypeBolt11Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a payable invoice that can be used to request a payment of the amount given and
+     * receive it via a newly created just-in-time (JIT) channel.
+     *
+     * When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+     * to us, supplying just-in-time inbound liquidity.
+     *
+     * If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
+     * channel to us. We'll use its cheapest offer otherwise.
+     *
+     * [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+     */
+open func receiveViaJitChannel(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, maxTotalLspFeeLimitMsat: UInt64?)throws  -> Bolt11Invoice  {
+    return try  FfiConverterTypeBolt11Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_receive_via_jit_channel(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
-        FfiConverterTypeBolt11InvoiceDescription.lower(description),
+        FfiConverterTypeBolt11InvoiceDescription_lower(description),
         FfiConverterUInt32.lower(expirySecs),
-        FfiConverterOptionUInt64.lower(maxLspFeeLimitMsat),$0
+        FfiConverterOptionUInt64.lower(maxTotalLspFeeLimitMsat),$0
     )
 })
 }
     
-open func receiveViaJitChannelForHash(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, maxLspFeeLimitMsat: UInt64?, paymentHash: PaymentHash)throws  -> Bolt11Invoice {
-    return try  FfiConverterTypeBolt11Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a payable invoice that can be used to request a payment of the amount given and
+     * receive it via a newly created just-in-time (JIT) channel.
+     *
+     * When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
+     * to us, supplying just-in-time inbound liquidity.
+     *
+     * If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
+     * channel to us. We'll use its cheapest offer otherwise.
+     *
+     * We will register the given payment hash and emit a [`PaymentClaimable`] event once
+     * the inbound payment arrives. The check that [`counterparty_skimmed_fee_msat`] is within the limits
+     * is performed *before* emitting the event.
+     *
+     * **Note:** users *MUST* handle this event and claim the payment manually via
+     * [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+     * payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
+     * [`fail_for_hash`].
+     *
+     * [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+     * [`PaymentClaimable`]: crate::Event::PaymentClaimable
+     * [`claim_for_hash`]: Self::claim_for_hash
+     * [`fail_for_hash`]: Self::fail_for_hash
+     * [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
+     */
+open func receiveViaJitChannelForHash(amountMsat: UInt64, description: Bolt11InvoiceDescription, expirySecs: UInt32, maxTotalLspFeeLimitMsat: UInt64?, paymentHash: PaymentHash)throws  -> Bolt11Invoice  {
+    return try  FfiConverterTypeBolt11Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_receive_via_jit_channel_for_hash(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
-        FfiConverterTypeBolt11InvoiceDescription.lower(description),
+        FfiConverterTypeBolt11InvoiceDescription_lower(description),
         FfiConverterUInt32.lower(expirySecs),
-        FfiConverterOptionUInt64.lower(maxLspFeeLimitMsat),
-        FfiConverterTypePaymentHash.lower(paymentHash),$0
+        FfiConverterOptionUInt64.lower(maxTotalLspFeeLimitMsat),
+        FfiConverterTypePaymentHash_lower(paymentHash),$0
     )
 })
 }
     
-open func send(invoice: Bolt11Invoice, routeParameters: RouteParametersConfig?)throws  -> PaymentId {
-    return try  FfiConverterTypePaymentId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Send a payment given an invoice.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
+open func send(invoice: Bolt11Invoice, routeParameters: RouteParametersConfig?)throws  -> PaymentId  {
+    return try  FfiConverterTypePaymentId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_send(self.uniffiClonePointer(),
-        FfiConverterTypeBolt11Invoice.lower(invoice),
+        FfiConverterTypeBolt11Invoice_lower(invoice),
         FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters),$0
     )
 })
 }
     
-open func sendProbes(invoice: Bolt11Invoice, routeParameters: RouteParametersConfig?)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Sends payment probes over all paths of a route that would be used to pay the given invoice.
+     *
+     * This may be used to send "pre-flight" probes, i.e., to train our scorer before conducting
+     * the actual payment. Note this is only useful if there likely is sufficient time for the
+     * probe to settle before sending out the actual payment, e.g., when waiting for user
+     * confirmation in a wallet UI.
+     *
+     * Otherwise, there is a chance the probe could take up some liquidity needed to complete the
+     * actual payment. Users should therefore be cautious and might avoid sending probes if
+     * liquidity is scarce and/or they don't expect the probe to return before they send the
+     * payment. To mitigate this issue, channels with available liquidity less than the required
+     * amount times [`Config::probing_liquidity_limit_multiplier`] won't be used to send
+     * pre-flight probes.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
+open func sendProbes(invoice: Bolt11Invoice, routeParameters: RouteParametersConfig?)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_send_probes(self.uniffiClonePointer(),
-        FfiConverterTypeBolt11Invoice.lower(invoice),
+        FfiConverterTypeBolt11Invoice_lower(invoice),
         FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters),$0
     )
 }
 }
     
-open func sendProbesUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64, routeParameters: RouteParametersConfig?)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Sends payment probes over all paths of a route that would be used to pay the given
+     * zero-value invoice using the given amount.
+     *
+     * This can be used to send pre-flight probes for a so-called "zero-amount" invoice, i.e., an
+     * invoice that leaves the amount paid to be determined by the user.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     *
+     * See [`Self::send_probes`] for more information.
+     */
+open func sendProbesUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64, routeParameters: RouteParametersConfig?)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_send_probes_using_amount(self.uniffiClonePointer(),
-        FfiConverterTypeBolt11Invoice.lower(invoice),
+        FfiConverterTypeBolt11Invoice_lower(invoice),
         FfiConverterUInt64.lower(amountMsat),
         FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters),$0
     )
 }
 }
     
-open func sendUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64, routeParameters: RouteParametersConfig?)throws  -> PaymentId {
-    return try  FfiConverterTypePaymentId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Send a payment given an invoice and an amount in millisatoshis.
+     *
+     * This will fail if the amount given is less than the value required by the given invoice.
+     *
+     * This can be used to pay a so-called "zero-amount" invoice, i.e., an invoice that leaves the
+     * amount paid to be determined by the user.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
+open func sendUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64, routeParameters: RouteParametersConfig?)throws  -> PaymentId  {
+    return try  FfiConverterTypePaymentId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt11payment_send_using_amount(self.uniffiClonePointer(),
-        FfiConverterTypeBolt11Invoice.lower(invoice),
+        FfiConverterTypeBolt11Invoice_lower(invoice),
         FfiConverterUInt64.lower(amountMsat),
         FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters),$0
     )
@@ -1059,6 +1603,7 @@ open func sendUsingAmount(invoice: Bolt11Invoice, amountMsat: UInt64, routeParam
     
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1095,8 +1640,6 @@ public struct FfiConverterTypeBolt11Payment: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1114,52 +1657,182 @@ public func FfiConverterTypeBolt11Payment_lower(_ value: Bolt11Payment) -> Unsaf
 
 
 
-public protocol Bolt12InvoiceProtocol : AnyObject {
+
+
+public protocol Bolt12InvoiceProtocol: AnyObject, Sendable {
     
+    /**
+     * Seconds since the Unix epoch when an invoice should no longer be requested.
+     *
+     * From [`Offer::absolute_expiry`] or [`Refund::absolute_expiry`].
+     *
+     * [`Offer::absolute_expiry`]: lightning::offers::offer::Offer::absolute_expiry
+     */
     func absoluteExpirySeconds()  -> UInt64?
     
+    /**
+     * The minimum amount required for a successful payment of a single item.
+     *
+     * From [`Offer::amount`]; `None` if the invoice was created in response to a [`Refund`] or if
+     * the [`Offer`] did not set it.
+     *
+     * [`Offer`]: lightning::offers::offer::Offer
+     * [`Offer::amount`]: lightning::offers::offer::Offer::amount
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
     func amount()  -> OfferAmount?
     
+    /**
+     * The minimum amount required for a successful payment of the invoice.
+     */
     func amountMsats()  -> UInt64
     
-    func chain()  -> [UInt8]
+    /**
+     * The chain that must be used when paying the invoice; selected from [`offer_chains`] if the
+     * invoice originated from an offer.
+     *
+     * From [`InvoiceRequest::chain`] or [`Refund::chain`].
+     *
+     * [`offer_chains`]: lightning::offers::invoice::Bolt12Invoice::offer_chains
+     * [`InvoiceRequest::chain`]: lightning::offers::invoice_request::InvoiceRequest::chain
+     * [`Refund::chain`]: lightning::offers::refund::Refund::chain
+     */
+    func chain()  -> Data
     
+    /**
+     * Duration since the Unix epoch when the invoice was created.
+     */
     func createdAt()  -> UInt64
     
-    func encode()  -> [UInt8]
+    /**
+     * Writes `self` out to a `Vec<u8>`.
+     */
+    func encode()  -> Data
     
+    /**
+     * Fallback addresses for paying the invoice on-chain, in order of most-preferred to
+     * least-preferred.
+     */
     func fallbackAddresses()  -> [Address]
     
+    /**
+     * A complete description of the purpose of the originating offer or refund.
+     *
+     * From [`Offer::description`] or [`Refund::description`].
+     *
+     * [`Offer::description`]: lightning::offers::offer::Offer::description
+     * [`Refund::description`]: lightning::offers::refund::Refund::description
+     */
     func invoiceDescription()  -> String?
     
+    /**
+     * Whether the invoice has expired.
+     */
     func isExpired()  -> Bool
     
+    /**
+     * The issuer of the offer or refund.
+     *
+     * From [`Offer::issuer`] or [`Refund::issuer`].
+     *
+     * [`Offer::issuer`]: lightning::offers::offer::Offer::issuer
+     * [`Refund::issuer`]: lightning::offers::refund::Refund::issuer
+     */
     func issuer()  -> String?
     
+    /**
+     * The public key used by the recipient to sign invoices.
+     *
+     * From [`Offer::issuer_signing_pubkey`] and may be `None`; also `None` if the invoice was
+     * created in response to a [`Refund`].
+     *
+     * [`Offer::issuer_signing_pubkey`]: lightning::offers::offer::Offer::issuer_signing_pubkey
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
     func issuerSigningPubkey()  -> PublicKey?
     
-    func metadata()  -> [UInt8]?
+    /**
+     * Opaque bytes set by the originating [`Offer`].
+     *
+     * From [`Offer::metadata`]; `None` if the invoice was created in response to a [`Refund`] or
+     * if the [`Offer`] did not set it.
+     *
+     * [`Offer`]: lightning::offers::offer::Offer
+     * [`Offer::metadata`]: lightning::offers::offer::Offer::metadata
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
+    func metadata()  -> Data?
     
-    func offerChains()  -> [[UInt8]]?
+    /**
+     * The chains that may be used when paying a requested invoice.
+     *
+     * From [`Offer::chains`]; `None` if the invoice was created in response to a [`Refund`].
+     *
+     * [`Offer::chains`]: lightning::offers::offer::Offer::chains
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
+    func offerChains()  -> [Data]?
     
+    /**
+     * A payer-provided note reflected back in the invoice.
+     *
+     * From [`InvoiceRequest::payer_note`] or [`Refund::payer_note`].
+     *
+     * [`Refund::payer_note`]: lightning::offers::refund::Refund::payer_note
+     */
     func payerNote()  -> String?
     
+    /**
+     * A possibly transient pubkey used to sign the invoice request or to send an invoice for a
+     * refund in case there are no [`message_paths`].
+     *
+     * [`message_paths`]: lightning::offers::invoice::Bolt12Invoice
+     */
     func payerSigningPubkey()  -> PublicKey
     
+    /**
+     * SHA256 hash of the payment preimage that will be given in return for paying the invoice.
+     */
     func paymentHash()  -> PaymentHash
     
+    /**
+     * The quantity of items requested or refunded for.
+     *
+     * From [`InvoiceRequest::quantity`] or [`Refund::quantity`].
+     *
+     * [`Refund::quantity`]: lightning::offers::refund::Refund::quantity
+     */
     func quantity()  -> UInt64?
     
+    /**
+     * When the invoice has expired and therefore should no longer be paid.
+     */
     func relativeExpiry()  -> UInt64
     
-    func signableHash()  -> [UInt8]
+    /**
+     * Hash that was used for signing the invoice.
+     */
+    func signableHash()  -> Data
     
+    /**
+     * A typically transient public key corresponding to the key used to sign the invoice.
+     *
+     * If the invoices was created in response to an [`Offer`], then this will be:
+     * - [`Offer::issuer_signing_pubkey`] if it's `Some`, otherwise
+     * - the final blinded node id from a [`BlindedMessagePath`] in [`Offer::paths`] if `None`.
+     *
+     * If the invoice was created in response to a [`Refund`], then it is a valid pubkey chosen by
+     * the recipient.
+     *
+     * [`Offer`]: lightning::offers::offer::Offer
+     * [`Offer::issuer_signing_pubkey`]: lightning::offers::offer::Offer::issuer_signing_pubkey
+     * [`Offer::paths`]: lightning::offers::offer::Offer::paths
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
     func signingPubkey()  -> PublicKey
     
 }
-
-open class Bolt12Invoice:
-    Bolt12InvoiceProtocol {
+open class Bolt12Invoice: Bolt12InvoiceProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -1173,6 +1846,9 @@ open class Bolt12Invoice:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -1206,8 +1882,8 @@ open class Bolt12Invoice:
     }
 
     
-public static func fromStr(invoiceStr: String)throws  -> Bolt12Invoice {
-    return try  FfiConverterTypeBolt12Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+public static func fromStr(invoiceStr: String)throws  -> Bolt12Invoice  {
+    return try  FfiConverterTypeBolt12Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_constructor_bolt12invoice_from_str(
         FfiConverterString.lower(invoiceStr),$0
     )
@@ -1216,141 +1892,271 @@ public static func fromStr(invoiceStr: String)throws  -> Bolt12Invoice {
     
 
     
-open func absoluteExpirySeconds() -> UInt64? {
+    /**
+     * Seconds since the Unix epoch when an invoice should no longer be requested.
+     *
+     * From [`Offer::absolute_expiry`] or [`Refund::absolute_expiry`].
+     *
+     * [`Offer::absolute_expiry`]: lightning::offers::offer::Offer::absolute_expiry
+     */
+open func absoluteExpirySeconds() -> UInt64?  {
     return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_absolute_expiry_seconds(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func amount() -> OfferAmount? {
+    /**
+     * The minimum amount required for a successful payment of a single item.
+     *
+     * From [`Offer::amount`]; `None` if the invoice was created in response to a [`Refund`] or if
+     * the [`Offer`] did not set it.
+     *
+     * [`Offer`]: lightning::offers::offer::Offer
+     * [`Offer::amount`]: lightning::offers::offer::Offer::amount
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
+open func amount() -> OfferAmount?  {
     return try!  FfiConverterOptionTypeOfferAmount.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_amount(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func amountMsats() -> UInt64 {
+    /**
+     * The minimum amount required for a successful payment of the invoice.
+     */
+open func amountMsats() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_amount_msats(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func chain() -> [UInt8] {
-    return try!  FfiConverterSequenceUInt8.lift(try! rustCall() {
+    /**
+     * The chain that must be used when paying the invoice; selected from [`offer_chains`] if the
+     * invoice originated from an offer.
+     *
+     * From [`InvoiceRequest::chain`] or [`Refund::chain`].
+     *
+     * [`offer_chains`]: lightning::offers::invoice::Bolt12Invoice::offer_chains
+     * [`InvoiceRequest::chain`]: lightning::offers::invoice_request::InvoiceRequest::chain
+     * [`Refund::chain`]: lightning::offers::refund::Refund::chain
+     */
+open func chain() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_chain(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func createdAt() -> UInt64 {
+    /**
+     * Duration since the Unix epoch when the invoice was created.
+     */
+open func createdAt() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_created_at(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func encode() -> [UInt8] {
-    return try!  FfiConverterSequenceUInt8.lift(try! rustCall() {
+    /**
+     * Writes `self` out to a `Vec<u8>`.
+     */
+open func encode() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_encode(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func fallbackAddresses() -> [Address] {
+    /**
+     * Fallback addresses for paying the invoice on-chain, in order of most-preferred to
+     * least-preferred.
+     */
+open func fallbackAddresses() -> [Address]  {
     return try!  FfiConverterSequenceTypeAddress.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_fallback_addresses(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func invoiceDescription() -> String? {
+    /**
+     * A complete description of the purpose of the originating offer or refund.
+     *
+     * From [`Offer::description`] or [`Refund::description`].
+     *
+     * [`Offer::description`]: lightning::offers::offer::Offer::description
+     * [`Refund::description`]: lightning::offers::refund::Refund::description
+     */
+open func invoiceDescription() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_invoice_description(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func isExpired() -> Bool {
+    /**
+     * Whether the invoice has expired.
+     */
+open func isExpired() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_is_expired(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func issuer() -> String? {
+    /**
+     * The issuer of the offer or refund.
+     *
+     * From [`Offer::issuer`] or [`Refund::issuer`].
+     *
+     * [`Offer::issuer`]: lightning::offers::offer::Offer::issuer
+     * [`Refund::issuer`]: lightning::offers::refund::Refund::issuer
+     */
+open func issuer() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_issuer(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func issuerSigningPubkey() -> PublicKey? {
+    /**
+     * The public key used by the recipient to sign invoices.
+     *
+     * From [`Offer::issuer_signing_pubkey`] and may be `None`; also `None` if the invoice was
+     * created in response to a [`Refund`].
+     *
+     * [`Offer::issuer_signing_pubkey`]: lightning::offers::offer::Offer::issuer_signing_pubkey
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
+open func issuerSigningPubkey() -> PublicKey?  {
     return try!  FfiConverterOptionTypePublicKey.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_issuer_signing_pubkey(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func metadata() -> [UInt8]? {
-    return try!  FfiConverterOptionSequenceUInt8.lift(try! rustCall() {
+    /**
+     * Opaque bytes set by the originating [`Offer`].
+     *
+     * From [`Offer::metadata`]; `None` if the invoice was created in response to a [`Refund`] or
+     * if the [`Offer`] did not set it.
+     *
+     * [`Offer`]: lightning::offers::offer::Offer
+     * [`Offer::metadata`]: lightning::offers::offer::Offer::metadata
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
+open func metadata() -> Data?  {
+    return try!  FfiConverterOptionData.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_metadata(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func offerChains() -> [[UInt8]]? {
-    return try!  FfiConverterOptionSequenceSequenceUInt8.lift(try! rustCall() {
+    /**
+     * The chains that may be used when paying a requested invoice.
+     *
+     * From [`Offer::chains`]; `None` if the invoice was created in response to a [`Refund`].
+     *
+     * [`Offer::chains`]: lightning::offers::offer::Offer::chains
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
+open func offerChains() -> [Data]?  {
+    return try!  FfiConverterOptionSequenceData.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_offer_chains(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func payerNote() -> String? {
+    /**
+     * A payer-provided note reflected back in the invoice.
+     *
+     * From [`InvoiceRequest::payer_note`] or [`Refund::payer_note`].
+     *
+     * [`Refund::payer_note`]: lightning::offers::refund::Refund::payer_note
+     */
+open func payerNote() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_payer_note(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func payerSigningPubkey() -> PublicKey {
-    return try!  FfiConverterTypePublicKey.lift(try! rustCall() {
+    /**
+     * A possibly transient pubkey used to sign the invoice request or to send an invoice for a
+     * refund in case there are no [`message_paths`].
+     *
+     * [`message_paths`]: lightning::offers::invoice::Bolt12Invoice
+     */
+open func payerSigningPubkey() -> PublicKey  {
+    return try!  FfiConverterTypePublicKey_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_payer_signing_pubkey(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func paymentHash() -> PaymentHash {
-    return try!  FfiConverterTypePaymentHash.lift(try! rustCall() {
+    /**
+     * SHA256 hash of the payment preimage that will be given in return for paying the invoice.
+     */
+open func paymentHash() -> PaymentHash  {
+    return try!  FfiConverterTypePaymentHash_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_payment_hash(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func quantity() -> UInt64? {
+    /**
+     * The quantity of items requested or refunded for.
+     *
+     * From [`InvoiceRequest::quantity`] or [`Refund::quantity`].
+     *
+     * [`Refund::quantity`]: lightning::offers::refund::Refund::quantity
+     */
+open func quantity() -> UInt64?  {
     return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_quantity(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func relativeExpiry() -> UInt64 {
+    /**
+     * When the invoice has expired and therefore should no longer be paid.
+     */
+open func relativeExpiry() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_relative_expiry(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func signableHash() -> [UInt8] {
-    return try!  FfiConverterSequenceUInt8.lift(try! rustCall() {
+    /**
+     * Hash that was used for signing the invoice.
+     */
+open func signableHash() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_signable_hash(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func signingPubkey() -> PublicKey {
-    return try!  FfiConverterTypePublicKey.lift(try! rustCall() {
+    /**
+     * A typically transient public key corresponding to the key used to sign the invoice.
+     *
+     * If the invoices was created in response to an [`Offer`], then this will be:
+     * - [`Offer::issuer_signing_pubkey`] if it's `Some`, otherwise
+     * - the final blinded node id from a [`BlindedMessagePath`] in [`Offer::paths`] if `None`.
+     *
+     * If the invoice was created in response to a [`Refund`], then it is a valid pubkey chosen by
+     * the recipient.
+     *
+     * [`Offer`]: lightning::offers::offer::Offer
+     * [`Offer::issuer_signing_pubkey`]: lightning::offers::offer::Offer::issuer_signing_pubkey
+     * [`Offer::paths`]: lightning::offers::offer::Offer::paths
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
+open func signingPubkey() -> PublicKey  {
+    return try!  FfiConverterTypePublicKey_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_bolt12invoice_signing_pubkey(self.uniffiClonePointer(),$0
     )
 })
@@ -1358,6 +2164,7 @@ open func signingPubkey() -> PublicKey {
     
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1394,8 +2201,6 @@ public struct FfiConverterTypeBolt12Invoice: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1413,30 +2218,127 @@ public func FfiConverterTypeBolt12Invoice_lower(_ value: Bolt12Invoice) -> Unsaf
 
 
 
-public protocol Bolt12PaymentProtocol : AnyObject {
+
+
+/**
+ * A payment handler allowing to create and pay [BOLT 12] offers and refunds.
+ *
+ * Should be retrieved by calling [`Node::bolt12_payment`].
+ *
+ * [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+ * [`Node::bolt12_payment`]: crate::Node::bolt12_payment
+ */
+public protocol Bolt12PaymentProtocol: AnyObject, Sendable {
     
+    /**
+     * [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
+     * build [`Offer`]s and [`StaticInvoice`]s for receiving async payments.
+     *
+     * **Caution**: Async payments support is considered experimental.
+     *
+     * [`Offer`]: lightning::offers::offer::Offer
+     * [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+     */
     func blindedPathsForAsyncRecipient(recipientId: Data) throws  -> Data
     
+    /**
+     * Returns a [`Refund`] object that can be used to offer a refund payment of the amount given.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     *
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
     func initiateRefund(amountMsat: UInt64, expirySecs: UInt32, quantity: UInt64?, payerNote: String?, routeParameters: RouteParametersConfig?) throws  -> Refund
     
+    /**
+     * Returns a payable offer that can be used to request and receive a payment of the amount
+     * given.
+     */
     func receive(amountMsat: UInt64, description: String, expirySecs: UInt32?, quantity: UInt64?) throws  -> Offer
     
+    /**
+     * Retrieve an [`Offer`] for receiving async payments as an often-offline recipient.
+     *
+     * Will only return an offer if [`Bolt12Payment::set_paths_to_static_invoice_server`] was called and we succeeded
+     * in interactively building a [`StaticInvoice`] with the static invoice server.
+     *
+     * Useful for posting offers to receive payments later, such as posting an offer on a website.
+     *
+     * **Caution**: Async payments support is considered experimental.
+     *
+     * [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+     * [`Offer`]: lightning::offers::offer::Offer
+     */
     func receiveAsync() throws  -> Offer
     
+    /**
+     * Returns a payable offer that can be used to request and receive a payment for which the
+     * amount is to be determined by the user, also known as a "zero-amount" offer.
+     */
     func receiveVariableAmount(description: String, expirySecs: UInt32?) throws  -> Offer
     
+    /**
+     * Requests a refund payment for the given [`Refund`].
+     *
+     * The returned [`Bolt12Invoice`] is for informational purposes only (i.e., isn't needed to
+     * retrieve the refund).
+     *
+     * [`Refund`]: lightning::offers::refund::Refund
+     * [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
+     */
     func requestRefundPayment(refund: Refund) throws  -> Bolt12Invoice
     
+    /**
+     * Send a payment given an offer.
+     *
+     * If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
+     * response.
+     *
+     * If `quantity` is `Some` it represents the number of items requested.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
     func send(offer: Offer, quantity: UInt64?, payerNote: String?, routeParameters: RouteParametersConfig?) throws  -> PaymentId
     
+    /**
+     * Send a payment given an offer and an amount in millisatoshi.
+     *
+     * This will fail if the amount given is less than the value required by the given offer.
+     *
+     * This can be used to pay a so-called "zero-amount" offers, i.e., an offer that leaves the
+     * amount paid to be determined by the user.
+     *
+     * If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
+     * response.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
     func sendUsingAmount(offer: Offer, amountMsat: UInt64, quantity: UInt64?, payerNote: String?, routeParameters: RouteParametersConfig?) throws  -> PaymentId
     
+    /**
+     * Sets the [`BlindedMessagePath`]s that we will use as an async recipient to interactively build [`Offer`]s with a
+     * static invoice server, so the server can serve [`StaticInvoice`]s to payers on our behalf when we're offline.
+     *
+     * **Caution**: Async payments support is considered experimental.
+     *
+     * [`Offer`]: lightning::offers::offer::Offer
+     * [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+     */
     func setPathsToStaticInvoiceServer(paths: Data) throws 
     
 }
-
-open class Bolt12Payment:
-    Bolt12PaymentProtocol {
+/**
+ * A payment handler allowing to create and pay [BOLT 12] offers and refunds.
+ *
+ * Should be retrieved by calling [`Node::bolt12_payment`].
+ *
+ * [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+ * [`Node::bolt12_payment`]: crate::Node::bolt12_payment
+ */
+open class Bolt12Payment: Bolt12PaymentProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -1450,6 +2352,9 @@ open class Bolt12Payment:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -1485,16 +2390,33 @@ open class Bolt12Payment:
     
 
     
-open func blindedPathsForAsyncRecipient(recipientId: Data)throws  -> Data {
-    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * [`BlindedMessagePath`]s for an async recipient to communicate with this node and interactively
+     * build [`Offer`]s and [`StaticInvoice`]s for receiving async payments.
+     *
+     * **Caution**: Async payments support is considered experimental.
+     *
+     * [`Offer`]: lightning::offers::offer::Offer
+     * [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+     */
+open func blindedPathsForAsyncRecipient(recipientId: Data)throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt12payment_blinded_paths_for_async_recipient(self.uniffiClonePointer(),
         FfiConverterData.lower(recipientId),$0
     )
 })
 }
     
-open func initiateRefund(amountMsat: UInt64, expirySecs: UInt32, quantity: UInt64?, payerNote: String?, routeParameters: RouteParametersConfig?)throws  -> Refund {
-    return try  FfiConverterTypeRefund.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a [`Refund`] object that can be used to offer a refund payment of the amount given.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     *
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
+open func initiateRefund(amountMsat: UInt64, expirySecs: UInt32, quantity: UInt64?, payerNote: String?, routeParameters: RouteParametersConfig?)throws  -> Refund  {
+    return try  FfiConverterTypeRefund_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt12payment_initiate_refund(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
         FfiConverterUInt32.lower(expirySecs),
@@ -1505,8 +2427,12 @@ open func initiateRefund(amountMsat: UInt64, expirySecs: UInt32, quantity: UInt6
 })
 }
     
-open func receive(amountMsat: UInt64, description: String, expirySecs: UInt32?, quantity: UInt64?)throws  -> Offer {
-    return try  FfiConverterTypeOffer.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a payable offer that can be used to request and receive a payment of the amount
+     * given.
+     */
+open func receive(amountMsat: UInt64, description: String, expirySecs: UInt32?, quantity: UInt64?)throws  -> Offer  {
+    return try  FfiConverterTypeOffer_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt12payment_receive(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
         FfiConverterString.lower(description),
@@ -1516,15 +2442,32 @@ open func receive(amountMsat: UInt64, description: String, expirySecs: UInt32?, 
 })
 }
     
-open func receiveAsync()throws  -> Offer {
-    return try  FfiConverterTypeOffer.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Retrieve an [`Offer`] for receiving async payments as an often-offline recipient.
+     *
+     * Will only return an offer if [`Bolt12Payment::set_paths_to_static_invoice_server`] was called and we succeeded
+     * in interactively building a [`StaticInvoice`] with the static invoice server.
+     *
+     * Useful for posting offers to receive payments later, such as posting an offer on a website.
+     *
+     * **Caution**: Async payments support is considered experimental.
+     *
+     * [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+     * [`Offer`]: lightning::offers::offer::Offer
+     */
+open func receiveAsync()throws  -> Offer  {
+    return try  FfiConverterTypeOffer_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt12payment_receive_async(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func receiveVariableAmount(description: String, expirySecs: UInt32?)throws  -> Offer {
-    return try  FfiConverterTypeOffer.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Returns a payable offer that can be used to request and receive a payment for which the
+     * amount is to be determined by the user, also known as a "zero-amount" offer.
+     */
+open func receiveVariableAmount(description: String, expirySecs: UInt32?)throws  -> Offer  {
+    return try  FfiConverterTypeOffer_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt12payment_receive_variable_amount(self.uniffiClonePointer(),
         FfiConverterString.lower(description),
         FfiConverterOptionUInt32.lower(expirySecs),$0
@@ -1532,18 +2475,38 @@ open func receiveVariableAmount(description: String, expirySecs: UInt32?)throws 
 })
 }
     
-open func requestRefundPayment(refund: Refund)throws  -> Bolt12Invoice {
-    return try  FfiConverterTypeBolt12Invoice.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Requests a refund payment for the given [`Refund`].
+     *
+     * The returned [`Bolt12Invoice`] is for informational purposes only (i.e., isn't needed to
+     * retrieve the refund).
+     *
+     * [`Refund`]: lightning::offers::refund::Refund
+     * [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
+     */
+open func requestRefundPayment(refund: Refund)throws  -> Bolt12Invoice  {
+    return try  FfiConverterTypeBolt12Invoice_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt12payment_request_refund_payment(self.uniffiClonePointer(),
-        FfiConverterTypeRefund.lower(refund),$0
+        FfiConverterTypeRefund_lower(refund),$0
     )
 })
 }
     
-open func send(offer: Offer, quantity: UInt64?, payerNote: String?, routeParameters: RouteParametersConfig?)throws  -> PaymentId {
-    return try  FfiConverterTypePaymentId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Send a payment given an offer.
+     *
+     * If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
+     * response.
+     *
+     * If `quantity` is `Some` it represents the number of items requested.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
+open func send(offer: Offer, quantity: UInt64?, payerNote: String?, routeParameters: RouteParametersConfig?)throws  -> PaymentId  {
+    return try  FfiConverterTypePaymentId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt12payment_send(self.uniffiClonePointer(),
-        FfiConverterTypeOffer.lower(offer),
+        FfiConverterTypeOffer_lower(offer),
         FfiConverterOptionUInt64.lower(quantity),
         FfiConverterOptionString.lower(payerNote),
         FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters),$0
@@ -1551,10 +2514,24 @@ open func send(offer: Offer, quantity: UInt64?, payerNote: String?, routeParamet
 })
 }
     
-open func sendUsingAmount(offer: Offer, amountMsat: UInt64, quantity: UInt64?, payerNote: String?, routeParameters: RouteParametersConfig?)throws  -> PaymentId {
-    return try  FfiConverterTypePaymentId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Send a payment given an offer and an amount in millisatoshi.
+     *
+     * This will fail if the amount given is less than the value required by the given offer.
+     *
+     * This can be used to pay a so-called "zero-amount" offers, i.e., an offer that leaves the
+     * amount paid to be determined by the user.
+     *
+     * If `payer_note` is `Some` it will be seen by the recipient and reflected back in the invoice
+     * response.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
+open func sendUsingAmount(offer: Offer, amountMsat: UInt64, quantity: UInt64?, payerNote: String?, routeParameters: RouteParametersConfig?)throws  -> PaymentId  {
+    return try  FfiConverterTypePaymentId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt12payment_send_using_amount(self.uniffiClonePointer(),
-        FfiConverterTypeOffer.lower(offer),
+        FfiConverterTypeOffer_lower(offer),
         FfiConverterUInt64.lower(amountMsat),
         FfiConverterOptionUInt64.lower(quantity),
         FfiConverterOptionString.lower(payerNote),
@@ -1563,7 +2540,16 @@ open func sendUsingAmount(offer: Offer, amountMsat: UInt64, quantity: UInt64?, p
 })
 }
     
-open func setPathsToStaticInvoiceServer(paths: Data)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Sets the [`BlindedMessagePath`]s that we will use as an async recipient to interactively build [`Offer`]s with a
+     * static invoice server, so the server can serve [`StaticInvoice`]s to payers on our behalf when we're offline.
+     *
+     * **Caution**: Async payments support is considered experimental.
+     *
+     * [`Offer`]: lightning::offers::offer::Offer
+     * [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
+     */
+open func setPathsToStaticInvoiceServer(paths: Data)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_bolt12payment_set_paths_to_static_invoice_server(self.uniffiClonePointer(),
         FfiConverterData.lower(paths),$0
     )
@@ -1572,6 +2558,7 @@ open func setPathsToStaticInvoiceServer(paths: Data)throws  {try rustCallWithErr
     
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1608,8 +2595,6 @@ public struct FfiConverterTypeBolt12Payment: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -1627,17 +2612,23 @@ public func FfiConverterTypeBolt12Payment_lower(_ value: Bolt12Payment) -> Unsaf
 
 
 
-public protocol BuilderProtocol : AnyObject {
+
+
+public protocol BuilderProtocol: AnyObject, Sendable {
     
-    func build() throws  -> Node
+    func build(nodeEntropy: NodeEntropy) throws  -> Node
     
-    func buildWithFsStore() throws  -> Node
+    func buildWithFsStore(nodeEntropy: NodeEntropy) throws  -> Node
     
-    func buildWithVssStore(vssUrl: String, storeId: String, lnurlAuthServerUrl: String, fixedHeaders: [String: String]) throws  -> Node
+    func buildWithPostgresStore(nodeEntropy: NodeEntropy, connectionString: String, dbName: String?, kvTableName: String?, certificatePem: String?) throws  -> Node
     
-    func buildWithVssStoreAndFixedHeaders(vssUrl: String, storeId: String, fixedHeaders: [String: String]) throws  -> Node
+    func buildWithVssStore(nodeEntropy: NodeEntropy, vssUrl: String, storeId: String, fixedHeaders: [String: String]) throws  -> Node
     
-    func buildWithVssStoreAndHeaderProvider(vssUrl: String, storeId: String, headerProvider: VssHeaderProvider) throws  -> Node
+    func buildWithVssStoreAndFixedHeaders(nodeEntropy: NodeEntropy, vssUrl: String, storeId: String, fixedHeaders: [String: String]) throws  -> Node
+    
+    func buildWithVssStoreAndHeaderProvider(nodeEntropy: NodeEntropy, vssUrl: String, storeId: String, headerProvider: VssHeaderProvider) throws  -> Node
+    
+    func buildWithVssStoreAndLnurlAuth(nodeEntropy: NodeEntropy, vssUrl: String, storeId: String, lnurlAuthServerUrl: String, fixedHeaders: [String: String]) throws  -> Node
     
     func setAnnouncementAddresses(announcementAddresses: [SocketAddress]) throws 
     
@@ -1652,12 +2643,6 @@ public protocol BuilderProtocol : AnyObject {
     func setChainSourceEsplora(serverUrl: String, config: EsploraSyncConfig?) 
     
     func setCustomLogger(logWriter: LogWriter) 
-    
-    func setEntropyBip39Mnemonic(mnemonic: Mnemonic, passphrase: String?) 
-    
-    func setEntropySeedBytes(seedBytes: [UInt8]) throws 
-    
-    func setEntropySeedPath(seedPath: String) 
     
     func setFilesystemLogger(logFilePath: String?, maxLogLevel: LogLevel?) 
     
@@ -1681,10 +2666,12 @@ public protocol BuilderProtocol : AnyObject {
     
     func setStorageDirPath(storageDirPath: String) 
     
+    func setTorConfig(torConfig: TorConfig) throws 
+    
+    func setWalletRecoveryMode() 
+    
 }
-
-open class Builder:
-    BuilderProtocol {
+open class Builder: BuilderProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -1698,6 +2685,9 @@ open class Builder:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -1738,33 +2728,81 @@ public convenience init() {
     }
 
     
-public static func fromConfig(config: Config) -> Builder {
-    return try!  FfiConverterTypeBuilder.lift(try! rustCall() {
+public static func fromConfig(config: Config) -> Builder  {
+    return try!  FfiConverterTypeBuilder_lift(try! rustCall() {
     uniffi_ldk_node_fn_constructor_builder_from_config(
-        FfiConverterTypeConfig.lower(config),$0
+        FfiConverterTypeConfig_lower(config),$0
     )
 })
 }
     
 
     
-open func build()throws  -> Node {
-    return try  FfiConverterTypeNode.lift(try rustCallWithError(FfiConverterTypeBuildError.lift) {
-    uniffi_ldk_node_fn_method_builder_build(self.uniffiClonePointer(),$0
+open func build(nodeEntropy: NodeEntropy)throws  -> Node  {
+    return try  FfiConverterTypeNode_lift(try rustCallWithError(FfiConverterTypeBuildError_lift) {
+    uniffi_ldk_node_fn_method_builder_build(self.uniffiClonePointer(),
+        FfiConverterTypeNodeEntropy_lower(nodeEntropy),$0
     )
 })
 }
     
-open func buildWithFsStore()throws  -> Node {
-    return try  FfiConverterTypeNode.lift(try rustCallWithError(FfiConverterTypeBuildError.lift) {
-    uniffi_ldk_node_fn_method_builder_build_with_fs_store(self.uniffiClonePointer(),$0
+open func buildWithFsStore(nodeEntropy: NodeEntropy)throws  -> Node  {
+    return try  FfiConverterTypeNode_lift(try rustCallWithError(FfiConverterTypeBuildError_lift) {
+    uniffi_ldk_node_fn_method_builder_build_with_fs_store(self.uniffiClonePointer(),
+        FfiConverterTypeNodeEntropy_lower(nodeEntropy),$0
     )
 })
 }
     
-open func buildWithVssStore(vssUrl: String, storeId: String, lnurlAuthServerUrl: String, fixedHeaders: [String: String])throws  -> Node {
-    return try  FfiConverterTypeNode.lift(try rustCallWithError(FfiConverterTypeBuildError.lift) {
+open func buildWithPostgresStore(nodeEntropy: NodeEntropy, connectionString: String, dbName: String?, kvTableName: String?, certificatePem: String?)throws  -> Node  {
+    return try  FfiConverterTypeNode_lift(try rustCallWithError(FfiConverterTypeBuildError_lift) {
+    uniffi_ldk_node_fn_method_builder_build_with_postgres_store(self.uniffiClonePointer(),
+        FfiConverterTypeNodeEntropy_lower(nodeEntropy),
+        FfiConverterString.lower(connectionString),
+        FfiConverterOptionString.lower(dbName),
+        FfiConverterOptionString.lower(kvTableName),
+        FfiConverterOptionString.lower(certificatePem),$0
+    )
+})
+}
+    
+open func buildWithVssStore(nodeEntropy: NodeEntropy, vssUrl: String, storeId: String, fixedHeaders: [String: String])throws  -> Node  {
+    return try  FfiConverterTypeNode_lift(try rustCallWithError(FfiConverterTypeBuildError_lift) {
     uniffi_ldk_node_fn_method_builder_build_with_vss_store(self.uniffiClonePointer(),
+        FfiConverterTypeNodeEntropy_lower(nodeEntropy),
+        FfiConverterString.lower(vssUrl),
+        FfiConverterString.lower(storeId),
+        FfiConverterDictionaryStringString.lower(fixedHeaders),$0
+    )
+})
+}
+    
+open func buildWithVssStoreAndFixedHeaders(nodeEntropy: NodeEntropy, vssUrl: String, storeId: String, fixedHeaders: [String: String])throws  -> Node  {
+    return try  FfiConverterTypeNode_lift(try rustCallWithError(FfiConverterTypeBuildError_lift) {
+    uniffi_ldk_node_fn_method_builder_build_with_vss_store_and_fixed_headers(self.uniffiClonePointer(),
+        FfiConverterTypeNodeEntropy_lower(nodeEntropy),
+        FfiConverterString.lower(vssUrl),
+        FfiConverterString.lower(storeId),
+        FfiConverterDictionaryStringString.lower(fixedHeaders),$0
+    )
+})
+}
+    
+open func buildWithVssStoreAndHeaderProvider(nodeEntropy: NodeEntropy, vssUrl: String, storeId: String, headerProvider: VssHeaderProvider)throws  -> Node  {
+    return try  FfiConverterTypeNode_lift(try rustCallWithError(FfiConverterTypeBuildError_lift) {
+    uniffi_ldk_node_fn_method_builder_build_with_vss_store_and_header_provider(self.uniffiClonePointer(),
+        FfiConverterTypeNodeEntropy_lower(nodeEntropy),
+        FfiConverterString.lower(vssUrl),
+        FfiConverterString.lower(storeId),
+        FfiConverterTypeVssHeaderProvider_lower(headerProvider),$0
+    )
+})
+}
+    
+open func buildWithVssStoreAndLnurlAuth(nodeEntropy: NodeEntropy, vssUrl: String, storeId: String, lnurlAuthServerUrl: String, fixedHeaders: [String: String])throws  -> Node  {
+    return try  FfiConverterTypeNode_lift(try rustCallWithError(FfiConverterTypeBuildError_lift) {
+    uniffi_ldk_node_fn_method_builder_build_with_vss_store_and_lnurl_auth(self.uniffiClonePointer(),
+        FfiConverterTypeNodeEntropy_lower(nodeEntropy),
         FfiConverterString.lower(vssUrl),
         FfiConverterString.lower(storeId),
         FfiConverterString.lower(lnurlAuthServerUrl),
@@ -1773,41 +2811,21 @@ open func buildWithVssStore(vssUrl: String, storeId: String, lnurlAuthServerUrl:
 })
 }
     
-open func buildWithVssStoreAndFixedHeaders(vssUrl: String, storeId: String, fixedHeaders: [String: String])throws  -> Node {
-    return try  FfiConverterTypeNode.lift(try rustCallWithError(FfiConverterTypeBuildError.lift) {
-    uniffi_ldk_node_fn_method_builder_build_with_vss_store_and_fixed_headers(self.uniffiClonePointer(),
-        FfiConverterString.lower(vssUrl),
-        FfiConverterString.lower(storeId),
-        FfiConverterDictionaryStringString.lower(fixedHeaders),$0
-    )
-})
-}
-    
-open func buildWithVssStoreAndHeaderProvider(vssUrl: String, storeId: String, headerProvider: VssHeaderProvider)throws  -> Node {
-    return try  FfiConverterTypeNode.lift(try rustCallWithError(FfiConverterTypeBuildError.lift) {
-    uniffi_ldk_node_fn_method_builder_build_with_vss_store_and_header_provider(self.uniffiClonePointer(),
-        FfiConverterString.lower(vssUrl),
-        FfiConverterString.lower(storeId),
-        FfiConverterTypeVssHeaderProvider.lower(headerProvider),$0
-    )
-})
-}
-    
-open func setAnnouncementAddresses(announcementAddresses: [SocketAddress])throws  {try rustCallWithError(FfiConverterTypeBuildError.lift) {
+open func setAnnouncementAddresses(announcementAddresses: [SocketAddress])throws   {try rustCallWithError(FfiConverterTypeBuildError_lift) {
     uniffi_ldk_node_fn_method_builder_set_announcement_addresses(self.uniffiClonePointer(),
         FfiConverterSequenceTypeSocketAddress.lower(announcementAddresses),$0
     )
 }
 }
     
-open func setAsyncPaymentsRole(role: AsyncPaymentsRole?)throws  {try rustCallWithError(FfiConverterTypeBuildError.lift) {
+open func setAsyncPaymentsRole(role: AsyncPaymentsRole?)throws   {try rustCallWithError(FfiConverterTypeBuildError_lift) {
     uniffi_ldk_node_fn_method_builder_set_async_payments_role(self.uniffiClonePointer(),
         FfiConverterOptionTypeAsyncPaymentsRole.lower(role),$0
     )
 }
 }
     
-open func setChainSourceBitcoindRest(restHost: String, restPort: UInt16, rpcHost: String, rpcPort: UInt16, rpcUser: String, rpcPassword: String) {try! rustCall() {
+open func setChainSourceBitcoindRest(restHost: String, restPort: UInt16, rpcHost: String, rpcPort: UInt16, rpcUser: String, rpcPassword: String)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_chain_source_bitcoind_rest(self.uniffiClonePointer(),
         FfiConverterString.lower(restHost),
         FfiConverterUInt16.lower(restPort),
@@ -1819,7 +2837,7 @@ open func setChainSourceBitcoindRest(restHost: String, restPort: UInt16, rpcHost
 }
 }
     
-open func setChainSourceBitcoindRpc(rpcHost: String, rpcPort: UInt16, rpcUser: String, rpcPassword: String) {try! rustCall() {
+open func setChainSourceBitcoindRpc(rpcHost: String, rpcPort: UInt16, rpcUser: String, rpcPassword: String)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_chain_source_bitcoind_rpc(self.uniffiClonePointer(),
         FfiConverterString.lower(rpcHost),
         FfiConverterUInt16.lower(rpcPort),
@@ -1829,7 +2847,7 @@ open func setChainSourceBitcoindRpc(rpcHost: String, rpcPort: UInt16, rpcUser: S
 }
 }
     
-open func setChainSourceElectrum(serverUrl: String, config: ElectrumSyncConfig?) {try! rustCall() {
+open func setChainSourceElectrum(serverUrl: String, config: ElectrumSyncConfig?)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_chain_source_electrum(self.uniffiClonePointer(),
         FfiConverterString.lower(serverUrl),
         FfiConverterOptionTypeElectrumSyncConfig.lower(config),$0
@@ -1837,7 +2855,7 @@ open func setChainSourceElectrum(serverUrl: String, config: ElectrumSyncConfig?)
 }
 }
     
-open func setChainSourceEsplora(serverUrl: String, config: EsploraSyncConfig?) {try! rustCall() {
+open func setChainSourceEsplora(serverUrl: String, config: EsploraSyncConfig?)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_chain_source_esplora(self.uniffiClonePointer(),
         FfiConverterString.lower(serverUrl),
         FfiConverterOptionTypeEsploraSyncConfig.lower(config),$0
@@ -1845,36 +2863,14 @@ open func setChainSourceEsplora(serverUrl: String, config: EsploraSyncConfig?) {
 }
 }
     
-open func setCustomLogger(logWriter: LogWriter) {try! rustCall() {
+open func setCustomLogger(logWriter: LogWriter)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_custom_logger(self.uniffiClonePointer(),
-        FfiConverterTypeLogWriter.lower(logWriter),$0
+        FfiConverterTypeLogWriter_lower(logWriter),$0
     )
 }
 }
     
-open func setEntropyBip39Mnemonic(mnemonic: Mnemonic, passphrase: String?) {try! rustCall() {
-    uniffi_ldk_node_fn_method_builder_set_entropy_bip39_mnemonic(self.uniffiClonePointer(),
-        FfiConverterTypeMnemonic.lower(mnemonic),
-        FfiConverterOptionString.lower(passphrase),$0
-    )
-}
-}
-    
-open func setEntropySeedBytes(seedBytes: [UInt8])throws  {try rustCallWithError(FfiConverterTypeBuildError.lift) {
-    uniffi_ldk_node_fn_method_builder_set_entropy_seed_bytes(self.uniffiClonePointer(),
-        FfiConverterSequenceUInt8.lower(seedBytes),$0
-    )
-}
-}
-    
-open func setEntropySeedPath(seedPath: String) {try! rustCall() {
-    uniffi_ldk_node_fn_method_builder_set_entropy_seed_path(self.uniffiClonePointer(),
-        FfiConverterString.lower(seedPath),$0
-    )
-}
-}
-    
-open func setFilesystemLogger(logFilePath: String?, maxLogLevel: LogLevel?) {try! rustCall() {
+open func setFilesystemLogger(logFilePath: String?, maxLogLevel: LogLevel?)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_filesystem_logger(self.uniffiClonePointer(),
         FfiConverterOptionString.lower(logFilePath),
         FfiConverterOptionTypeLogLevel.lower(maxLogLevel),$0
@@ -1882,80 +2878,94 @@ open func setFilesystemLogger(logFilePath: String?, maxLogLevel: LogLevel?) {try
 }
 }
     
-open func setGossipSourceP2p() {try! rustCall() {
+open func setGossipSourceP2p()  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_gossip_source_p2p(self.uniffiClonePointer(),$0
     )
 }
 }
     
-open func setGossipSourceRgs(rgsServerUrl: String) {try! rustCall() {
+open func setGossipSourceRgs(rgsServerUrl: String)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_gossip_source_rgs(self.uniffiClonePointer(),
         FfiConverterString.lower(rgsServerUrl),$0
     )
 }
 }
     
-open func setLiquiditySourceLsps1(nodeId: PublicKey, address: SocketAddress, token: String?) {try! rustCall() {
+open func setLiquiditySourceLsps1(nodeId: PublicKey, address: SocketAddress, token: String?)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_liquidity_source_lsps1(self.uniffiClonePointer(),
-        FfiConverterTypePublicKey.lower(nodeId),
-        FfiConverterTypeSocketAddress.lower(address),
+        FfiConverterTypePublicKey_lower(nodeId),
+        FfiConverterTypeSocketAddress_lower(address),
         FfiConverterOptionString.lower(token),$0
     )
 }
 }
     
-open func setLiquiditySourceLsps2(nodeId: PublicKey, address: SocketAddress, token: String?) {try! rustCall() {
+open func setLiquiditySourceLsps2(nodeId: PublicKey, address: SocketAddress, token: String?)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_liquidity_source_lsps2(self.uniffiClonePointer(),
-        FfiConverterTypePublicKey.lower(nodeId),
-        FfiConverterTypeSocketAddress.lower(address),
+        FfiConverterTypePublicKey_lower(nodeId),
+        FfiConverterTypeSocketAddress_lower(address),
         FfiConverterOptionString.lower(token),$0
     )
 }
 }
     
-open func setListeningAddresses(listeningAddresses: [SocketAddress])throws  {try rustCallWithError(FfiConverterTypeBuildError.lift) {
+open func setListeningAddresses(listeningAddresses: [SocketAddress])throws   {try rustCallWithError(FfiConverterTypeBuildError_lift) {
     uniffi_ldk_node_fn_method_builder_set_listening_addresses(self.uniffiClonePointer(),
         FfiConverterSequenceTypeSocketAddress.lower(listeningAddresses),$0
     )
 }
 }
     
-open func setLogFacadeLogger() {try! rustCall() {
+open func setLogFacadeLogger()  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_log_facade_logger(self.uniffiClonePointer(),$0
     )
 }
 }
     
-open func setNetwork(network: Network) {try! rustCall() {
+open func setNetwork(network: Network)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_network(self.uniffiClonePointer(),
-        FfiConverterTypeNetwork.lower(network),$0
+        FfiConverterTypeNetwork_lower(network),$0
     )
 }
 }
     
-open func setNodeAlias(nodeAlias: String)throws  {try rustCallWithError(FfiConverterTypeBuildError.lift) {
+open func setNodeAlias(nodeAlias: String)throws   {try rustCallWithError(FfiConverterTypeBuildError_lift) {
     uniffi_ldk_node_fn_method_builder_set_node_alias(self.uniffiClonePointer(),
         FfiConverterString.lower(nodeAlias),$0
     )
 }
 }
     
-open func setPathfindingScoresSource(url: String) {try! rustCall() {
+open func setPathfindingScoresSource(url: String)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_pathfinding_scores_source(self.uniffiClonePointer(),
         FfiConverterString.lower(url),$0
     )
 }
 }
     
-open func setStorageDirPath(storageDirPath: String) {try! rustCall() {
+open func setStorageDirPath(storageDirPath: String)  {try! rustCall() {
     uniffi_ldk_node_fn_method_builder_set_storage_dir_path(self.uniffiClonePointer(),
         FfiConverterString.lower(storageDirPath),$0
     )
 }
 }
     
+open func setTorConfig(torConfig: TorConfig)throws   {try rustCallWithError(FfiConverterTypeBuildError_lift) {
+    uniffi_ldk_node_fn_method_builder_set_tor_config(self.uniffiClonePointer(),
+        FfiConverterTypeTorConfig_lower(torConfig),$0
+    )
+}
+}
+    
+open func setWalletRecoveryMode()  {try! rustCall() {
+    uniffi_ldk_node_fn_method_builder_set_wallet_recovery_mode(self.uniffiClonePointer(),$0
+    )
+}
+}
+    
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -1992,8 +3002,6 @@ public struct FfiConverterTypeBuilder: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -2011,7 +3019,9 @@ public func FfiConverterTypeBuilder_lower(_ value: Builder) -> UnsafeMutableRawP
 
 
 
-public protocol FeeRateProtocol : AnyObject {
+
+
+public protocol FeeRateProtocol: AnyObject, Sendable {
     
     func toSatPerKwu()  -> UInt64
     
@@ -2020,9 +3030,7 @@ public protocol FeeRateProtocol : AnyObject {
     func toSatPerVbFloor()  -> UInt64
     
 }
-
-open class FeeRate:
-    FeeRateProtocol {
+open class FeeRate: FeeRateProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -2036,6 +3044,9 @@ open class FeeRate:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -2069,39 +3080,39 @@ open class FeeRate:
     }
 
     
-public static func fromSatPerKwu(satKwu: UInt64) -> FeeRate {
-    return try!  FfiConverterTypeFeeRate.lift(try! rustCall() {
+public static func fromSatPerKwu(satKwu: UInt64) -> FeeRate  {
+    return try!  FfiConverterTypeFeeRate_lift(try! rustCall() {
     uniffi_ldk_node_fn_constructor_feerate_from_sat_per_kwu(
         FfiConverterUInt64.lower(satKwu),$0
     )
 })
 }
     
-public static func fromSatPerVbUnchecked(satVb: UInt64) -> FeeRate {
-    return try!  FfiConverterTypeFeeRate.lift(try! rustCall() {
-    uniffi_ldk_node_fn_constructor_feerate_from_sat_per_vb_unchecked(
-        FfiConverterUInt64.lower(satVb),$0
+public static func fromSatPerVbU32(satVb: UInt32) -> FeeRate  {
+    return try!  FfiConverterTypeFeeRate_lift(try! rustCall() {
+    uniffi_ldk_node_fn_constructor_feerate_from_sat_per_vb_u32(
+        FfiConverterUInt32.lower(satVb),$0
     )
 })
 }
     
 
     
-open func toSatPerKwu() -> UInt64 {
+open func toSatPerKwu() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_feerate_to_sat_per_kwu(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func toSatPerVbCeil() -> UInt64 {
+open func toSatPerVbCeil() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_feerate_to_sat_per_vb_ceil(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func toSatPerVbFloor() -> UInt64 {
+open func toSatPerVbFloor() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_feerate_to_sat_per_vb_floor(self.uniffiClonePointer(),$0
     )
@@ -2110,6 +3121,7 @@ open func toSatPerVbFloor() -> UInt64 {
     
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2146,8 +3158,6 @@ public struct FfiConverterTypeFeeRate: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -2165,16 +3175,50 @@ public func FfiConverterTypeFeeRate_lower(_ value: FeeRate) -> UnsafeMutableRawP
 
 
 
-public protocol Lsps1LiquidityProtocol : AnyObject {
+
+
+/**
+ * A struct containing the two parts of a BIP 353 Human-Readable Name - the user and domain parts.
+ *
+ * The `user` and `domain` parts combined cannot exceed 231 bytes in length;
+ * each DNS label within them must be non-empty and no longer than 63 bytes.
+ *
+ * If you intend to handle non-ASCII `user` or `domain` parts, you must handle [Homograph Attacks]
+ * and do punycode en-/de-coding yourself. This struct will always handle only plain ASCII `user`
+ * and `domain` parts.
+ *
+ * This struct can also be used for LN-Address recipients.
+ *
+ * [Homograph Attacks]: https://en.wikipedia.org/wiki/IDN_homograph_attack
+ */
+public protocol HumanReadableNameProtocol: AnyObject, Sendable {
     
-    func checkOrderStatus(orderId: Lsps1OrderId) throws  -> Lsps1OrderStatus
+    /**
+     * Gets the `domain` part of this Human-Readable Name
+     */
+    func domain()  -> String
     
-    func requestChannel(lspBalanceSat: UInt64, clientBalanceSat: UInt64, channelExpiryBlocks: UInt32, announceChannel: Bool) throws  -> Lsps1OrderStatus
+    /**
+     * Gets the `user` part of this Human-Readable Name
+     */
+    func user()  -> String
     
 }
-
-open class Lsps1Liquidity:
-    Lsps1LiquidityProtocol {
+/**
+ * A struct containing the two parts of a BIP 353 Human-Readable Name - the user and domain parts.
+ *
+ * The `user` and `domain` parts combined cannot exceed 231 bytes in length;
+ * each DNS label within them must be non-empty and no longer than 63 bytes.
+ *
+ * If you intend to handle non-ASCII `user` or `domain` parts, you must handle [Homograph Attacks]
+ * and do punycode en-/de-coding yourself. This struct will always handle only plain ASCII `user`
+ * and `domain` parts.
+ *
+ * This struct can also be used for LN-Address recipients.
+ *
+ * [Homograph Attacks]: https://en.wikipedia.org/wiki/IDN_homograph_attack
+ */
+open class HumanReadableName: HumanReadableNameProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -2188,6 +3232,223 @@ open class Lsps1Liquidity:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_ldk_node_fn_clone_humanreadablename(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_ldk_node_fn_free_humanreadablename(pointer, $0) }
+    }
+
+    
+    /**
+     * Constructs a new [`HumanReadableName`] from the standard encoding - `user`@`domain`.
+     *
+     * If `user` includes the standard BIP 353 ₿ prefix it is automatically removed as required by
+     * BIP 353.
+     */
+public static func fromEncoded(encoded: String)throws  -> HumanReadableName  {
+    return try  FfiConverterTypeHumanReadableName_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_constructor_humanreadablename_from_encoded(
+        FfiConverterString.lower(encoded),$0
+    )
+})
+}
+    
+
+    
+    /**
+     * Gets the `domain` part of this Human-Readable Name
+     */
+open func domain() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_ldk_node_fn_method_humanreadablename_domain(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Gets the `user` part of this Human-Readable Name
+     */
+open func user() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_ldk_node_fn_method_humanreadablename_user(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_ldk_node_fn_method_humanreadablename_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    open var description: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_ldk_node_fn_method_humanreadablename_uniffi_trait_display(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    public static func == (self: HumanReadableName, other: HumanReadableName) -> Bool {
+        return try!  FfiConverterBool.lift(
+            try! rustCall() {
+    uniffi_ldk_node_fn_method_humanreadablename_uniffi_trait_eq_eq(self.uniffiClonePointer(),
+        FfiConverterTypeHumanReadableName_lower(other),$0
+    )
+}
+        )
+    }
+
+}
+extension HumanReadableName: CustomDebugStringConvertible {}
+extension HumanReadableName: CustomStringConvertible {}
+extension HumanReadableName: Equatable {}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHumanReadableName: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = HumanReadableName
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> HumanReadableName {
+        return HumanReadableName(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: HumanReadableName) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HumanReadableName {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: HumanReadableName, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHumanReadableName_lift(_ pointer: UnsafeMutableRawPointer) throws -> HumanReadableName {
+    return try FfiConverterTypeHumanReadableName.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHumanReadableName_lower(_ value: HumanReadableName) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeHumanReadableName.lower(value)
+}
+
+
+
+
+
+
+/**
+ * A liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
+ *
+ * Should be retrieved by calling [`Node::lsps1_liquidity`].
+ *
+ * To open [bLIP-52 / LSPS2] JIT channels, please refer to
+ * [`Bolt11Payment::receive_via_jit_channel`].
+ *
+ * [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
+ * [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+ * [`Node::lsps1_liquidity`]: crate::Node::lsps1_liquidity
+ * [`Bolt11Payment::receive_via_jit_channel`]: crate::payment::Bolt11Payment::receive_via_jit_channel
+ */
+public protocol Lsps1LiquidityProtocol: AnyObject, Sendable {
+    
+    /**
+     * Connects to the configured LSP and checks for the status of a previously-placed order.
+     */
+    func checkOrderStatus(orderId: Lsps1OrderId) throws  -> Lsps1OrderStatus
+    
+    /**
+     * Connects to the configured LSP and places an order for an inbound channel.
+     *
+     * The channel will be opened after one of the returned payment options has successfully been
+     * paid.
+     */
+    func requestChannel(lspBalanceSat: UInt64, clientBalanceSat: UInt64, channelExpiryBlocks: UInt32, announceChannel: Bool) throws  -> Lsps1OrderStatus
+    
+}
+/**
+ * A liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
+ *
+ * Should be retrieved by calling [`Node::lsps1_liquidity`].
+ *
+ * To open [bLIP-52 / LSPS2] JIT channels, please refer to
+ * [`Bolt11Payment::receive_via_jit_channel`].
+ *
+ * [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
+ * [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+ * [`Node::lsps1_liquidity`]: crate::Node::lsps1_liquidity
+ * [`Bolt11Payment::receive_via_jit_channel`]: crate::payment::Bolt11Payment::receive_via_jit_channel
+ */
+open class Lsps1Liquidity: Lsps1LiquidityProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -2223,16 +3484,25 @@ open class Lsps1Liquidity:
     
 
     
-open func checkOrderStatus(orderId: Lsps1OrderId)throws  -> Lsps1OrderStatus {
-    return try  FfiConverterTypeLSPS1OrderStatus.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Connects to the configured LSP and checks for the status of a previously-placed order.
+     */
+open func checkOrderStatus(orderId: Lsps1OrderId)throws  -> Lsps1OrderStatus  {
+    return try  FfiConverterTypeLSPS1OrderStatus_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_lsps1liquidity_check_order_status(self.uniffiClonePointer(),
-        FfiConverterTypeLSPS1OrderId.lower(orderId),$0
+        FfiConverterTypeLSPS1OrderId_lower(orderId),$0
     )
 })
 }
     
-open func requestChannel(lspBalanceSat: UInt64, clientBalanceSat: UInt64, channelExpiryBlocks: UInt32, announceChannel: Bool)throws  -> Lsps1OrderStatus {
-    return try  FfiConverterTypeLSPS1OrderStatus.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Connects to the configured LSP and places an order for an inbound channel.
+     *
+     * The channel will be opened after one of the returned payment options has successfully been
+     * paid.
+     */
+open func requestChannel(lspBalanceSat: UInt64, clientBalanceSat: UInt64, channelExpiryBlocks: UInt32, announceChannel: Bool)throws  -> Lsps1OrderStatus  {
+    return try  FfiConverterTypeLSPS1OrderStatus_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_lsps1liquidity_request_channel(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(lspBalanceSat),
         FfiConverterUInt64.lower(clientBalanceSat),
@@ -2244,6 +3514,7 @@ open func requestChannel(lspBalanceSat: UInt64, clientBalanceSat: UInt64, channe
     
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2280,8 +3551,6 @@ public struct FfiConverterTypeLSPS1Liquidity: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -2299,14 +3568,14 @@ public func FfiConverterTypeLSPS1Liquidity_lower(_ value: Lsps1Liquidity) -> Uns
 
 
 
-public protocol LogWriter : AnyObject {
+
+
+public protocol LogWriter: AnyObject, Sendable {
     
     func log(record: LogRecord) 
     
 }
-
-open class LogWriterImpl:
-    LogWriter {
+open class LogWriterImpl: LogWriter, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -2320,6 +3589,9 @@ open class LogWriterImpl:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -2355,29 +3627,26 @@ open class LogWriterImpl:
     
 
     
-open func log(record: LogRecord) {try! rustCall() {
+open func log(record: LogRecord)  {try! rustCall() {
     uniffi_ldk_node_fn_method_logwriter_log(self.uniffiClonePointer(),
-        FfiConverterTypeLogRecord.lower(record),$0
+        FfiConverterTypeLogRecord_lower(record),$0
     )
 }
 }
     
 
 }
-// Magic number for the Rust proxy to call using the same mechanism as every other method,
-// to free the callback once it's dropped by Rust.
-private let IDX_CALLBACK_FREE: Int32 = 0
-// Callback return codes
-private let UNIFFI_CALLBACK_SUCCESS: Int32 = 0
-private let UNIFFI_CALLBACK_ERROR: Int32 = 1
-private let UNIFFI_CALLBACK_UNEXPECTED_ERROR: Int32 = 2
+
 
 // Put the implementation in a struct so we don't pollute the top-level namespace
 fileprivate struct UniffiCallbackInterfaceLogWriter {
 
     // Create the VTable using a series of closures.
     // Swift automatically converts these into C callback functions.
-    static var vtable: UniffiVTableCallbackInterfaceLogWriter = UniffiVTableCallbackInterfaceLogWriter(
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceLogWriter] = [UniffiVTableCallbackInterfaceLogWriter(
         log: { (
             uniffiHandle: UInt64,
             record: RustBuffer,
@@ -2390,7 +3659,7 @@ fileprivate struct UniffiCallbackInterfaceLogWriter {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
                 return uniffiObj.log(
-                     record: try FfiConverterTypeLogRecord.lift(record)
+                     record: try FfiConverterTypeLogRecord_lift(record)
                 )
             }
 
@@ -2408,18 +3677,19 @@ fileprivate struct UniffiCallbackInterfaceLogWriter {
                 print("Uniffi callback interface LogWriter: handle missing in uniffiFree")
             }
         }
-    )
+    )]
 }
 
 private func uniffiCallbackInitLogWriter() {
-    uniffi_ldk_node_fn_init_callback_vtable_logwriter(&UniffiCallbackInterfaceLogWriter.vtable)
+    uniffi_ldk_node_fn_init_callback_vtable_logwriter(UniffiCallbackInterfaceLogWriter.vtable)
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeLogWriter: FfiConverter {
-    fileprivate static var handleMap = UniffiHandleMap<LogWriter>()
+    fileprivate static let handleMap = UniffiHandleMap<LogWriter>()
 
     typealias FfiType = UnsafeMutableRawPointer
     typealias SwiftType = LogWriter
@@ -2454,8 +3724,6 @@ public struct FfiConverterTypeLogWriter: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -2473,20 +3741,38 @@ public func FfiConverterTypeLogWriter_lower(_ value: LogWriter) -> UnsafeMutable
 
 
 
-public protocol NetworkGraphProtocol : AnyObject {
+
+
+/**
+ * Represents the network as nodes and channels between them.
+ */
+public protocol NetworkGraphProtocol: AnyObject, Sendable {
     
+    /**
+     * Returns information on a channel with the given id.
+     */
     func channel(shortChannelId: UInt64)  -> ChannelInfo?
     
+    /**
+     * Returns the list of channels in the graph
+     */
     func listChannels()  -> [UInt64]
     
+    /**
+     * Returns the list of nodes in the graph
+     */
     func listNodes()  -> [NodeId]
     
+    /**
+     * Returns information on a node with the given id.
+     */
     func node(nodeId: NodeId)  -> NodeInfo?
     
 }
-
-open class NetworkGraph:
-    NetworkGraphProtocol {
+/**
+ * Represents the network as nodes and channels between them.
+ */
+open class NetworkGraph: NetworkGraphProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -2500,6 +3786,9 @@ open class NetworkGraph:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -2535,7 +3824,10 @@ open class NetworkGraph:
     
 
     
-open func channel(shortChannelId: UInt64) -> ChannelInfo? {
+    /**
+     * Returns information on a channel with the given id.
+     */
+open func channel(shortChannelId: UInt64) -> ChannelInfo?  {
     return try!  FfiConverterOptionTypeChannelInfo.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_networkgraph_channel(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(shortChannelId),$0
@@ -2543,30 +3835,40 @@ open func channel(shortChannelId: UInt64) -> ChannelInfo? {
 })
 }
     
-open func listChannels() -> [UInt64] {
+    /**
+     * Returns the list of channels in the graph
+     */
+open func listChannels() -> [UInt64]  {
     return try!  FfiConverterSequenceUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_networkgraph_list_channels(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func listNodes() -> [NodeId] {
+    /**
+     * Returns the list of nodes in the graph
+     */
+open func listNodes() -> [NodeId]  {
     return try!  FfiConverterSequenceTypeNodeId.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_networkgraph_list_nodes(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func node(nodeId: NodeId) -> NodeInfo? {
+    /**
+     * Returns information on a node with the given id.
+     */
+open func node(nodeId: NodeId) -> NodeInfo?  {
     return try!  FfiConverterOptionTypeNodeInfo.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_networkgraph_node(self.uniffiClonePointer(),
-        FfiConverterTypeNodeId.lower(nodeId),$0
+        FfiConverterTypeNodeId_lower(nodeId),$0
     )
 })
 }
     
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -2603,8 +3905,6 @@ public struct FfiConverterTypeNetworkGraph: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -2622,7 +3922,9 @@ public func FfiConverterTypeNetworkGraph_lower(_ value: NetworkGraph) -> UnsafeM
 
 
 
-public protocol NodeProtocol : AnyObject {
+
+
+public protocol NodeProtocol: AnyObject, Sendable {
     
     func announcementAddresses()  -> [SocketAddress]?
     
@@ -2654,6 +3956,8 @@ public protocol NodeProtocol : AnyObject {
     
     func listeningAddresses()  -> [SocketAddress]?
     
+    func lnurlAuth(lnurl: String) throws 
+    
     func lsps1Liquidity()  -> Lsps1Liquidity
     
     func networkGraph()  -> NetworkGraph
@@ -2668,9 +3972,17 @@ public protocol NodeProtocol : AnyObject {
     
     func onchainPayment()  -> OnchainPayment
     
+    func open0reserveChannel(nodeId: PublicKey, address: SocketAddress, channelAmountSats: UInt64, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?) throws  -> UserChannelId
+    
+    func open0reserveChannelWithAll(nodeId: PublicKey, address: SocketAddress, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?) throws  -> UserChannelId
+    
     func openAnnouncedChannel(nodeId: PublicKey, address: SocketAddress, channelAmountSats: UInt64, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?) throws  -> UserChannelId
     
+    func openAnnouncedChannelWithAll(nodeId: PublicKey, address: SocketAddress, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?) throws  -> UserChannelId
+    
     func openChannel(nodeId: PublicKey, address: SocketAddress, channelAmountSats: UInt64, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?) throws  -> UserChannelId
+    
+    func openChannelWithAll(nodeId: PublicKey, address: SocketAddress, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?) throws  -> UserChannelId
     
     func payment(paymentId: PaymentId)  -> PaymentDetails?
     
@@ -2679,6 +3991,8 @@ public protocol NodeProtocol : AnyObject {
     func signMessage(msg: [UInt8])  -> String
     
     func spliceIn(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, spliceAmountSats: UInt64) throws 
+    
+    func spliceInWithAll(userChannelId: UserChannelId, counterpartyNodeId: PublicKey) throws 
     
     func spliceOut(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, address: Address, spliceAmountSats: UInt64) throws 
     
@@ -2692,7 +4006,7 @@ public protocol NodeProtocol : AnyObject {
     
     func syncWallets() throws 
     
-    func unifiedQrPayment()  -> UnifiedQrPayment
+    func unifiedPayment()  -> UnifiedPayment
     
     func updateChannelConfig(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, channelConfig: ChannelConfig) throws 
     
@@ -2701,9 +4015,7 @@ public protocol NodeProtocol : AnyObject {
     func waitNextEvent()  -> Event
     
 }
-
-open class Node:
-    NodeProtocol {
+open class Node: NodeProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -2717,6 +4029,9 @@ open class Node:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -2752,137 +4067,144 @@ open class Node:
     
 
     
-open func announcementAddresses() -> [SocketAddress]? {
+open func announcementAddresses() -> [SocketAddress]?  {
     return try!  FfiConverterOptionSequenceTypeSocketAddress.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_announcement_addresses(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func bolt11Payment() -> Bolt11Payment {
-    return try!  FfiConverterTypeBolt11Payment.lift(try! rustCall() {
+open func bolt11Payment() -> Bolt11Payment  {
+    return try!  FfiConverterTypeBolt11Payment_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_bolt11_payment(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func bolt12Payment() -> Bolt12Payment {
-    return try!  FfiConverterTypeBolt12Payment.lift(try! rustCall() {
+open func bolt12Payment() -> Bolt12Payment  {
+    return try!  FfiConverterTypeBolt12Payment_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_bolt12_payment(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func closeChannel(userChannelId: UserChannelId, counterpartyNodeId: PublicKey)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func closeChannel(userChannelId: UserChannelId, counterpartyNodeId: PublicKey)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_close_channel(self.uniffiClonePointer(),
-        FfiConverterTypeUserChannelId.lower(userChannelId),
-        FfiConverterTypePublicKey.lower(counterpartyNodeId),$0
+        FfiConverterTypeUserChannelId_lower(userChannelId),
+        FfiConverterTypePublicKey_lower(counterpartyNodeId),$0
     )
 }
 }
     
-open func config() -> Config {
-    return try!  FfiConverterTypeConfig.lift(try! rustCall() {
+open func config() -> Config  {
+    return try!  FfiConverterTypeConfig_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_config(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func connect(nodeId: PublicKey, address: SocketAddress, persist: Bool)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func connect(nodeId: PublicKey, address: SocketAddress, persist: Bool)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_connect(self.uniffiClonePointer(),
-        FfiConverterTypePublicKey.lower(nodeId),
-        FfiConverterTypeSocketAddress.lower(address),
+        FfiConverterTypePublicKey_lower(nodeId),
+        FfiConverterTypeSocketAddress_lower(address),
         FfiConverterBool.lower(persist),$0
     )
 }
 }
     
-open func disconnect(nodeId: PublicKey)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func disconnect(nodeId: PublicKey)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_disconnect(self.uniffiClonePointer(),
-        FfiConverterTypePublicKey.lower(nodeId),$0
+        FfiConverterTypePublicKey_lower(nodeId),$0
     )
 }
 }
     
-open func eventHandled()throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func eventHandled()throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_event_handled(self.uniffiClonePointer(),$0
     )
 }
 }
     
-open func exportPathfindingScores()throws  -> Data {
-    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func exportPathfindingScores()throws  -> Data  {
+    return try  FfiConverterData.lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_export_pathfinding_scores(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func forceCloseChannel(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, reason: String?)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func forceCloseChannel(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, reason: String?)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_force_close_channel(self.uniffiClonePointer(),
-        FfiConverterTypeUserChannelId.lower(userChannelId),
-        FfiConverterTypePublicKey.lower(counterpartyNodeId),
+        FfiConverterTypeUserChannelId_lower(userChannelId),
+        FfiConverterTypePublicKey_lower(counterpartyNodeId),
         FfiConverterOptionString.lower(reason),$0
     )
 }
 }
     
-open func listBalances() -> BalanceDetails {
-    return try!  FfiConverterTypeBalanceDetails.lift(try! rustCall() {
+open func listBalances() -> BalanceDetails  {
+    return try!  FfiConverterTypeBalanceDetails_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_list_balances(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func listChannels() -> [ChannelDetails] {
+open func listChannels() -> [ChannelDetails]  {
     return try!  FfiConverterSequenceTypeChannelDetails.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_list_channels(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func listPayments() -> [PaymentDetails] {
+open func listPayments() -> [PaymentDetails]  {
     return try!  FfiConverterSequenceTypePaymentDetails.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_list_payments(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func listPeers() -> [PeerDetails] {
+open func listPeers() -> [PeerDetails]  {
     return try!  FfiConverterSequenceTypePeerDetails.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_list_peers(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func listeningAddresses() -> [SocketAddress]? {
+open func listeningAddresses() -> [SocketAddress]?  {
     return try!  FfiConverterOptionSequenceTypeSocketAddress.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_listening_addresses(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func lsps1Liquidity() -> Lsps1Liquidity {
-    return try!  FfiConverterTypeLSPS1Liquidity.lift(try! rustCall() {
+open func lnurlAuth(lnurl: String)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_method_node_lnurl_auth(self.uniffiClonePointer(),
+        FfiConverterString.lower(lnurl),$0
+    )
+}
+}
+    
+open func lsps1Liquidity() -> Lsps1Liquidity  {
+    return try!  FfiConverterTypeLSPS1Liquidity_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_lsps1_liquidity(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func networkGraph() -> NetworkGraph {
-    return try!  FfiConverterTypeNetworkGraph.lift(try! rustCall() {
+open func networkGraph() -> NetworkGraph  {
+    return try!  FfiConverterTypeNetworkGraph_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_network_graph(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func nextEvent() -> Event? {
+open func nextEvent() -> Event?  {
     return try!  FfiConverterOptionTypeEvent.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_next_event(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func nextEventAsync()async  -> Event {
+open func nextEventAsync()async  -> Event  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -2894,38 +4216,61 @@ open func nextEventAsync()async  -> Event {
             pollFunc: ffi_ldk_node_rust_future_poll_rust_buffer,
             completeFunc: ffi_ldk_node_rust_future_complete_rust_buffer,
             freeFunc: ffi_ldk_node_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeEvent.lift,
+            liftFunc: FfiConverterTypeEvent_lift,
             errorHandler: nil
             
         )
 }
     
-open func nodeAlias() -> NodeAlias? {
+open func nodeAlias() -> NodeAlias?  {
     return try!  FfiConverterOptionTypeNodeAlias.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_node_alias(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func nodeId() -> PublicKey {
-    return try!  FfiConverterTypePublicKey.lift(try! rustCall() {
+open func nodeId() -> PublicKey  {
+    return try!  FfiConverterTypePublicKey_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_node_id(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func onchainPayment() -> OnchainPayment {
-    return try!  FfiConverterTypeOnchainPayment.lift(try! rustCall() {
+open func onchainPayment() -> OnchainPayment  {
+    return try!  FfiConverterTypeOnchainPayment_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_onchain_payment(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func openAnnouncedChannel(nodeId: PublicKey, address: SocketAddress, channelAmountSats: UInt64, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?)throws  -> UserChannelId {
-    return try  FfiConverterTypeUserChannelId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func open0reserveChannel(nodeId: PublicKey, address: SocketAddress, channelAmountSats: UInt64, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?)throws  -> UserChannelId  {
+    return try  FfiConverterTypeUserChannelId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_method_node_open_0reserve_channel(self.uniffiClonePointer(),
+        FfiConverterTypePublicKey_lower(nodeId),
+        FfiConverterTypeSocketAddress_lower(address),
+        FfiConverterUInt64.lower(channelAmountSats),
+        FfiConverterOptionUInt64.lower(pushToCounterpartyMsat),
+        FfiConverterOptionTypeChannelConfig.lower(channelConfig),$0
+    )
+})
+}
+    
+open func open0reserveChannelWithAll(nodeId: PublicKey, address: SocketAddress, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?)throws  -> UserChannelId  {
+    return try  FfiConverterTypeUserChannelId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_method_node_open_0reserve_channel_with_all(self.uniffiClonePointer(),
+        FfiConverterTypePublicKey_lower(nodeId),
+        FfiConverterTypeSocketAddress_lower(address),
+        FfiConverterOptionUInt64.lower(pushToCounterpartyMsat),
+        FfiConverterOptionTypeChannelConfig.lower(channelConfig),$0
+    )
+})
+}
+    
+open func openAnnouncedChannel(nodeId: PublicKey, address: SocketAddress, channelAmountSats: UInt64, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?)throws  -> UserChannelId  {
+    return try  FfiConverterTypeUserChannelId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_open_announced_channel(self.uniffiClonePointer(),
-        FfiConverterTypePublicKey.lower(nodeId),
-        FfiConverterTypeSocketAddress.lower(address),
+        FfiConverterTypePublicKey_lower(nodeId),
+        FfiConverterTypeSocketAddress_lower(address),
         FfiConverterUInt64.lower(channelAmountSats),
         FfiConverterOptionUInt64.lower(pushToCounterpartyMsat),
         FfiConverterOptionTypeChannelConfig.lower(channelConfig),$0
@@ -2933,11 +4278,22 @@ open func openAnnouncedChannel(nodeId: PublicKey, address: SocketAddress, channe
 })
 }
     
-open func openChannel(nodeId: PublicKey, address: SocketAddress, channelAmountSats: UInt64, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?)throws  -> UserChannelId {
-    return try  FfiConverterTypeUserChannelId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func openAnnouncedChannelWithAll(nodeId: PublicKey, address: SocketAddress, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?)throws  -> UserChannelId  {
+    return try  FfiConverterTypeUserChannelId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_method_node_open_announced_channel_with_all(self.uniffiClonePointer(),
+        FfiConverterTypePublicKey_lower(nodeId),
+        FfiConverterTypeSocketAddress_lower(address),
+        FfiConverterOptionUInt64.lower(pushToCounterpartyMsat),
+        FfiConverterOptionTypeChannelConfig.lower(channelConfig),$0
+    )
+})
+}
+    
+open func openChannel(nodeId: PublicKey, address: SocketAddress, channelAmountSats: UInt64, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?)throws  -> UserChannelId  {
+    return try  FfiConverterTypeUserChannelId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_open_channel(self.uniffiClonePointer(),
-        FfiConverterTypePublicKey.lower(nodeId),
-        FfiConverterTypeSocketAddress.lower(address),
+        FfiConverterTypePublicKey_lower(nodeId),
+        FfiConverterTypeSocketAddress_lower(address),
         FfiConverterUInt64.lower(channelAmountSats),
         FfiConverterOptionUInt64.lower(pushToCounterpartyMsat),
         FfiConverterOptionTypeChannelConfig.lower(channelConfig),$0
@@ -2945,22 +4301,33 @@ open func openChannel(nodeId: PublicKey, address: SocketAddress, channelAmountSa
 })
 }
     
-open func payment(paymentId: PaymentId) -> PaymentDetails? {
+open func openChannelWithAll(nodeId: PublicKey, address: SocketAddress, pushToCounterpartyMsat: UInt64?, channelConfig: ChannelConfig?)throws  -> UserChannelId  {
+    return try  FfiConverterTypeUserChannelId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_method_node_open_channel_with_all(self.uniffiClonePointer(),
+        FfiConverterTypePublicKey_lower(nodeId),
+        FfiConverterTypeSocketAddress_lower(address),
+        FfiConverterOptionUInt64.lower(pushToCounterpartyMsat),
+        FfiConverterOptionTypeChannelConfig.lower(channelConfig),$0
+    )
+})
+}
+    
+open func payment(paymentId: PaymentId) -> PaymentDetails?  {
     return try!  FfiConverterOptionTypePaymentDetails.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_payment(self.uniffiClonePointer(),
-        FfiConverterTypePaymentId.lower(paymentId),$0
+        FfiConverterTypePaymentId_lower(paymentId),$0
     )
 })
 }
     
-open func removePayment(paymentId: PaymentId)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func removePayment(paymentId: PaymentId)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_remove_payment(self.uniffiClonePointer(),
-        FfiConverterTypePaymentId.lower(paymentId),$0
+        FfiConverterTypePaymentId_lower(paymentId),$0
     )
 }
 }
     
-open func signMessage(msg: [UInt8]) -> String {
+open func signMessage(msg: [UInt8]) -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_sign_message(self.uniffiClonePointer(),
         FfiConverterSequenceUInt8.lower(msg),$0
@@ -2968,85 +4335,93 @@ open func signMessage(msg: [UInt8]) -> String {
 })
 }
     
-open func spliceIn(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, spliceAmountSats: UInt64)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func spliceIn(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, spliceAmountSats: UInt64)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_splice_in(self.uniffiClonePointer(),
-        FfiConverterTypeUserChannelId.lower(userChannelId),
-        FfiConverterTypePublicKey.lower(counterpartyNodeId),
+        FfiConverterTypeUserChannelId_lower(userChannelId),
+        FfiConverterTypePublicKey_lower(counterpartyNodeId),
         FfiConverterUInt64.lower(spliceAmountSats),$0
     )
 }
 }
     
-open func spliceOut(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, address: Address, spliceAmountSats: UInt64)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func spliceInWithAll(userChannelId: UserChannelId, counterpartyNodeId: PublicKey)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_method_node_splice_in_with_all(self.uniffiClonePointer(),
+        FfiConverterTypeUserChannelId_lower(userChannelId),
+        FfiConverterTypePublicKey_lower(counterpartyNodeId),$0
+    )
+}
+}
+    
+open func spliceOut(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, address: Address, spliceAmountSats: UInt64)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_splice_out(self.uniffiClonePointer(),
-        FfiConverterTypeUserChannelId.lower(userChannelId),
-        FfiConverterTypePublicKey.lower(counterpartyNodeId),
-        FfiConverterTypeAddress.lower(address),
+        FfiConverterTypeUserChannelId_lower(userChannelId),
+        FfiConverterTypePublicKey_lower(counterpartyNodeId),
+        FfiConverterTypeAddress_lower(address),
         FfiConverterUInt64.lower(spliceAmountSats),$0
     )
 }
 }
     
-open func spontaneousPayment() -> SpontaneousPayment {
-    return try!  FfiConverterTypeSpontaneousPayment.lift(try! rustCall() {
+open func spontaneousPayment() -> SpontaneousPayment  {
+    return try!  FfiConverterTypeSpontaneousPayment_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_spontaneous_payment(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func start()throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func start()throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_start(self.uniffiClonePointer(),$0
     )
 }
 }
     
-open func status() -> NodeStatus {
-    return try!  FfiConverterTypeNodeStatus.lift(try! rustCall() {
+open func status() -> NodeStatus  {
+    return try!  FfiConverterTypeNodeStatus_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_status(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func stop()throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func stop()throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_stop(self.uniffiClonePointer(),$0
     )
 }
 }
     
-open func syncWallets()throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func syncWallets()throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_sync_wallets(self.uniffiClonePointer(),$0
     )
 }
 }
     
-open func unifiedQrPayment() -> UnifiedQrPayment {
-    return try!  FfiConverterTypeUnifiedQrPayment.lift(try! rustCall() {
-    uniffi_ldk_node_fn_method_node_unified_qr_payment(self.uniffiClonePointer(),$0
+open func unifiedPayment() -> UnifiedPayment  {
+    return try!  FfiConverterTypeUnifiedPayment_lift(try! rustCall() {
+    uniffi_ldk_node_fn_method_node_unified_payment(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func updateChannelConfig(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, channelConfig: ChannelConfig)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+open func updateChannelConfig(userChannelId: UserChannelId, counterpartyNodeId: PublicKey, channelConfig: ChannelConfig)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_node_update_channel_config(self.uniffiClonePointer(),
-        FfiConverterTypeUserChannelId.lower(userChannelId),
-        FfiConverterTypePublicKey.lower(counterpartyNodeId),
-        FfiConverterTypeChannelConfig.lower(channelConfig),$0
+        FfiConverterTypeUserChannelId_lower(userChannelId),
+        FfiConverterTypePublicKey_lower(counterpartyNodeId),
+        FfiConverterTypeChannelConfig_lower(channelConfig),$0
     )
 }
 }
     
-open func verifySignature(msg: [UInt8], sig: String, pkey: PublicKey) -> Bool {
+open func verifySignature(msg: [UInt8], sig: String, pkey: PublicKey) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_verify_signature(self.uniffiClonePointer(),
         FfiConverterSequenceUInt8.lower(msg),
         FfiConverterString.lower(sig),
-        FfiConverterTypePublicKey.lower(pkey),$0
+        FfiConverterTypePublicKey_lower(pkey),$0
     )
 })
 }
     
-open func waitNextEvent() -> Event {
-    return try!  FfiConverterTypeEvent.lift(try! rustCall() {
+open func waitNextEvent() -> Event  {
+    return try!  FfiConverterTypeEvent_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_node_wait_next_event(self.uniffiClonePointer(),$0
     )
 })
@@ -3054,6 +4429,7 @@ open func waitNextEvent() -> Event {
     
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -3090,8 +4466,6 @@ public struct FfiConverterTypeNode: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -3109,39 +4483,24 @@ public func FfiConverterTypeNode_lower(_ value: Node) -> UnsafeMutableRawPointer
 
 
 
-public protocol OfferProtocol : AnyObject {
-    
-    func absoluteExpirySeconds()  -> UInt64?
-    
-    func amount()  -> OfferAmount?
-    
-    func chains()  -> [Network]
-    
-    func expectsQuantity()  -> Bool
-    
-    func id()  -> OfferId
-    
-    func isExpired()  -> Bool
-    
-    func isValidQuantity(quantity: UInt64)  -> Bool
-    
-    func issuer()  -> String?
-    
-    func issuerSigningPubkey()  -> PublicKey?
-    
-    func metadata()  -> [UInt8]?
-    
-    func offerDescription()  -> String?
-    
-    func supportsChain(chain: Network)  -> Bool
+
+
+/**
+ * The node entropy, i.e., the main secret from which all other secrets of the [`Node`] are
+ * derived.
+ *
+ * [`Node`]: crate::Node
+ */
+public protocol NodeEntropyProtocol: AnyObject, Sendable {
     
 }
-
-open class Offer:
-    CustomDebugStringConvertible,
-    CustomStringConvertible,
-    Equatable,
-    OfferProtocol {
+/**
+ * The node entropy, i.e., the main secret from which all other secrets of the [`Node`] are
+ * derived.
+ *
+ * [`Node`]: crate::Node
+ */
+open class NodeEntropy: NodeEntropyProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -3155,6 +4514,418 @@ open class Offer:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_ldk_node_fn_clone_nodeentropy(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_ldk_node_fn_free_nodeentropy(pointer, $0) }
+    }
+
+    
+    /**
+     * Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
+     *
+     * [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+     * [`Node`]: crate::Node
+     */
+public static func fromBip39Mnemonic(mnemonic: Mnemonic, passphrase: String?) -> NodeEntropy  {
+    return try!  FfiConverterTypeNodeEntropy_lift(try! rustCall() {
+    uniffi_ldk_node_fn_constructor_nodeentropy_from_bip39_mnemonic(
+        FfiConverterTypeMnemonic_lower(mnemonic),
+        FfiConverterOptionString.lower(passphrase),$0
+    )
+})
+}
+    
+    /**
+     * Configures the [`Node`] instance to source its wallet entropy from the given
+     * [`WALLET_KEYS_SEED_LEN`] seed bytes.
+     *
+     * Will return an error if the length of the given `Vec` is not exactly
+     * [`WALLET_KEYS_SEED_LEN`].
+     *
+     * [`Node`]: crate::Node
+     */
+public static func fromSeedBytes(seedBytes: Data)throws  -> NodeEntropy  {
+    return try  FfiConverterTypeNodeEntropy_lift(try rustCallWithError(FfiConverterTypeEntropyError_lift) {
+    uniffi_ldk_node_fn_constructor_nodeentropy_from_seed_bytes(
+        FfiConverterData.lower(seedBytes),$0
+    )
+})
+}
+    
+    /**
+     * Configures the [`Node`] instance to source its wallet entropy from a seed file on disk.
+     *
+     * If the given file does not exist a new random seed file will be generated and
+     * stored at the given location.
+     *
+     * [`Node`]: crate::Node
+     */
+public static func fromSeedPath(seedPath: String)throws  -> NodeEntropy  {
+    return try  FfiConverterTypeNodeEntropy_lift(try rustCallWithError(FfiConverterTypeEntropyError_lift) {
+    uniffi_ldk_node_fn_constructor_nodeentropy_from_seed_path(
+        FfiConverterString.lower(seedPath),$0
+    )
+})
+}
+    
+
+    
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNodeEntropy: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = NodeEntropy
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> NodeEntropy {
+        return NodeEntropy(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: NodeEntropy) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeEntropy {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: NodeEntropy, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeEntropy_lift(_ pointer: UnsafeMutableRawPointer) throws -> NodeEntropy {
+    return try FfiConverterTypeNodeEntropy.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeEntropy_lower(_ value: NodeEntropy) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeNodeEntropy.lower(value)
+}
+
+
+
+
+
+
+public protocol NodeFeaturesProtocol: AnyObject, Sendable {
+    
+}
+open class NodeFeatures: NodeFeaturesProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_ldk_node_fn_clone_nodefeatures(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_ldk_node_fn_free_nodefeatures(pointer, $0) }
+    }
+
+    
+
+    
+    open var debugDescription: String {
+        return try!  FfiConverterString.lift(
+            try! rustCall() {
+    uniffi_ldk_node_fn_method_nodefeatures_uniffi_trait_debug(self.uniffiClonePointer(),$0
+    )
+}
+        )
+    }
+    public static func == (self: NodeFeatures, other: NodeFeatures) -> Bool {
+        return try!  FfiConverterBool.lift(
+            try! rustCall() {
+    uniffi_ldk_node_fn_method_nodefeatures_uniffi_trait_eq_eq(self.uniffiClonePointer(),
+        FfiConverterTypeNodeFeatures_lower(other),$0
+    )
+}
+        )
+    }
+
+}
+extension NodeFeatures: CustomDebugStringConvertible {}
+extension NodeFeatures: Equatable {}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeNodeFeatures: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = NodeFeatures
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> NodeFeatures {
+        return NodeFeatures(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: NodeFeatures) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> NodeFeatures {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: NodeFeatures, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeFeatures_lift(_ pointer: UnsafeMutableRawPointer) throws -> NodeFeatures {
+    return try FfiConverterTypeNodeFeatures.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeFeatures_lower(_ value: NodeFeatures) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeNodeFeatures.lower(value)
+}
+
+
+
+
+
+
+/**
+ * An `Offer` is a potentially long-lived proposal for payment of a good or service.
+ *
+ * An offer is a precursor to an [`InvoiceRequest`]. A merchant publishes an offer from which a
+ * customer may request an [`Bolt12Invoice`] for a specific quantity and using an amount sufficient
+ * to cover that quantity (i.e., at least `quantity * amount`). See [`Offer::amount`].
+ *
+ * Offers may be denominated in currency other than bitcoin but are ultimately paid using the
+ * latter.
+ *
+ * Through the use of [`BlindedMessagePath`]s, offers provide recipient privacy.
+ *
+ * [`InvoiceRequest`]: lightning::offers::invoice_request::InvoiceRequest
+ * [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
+ * [`Offer`]: lightning::offers::Offer:amount
+ */
+public protocol OfferProtocol: AnyObject, Sendable {
+    
+    /**
+     * Seconds since the Unix epoch when an invoice should no longer be requested.
+     *
+     * If `None`, the offer does not expire.
+     */
+    func absoluteExpirySeconds()  -> UInt64?
+    
+    /**
+     * The minimum amount required for a successful payment of a single item.
+     */
+    func amount()  -> OfferAmount?
+    
+    /**
+     * The chains that may be used when paying a requested invoice (e.g., bitcoin mainnet).
+     *
+     * Payments must be denominated in units of the minimal lightning-payable unit (e.g., msats)
+     * for the selected chain.
+     */
+    func chains()  -> [Network]
+    
+    /**
+     * Returns whether a quantity is expected in an [`InvoiceRequest`] for the offer.
+     *
+     * [`InvoiceRequest`]: lightning::offers::invoice_request::InvoiceRequest
+     */
+    func expectsQuantity()  -> Bool
+    
+    /**
+     * Returns the id of the offer.
+     */
+    func id()  -> OfferId
+    
+    /**
+     * Whether the offer has expired.
+     */
+    func isExpired()  -> Bool
+    
+    /**
+     * Returns whether the given quantity is valid for the offer.
+     */
+    func isValidQuantity(quantity: UInt64)  -> Bool
+    
+    /**
+     * The issuer of the offer, possibly beginning with `user@domain` or `domain`.
+     *
+     * Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+     */
+    func issuer()  -> String?
+    
+    /**
+     * The public key corresponding to the key used by the recipient to sign invoices.
+     * - If [`Offer::paths`] is empty, MUST be `Some` and contain the recipient's node id for
+     * sending an [`InvoiceRequest`].
+     * - If [`Offer::paths`] is not empty, MAY be `Some` and contain a transient id.
+     * - If `None`, the signing pubkey will be the final blinded node id from the
+     * [`BlindedMessagePath`] in [`Offer::paths`] used to send the [`InvoiceRequest`].
+     *
+     * See also [`Bolt12Invoice::signing_pubkey`].
+     *
+     * [`InvoiceRequest`]: lightning::offers::invoice_request::InvoiceRequest
+     * [`Bolt12Invoice::signing_pubkey`]: lightning::offers::invoice::Bolt12Invoice::signing_pubkey
+     */
+    func issuerSigningPubkey()  -> PublicKey?
+    
+    /**
+     * Opaque bytes set by the originator.
+     *
+     * Useful for authentication and validating fields since it is reflected in `invoice_request`
+     * messages along with all the other fields from the `offer`.
+     */
+    func metadata()  -> Data?
+    
+    /**
+     * A complete description of the purpose of the payment.
+     *
+     * Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+     */
+    func offerDescription()  -> String?
+    
+    /**
+     * Returns whether the given chain is supported by the offer.
+     */
+    func supportsChain(chain: Network)  -> Bool
+    
+}
+/**
+ * An `Offer` is a potentially long-lived proposal for payment of a good or service.
+ *
+ * An offer is a precursor to an [`InvoiceRequest`]. A merchant publishes an offer from which a
+ * customer may request an [`Bolt12Invoice`] for a specific quantity and using an amount sufficient
+ * to cover that quantity (i.e., at least `quantity * amount`). See [`Offer::amount`].
+ *
+ * Offers may be denominated in currency other than bitcoin but are ultimately paid using the
+ * latter.
+ *
+ * Through the use of [`BlindedMessagePath`]s, offers provide recipient privacy.
+ *
+ * [`InvoiceRequest`]: lightning::offers::invoice_request::InvoiceRequest
+ * [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
+ * [`Offer`]: lightning::offers::Offer:amount
+ */
+open class Offer: OfferProtocol, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -3188,8 +4959,8 @@ open class Offer:
     }
 
     
-public static func fromStr(offerStr: String)throws  -> Offer {
-    return try  FfiConverterTypeOffer.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+public static func fromStr(offerStr: String)throws  -> Offer  {
+    return try  FfiConverterTypeOffer_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_constructor_offer_from_str(
         FfiConverterString.lower(offerStr),$0
     )
@@ -3198,49 +4969,77 @@ public static func fromStr(offerStr: String)throws  -> Offer {
     
 
     
-open func absoluteExpirySeconds() -> UInt64? {
+    /**
+     * Seconds since the Unix epoch when an invoice should no longer be requested.
+     *
+     * If `None`, the offer does not expire.
+     */
+open func absoluteExpirySeconds() -> UInt64?  {
     return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_absolute_expiry_seconds(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func amount() -> OfferAmount? {
+    /**
+     * The minimum amount required for a successful payment of a single item.
+     */
+open func amount() -> OfferAmount?  {
     return try!  FfiConverterOptionTypeOfferAmount.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_amount(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func chains() -> [Network] {
+    /**
+     * The chains that may be used when paying a requested invoice (e.g., bitcoin mainnet).
+     *
+     * Payments must be denominated in units of the minimal lightning-payable unit (e.g., msats)
+     * for the selected chain.
+     */
+open func chains() -> [Network]  {
     return try!  FfiConverterSequenceTypeNetwork.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_chains(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func expectsQuantity() -> Bool {
+    /**
+     * Returns whether a quantity is expected in an [`InvoiceRequest`] for the offer.
+     *
+     * [`InvoiceRequest`]: lightning::offers::invoice_request::InvoiceRequest
+     */
+open func expectsQuantity() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_expects_quantity(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func id() -> OfferId {
-    return try!  FfiConverterTypeOfferId.lift(try! rustCall() {
+    /**
+     * Returns the id of the offer.
+     */
+open func id() -> OfferId  {
+    return try!  FfiConverterTypeOfferId_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_id(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func isExpired() -> Bool {
+    /**
+     * Whether the offer has expired.
+     */
+open func isExpired() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_is_expired(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func isValidQuantity(quantity: UInt64) -> Bool {
+    /**
+     * Returns whether the given quantity is valid for the offer.
+     */
+open func isValidQuantity(quantity: UInt64) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_is_valid_quantity(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(quantity),$0
@@ -3248,38 +5047,70 @@ open func isValidQuantity(quantity: UInt64) -> Bool {
 })
 }
     
-open func issuer() -> String? {
+    /**
+     * The issuer of the offer, possibly beginning with `user@domain` or `domain`.
+     *
+     * Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+     */
+open func issuer() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_issuer(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func issuerSigningPubkey() -> PublicKey? {
+    /**
+     * The public key corresponding to the key used by the recipient to sign invoices.
+     * - If [`Offer::paths`] is empty, MUST be `Some` and contain the recipient's node id for
+     * sending an [`InvoiceRequest`].
+     * - If [`Offer::paths`] is not empty, MAY be `Some` and contain a transient id.
+     * - If `None`, the signing pubkey will be the final blinded node id from the
+     * [`BlindedMessagePath`] in [`Offer::paths`] used to send the [`InvoiceRequest`].
+     *
+     * See also [`Bolt12Invoice::signing_pubkey`].
+     *
+     * [`InvoiceRequest`]: lightning::offers::invoice_request::InvoiceRequest
+     * [`Bolt12Invoice::signing_pubkey`]: lightning::offers::invoice::Bolt12Invoice::signing_pubkey
+     */
+open func issuerSigningPubkey() -> PublicKey?  {
     return try!  FfiConverterOptionTypePublicKey.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_issuer_signing_pubkey(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func metadata() -> [UInt8]? {
-    return try!  FfiConverterOptionSequenceUInt8.lift(try! rustCall() {
+    /**
+     * Opaque bytes set by the originator.
+     *
+     * Useful for authentication and validating fields since it is reflected in `invoice_request`
+     * messages along with all the other fields from the `offer`.
+     */
+open func metadata() -> Data?  {
+    return try!  FfiConverterOptionData.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_metadata(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func offerDescription() -> String? {
+    /**
+     * A complete description of the purpose of the payment.
+     *
+     * Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+     */
+open func offerDescription() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_offer_description(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func supportsChain(chain: Network) -> Bool {
+    /**
+     * Returns whether the given chain is supported by the offer.
+     */
+open func supportsChain(chain: Network) -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_offer_supports_chain(self.uniffiClonePointer(),
-        FfiConverterTypeNetwork.lower(chain),$0
+        FfiConverterTypeNetwork_lower(chain),$0
     )
 })
 }
@@ -3304,13 +5135,17 @@ open func supportsChain(chain: Network) -> Bool {
         return try!  FfiConverterBool.lift(
             try! rustCall() {
     uniffi_ldk_node_fn_method_offer_uniffi_trait_eq_eq(self.uniffiClonePointer(),
-        FfiConverterTypeOffer.lower(other),$0
+        FfiConverterTypeOffer_lower(other),$0
     )
 }
         )
     }
 
 }
+extension Offer: CustomDebugStringConvertible {}
+extension Offer: CustomStringConvertible {}
+extension Offer: Equatable {}
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -3347,8 +5182,6 @@ public struct FfiConverterTypeOffer: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -3366,18 +5199,76 @@ public func FfiConverterTypeOffer_lower(_ value: Offer) -> UnsafeMutableRawPoint
 
 
 
-public protocol OnchainPaymentProtocol : AnyObject {
+
+
+/**
+ * A payment handler allowing to send and receive on-chain payments.
+ *
+ * Should be retrieved by calling [`Node::onchain_payment`].
+ *
+ * [`Node::onchain_payment`]: crate::Node::onchain_payment
+ */
+public protocol OnchainPaymentProtocol: AnyObject, Sendable {
     
+    /**
+     * Attempt to bump the fee of an unconfirmed transaction using Replace-by-Fee (RBF).
+     *
+     * This creates a new transaction that replaces the original one, increasing the fee by the
+     * specified increment to improve its chances of confirmation.
+     *
+     * The new transaction will have the same outputs as the original but with a
+     * higher fee, resulting in faster confirmation potential.
+     *
+     * Returns the [`Txid`] of the new replacement transaction if successful.
+     */
+    func bumpFeeRbf(paymentId: PaymentId, feeRate: FeeRate?) throws  -> Txid
+    
+    /**
+     * Retrieve a new on-chain/funding address.
+     */
     func newAddress() throws  -> Address
     
-    func sendAllToAddress(address: Address, retainReserve: Bool, feeRate: FeeRate?) throws  -> Txid
+    /**
+     * Send an on-chain payment to the given address, draining the available funds.
+     *
+     * This is useful if you have closed all channels and want to migrate funds to another
+     * on-chain wallet.
+     *
+     * Please note that if `retain_reserves` is set to `false` this will **not** retain any on-chain reserves, which might be potentially
+     * dangerous if you have open Anchor channels for which you can't trust the counterparty to
+     * spend the Anchor output after channel closure. If `retain_reserves` is set to `true`, this
+     * will try to send all spendable onchain funds, i.e.,
+     * [`BalanceDetails::spendable_onchain_balance_sats`].
+     *
+     * If `fee_rate` is set it will be used on the resulting transaction. Otherwise a reasonable
+     * we'll retrieve an estimate from the configured chain source.
+     *
+     * [`BalanceDetails::spendable_onchain_balance_sats`]: crate::balance::BalanceDetails::spendable_onchain_balance_sats
+     */
+    func sendAllToAddress(address: Address, retainReserves: Bool, feeRate: FeeRate?) throws  -> Txid
     
+    /**
+     * Send an on-chain payment to the given address.
+     *
+     * This will respect any on-chain reserve we need to keep, i.e., won't allow to cut into
+     * [`BalanceDetails::total_anchor_channels_reserve_sats`].
+     *
+     * If `fee_rate` is set it will be used on the resulting transaction. Otherwise we'll retrieve
+     * a reasonable estimate from the configured chain source.
+     *
+     * [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
+     */
     func sendToAddress(address: Address, amountSats: UInt64, feeRate: FeeRate?) throws  -> Txid
     
 }
-
-open class OnchainPayment:
-    OnchainPaymentProtocol {
+/**
+ * A payment handler allowing to send and receive on-chain payments.
+ *
+ * Should be retrieved by calling [`Node::onchain_payment`].
+ *
+ * [`Node::onchain_payment`]: crate::Node::onchain_payment
+ */
+open class OnchainPayment: OnchainPaymentProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -3391,6 +5282,9 @@ open class OnchainPayment:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -3426,27 +5320,78 @@ open class OnchainPayment:
     
 
     
-open func newAddress()throws  -> Address {
-    return try  FfiConverterTypeAddress.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
-    uniffi_ldk_node_fn_method_onchainpayment_new_address(self.uniffiClonePointer(),$0
-    )
-})
-}
-    
-open func sendAllToAddress(address: Address, retainReserve: Bool, feeRate: FeeRate?)throws  -> Txid {
-    return try  FfiConverterTypeTxid.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
-    uniffi_ldk_node_fn_method_onchainpayment_send_all_to_address(self.uniffiClonePointer(),
-        FfiConverterTypeAddress.lower(address),
-        FfiConverterBool.lower(retainReserve),
+    /**
+     * Attempt to bump the fee of an unconfirmed transaction using Replace-by-Fee (RBF).
+     *
+     * This creates a new transaction that replaces the original one, increasing the fee by the
+     * specified increment to improve its chances of confirmation.
+     *
+     * The new transaction will have the same outputs as the original but with a
+     * higher fee, resulting in faster confirmation potential.
+     *
+     * Returns the [`Txid`] of the new replacement transaction if successful.
+     */
+open func bumpFeeRbf(paymentId: PaymentId, feeRate: FeeRate?)throws  -> Txid  {
+    return try  FfiConverterTypeTxid_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_method_onchainpayment_bump_fee_rbf(self.uniffiClonePointer(),
+        FfiConverterTypePaymentId_lower(paymentId),
         FfiConverterOptionTypeFeeRate.lower(feeRate),$0
     )
 })
 }
     
-open func sendToAddress(address: Address, amountSats: UInt64, feeRate: FeeRate?)throws  -> Txid {
-    return try  FfiConverterTypeTxid.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Retrieve a new on-chain/funding address.
+     */
+open func newAddress()throws  -> Address  {
+    return try  FfiConverterTypeAddress_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_method_onchainpayment_new_address(self.uniffiClonePointer(),$0
+    )
+})
+}
+    
+    /**
+     * Send an on-chain payment to the given address, draining the available funds.
+     *
+     * This is useful if you have closed all channels and want to migrate funds to another
+     * on-chain wallet.
+     *
+     * Please note that if `retain_reserves` is set to `false` this will **not** retain any on-chain reserves, which might be potentially
+     * dangerous if you have open Anchor channels for which you can't trust the counterparty to
+     * spend the Anchor output after channel closure. If `retain_reserves` is set to `true`, this
+     * will try to send all spendable onchain funds, i.e.,
+     * [`BalanceDetails::spendable_onchain_balance_sats`].
+     *
+     * If `fee_rate` is set it will be used on the resulting transaction. Otherwise a reasonable
+     * we'll retrieve an estimate from the configured chain source.
+     *
+     * [`BalanceDetails::spendable_onchain_balance_sats`]: crate::balance::BalanceDetails::spendable_onchain_balance_sats
+     */
+open func sendAllToAddress(address: Address, retainReserves: Bool, feeRate: FeeRate?)throws  -> Txid  {
+    return try  FfiConverterTypeTxid_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_method_onchainpayment_send_all_to_address(self.uniffiClonePointer(),
+        FfiConverterTypeAddress_lower(address),
+        FfiConverterBool.lower(retainReserves),
+        FfiConverterOptionTypeFeeRate.lower(feeRate),$0
+    )
+})
+}
+    
+    /**
+     * Send an on-chain payment to the given address.
+     *
+     * This will respect any on-chain reserve we need to keep, i.e., won't allow to cut into
+     * [`BalanceDetails::total_anchor_channels_reserve_sats`].
+     *
+     * If `fee_rate` is set it will be used on the resulting transaction. Otherwise we'll retrieve
+     * a reasonable estimate from the configured chain source.
+     *
+     * [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
+     */
+open func sendToAddress(address: Address, amountSats: UInt64, feeRate: FeeRate?)throws  -> Txid  {
+    return try  FfiConverterTypeTxid_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_onchainpayment_send_to_address(self.uniffiClonePointer(),
-        FfiConverterTypeAddress.lower(address),
+        FfiConverterTypeAddress_lower(address),
         FfiConverterUInt64.lower(amountSats),
         FfiConverterOptionTypeFeeRate.lower(feeRate),$0
     )
@@ -3455,6 +5400,7 @@ open func sendToAddress(address: Address, amountSats: UInt64, feeRate: FeeRate?)
     
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -3491,8 +5437,6 @@ public struct FfiConverterTypeOnchainPayment: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -3510,35 +5454,97 @@ public func FfiConverterTypeOnchainPayment_lower(_ value: OnchainPayment) -> Uns
 
 
 
-public protocol RefundProtocol : AnyObject {
+
+
+/**
+ * A `Refund` is a request to send an [`Bolt12Invoice`] without a preceding [`Offer`].
+ *
+ * Typically, after an invoice is paid, the recipient may publish a refund allowing the sender to
+ * recoup their funds. A refund may be used more generally as an "offer for money", such as with a
+ * bitcoin ATM.
+ *
+ * [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
+ * [`Offer`]: lightning::offers::offer::Offer
+ */
+public protocol RefundProtocol: AnyObject, Sendable {
     
+    /**
+     * Seconds since the Unix epoch when an invoice should no longer be sent.
+     *
+     * If `None`, the refund does not expire.
+     */
     func absoluteExpirySeconds()  -> UInt64?
     
+    /**
+     * The amount to refund in msats (i.e., the minimum lightning-payable unit for [`chain`]).
+     *
+     * [`chain`]: Self::chain
+     */
     func amountMsats()  -> UInt64
     
+    /**
+     * A chain that the refund is valid for.
+     */
     func chain()  -> Network?
     
+    /**
+     * Whether the refund has expired.
+     */
     func isExpired()  -> Bool
     
+    /**
+     * The issuer of the refund, possibly beginning with `user@domain` or `domain`.
+     *
+     * Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+     */
     func issuer()  -> String?
     
-    func payerMetadata()  -> [UInt8]
+    /**
+     * An unpredictable series of bytes, typically containing information about the derivation of
+     * [`payer_signing_pubkey`].
+     *
+     * [`payer_signing_pubkey`]: Self::payer_signing_pubkey
+     */
+    func payerMetadata()  -> Data
     
+    /**
+     * Payer provided note to include in the invoice.
+     */
     func payerNote()  -> String?
     
+    /**
+     * A public node id to send to in the case where there are no [`paths`].
+     *
+     * Otherwise, a possibly transient pubkey.
+     *
+     * [`paths`]: lightning::offers::refund::Refund::paths
+     */
     func payerSigningPubkey()  -> PublicKey
     
+    /**
+     * The quantity of an item that refund is for.
+     */
     func quantity()  -> UInt64?
     
+    /**
+     * A complete description of the purpose of the refund.
+     *
+     * Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+     */
     func refundDescription()  -> String
     
 }
-
-open class Refund:
-    CustomDebugStringConvertible,
-    CustomStringConvertible,
-    Equatable,
-    RefundProtocol {
+/**
+ * A `Refund` is a request to send an [`Bolt12Invoice`] without a preceding [`Offer`].
+ *
+ * Typically, after an invoice is paid, the recipient may publish a refund allowing the sender to
+ * recoup their funds. A refund may be used more generally as an "offer for money", such as with a
+ * bitcoin ATM.
+ *
+ * [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
+ * [`Offer`]: lightning::offers::offer::Offer
+ */
+open class Refund: RefundProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -3552,6 +5558,9 @@ open class Refund:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -3585,8 +5594,8 @@ open class Refund:
     }
 
     
-public static func fromStr(refundStr: String)throws  -> Refund {
-    return try  FfiConverterTypeRefund.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+public static func fromStr(refundStr: String)throws  -> Refund  {
+    return try  FfiConverterTypeRefund_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_constructor_refund_from_str(
         FfiConverterString.lower(refundStr),$0
     )
@@ -3595,70 +5604,115 @@ public static func fromStr(refundStr: String)throws  -> Refund {
     
 
     
-open func absoluteExpirySeconds() -> UInt64? {
+    /**
+     * Seconds since the Unix epoch when an invoice should no longer be sent.
+     *
+     * If `None`, the refund does not expire.
+     */
+open func absoluteExpirySeconds() -> UInt64?  {
     return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_refund_absolute_expiry_seconds(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func amountMsats() -> UInt64 {
+    /**
+     * The amount to refund in msats (i.e., the minimum lightning-payable unit for [`chain`]).
+     *
+     * [`chain`]: Self::chain
+     */
+open func amountMsats() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_refund_amount_msats(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func chain() -> Network? {
+    /**
+     * A chain that the refund is valid for.
+     */
+open func chain() -> Network?  {
     return try!  FfiConverterOptionTypeNetwork.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_refund_chain(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func isExpired() -> Bool {
+    /**
+     * Whether the refund has expired.
+     */
+open func isExpired() -> Bool  {
     return try!  FfiConverterBool.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_refund_is_expired(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func issuer() -> String? {
+    /**
+     * The issuer of the refund, possibly beginning with `user@domain` or `domain`.
+     *
+     * Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+     */
+open func issuer() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_refund_issuer(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func payerMetadata() -> [UInt8] {
-    return try!  FfiConverterSequenceUInt8.lift(try! rustCall() {
+    /**
+     * An unpredictable series of bytes, typically containing information about the derivation of
+     * [`payer_signing_pubkey`].
+     *
+     * [`payer_signing_pubkey`]: Self::payer_signing_pubkey
+     */
+open func payerMetadata() -> Data  {
+    return try!  FfiConverterData.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_refund_payer_metadata(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func payerNote() -> String? {
+    /**
+     * Payer provided note to include in the invoice.
+     */
+open func payerNote() -> String?  {
     return try!  FfiConverterOptionString.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_refund_payer_note(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func payerSigningPubkey() -> PublicKey {
-    return try!  FfiConverterTypePublicKey.lift(try! rustCall() {
+    /**
+     * A public node id to send to in the case where there are no [`paths`].
+     *
+     * Otherwise, a possibly transient pubkey.
+     *
+     * [`paths`]: lightning::offers::refund::Refund::paths
+     */
+open func payerSigningPubkey() -> PublicKey  {
+    return try!  FfiConverterTypePublicKey_lift(try! rustCall() {
     uniffi_ldk_node_fn_method_refund_payer_signing_pubkey(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func quantity() -> UInt64? {
+    /**
+     * The quantity of an item that refund is for.
+     */
+open func quantity() -> UInt64?  {
     return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_refund_quantity(self.uniffiClonePointer(),$0
     )
 })
 }
     
-open func refundDescription() -> String {
+    /**
+     * A complete description of the purpose of the refund.
+     *
+     * Intended to be displayed to the user but with the caveat that it has not been verified in any way.
+     */
+open func refundDescription() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_ldk_node_fn_method_refund_refund_description(self.uniffiClonePointer(),$0
     )
@@ -3685,13 +5739,17 @@ open func refundDescription() -> String {
         return try!  FfiConverterBool.lift(
             try! rustCall() {
     uniffi_ldk_node_fn_method_refund_uniffi_trait_eq_eq(self.uniffiClonePointer(),
-        FfiConverterTypeRefund.lower(other),$0
+        FfiConverterTypeRefund_lower(other),$0
     )
 }
         )
     }
 
 }
+extension Refund: CustomDebugStringConvertible {}
+extension Refund: CustomStringConvertible {}
+extension Refund: Equatable {}
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -3728,8 +5786,6 @@ public struct FfiConverterTypeRefund: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -3747,22 +5803,59 @@ public func FfiConverterTypeRefund_lower(_ value: Refund) -> UnsafeMutableRawPoi
 
 
 
-public protocol SpontaneousPaymentProtocol : AnyObject {
+
+
+/**
+ * A payment handler allowing to send spontaneous ("keysend") payments.
+ *
+ * Should be retrieved by calling [`Node::spontaneous_payment`].
+ *
+ * [`Node::spontaneous_payment`]: crate::Node::spontaneous_payment
+ */
+public protocol SpontaneousPaymentProtocol: AnyObject, Sendable {
     
+    /**
+     * Send a spontaneous aka. "keysend", payment.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
     func send(amountMsat: UInt64, nodeId: PublicKey, routeParameters: RouteParametersConfig?) throws  -> PaymentId
     
+    /**
+     * Sends payment probes over all paths of a route that would be used to pay the given
+     * amount to the given `node_id`.
+     *
+     * See [`Bolt11Payment::send_probes`] for more information.
+     *
+     * [`Bolt11Payment::send_probes`]: crate::payment::Bolt11Payment
+     */
     func sendProbes(amountMsat: UInt64, nodeId: PublicKey) throws 
     
+    /**
+     * Send a spontaneous payment including a list of custom TLVs.
+     */
     func sendWithCustomTlvs(amountMsat: UInt64, nodeId: PublicKey, routeParameters: RouteParametersConfig?, customTlvs: [CustomTlvRecord]) throws  -> PaymentId
     
+    /**
+     * Send a spontaneous payment with custom preimage
+     */
     func sendWithPreimage(amountMsat: UInt64, nodeId: PublicKey, preimage: PaymentPreimage, routeParameters: RouteParametersConfig?) throws  -> PaymentId
     
+    /**
+     * Send a spontaneous payment with custom preimage including a list of custom TLVs.
+     */
     func sendWithPreimageAndCustomTlvs(amountMsat: UInt64, nodeId: PublicKey, customTlvs: [CustomTlvRecord], preimage: PaymentPreimage, routeParameters: RouteParametersConfig?) throws  -> PaymentId
     
 }
-
-open class SpontaneousPayment:
-    SpontaneousPaymentProtocol {
+/**
+ * A payment handler allowing to send spontaneous ("keysend") payments.
+ *
+ * Should be retrieved by calling [`Node::spontaneous_payment`].
+ *
+ * [`Node::spontaneous_payment`]: crate::Node::spontaneous_payment
+ */
+open class SpontaneousPayment: SpontaneousPaymentProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -3776,6 +5869,9 @@ open class SpontaneousPayment:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -3811,53 +5907,76 @@ open class SpontaneousPayment:
     
 
     
-open func send(amountMsat: UInt64, nodeId: PublicKey, routeParameters: RouteParametersConfig?)throws  -> PaymentId {
-    return try  FfiConverterTypePaymentId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Send a spontaneous aka. "keysend", payment.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     */
+open func send(amountMsat: UInt64, nodeId: PublicKey, routeParameters: RouteParametersConfig?)throws  -> PaymentId  {
+    return try  FfiConverterTypePaymentId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_spontaneouspayment_send(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
-        FfiConverterTypePublicKey.lower(nodeId),
+        FfiConverterTypePublicKey_lower(nodeId),
         FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters),$0
     )
 })
 }
     
-open func sendProbes(amountMsat: UInt64, nodeId: PublicKey)throws  {try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Sends payment probes over all paths of a route that would be used to pay the given
+     * amount to the given `node_id`.
+     *
+     * See [`Bolt11Payment::send_probes`] for more information.
+     *
+     * [`Bolt11Payment::send_probes`]: crate::payment::Bolt11Payment
+     */
+open func sendProbes(amountMsat: UInt64, nodeId: PublicKey)throws   {try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_spontaneouspayment_send_probes(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
-        FfiConverterTypePublicKey.lower(nodeId),$0
+        FfiConverterTypePublicKey_lower(nodeId),$0
     )
 }
 }
     
-open func sendWithCustomTlvs(amountMsat: UInt64, nodeId: PublicKey, routeParameters: RouteParametersConfig?, customTlvs: [CustomTlvRecord])throws  -> PaymentId {
-    return try  FfiConverterTypePaymentId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Send a spontaneous payment including a list of custom TLVs.
+     */
+open func sendWithCustomTlvs(amountMsat: UInt64, nodeId: PublicKey, routeParameters: RouteParametersConfig?, customTlvs: [CustomTlvRecord])throws  -> PaymentId  {
+    return try  FfiConverterTypePaymentId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_spontaneouspayment_send_with_custom_tlvs(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
-        FfiConverterTypePublicKey.lower(nodeId),
+        FfiConverterTypePublicKey_lower(nodeId),
         FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters),
         FfiConverterSequenceTypeCustomTlvRecord.lower(customTlvs),$0
     )
 })
 }
     
-open func sendWithPreimage(amountMsat: UInt64, nodeId: PublicKey, preimage: PaymentPreimage, routeParameters: RouteParametersConfig?)throws  -> PaymentId {
-    return try  FfiConverterTypePaymentId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Send a spontaneous payment with custom preimage
+     */
+open func sendWithPreimage(amountMsat: UInt64, nodeId: PublicKey, preimage: PaymentPreimage, routeParameters: RouteParametersConfig?)throws  -> PaymentId  {
+    return try  FfiConverterTypePaymentId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_spontaneouspayment_send_with_preimage(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
-        FfiConverterTypePublicKey.lower(nodeId),
-        FfiConverterTypePaymentPreimage.lower(preimage),
+        FfiConverterTypePublicKey_lower(nodeId),
+        FfiConverterTypePaymentPreimage_lower(preimage),
         FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters),$0
     )
 })
 }
     
-open func sendWithPreimageAndCustomTlvs(amountMsat: UInt64, nodeId: PublicKey, customTlvs: [CustomTlvRecord], preimage: PaymentPreimage, routeParameters: RouteParametersConfig?)throws  -> PaymentId {
-    return try  FfiConverterTypePaymentId.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
+    /**
+     * Send a spontaneous payment with custom preimage including a list of custom TLVs.
+     */
+open func sendWithPreimageAndCustomTlvs(amountMsat: UInt64, nodeId: PublicKey, customTlvs: [CustomTlvRecord], preimage: PaymentPreimage, routeParameters: RouteParametersConfig?)throws  -> PaymentId  {
+    return try  FfiConverterTypePaymentId_lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
     uniffi_ldk_node_fn_method_spontaneouspayment_send_with_preimage_and_custom_tlvs(self.uniffiClonePointer(),
         FfiConverterUInt64.lower(amountMsat),
-        FfiConverterTypePublicKey.lower(nodeId),
+        FfiConverterTypePublicKey_lower(nodeId),
         FfiConverterSequenceTypeCustomTlvRecord.lower(customTlvs),
-        FfiConverterTypePaymentPreimage.lower(preimage),
+        FfiConverterTypePaymentPreimage_lower(preimage),
         FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters),$0
     )
 })
@@ -3865,6 +5984,7 @@ open func sendWithPreimageAndCustomTlvs(amountMsat: UInt64, nodeId: PublicKey, c
     
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -3901,8 +6021,6 @@ public struct FfiConverterTypeSpontaneousPayment: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -3920,16 +6038,29 @@ public func FfiConverterTypeSpontaneousPayment_lower(_ value: SpontaneousPayment
 
 
 
-public protocol UnifiedQrPaymentProtocol : AnyObject {
+
+
+/**
+ * A static invoice used for async payments.
+ *
+ * Static invoices are a special type of BOLT12 invoice where proof of payment is not possible,
+ * as the payment hash is not derived from a preimage known only to the recipient.
+ */
+public protocol StaticInvoiceProtocol: AnyObject, Sendable {
     
-    func receive(amountSats: UInt64, message: String, expirySec: UInt32) throws  -> String
-    
-    func send(uriStr: String, routeParameters: RouteParametersConfig?) throws  -> QrPaymentResult
+    /**
+     * The amount for a successful payment of the invoice, if specified.
+     */
+    func amount()  -> OfferAmount?
     
 }
-
-open class UnifiedQrPayment:
-    UnifiedQrPaymentProtocol {
+/**
+ * A static invoice used for async payments.
+ *
+ * Static invoices are a special type of BOLT12 invoice where proof of payment is not possible,
+ * as the payment hash is not derived from a preimage known only to the recipient.
+ */
+open class StaticInvoice: StaticInvoiceProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -3943,6 +6074,9 @@ open class UnifiedQrPayment:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -3963,7 +6097,7 @@ open class UnifiedQrPayment:
     @_documentation(visibility: private)
 #endif
     public func uniffiClonePointer() -> UnsafeMutableRawPointer {
-        return try! rustCall { uniffi_ldk_node_fn_clone_unifiedqrpayment(self.pointer, $0) }
+        return try! rustCall { uniffi_ldk_node_fn_clone_staticinvoice(self.pointer, $0) }
     }
     // No primary constructor declared for this class.
 
@@ -3972,51 +6106,43 @@ open class UnifiedQrPayment:
             return
         }
 
-        try! rustCall { uniffi_ldk_node_fn_free_unifiedqrpayment(pointer, $0) }
+        try! rustCall { uniffi_ldk_node_fn_free_staticinvoice(pointer, $0) }
     }
 
     
 
     
-open func receive(amountSats: UInt64, message: String, expirySec: UInt32)throws  -> String {
-    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
-    uniffi_ldk_node_fn_method_unifiedqrpayment_receive(self.uniffiClonePointer(),
-        FfiConverterUInt64.lower(amountSats),
-        FfiConverterString.lower(message),
-        FfiConverterUInt32.lower(expirySec),$0
-    )
-})
-}
-    
-open func send(uriStr: String, routeParameters: RouteParametersConfig?)throws  -> QrPaymentResult {
-    return try  FfiConverterTypeQrPaymentResult.lift(try rustCallWithError(FfiConverterTypeNodeError.lift) {
-    uniffi_ldk_node_fn_method_unifiedqrpayment_send(self.uniffiClonePointer(),
-        FfiConverterString.lower(uriStr),
-        FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters),$0
+    /**
+     * The amount for a successful payment of the invoice, if specified.
+     */
+open func amount() -> OfferAmount?  {
+    return try!  FfiConverterOptionTypeOfferAmount.lift(try! rustCall() {
+    uniffi_ldk_node_fn_method_staticinvoice_amount(self.uniffiClonePointer(),$0
     )
 })
 }
     
 
 }
+
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeUnifiedQrPayment: FfiConverter {
+public struct FfiConverterTypeStaticInvoice: FfiConverter {
 
     typealias FfiType = UnsafeMutableRawPointer
-    typealias SwiftType = UnifiedQrPayment
+    typealias SwiftType = StaticInvoice
 
-    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> UnifiedQrPayment {
-        return UnifiedQrPayment(unsafeFromRawPointer: pointer)
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> StaticInvoice {
+        return StaticInvoice(unsafeFromRawPointer: pointer)
     }
 
-    public static func lower(_ value: UnifiedQrPayment) -> UnsafeMutableRawPointer {
+    public static func lower(_ value: StaticInvoice) -> UnsafeMutableRawPointer {
         return value.uniffiClonePointer()
     }
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UnifiedQrPayment {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> StaticInvoice {
         let v: UInt64 = try readInt(&buf)
         // The Rust code won't compile if a pointer won't fit in a UInt64.
         // We have to go via `UInt` because that's the thing that's the size of a pointer.
@@ -4027,7 +6153,7 @@ public struct FfiConverterTypeUnifiedQrPayment: FfiConverter {
         return try lift(ptr!)
     }
 
-    public static func write(_ value: UnifiedQrPayment, into buf: inout [UInt8]) {
+    public static func write(_ value: StaticInvoice, into buf: inout [UInt8]) {
         // This fiddling is because `Int` is the thing that's the same size as a pointer.
         // The Rust code won't compile if a pointer won't fit in a `UInt64`.
         writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
@@ -4035,33 +6161,105 @@ public struct FfiConverterTypeUnifiedQrPayment: FfiConverter {
 }
 
 
-
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeStaticInvoice_lift(_ pointer: UnsafeMutableRawPointer) throws -> StaticInvoice {
+    return try FfiConverterTypeStaticInvoice.lift(pointer)
+}
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeUnifiedQrPayment_lift(_ pointer: UnsafeMutableRawPointer) throws -> UnifiedQrPayment {
-    return try FfiConverterTypeUnifiedQrPayment.lift(pointer)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeUnifiedQrPayment_lower(_ value: UnifiedQrPayment) -> UnsafeMutableRawPointer {
-    return FfiConverterTypeUnifiedQrPayment.lower(value)
+public func FfiConverterTypeStaticInvoice_lower(_ value: StaticInvoice) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeStaticInvoice.lower(value)
 }
 
 
 
 
-public protocol VssHeaderProviderProtocol : AnyObject {
+
+
+/**
+ * A payment handler that supports creating and paying to [BIP 21] URIs with on-chain, [BOLT 11],
+ * and [BOLT 12] payment options.
+ *
+ * Also supports sending payments to [BIP 353] Human-Readable Names.
+ *
+ * Should be retrieved by calling [`Node::unified_payment`]
+ *
+ * [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+ * [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+ * [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+ * [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+ * [`Node::unified_payment`]: crate::Node::unified_payment
+ */
+public protocol UnifiedPaymentProtocol: AnyObject, Sendable {
     
-    func getHeaders(request: [UInt8]) async throws  -> [String: String]
+    /**
+     * Generates a URI with an on-chain address, [BOLT 11] invoice and [BOLT 12] offer.
+     *
+     * The URI allows users to send the payment request allowing the wallet to decide
+     * which payment method to use. This enables a fallback mechanism: older wallets
+     * can always pay using the provided on-chain address, while newer wallets will
+     * typically opt to use the provided BOLT11 invoice or BOLT12 offer.
+     *
+     * The URI will always include an on-chain address. A BOLT11 invoice will be included
+     * unless invoice generation fails, while a BOLT12 offer will only be included when
+     * the node has suitable channels for routing.
+     *
+     * # Parameters
+     * - `amount_sats`: The amount to be received, specified in satoshis.
+     * - `description`: A description or note associated with the payment.
+     * This message is visible to the payer and can provide context or details about the payment.
+     * - `expiry_sec`: The expiration time for the payment, specified in seconds.
+     *
+     * Returns a payable URI that can be used to request and receive a payment of the amount
+     * given. Failure to generate the on-chain address will result in an error return
+     * (`Error::WalletOperationFailed`), while failures in invoice or offer generation will
+     * result in those components being omitted from the URI.
+     *
+     * The generated URI can then be given to a QR code library.
+     *
+     * [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+     * [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+     */
+    func receive(amountSats: UInt64, description: String, expirySec: UInt32) throws  -> String
+    
+    /**
+     * Sends a payment given a [BIP 21] URI or [BIP 353] Human-Readable Name.
+     *
+     * This method parses the provided URI string and attempts to send the payment. If the URI
+     * has an offer and or invoice, it will try to pay the offer first followed by the invoice.
+     * If they both fail, the on-chain payment will be paid.
+     *
+     * Returns a [`UnifiedPaymentResult`] indicating the outcome of the payment. If an error
+     * occurs, an `Error` is returned detailing the issue encountered.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     *
+     * [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+     * [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+     */
+    func send(uriStr: String, amountMsat: UInt64?, routeParameters: RouteParametersConfig?) async throws  -> UnifiedPaymentResult
     
 }
-
-open class VssHeaderProvider:
-    VssHeaderProviderProtocol {
+/**
+ * A payment handler that supports creating and paying to [BIP 21] URIs with on-chain, [BOLT 11],
+ * and [BOLT 12] payment options.
+ *
+ * Also supports sending payments to [BIP 353] Human-Readable Names.
+ *
+ * Should be retrieved by calling [`Node::unified_payment`]
+ *
+ * [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+ * [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+ * [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+ * [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+ * [`Node::unified_payment`]: crate::Node::unified_payment
+ */
+open class UnifiedPayment: UnifiedPaymentProtocol, @unchecked Sendable {
     fileprivate let pointer: UnsafeMutableRawPointer!
 
     /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
@@ -4075,6 +6273,195 @@ open class VssHeaderProvider:
     // TODO: We'd like this to be `private` but for Swifty reasons,
     // we can't implement `FfiConverter` without making this `required` and we can't
     // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
+        self.pointer = pointer
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noPointer: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing [Pointer] the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noPointer: NoPointer) {
+        self.pointer = nil
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiClonePointer() -> UnsafeMutableRawPointer {
+        return try! rustCall { uniffi_ldk_node_fn_clone_unifiedpayment(self.pointer, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        guard let pointer = pointer else {
+            return
+        }
+
+        try! rustCall { uniffi_ldk_node_fn_free_unifiedpayment(pointer, $0) }
+    }
+
+    
+
+    
+    /**
+     * Generates a URI with an on-chain address, [BOLT 11] invoice and [BOLT 12] offer.
+     *
+     * The URI allows users to send the payment request allowing the wallet to decide
+     * which payment method to use. This enables a fallback mechanism: older wallets
+     * can always pay using the provided on-chain address, while newer wallets will
+     * typically opt to use the provided BOLT11 invoice or BOLT12 offer.
+     *
+     * The URI will always include an on-chain address. A BOLT11 invoice will be included
+     * unless invoice generation fails, while a BOLT12 offer will only be included when
+     * the node has suitable channels for routing.
+     *
+     * # Parameters
+     * - `amount_sats`: The amount to be received, specified in satoshis.
+     * - `description`: A description or note associated with the payment.
+     * This message is visible to the payer and can provide context or details about the payment.
+     * - `expiry_sec`: The expiration time for the payment, specified in seconds.
+     *
+     * Returns a payable URI that can be used to request and receive a payment of the amount
+     * given. Failure to generate the on-chain address will result in an error return
+     * (`Error::WalletOperationFailed`), while failures in invoice or offer generation will
+     * result in those components being omitted from the URI.
+     *
+     * The generated URI can then be given to a QR code library.
+     *
+     * [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+     * [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+     */
+open func receive(amountSats: UInt64, description: String, expirySec: UInt32)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeNodeError_lift) {
+    uniffi_ldk_node_fn_method_unifiedpayment_receive(self.uniffiClonePointer(),
+        FfiConverterUInt64.lower(amountSats),
+        FfiConverterString.lower(description),
+        FfiConverterUInt32.lower(expirySec),$0
+    )
+})
+}
+    
+    /**
+     * Sends a payment given a [BIP 21] URI or [BIP 353] Human-Readable Name.
+     *
+     * This method parses the provided URI string and attempts to send the payment. If the URI
+     * has an offer and or invoice, it will try to pay the offer first followed by the invoice.
+     * If they both fail, the on-chain payment will be paid.
+     *
+     * Returns a [`UnifiedPaymentResult`] indicating the outcome of the payment. If an error
+     * occurs, an `Error` is returned detailing the issue encountered.
+     *
+     * If `route_parameters` are provided they will override the default as well as the
+     * node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+     *
+     * [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+     * [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+     */
+open func send(uriStr: String, amountMsat: UInt64?, routeParameters: RouteParametersConfig?)async throws  -> UnifiedPaymentResult  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_ldk_node_fn_method_unifiedpayment_send(
+                    self.uniffiClonePointer(),
+                    FfiConverterString.lower(uriStr),FfiConverterOptionUInt64.lower(amountMsat),FfiConverterOptionTypeRouteParametersConfig.lower(routeParameters)
+                )
+            },
+            pollFunc: ffi_ldk_node_rust_future_poll_rust_buffer,
+            completeFunc: ffi_ldk_node_rust_future_complete_rust_buffer,
+            freeFunc: ffi_ldk_node_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeUnifiedPaymentResult_lift,
+            errorHandler: FfiConverterTypeNodeError_lift
+        )
+}
+    
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUnifiedPayment: FfiConverter {
+
+    typealias FfiType = UnsafeMutableRawPointer
+    typealias SwiftType = UnifiedPayment
+
+    public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> UnifiedPayment {
+        return UnifiedPayment(unsafeFromRawPointer: pointer)
+    }
+
+    public static func lower(_ value: UnifiedPayment) -> UnsafeMutableRawPointer {
+        return value.uniffiClonePointer()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UnifiedPayment {
+        let v: UInt64 = try readInt(&buf)
+        // The Rust code won't compile if a pointer won't fit in a UInt64.
+        // We have to go via `UInt` because that's the thing that's the size of a pointer.
+        let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: v))
+        if (ptr == nil) {
+            throw UniffiInternalError.unexpectedNullPointer
+        }
+        return try lift(ptr!)
+    }
+
+    public static func write(_ value: UnifiedPayment, into buf: inout [UInt8]) {
+        // This fiddling is because `Int` is the thing that's the same size as a pointer.
+        // The Rust code won't compile if a pointer won't fit in a `UInt64`.
+        writeInt(&buf, UInt64(bitPattern: Int64(Int(bitPattern: lower(value)))))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUnifiedPayment_lift(_ pointer: UnsafeMutableRawPointer) throws -> UnifiedPayment {
+    return try FfiConverterTypeUnifiedPayment.lift(pointer)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUnifiedPayment_lower(_ value: UnifiedPayment) -> UnsafeMutableRawPointer {
+    return FfiConverterTypeUnifiedPayment.lower(value)
+}
+
+
+
+
+
+
+public protocol VssHeaderProvider: AnyObject, Sendable {
+    
+    func getHeaders(request: [UInt8]) async throws  -> [String: String]
+    
+}
+open class VssHeaderProviderImpl: VssHeaderProvider, @unchecked Sendable {
+    fileprivate let pointer: UnsafeMutableRawPointer!
+
+    /// Used to instantiate a [FFIObject] without an actual pointer, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoPointer {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
     required public init(unsafeFromRawPointer pointer: UnsafeMutableRawPointer) {
         self.pointer = pointer
     }
@@ -4110,7 +6497,7 @@ open class VssHeaderProvider:
     
 
     
-open func getHeaders(request: [UInt8])async throws  -> [String: String] {
+open func getHeaders(request: [UInt8])async throws  -> [String: String]  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
@@ -4123,27 +6510,98 @@ open func getHeaders(request: [UInt8])async throws  -> [String: String] {
             completeFunc: ffi_ldk_node_rust_future_complete_rust_buffer,
             freeFunc: ffi_ldk_node_rust_future_free_rust_buffer,
             liftFunc: FfiConverterDictionaryStringString.lift,
-            errorHandler: FfiConverterTypeVssHeaderProviderError.lift
+            errorHandler: FfiConverterTypeVssHeaderProviderError_lift
         )
 }
     
 
 }
 
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceVssHeaderProvider {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceVssHeaderProvider] = [UniffiVTableCallbackInterfaceVssHeaderProvider(
+        getHeaders: { (
+            uniffiHandle: UInt64,
+            request: RustBuffer,
+            uniffiFutureCallback: @escaping UniffiForeignFutureCompleteRustBuffer,
+            uniffiCallbackData: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UniffiForeignFuture>
+        ) in
+            let makeCall = {
+                () async throws -> [String: String] in
+                guard let uniffiObj = try? FfiConverterTypeVssHeaderProvider.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try await uniffiObj.getHeaders(
+                     request: try FfiConverterSequenceUInt8.lift(request)
+                )
+            }
+
+            let uniffiHandleSuccess = { (returnValue: [String: String]) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructRustBuffer(
+                        returnValue: FfiConverterDictionaryStringString.lower(returnValue),
+                        callStatus: RustCallStatus()
+                    )
+                )
+            }
+            let uniffiHandleError = { (statusCode, errorBuf) in
+                uniffiFutureCallback(
+                    uniffiCallbackData,
+                    UniffiForeignFutureStructRustBuffer(
+                        returnValue: RustBuffer.empty(),
+                        callStatus: RustCallStatus(code: statusCode, errorBuf: errorBuf)
+                    )
+                )
+            }
+            let uniffiForeignFuture = uniffiTraitInterfaceCallAsyncWithError(
+                makeCall: makeCall,
+                handleSuccess: uniffiHandleSuccess,
+                handleError: uniffiHandleError,
+                lowerError: FfiConverterTypeVssHeaderProviderError_lower
+            )
+            uniffiOutReturn.pointee = uniffiForeignFuture
+        },
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            let result = try? FfiConverterTypeVssHeaderProvider.handleMap.remove(handle: uniffiHandle)
+            if result == nil {
+                print("Uniffi callback interface VssHeaderProvider: handle missing in uniffiFree")
+            }
+        }
+    )]
+}
+
+private func uniffiCallbackInitVssHeaderProvider() {
+    uniffi_ldk_node_fn_init_callback_vtable_vssheaderprovider(UniffiCallbackInterfaceVssHeaderProvider.vtable)
+}
+
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeVssHeaderProvider: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<VssHeaderProvider>()
 
     typealias FfiType = UnsafeMutableRawPointer
     typealias SwiftType = VssHeaderProvider
 
     public static func lift(_ pointer: UnsafeMutableRawPointer) throws -> VssHeaderProvider {
-        return VssHeaderProvider(unsafeFromRawPointer: pointer)
+        return VssHeaderProviderImpl(unsafeFromRawPointer: pointer)
     }
 
     public static func lower(_ value: VssHeaderProvider) -> UnsafeMutableRawPointer {
-        return value.uniffiClonePointer()
+        guard let ptr = UnsafeMutableRawPointer(bitPattern: UInt(truncatingIfNeeded: handleMap.insert(obj: value))) else {
+            fatalError("Cast to UnsafeMutableRawPointer failed")
+        }
+        return ptr
     }
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VssHeaderProvider {
@@ -4165,8 +6623,6 @@ public struct FfiConverterTypeVssHeaderProvider: FfiConverter {
 }
 
 
-
-
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -4182,18 +6638,114 @@ public func FfiConverterTypeVssHeaderProvider_lower(_ value: VssHeaderProvider) 
 }
 
 
+
+
+/**
+ * Configuration options pertaining to 'Anchor' channels, i.e., channels for which the
+ * `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
+ *
+ * Prior to the introduction of Anchor channels, the on-chain fees paying for the transactions
+ * issued on channel closure were pre-determined and locked-in at the time of the channel
+ * opening. This required to estimate what fee rate would be sufficient to still have the
+ * closing transactions be spendable on-chain (i.e., not be considered dust). This legacy
+ * design of pre-anchor channels proved inadequate in the unpredictable, often turbulent, fee
+ * markets we experience today.
+ *
+ * In contrast, Anchor channels allow to determine an adequate fee rate *at the time of channel
+ * closure*, making them much more robust in the face of fee spikes. In turn, they require to
+ * maintain a reserve of on-chain funds to have the channel closure transactions confirmed
+ * on-chain, at least if the channel counterparty can't be trusted to do this for us.
+ *
+ * See [BOLT 3] for more technical details on Anchor channels.
+ *
+ *
+ * ### Defaults
+ *
+ * | Parameter                  | Value  |
+ * |----------------------------|--------|
+ * | `trusted_peers_no_reserve` | []     |
+ * | `per_channel_reserve_sats` | 25000  |
+ *
+ *
+ * [BOLT 3]: https://github.com/lightning/bolts/blob/master/03-transactions.md#htlc-timeout-and-htlc-success-transactions
+ */
 public struct AnchorChannelsConfig {
+    /**
+     * A list of peers that we trust to get the required channel closing transactions confirmed
+     * on-chain.
+     *
+     * Channels with these peers won't count towards the retained on-chain reserve and we won't
+     * take any action to get the required channel closing transactions confirmed ourselves.
+     *
+     * **Note:** Trusting the channel counterparty to take the necessary actions to get the
+     * required Anchor spending transactions confirmed on-chain is potentially insecure
+     * as the channel may not be closed if they refuse to do so.
+     */
     public var trustedPeersNoReserve: [PublicKey]
+    /**
+     * The amount of satoshis per anchors-negotiated channel with an untrusted peer that we keep
+     * as an emergency reserve in our on-chain wallet.
+     *
+     * This allows for having the required Anchor output spending and HTLC transactions confirmed
+     * when the channel is closed.
+     *
+     * If the channel peer is not marked as trusted via
+     * [`AnchorChannelsConfig::trusted_peers_no_reserve`], we will always try to spend the Anchor
+     * outputs with *any* on-chain funds available, i.e., the total reserve value as well as any
+     * spendable funds available in the on-chain wallet. Therefore, this per-channel multiplier is
+     * really an emergency reserve that we maintain at all time to reduce the risk of
+     * insufficient funds at time of a channel closure. To this end, we will refuse to open
+     * outbound or accept inbound channels if we don't have sufficient on-chain funds available to
+     * cover the additional reserve requirement.
+     *
+     * **Note:** Depending on the fee market at the time of closure, this reserve amount might or
+     * might not suffice to successfully spend the Anchor output and have the HTLC transactions
+     * confirmed on-chain, i.e., you may want to adjust this value accordingly.
+     */
     public var perChannelReserveSats: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(trustedPeersNoReserve: [PublicKey], perChannelReserveSats: UInt64) {
+    public init(
+        /**
+         * A list of peers that we trust to get the required channel closing transactions confirmed
+         * on-chain.
+         *
+         * Channels with these peers won't count towards the retained on-chain reserve and we won't
+         * take any action to get the required channel closing transactions confirmed ourselves.
+         *
+         * **Note:** Trusting the channel counterparty to take the necessary actions to get the
+         * required Anchor spending transactions confirmed on-chain is potentially insecure
+         * as the channel may not be closed if they refuse to do so.
+         */trustedPeersNoReserve: [PublicKey], 
+        /**
+         * The amount of satoshis per anchors-negotiated channel with an untrusted peer that we keep
+         * as an emergency reserve in our on-chain wallet.
+         *
+         * This allows for having the required Anchor output spending and HTLC transactions confirmed
+         * when the channel is closed.
+         *
+         * If the channel peer is not marked as trusted via
+         * [`AnchorChannelsConfig::trusted_peers_no_reserve`], we will always try to spend the Anchor
+         * outputs with *any* on-chain funds available, i.e., the total reserve value as well as any
+         * spendable funds available in the on-chain wallet. Therefore, this per-channel multiplier is
+         * really an emergency reserve that we maintain at all time to reduce the risk of
+         * insufficient funds at time of a channel closure. To this end, we will refuse to open
+         * outbound or accept inbound channels if we don't have sufficient on-chain funds available to
+         * cover the additional reserve requirement.
+         *
+         * **Note:** Depending on the fee market at the time of closure, this reserve amount might or
+         * might not suffice to successfully spend the Anchor output and have the HTLC transactions
+         * confirmed on-chain, i.e., you may want to adjust this value accordingly.
+         */perChannelReserveSats: UInt64) {
         self.trustedPeersNoReserve = trustedPeersNoReserve
         self.perChannelReserveSats = perChannelReserveSats
     }
 }
 
+#if compiler(>=6)
+extension AnchorChannelsConfig: Sendable {}
+#endif
 
 
 extension AnchorChannelsConfig: Equatable, Hashable {
@@ -4212,6 +6764,7 @@ extension AnchorChannelsConfig: Equatable, Hashable {
         hasher.combine(perChannelReserveSats)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -4248,20 +6801,64 @@ public func FfiConverterTypeAnchorChannelsConfig_lower(_ value: AnchorChannelsCo
 }
 
 
+/**
+ * Options related to background syncing the Lightning and on-chain wallets.
+ *
+ * ### Defaults
+ *
+ * | Parameter                              | Value              |
+ * |----------------------------------------|--------------------|
+ * | `onchain_wallet_sync_interval_secs`    | 80                 |
+ * | `lightning_wallet_sync_interval_secs`  | 30                 |
+ * | `fee_rate_cache_update_interval_secs`  | 600                |
+ */
 public struct BackgroundSyncConfig {
+    /**
+     * The time in-between background sync attempts of the onchain wallet, in seconds.
+     *
+     * **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
+     */
     public var onchainWalletSyncIntervalSecs: UInt64
+    /**
+     * The time in-between background sync attempts of the LDK wallet, in seconds.
+     *
+     * **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
+     */
     public var lightningWalletSyncIntervalSecs: UInt64
+    /**
+     * The time in-between background update attempts to our fee rate cache, in seconds.
+     *
+     * **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
+     */
     public var feeRateCacheUpdateIntervalSecs: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(onchainWalletSyncIntervalSecs: UInt64, lightningWalletSyncIntervalSecs: UInt64, feeRateCacheUpdateIntervalSecs: UInt64) {
+    public init(
+        /**
+         * The time in-between background sync attempts of the onchain wallet, in seconds.
+         *
+         * **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
+         */onchainWalletSyncIntervalSecs: UInt64, 
+        /**
+         * The time in-between background sync attempts of the LDK wallet, in seconds.
+         *
+         * **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
+         */lightningWalletSyncIntervalSecs: UInt64, 
+        /**
+         * The time in-between background update attempts to our fee rate cache, in seconds.
+         *
+         * **Note:** A minimum of 10 seconds is enforced when background syncing is enabled.
+         */feeRateCacheUpdateIntervalSecs: UInt64) {
         self.onchainWalletSyncIntervalSecs = onchainWalletSyncIntervalSecs
         self.lightningWalletSyncIntervalSecs = lightningWalletSyncIntervalSecs
         self.feeRateCacheUpdateIntervalSecs = feeRateCacheUpdateIntervalSecs
     }
 }
 
+#if compiler(>=6)
+extension BackgroundSyncConfig: Sendable {}
+#endif
 
 
 extension BackgroundSyncConfig: Equatable, Hashable {
@@ -4284,6 +6881,7 @@ extension BackgroundSyncConfig: Equatable, Hashable {
         hasher.combine(feeRateCacheUpdateIntervalSecs)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -4322,17 +6920,124 @@ public func FfiConverterTypeBackgroundSyncConfig_lower(_ value: BackgroundSyncCo
 }
 
 
+/**
+ * Details of the known available balances returned by [`Node::list_balances`].
+ *
+ * [`Node::list_balances`]: crate::Node::list_balances
+ */
 public struct BalanceDetails {
+    /**
+     * The total balance of our on-chain wallet.
+     */
     public var totalOnchainBalanceSats: UInt64
+    /**
+     * The currently spendable balance of our on-chain wallet.
+     *
+     * This includes any sufficiently confirmed funds, minus
+     * [`total_anchor_channels_reserve_sats`].
+     *
+     * [`total_anchor_channels_reserve_sats`]: Self::total_anchor_channels_reserve_sats
+     */
     public var spendableOnchainBalanceSats: UInt64
+    /**
+     * The share of our total balance that we retain as an emergency reserve to (hopefully) be
+     * able to spend the Anchor outputs when one of our channels is closed.
+     */
     public var totalAnchorChannelsReserveSats: UInt64
+    /**
+     * The total balance that we would be able to claim across all our Lightning channels.
+     *
+     * Note this excludes balances that we are unsure if we are able to claim (e.g., as we are
+     * waiting for a preimage or for a timeout to expire). These balances will however be included
+     * as [`MaybePreimageClaimableHTLC`] and
+     * [`MaybeTimeoutClaimableHTLC`] in [`lightning_balances`].
+     *
+     * [`MaybePreimageClaimableHTLC`]: LightningBalance::MaybePreimageClaimableHTLC
+     * [`MaybeTimeoutClaimableHTLC`]: LightningBalance::MaybeTimeoutClaimableHTLC
+     * [`lightning_balances`]: Self::lightning_balances
+     */
     public var totalLightningBalanceSats: UInt64
+    /**
+     * A detailed list of all known Lightning balances that would be claimable on channel closure.
+     *
+     * Note that less than the listed amounts are spendable over lightning as further reserve
+     * restrictions apply. Please refer to [`ChannelDetails::outbound_capacity_msat`] and
+     * [`ChannelDetails::next_outbound_htlc_limit_msat`] as returned by [`Node::list_channels`]
+     * for a better approximation of the spendable amounts.
+     *
+     * [`ChannelDetails::outbound_capacity_msat`]: crate::ChannelDetails::outbound_capacity_msat
+     * [`ChannelDetails::next_outbound_htlc_limit_msat`]: crate::ChannelDetails::next_outbound_htlc_limit_msat
+     * [`Node::list_channels`]: crate::Node::list_channels
+     */
     public var lightningBalances: [LightningBalance]
+    /**
+     * A detailed list of balances currently being swept from the Lightning to the on-chain
+     * wallet.
+     *
+     * These are balances resulting from channel closures that may have been encumbered by a
+     * delay, but are now being claimed and useable once sufficiently confirmed on-chain.
+     *
+     * Note that, depending on the sync status of the wallets, swept balances listed here might or
+     * might not already be accounted for in [`total_onchain_balance_sats`].
+     *
+     * [`total_onchain_balance_sats`]: Self::total_onchain_balance_sats
+     */
     public var pendingBalancesFromChannelClosures: [PendingSweepBalance]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(totalOnchainBalanceSats: UInt64, spendableOnchainBalanceSats: UInt64, totalAnchorChannelsReserveSats: UInt64, totalLightningBalanceSats: UInt64, lightningBalances: [LightningBalance], pendingBalancesFromChannelClosures: [PendingSweepBalance]) {
+    public init(
+        /**
+         * The total balance of our on-chain wallet.
+         */totalOnchainBalanceSats: UInt64, 
+        /**
+         * The currently spendable balance of our on-chain wallet.
+         *
+         * This includes any sufficiently confirmed funds, minus
+         * [`total_anchor_channels_reserve_sats`].
+         *
+         * [`total_anchor_channels_reserve_sats`]: Self::total_anchor_channels_reserve_sats
+         */spendableOnchainBalanceSats: UInt64, 
+        /**
+         * The share of our total balance that we retain as an emergency reserve to (hopefully) be
+         * able to spend the Anchor outputs when one of our channels is closed.
+         */totalAnchorChannelsReserveSats: UInt64, 
+        /**
+         * The total balance that we would be able to claim across all our Lightning channels.
+         *
+         * Note this excludes balances that we are unsure if we are able to claim (e.g., as we are
+         * waiting for a preimage or for a timeout to expire). These balances will however be included
+         * as [`MaybePreimageClaimableHTLC`] and
+         * [`MaybeTimeoutClaimableHTLC`] in [`lightning_balances`].
+         *
+         * [`MaybePreimageClaimableHTLC`]: LightningBalance::MaybePreimageClaimableHTLC
+         * [`MaybeTimeoutClaimableHTLC`]: LightningBalance::MaybeTimeoutClaimableHTLC
+         * [`lightning_balances`]: Self::lightning_balances
+         */totalLightningBalanceSats: UInt64, 
+        /**
+         * A detailed list of all known Lightning balances that would be claimable on channel closure.
+         *
+         * Note that less than the listed amounts are spendable over lightning as further reserve
+         * restrictions apply. Please refer to [`ChannelDetails::outbound_capacity_msat`] and
+         * [`ChannelDetails::next_outbound_htlc_limit_msat`] as returned by [`Node::list_channels`]
+         * for a better approximation of the spendable amounts.
+         *
+         * [`ChannelDetails::outbound_capacity_msat`]: crate::ChannelDetails::outbound_capacity_msat
+         * [`ChannelDetails::next_outbound_htlc_limit_msat`]: crate::ChannelDetails::next_outbound_htlc_limit_msat
+         * [`Node::list_channels`]: crate::Node::list_channels
+         */lightningBalances: [LightningBalance], 
+        /**
+         * A detailed list of balances currently being swept from the Lightning to the on-chain
+         * wallet.
+         *
+         * These are balances resulting from channel closures that may have been encumbered by a
+         * delay, but are now being claimed and useable once sufficiently confirmed on-chain.
+         *
+         * Note that, depending on the sync status of the wallets, swept balances listed here might or
+         * might not already be accounted for in [`total_onchain_balance_sats`].
+         *
+         * [`total_onchain_balance_sats`]: Self::total_onchain_balance_sats
+         */pendingBalancesFromChannelClosures: [PendingSweepBalance]) {
         self.totalOnchainBalanceSats = totalOnchainBalanceSats
         self.spendableOnchainBalanceSats = spendableOnchainBalanceSats
         self.totalAnchorChannelsReserveSats = totalAnchorChannelsReserveSats
@@ -4342,6 +7047,9 @@ public struct BalanceDetails {
     }
 }
 
+#if compiler(>=6)
+extension BalanceDetails: Sendable {}
+#endif
 
 
 extension BalanceDetails: Equatable, Hashable {
@@ -4376,6 +7084,7 @@ extension BalanceDetails: Equatable, Hashable {
         hasher.combine(pendingBalancesFromChannelClosures)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -4420,18 +7129,36 @@ public func FfiConverterTypeBalanceDetails_lower(_ value: BalanceDetails) -> Rus
 }
 
 
+/**
+ * The best known block as identified by its hash and height.
+ */
 public struct BestBlock {
+    /**
+     * The block's hash.
+     */
     public var blockHash: BlockHash
+    /**
+     * The height at which the block was confirmed.
+     */
     public var height: UInt32
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(blockHash: BlockHash, height: UInt32) {
+    public init(
+        /**
+         * The block's hash.
+         */blockHash: BlockHash, 
+        /**
+         * The height at which the block was confirmed.
+         */height: UInt32) {
         self.blockHash = blockHash
         self.height = height
     }
 }
 
+#if compiler(>=6)
+extension BestBlock: Sendable {}
+#endif
 
 
 extension BestBlock: Equatable, Hashable {
@@ -4450,6 +7177,7 @@ extension BestBlock: Equatable, Hashable {
         hasher.combine(height)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -4486,17 +7214,103 @@ public func FfiConverterTypeBestBlock_lower(_ value: BestBlock) -> RustBuffer {
 }
 
 
+/**
+ * Options which apply on a per-channel basis and may change at runtime or based on negotiation
+ * with our counterparty.
+ */
 public struct ChannelConfig {
+    /**
+     * Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound
+     * over the channel.
+     * This may be allowed to change at runtime in a later update, however doing so must result in
+     * update messages sent to notify all nodes of our updated relay fee.
+     *
+     * Please refer to [`LdkChannelConfig`] for further details.
+     */
     public var forwardingFeeProportionalMillionths: UInt32
+    /**
+     * Amount (in milli-satoshi) charged for payments forwarded outbound over the channel, in
+     * excess of [`ChannelConfig::forwarding_fee_proportional_millionths`].
+     * This may be allowed to change at runtime in a later update, however doing so must result in
+     * update messages sent to notify all nodes of our updated relay fee.
+     *
+     * Please refer to [`LdkChannelConfig`] for further details.
+     */
     public var forwardingFeeBaseMsat: UInt32
+    /**
+     * The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
+     * the channel this config applies to.
+     *
+     * Please refer to [`LdkChannelConfig`] for further details.
+     */
     public var cltvExpiryDelta: UInt16
+    /**
+     * Limit our total exposure to potential loss to on-chain fees on close, including in-flight
+     * HTLCs which are burned to fees as they are too small to claim on-chain and fees on
+     * commitment transaction(s) broadcasted by our counterparty in excess of our own fee estimate.
+     *
+     * Please refer to [`LdkChannelConfig`] for further details.
+     */
     public var maxDustHtlcExposure: MaxDustHtlcExposure
+    /**
+     * The additional fee we're willing to pay to avoid waiting for the counterparty's
+     * `to_self_delay` to reclaim funds.
+     *
+     * Please refer to [`LdkChannelConfig`] for further details.
+     */
     public var forceCloseAvoidanceMaxFeeSatoshis: UInt64
+    /**
+     * If set, allows this channel's counterparty to skim an additional fee off this node's inbound
+     * HTLCs. Useful for liquidity providers to offload on-chain channel costs to end users.
+     *
+     * Please refer to [`LdkChannelConfig`] for further details.
+     */
     public var acceptUnderpayingHtlcs: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(forwardingFeeProportionalMillionths: UInt32, forwardingFeeBaseMsat: UInt32, cltvExpiryDelta: UInt16, maxDustHtlcExposure: MaxDustHtlcExposure, forceCloseAvoidanceMaxFeeSatoshis: UInt64, acceptUnderpayingHtlcs: Bool) {
+    public init(
+        /**
+         * Amount (in millionths of a satoshi) charged per satoshi for payments forwarded outbound
+         * over the channel.
+         * This may be allowed to change at runtime in a later update, however doing so must result in
+         * update messages sent to notify all nodes of our updated relay fee.
+         *
+         * Please refer to [`LdkChannelConfig`] for further details.
+         */forwardingFeeProportionalMillionths: UInt32, 
+        /**
+         * Amount (in milli-satoshi) charged for payments forwarded outbound over the channel, in
+         * excess of [`ChannelConfig::forwarding_fee_proportional_millionths`].
+         * This may be allowed to change at runtime in a later update, however doing so must result in
+         * update messages sent to notify all nodes of our updated relay fee.
+         *
+         * Please refer to [`LdkChannelConfig`] for further details.
+         */forwardingFeeBaseMsat: UInt32, 
+        /**
+         * The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
+         * the channel this config applies to.
+         *
+         * Please refer to [`LdkChannelConfig`] for further details.
+         */cltvExpiryDelta: UInt16, 
+        /**
+         * Limit our total exposure to potential loss to on-chain fees on close, including in-flight
+         * HTLCs which are burned to fees as they are too small to claim on-chain and fees on
+         * commitment transaction(s) broadcasted by our counterparty in excess of our own fee estimate.
+         *
+         * Please refer to [`LdkChannelConfig`] for further details.
+         */maxDustHtlcExposure: MaxDustHtlcExposure, 
+        /**
+         * The additional fee we're willing to pay to avoid waiting for the counterparty's
+         * `to_self_delay` to reclaim funds.
+         *
+         * Please refer to [`LdkChannelConfig`] for further details.
+         */forceCloseAvoidanceMaxFeeSatoshis: UInt64, 
+        /**
+         * If set, allows this channel's counterparty to skim an additional fee off this node's inbound
+         * HTLCs. Useful for liquidity providers to offload on-chain channel costs to end users.
+         *
+         * Please refer to [`LdkChannelConfig`] for further details.
+         */acceptUnderpayingHtlcs: Bool) {
         self.forwardingFeeProportionalMillionths = forwardingFeeProportionalMillionths
         self.forwardingFeeBaseMsat = forwardingFeeBaseMsat
         self.cltvExpiryDelta = cltvExpiryDelta
@@ -4506,6 +7320,9 @@ public struct ChannelConfig {
     }
 }
 
+#if compiler(>=6)
+extension ChannelConfig: Sendable {}
+#endif
 
 
 extension ChannelConfig: Equatable, Hashable {
@@ -4540,6 +7357,7 @@ extension ChannelConfig: Equatable, Hashable {
         hasher.combine(acceptUnderpayingHtlcs)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -4584,45 +7402,475 @@ public func FfiConverterTypeChannelConfig_lower(_ value: ChannelConfig) -> RustB
 }
 
 
+/**
+ * Details of a channel as returned by [`Node::list_channels`].
+ *
+ * When a channel is spliced, most fields continue to refer to the original pre-splice channel
+ * state until the splice transaction reaches sufficient confirmations to be locked (and we
+ * exchange `splice_locked` messages with our peer). See individual fields for details.
+ *
+ * [`Node::list_channels`]: crate::Node::list_channels
+ */
 public struct ChannelDetails {
+    /**
+     * The channel's ID (prior to initial channel setup this is a random 32 bytes, thereafter it
+     * is derived from channel funding or key material).
+     *
+     * Note that this means this value is *not* persistent - it can change once during the
+     * lifetime of the channel.
+     */
     public var channelId: ChannelId
+    /**
+     * The node ID of our the channel's counterparty.
+     */
     public var counterpartyNodeId: PublicKey
+    /**
+     * The channel's funding transaction output, if we've negotiated the funding transaction with
+     * our counterparty already.
+     *
+     * When a channel is spliced, this continues to refer to the original pre-splice channel
+     * state until the splice transaction reaches sufficient confirmations to be locked (and we
+     * exchange `splice_locked` messages with our peer).
+     */
     public var fundingTxo: OutPoint?
+    /**
+     * The witness script that is used to lock the channel's funding output to commitment transactions.
+     *
+     * This field will be `None` if we have not negotiated the funding transaction with our
+     * counterparty already.
+     *
+     * When a channel is spliced, this continues to refer to the original pre-splice channel
+     * state until the splice transaction reaches sufficient confirmations to be locked (and we
+     * exchange `splice_locked` messages with our peer).
+     */
+    public var fundingRedeemScript: ScriptBuf?
+    /**
+     * The position of the funding transaction in the chain. None if the funding transaction has
+     * not yet been confirmed and the channel fully opened.
+     *
+     * Note that if [`inbound_scid_alias`] is set, it will be used for invoices and inbound
+     * payments instead of this.
+     *
+     * For channels with [`confirmations_required`] set to `Some(0)`, [`outbound_scid_alias`] may
+     * be used in place of this in outbound routes.
+     *
+     * When a channel is spliced, this continues to refer to the original pre-splice channel state
+     * until the splice transaction reaches sufficient confirmations to be locked (and we exchange
+     * `splice_locked` messages with our peer).
+     *
+     * [`inbound_scid_alias`]: Self::inbound_scid_alias
+     * [`outbound_scid_alias`]: Self::outbound_scid_alias
+     * [`confirmations_required`]: Self::confirmations_required
+     */
     public var shortChannelId: UInt64?
+    /**
+     * An optional [`short_channel_id`] alias for this channel, randomly generated by us and
+     * usable in place of [`short_channel_id`] to reference the channel in outbound routes when
+     * the channel has not yet been confirmed (as long as [`confirmations_required`] is
+     * `Some(0)`).
+     *
+     * This will be `None` as long as the channel is not available for routing outbound payments.
+     *
+     * When a channel is spliced, this continues to refer to the original pre-splice channel
+     * state until the splice transaction reaches sufficient confirmations to be locked (and we
+     * exchange `splice_locked` messages with our peer).
+     *
+     * [`short_channel_id`]: Self::short_channel_id
+     * [`confirmations_required`]: Self::confirmations_required
+     */
     public var outboundScidAlias: UInt64?
+    /**
+     * An optional [`short_channel_id`] alias for this channel, randomly generated by our
+     * counterparty and usable in place of [`short_channel_id`] in invoice route hints. Our
+     * counterparty will recognize the alias provided here in place of the [`short_channel_id`]
+     * when they see a payment to be routed to us.
+     *
+     * Our counterparty may choose to rotate this value at any time, though will always recognize
+     * previous values for inbound payment forwarding.
+     *
+     * [`short_channel_id`]: Self::short_channel_id
+     */
     public var inboundScidAlias: UInt64?
+    /**
+     * The value, in satoshis, of this channel as it appears in the funding output.
+     *
+     * When a channel is spliced, this continues to refer to the original pre-splice channel
+     * state until the splice transaction reaches sufficient confirmations to be locked (and we
+     * exchange `splice_locked` messages with our peer).
+     */
     public var channelValueSats: UInt64
+    /**
+     * The value, in satoshis, that must always be held as a reserve in the channel for us. This
+     * value ensures that if we broadcast a revoked state, our counterparty can punish us by
+     * claiming at least this value on chain.
+     *
+     * This value is not included in [`outbound_capacity_msat`] as it can never be spent.
+     *
+     * This value will be `None` for outbound channels until the counterparty accepts the channel.
+     *
+     * [`outbound_capacity_msat`]: Self::outbound_capacity_msat
+     */
     public var unspendablePunishmentReserve: UInt64?
+    /**
+     * The local `user_channel_id` of this channel.
+     */
     public var userChannelId: UserChannelId
+    /**
+     * The currently negotiated fee rate denominated in satoshi per 1000 weight units,
+     * which is applied to commitment and HTLC transactions.
+     */
     public var feerateSatPer1000Weight: UInt32
+    /**
+     * The available outbound capacity for sending HTLCs to the remote peer.
+     *
+     * The amount does not include any pending HTLCs which are not yet resolved (and, thus, whose
+     * balance is not available for inclusion in new outbound HTLCs). This further does not include
+     * any pending outgoing HTLCs which are awaiting some other resolution to be sent.
+     */
     public var outboundCapacityMsat: UInt64
+    /**
+     * The available inbound capacity for receiving HTLCs from the remote peer.
+     *
+     * The amount does not include any pending HTLCs which are not yet resolved
+     * (and, thus, whose balance is not available for inclusion in new inbound HTLCs). This further
+     * does not include any pending incoming HTLCs which are awaiting some other resolution to be
+     * sent.
+     */
     public var inboundCapacityMsat: UInt64
+    /**
+     * The number of required confirmations on the funding transactions before the funding is
+     * considered "locked". The amount is selected by the channel fundee.
+     *
+     * The value will be `None` for outbound channels until the counterparty accepts the channel.
+     */
     public var confirmationsRequired: UInt32?
+    /**
+     * The current number of confirmations on the funding transaction.
+     */
     public var confirmations: UInt32?
+    /**
+     * Returns `true` if the channel was initiated (and therefore funded) by us.
+     */
     public var isOutbound: Bool
+    /**
+     * Returns `true` if both parties have exchanged `channel_ready` messages, and the channel is
+     * not currently being shut down. Both parties exchange `channel_ready` messages upon
+     * independently verifying that the required confirmations count provided by
+     * `confirmations_required` has been reached.
+     */
     public var isChannelReady: Bool
+    /**
+     * Returns `true` if the channel (a) `channel_ready` messages have been exchanged, (b) the
+     * peer is connected, and (c) the channel is not currently negotiating shutdown.
+     *
+     * This is a strict superset of `is_channel_ready`.
+     */
     public var isUsable: Bool
+    /**
+     * Returns `true` if this channel is (or will be) publicly-announced
+     */
     public var isAnnounced: Bool
+    /**
+     * The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
+     * the channel.
+     */
     public var cltvExpiryDelta: UInt16?
+    /**
+     * The value, in satoshis, that must always be held in the channel for our counterparty. This
+     * value ensures that if our counterparty broadcasts a revoked state, we can punish them by
+     * claiming at least this value on chain.
+     *
+     * This value is not included in [`inbound_capacity_msat`] as it can never be spent.
+     *
+     * [`inbound_capacity_msat`]: ChannelDetails::inbound_capacity_msat
+     */
     public var counterpartyUnspendablePunishmentReserve: UInt64
+    /**
+     * The smallest value HTLC (in msat) the remote peer will accept, for this channel.
+     *
+     * This field is only `None` before we have received either the `OpenChannel` or
+     * `AcceptChannel` message from the remote peer.
+     */
     public var counterpartyOutboundHtlcMinimumMsat: UInt64?
+    /**
+     * The largest value HTLC (in msat) the remote peer currently will accept, for this channel.
+     */
     public var counterpartyOutboundHtlcMaximumMsat: UInt64?
+    /**
+     * Base routing fee in millisatoshis.
+     */
     public var counterpartyForwardingInfoFeeBaseMsat: UInt32?
+    /**
+     * Proportional fee, in millionths of a satoshi the channel will charge per transferred satoshi.
+     */
     public var counterpartyForwardingInfoFeeProportionalMillionths: UInt32?
+    /**
+     * The minimum difference in CLTV expiry between an ingoing HTLC and its outgoing counterpart,
+     * such that the outgoing HTLC is forwardable to this counterparty.
+     */
     public var counterpartyForwardingInfoCltvExpiryDelta: UInt16?
+    /**
+     * The available outbound capacity for sending a single HTLC to the remote peer. This is
+     * similar to [`ChannelDetails::outbound_capacity_msat`] but it may be further restricted by
+     * the current state and per-HTLC limit(s). This is intended for use when routing, allowing us
+     * to use a limit as close as possible to the HTLC limit we can currently send.
+     *
+     * See also [`ChannelDetails::next_outbound_htlc_minimum_msat`] and
+     * [`ChannelDetails::outbound_capacity_msat`].
+     */
     public var nextOutboundHtlcLimitMsat: UInt64
+    /**
+     * The minimum value for sending a single HTLC to the remote peer. This is the equivalent of
+     * [`ChannelDetails::next_outbound_htlc_limit_msat`] but represents a lower-bound, rather than
+     * an upper-bound. This is intended for use when routing, allowing us to ensure we pick a
+     * route which is valid.
+     */
     public var nextOutboundHtlcMinimumMsat: UInt64
+    /**
+     * The number of blocks (after our commitment transaction confirms) that we will need to wait
+     * until we can claim our funds after we force-close the channel. During this time our
+     * counterparty is allowed to punish us if we broadcasted a stale state. If our counterparty
+     * force-closes the channel and broadcasts a commitment transaction we do not have to wait any
+     * time to claim our non-HTLC-encumbered funds.
+     *
+     * This value will be `None` for outbound channels until the counterparty accepts the channel.
+     */
     public var forceCloseSpendDelay: UInt16?
+    /**
+     * The smallest value HTLC (in msat) we will accept, for this channel.
+     */
     public var inboundHtlcMinimumMsat: UInt64
+    /**
+     * The largest value HTLC (in msat) we currently will accept, for this channel.
+     */
     public var inboundHtlcMaximumMsat: UInt64?
+    /**
+     * Set of configurable parameters that affect channel operation.
+     */
     public var config: ChannelConfig
+    /**
+     * The current shutdown state of the channel, if any.
+     *
+     * Will be `None` for objects serialized with LDK Node v0.1 and earlier.
+     */
+    public var channelShutdownState: ChannelShutdownState?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(channelId: ChannelId, counterpartyNodeId: PublicKey, fundingTxo: OutPoint?, shortChannelId: UInt64?, outboundScidAlias: UInt64?, inboundScidAlias: UInt64?, channelValueSats: UInt64, unspendablePunishmentReserve: UInt64?, userChannelId: UserChannelId, feerateSatPer1000Weight: UInt32, outboundCapacityMsat: UInt64, inboundCapacityMsat: UInt64, confirmationsRequired: UInt32?, confirmations: UInt32?, isOutbound: Bool, isChannelReady: Bool, isUsable: Bool, isAnnounced: Bool, cltvExpiryDelta: UInt16?, counterpartyUnspendablePunishmentReserve: UInt64, counterpartyOutboundHtlcMinimumMsat: UInt64?, counterpartyOutboundHtlcMaximumMsat: UInt64?, counterpartyForwardingInfoFeeBaseMsat: UInt32?, counterpartyForwardingInfoFeeProportionalMillionths: UInt32?, counterpartyForwardingInfoCltvExpiryDelta: UInt16?, nextOutboundHtlcLimitMsat: UInt64, nextOutboundHtlcMinimumMsat: UInt64, forceCloseSpendDelay: UInt16?, inboundHtlcMinimumMsat: UInt64, inboundHtlcMaximumMsat: UInt64?, config: ChannelConfig) {
+    public init(
+        /**
+         * The channel's ID (prior to initial channel setup this is a random 32 bytes, thereafter it
+         * is derived from channel funding or key material).
+         *
+         * Note that this means this value is *not* persistent - it can change once during the
+         * lifetime of the channel.
+         */channelId: ChannelId, 
+        /**
+         * The node ID of our the channel's counterparty.
+         */counterpartyNodeId: PublicKey, 
+        /**
+         * The channel's funding transaction output, if we've negotiated the funding transaction with
+         * our counterparty already.
+         *
+         * When a channel is spliced, this continues to refer to the original pre-splice channel
+         * state until the splice transaction reaches sufficient confirmations to be locked (and we
+         * exchange `splice_locked` messages with our peer).
+         */fundingTxo: OutPoint?, 
+        /**
+         * The witness script that is used to lock the channel's funding output to commitment transactions.
+         *
+         * This field will be `None` if we have not negotiated the funding transaction with our
+         * counterparty already.
+         *
+         * When a channel is spliced, this continues to refer to the original pre-splice channel
+         * state until the splice transaction reaches sufficient confirmations to be locked (and we
+         * exchange `splice_locked` messages with our peer).
+         */fundingRedeemScript: ScriptBuf?, 
+        /**
+         * The position of the funding transaction in the chain. None if the funding transaction has
+         * not yet been confirmed and the channel fully opened.
+         *
+         * Note that if [`inbound_scid_alias`] is set, it will be used for invoices and inbound
+         * payments instead of this.
+         *
+         * For channels with [`confirmations_required`] set to `Some(0)`, [`outbound_scid_alias`] may
+         * be used in place of this in outbound routes.
+         *
+         * When a channel is spliced, this continues to refer to the original pre-splice channel state
+         * until the splice transaction reaches sufficient confirmations to be locked (and we exchange
+         * `splice_locked` messages with our peer).
+         *
+         * [`inbound_scid_alias`]: Self::inbound_scid_alias
+         * [`outbound_scid_alias`]: Self::outbound_scid_alias
+         * [`confirmations_required`]: Self::confirmations_required
+         */shortChannelId: UInt64?, 
+        /**
+         * An optional [`short_channel_id`] alias for this channel, randomly generated by us and
+         * usable in place of [`short_channel_id`] to reference the channel in outbound routes when
+         * the channel has not yet been confirmed (as long as [`confirmations_required`] is
+         * `Some(0)`).
+         *
+         * This will be `None` as long as the channel is not available for routing outbound payments.
+         *
+         * When a channel is spliced, this continues to refer to the original pre-splice channel
+         * state until the splice transaction reaches sufficient confirmations to be locked (and we
+         * exchange `splice_locked` messages with our peer).
+         *
+         * [`short_channel_id`]: Self::short_channel_id
+         * [`confirmations_required`]: Self::confirmations_required
+         */outboundScidAlias: UInt64?, 
+        /**
+         * An optional [`short_channel_id`] alias for this channel, randomly generated by our
+         * counterparty and usable in place of [`short_channel_id`] in invoice route hints. Our
+         * counterparty will recognize the alias provided here in place of the [`short_channel_id`]
+         * when they see a payment to be routed to us.
+         *
+         * Our counterparty may choose to rotate this value at any time, though will always recognize
+         * previous values for inbound payment forwarding.
+         *
+         * [`short_channel_id`]: Self::short_channel_id
+         */inboundScidAlias: UInt64?, 
+        /**
+         * The value, in satoshis, of this channel as it appears in the funding output.
+         *
+         * When a channel is spliced, this continues to refer to the original pre-splice channel
+         * state until the splice transaction reaches sufficient confirmations to be locked (and we
+         * exchange `splice_locked` messages with our peer).
+         */channelValueSats: UInt64, 
+        /**
+         * The value, in satoshis, that must always be held as a reserve in the channel for us. This
+         * value ensures that if we broadcast a revoked state, our counterparty can punish us by
+         * claiming at least this value on chain.
+         *
+         * This value is not included in [`outbound_capacity_msat`] as it can never be spent.
+         *
+         * This value will be `None` for outbound channels until the counterparty accepts the channel.
+         *
+         * [`outbound_capacity_msat`]: Self::outbound_capacity_msat
+         */unspendablePunishmentReserve: UInt64?, 
+        /**
+         * The local `user_channel_id` of this channel.
+         */userChannelId: UserChannelId, 
+        /**
+         * The currently negotiated fee rate denominated in satoshi per 1000 weight units,
+         * which is applied to commitment and HTLC transactions.
+         */feerateSatPer1000Weight: UInt32, 
+        /**
+         * The available outbound capacity for sending HTLCs to the remote peer.
+         *
+         * The amount does not include any pending HTLCs which are not yet resolved (and, thus, whose
+         * balance is not available for inclusion in new outbound HTLCs). This further does not include
+         * any pending outgoing HTLCs which are awaiting some other resolution to be sent.
+         */outboundCapacityMsat: UInt64, 
+        /**
+         * The available inbound capacity for receiving HTLCs from the remote peer.
+         *
+         * The amount does not include any pending HTLCs which are not yet resolved
+         * (and, thus, whose balance is not available for inclusion in new inbound HTLCs). This further
+         * does not include any pending incoming HTLCs which are awaiting some other resolution to be
+         * sent.
+         */inboundCapacityMsat: UInt64, 
+        /**
+         * The number of required confirmations on the funding transactions before the funding is
+         * considered "locked". The amount is selected by the channel fundee.
+         *
+         * The value will be `None` for outbound channels until the counterparty accepts the channel.
+         */confirmationsRequired: UInt32?, 
+        /**
+         * The current number of confirmations on the funding transaction.
+         */confirmations: UInt32?, 
+        /**
+         * Returns `true` if the channel was initiated (and therefore funded) by us.
+         */isOutbound: Bool, 
+        /**
+         * Returns `true` if both parties have exchanged `channel_ready` messages, and the channel is
+         * not currently being shut down. Both parties exchange `channel_ready` messages upon
+         * independently verifying that the required confirmations count provided by
+         * `confirmations_required` has been reached.
+         */isChannelReady: Bool, 
+        /**
+         * Returns `true` if the channel (a) `channel_ready` messages have been exchanged, (b) the
+         * peer is connected, and (c) the channel is not currently negotiating shutdown.
+         *
+         * This is a strict superset of `is_channel_ready`.
+         */isUsable: Bool, 
+        /**
+         * Returns `true` if this channel is (or will be) publicly-announced
+         */isAnnounced: Bool, 
+        /**
+         * The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded over
+         * the channel.
+         */cltvExpiryDelta: UInt16?, 
+        /**
+         * The value, in satoshis, that must always be held in the channel for our counterparty. This
+         * value ensures that if our counterparty broadcasts a revoked state, we can punish them by
+         * claiming at least this value on chain.
+         *
+         * This value is not included in [`inbound_capacity_msat`] as it can never be spent.
+         *
+         * [`inbound_capacity_msat`]: ChannelDetails::inbound_capacity_msat
+         */counterpartyUnspendablePunishmentReserve: UInt64, 
+        /**
+         * The smallest value HTLC (in msat) the remote peer will accept, for this channel.
+         *
+         * This field is only `None` before we have received either the `OpenChannel` or
+         * `AcceptChannel` message from the remote peer.
+         */counterpartyOutboundHtlcMinimumMsat: UInt64?, 
+        /**
+         * The largest value HTLC (in msat) the remote peer currently will accept, for this channel.
+         */counterpartyOutboundHtlcMaximumMsat: UInt64?, 
+        /**
+         * Base routing fee in millisatoshis.
+         */counterpartyForwardingInfoFeeBaseMsat: UInt32?, 
+        /**
+         * Proportional fee, in millionths of a satoshi the channel will charge per transferred satoshi.
+         */counterpartyForwardingInfoFeeProportionalMillionths: UInt32?, 
+        /**
+         * The minimum difference in CLTV expiry between an ingoing HTLC and its outgoing counterpart,
+         * such that the outgoing HTLC is forwardable to this counterparty.
+         */counterpartyForwardingInfoCltvExpiryDelta: UInt16?, 
+        /**
+         * The available outbound capacity for sending a single HTLC to the remote peer. This is
+         * similar to [`ChannelDetails::outbound_capacity_msat`] but it may be further restricted by
+         * the current state and per-HTLC limit(s). This is intended for use when routing, allowing us
+         * to use a limit as close as possible to the HTLC limit we can currently send.
+         *
+         * See also [`ChannelDetails::next_outbound_htlc_minimum_msat`] and
+         * [`ChannelDetails::outbound_capacity_msat`].
+         */nextOutboundHtlcLimitMsat: UInt64, 
+        /**
+         * The minimum value for sending a single HTLC to the remote peer. This is the equivalent of
+         * [`ChannelDetails::next_outbound_htlc_limit_msat`] but represents a lower-bound, rather than
+         * an upper-bound. This is intended for use when routing, allowing us to ensure we pick a
+         * route which is valid.
+         */nextOutboundHtlcMinimumMsat: UInt64, 
+        /**
+         * The number of blocks (after our commitment transaction confirms) that we will need to wait
+         * until we can claim our funds after we force-close the channel. During this time our
+         * counterparty is allowed to punish us if we broadcasted a stale state. If our counterparty
+         * force-closes the channel and broadcasts a commitment transaction we do not have to wait any
+         * time to claim our non-HTLC-encumbered funds.
+         *
+         * This value will be `None` for outbound channels until the counterparty accepts the channel.
+         */forceCloseSpendDelay: UInt16?, 
+        /**
+         * The smallest value HTLC (in msat) we will accept, for this channel.
+         */inboundHtlcMinimumMsat: UInt64, 
+        /**
+         * The largest value HTLC (in msat) we currently will accept, for this channel.
+         */inboundHtlcMaximumMsat: UInt64?, 
+        /**
+         * Set of configurable parameters that affect channel operation.
+         */config: ChannelConfig, 
+        /**
+         * The current shutdown state of the channel, if any.
+         *
+         * Will be `None` for objects serialized with LDK Node v0.1 and earlier.
+         */channelShutdownState: ChannelShutdownState?) {
         self.channelId = channelId
         self.counterpartyNodeId = counterpartyNodeId
         self.fundingTxo = fundingTxo
+        self.fundingRedeemScript = fundingRedeemScript
         self.shortChannelId = shortChannelId
         self.outboundScidAlias = outboundScidAlias
         self.inboundScidAlias = inboundScidAlias
@@ -4651,9 +7899,13 @@ public struct ChannelDetails {
         self.inboundHtlcMinimumMsat = inboundHtlcMinimumMsat
         self.inboundHtlcMaximumMsat = inboundHtlcMaximumMsat
         self.config = config
+        self.channelShutdownState = channelShutdownState
     }
 }
 
+#if compiler(>=6)
+extension ChannelDetails: Sendable {}
+#endif
 
 
 extension ChannelDetails: Equatable, Hashable {
@@ -4665,6 +7917,9 @@ extension ChannelDetails: Equatable, Hashable {
             return false
         }
         if lhs.fundingTxo != rhs.fundingTxo {
+            return false
+        }
+        if lhs.fundingRedeemScript != rhs.fundingRedeemScript {
             return false
         }
         if lhs.shortChannelId != rhs.shortChannelId {
@@ -4751,6 +8006,9 @@ extension ChannelDetails: Equatable, Hashable {
         if lhs.config != rhs.config {
             return false
         }
+        if lhs.channelShutdownState != rhs.channelShutdownState {
+            return false
+        }
         return true
     }
 
@@ -4758,6 +8016,7 @@ extension ChannelDetails: Equatable, Hashable {
         hasher.combine(channelId)
         hasher.combine(counterpartyNodeId)
         hasher.combine(fundingTxo)
+        hasher.combine(fundingRedeemScript)
         hasher.combine(shortChannelId)
         hasher.combine(outboundScidAlias)
         hasher.combine(inboundScidAlias)
@@ -4786,8 +8045,10 @@ extension ChannelDetails: Equatable, Hashable {
         hasher.combine(inboundHtlcMinimumMsat)
         hasher.combine(inboundHtlcMaximumMsat)
         hasher.combine(config)
+        hasher.combine(channelShutdownState)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -4800,6 +8061,7 @@ public struct FfiConverterTypeChannelDetails: FfiConverterRustBuffer {
                 channelId: FfiConverterTypeChannelId.read(from: &buf), 
                 counterpartyNodeId: FfiConverterTypePublicKey.read(from: &buf), 
                 fundingTxo: FfiConverterOptionTypeOutPoint.read(from: &buf), 
+                fundingRedeemScript: FfiConverterOptionTypeScriptBuf.read(from: &buf), 
                 shortChannelId: FfiConverterOptionUInt64.read(from: &buf), 
                 outboundScidAlias: FfiConverterOptionUInt64.read(from: &buf), 
                 inboundScidAlias: FfiConverterOptionUInt64.read(from: &buf), 
@@ -4827,7 +8089,8 @@ public struct FfiConverterTypeChannelDetails: FfiConverterRustBuffer {
                 forceCloseSpendDelay: FfiConverterOptionUInt16.read(from: &buf), 
                 inboundHtlcMinimumMsat: FfiConverterUInt64.read(from: &buf), 
                 inboundHtlcMaximumMsat: FfiConverterOptionUInt64.read(from: &buf), 
-                config: FfiConverterTypeChannelConfig.read(from: &buf)
+                config: FfiConverterTypeChannelConfig.read(from: &buf), 
+                channelShutdownState: FfiConverterOptionTypeChannelShutdownState.read(from: &buf)
         )
     }
 
@@ -4835,6 +8098,7 @@ public struct FfiConverterTypeChannelDetails: FfiConverterRustBuffer {
         FfiConverterTypeChannelId.write(value.channelId, into: &buf)
         FfiConverterTypePublicKey.write(value.counterpartyNodeId, into: &buf)
         FfiConverterOptionTypeOutPoint.write(value.fundingTxo, into: &buf)
+        FfiConverterOptionTypeScriptBuf.write(value.fundingRedeemScript, into: &buf)
         FfiConverterOptionUInt64.write(value.shortChannelId, into: &buf)
         FfiConverterOptionUInt64.write(value.outboundScidAlias, into: &buf)
         FfiConverterOptionUInt64.write(value.inboundScidAlias, into: &buf)
@@ -4863,6 +8127,7 @@ public struct FfiConverterTypeChannelDetails: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.inboundHtlcMinimumMsat, into: &buf)
         FfiConverterOptionUInt64.write(value.inboundHtlcMaximumMsat, into: &buf)
         FfiConverterTypeChannelConfig.write(value.config, into: &buf)
+        FfiConverterOptionTypeChannelShutdownState.write(value.channelShutdownState, into: &buf)
     }
 }
 
@@ -4882,16 +8147,53 @@ public func FfiConverterTypeChannelDetails_lower(_ value: ChannelDetails) -> Rus
 }
 
 
+/**
+ * Details about a channel (both directions).
+ *
+ * Received within a channel announcement.
+ *
+ * This is a simplified version of LDK's `ChannelInfo` for bindings.
+ */
 public struct ChannelInfo {
+    /**
+     * Source node of the first direction of a channel
+     */
     public var nodeOne: NodeId
+    /**
+     * Details about the first direction of a channel
+     */
     public var oneToTwo: ChannelUpdateInfo?
+    /**
+     * Source node of the second direction of a channel
+     */
     public var nodeTwo: NodeId
+    /**
+     * Details about the second direction of a channel
+     */
     public var twoToOne: ChannelUpdateInfo?
+    /**
+     * The channel capacity as seen on-chain, if chain lookup is available.
+     */
     public var capacitySats: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(nodeOne: NodeId, oneToTwo: ChannelUpdateInfo?, nodeTwo: NodeId, twoToOne: ChannelUpdateInfo?, capacitySats: UInt64?) {
+    public init(
+        /**
+         * Source node of the first direction of a channel
+         */nodeOne: NodeId, 
+        /**
+         * Details about the first direction of a channel
+         */oneToTwo: ChannelUpdateInfo?, 
+        /**
+         * Source node of the second direction of a channel
+         */nodeTwo: NodeId, 
+        /**
+         * Details about the second direction of a channel
+         */twoToOne: ChannelUpdateInfo?, 
+        /**
+         * The channel capacity as seen on-chain, if chain lookup is available.
+         */capacitySats: UInt64?) {
         self.nodeOne = nodeOne
         self.oneToTwo = oneToTwo
         self.nodeTwo = nodeTwo
@@ -4900,6 +8202,9 @@ public struct ChannelInfo {
     }
 }
 
+#if compiler(>=6)
+extension ChannelInfo: Sendable {}
+#endif
 
 
 extension ChannelInfo: Equatable, Hashable {
@@ -4930,6 +8235,7 @@ extension ChannelInfo: Equatable, Hashable {
         hasher.combine(capacitySats)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -4972,17 +8278,60 @@ public func FfiConverterTypeChannelInfo_lower(_ value: ChannelInfo) -> RustBuffe
 }
 
 
+/**
+ * Details about one direction of a channel as received within a `ChannelUpdate`.
+ *
+ * This is a simplified version of LDK's `ChannelUpdateInfo` for bindings.
+ */
 public struct ChannelUpdateInfo {
+    /**
+     * When the last update to the channel direction was issued.
+     * Value is opaque, as set in the announcement.
+     */
     public var lastUpdate: UInt32
+    /**
+     * Whether the channel can be currently used for payments (in this one direction).
+     */
     public var enabled: Bool
+    /**
+     * The difference in CLTV values that you must have when routing through this channel.
+     */
     public var cltvExpiryDelta: UInt16
+    /**
+     * The minimum value, which must be relayed to the next hop via the channel
+     */
     public var htlcMinimumMsat: UInt64
+    /**
+     * The maximum value which may be relayed to the next hop via the channel.
+     */
     public var htlcMaximumMsat: UInt64
+    /**
+     * Fees charged when the channel is used for routing
+     */
     public var fees: RoutingFees
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(lastUpdate: UInt32, enabled: Bool, cltvExpiryDelta: UInt16, htlcMinimumMsat: UInt64, htlcMaximumMsat: UInt64, fees: RoutingFees) {
+    public init(
+        /**
+         * When the last update to the channel direction was issued.
+         * Value is opaque, as set in the announcement.
+         */lastUpdate: UInt32, 
+        /**
+         * Whether the channel can be currently used for payments (in this one direction).
+         */enabled: Bool, 
+        /**
+         * The difference in CLTV values that you must have when routing through this channel.
+         */cltvExpiryDelta: UInt16, 
+        /**
+         * The minimum value, which must be relayed to the next hop via the channel
+         */htlcMinimumMsat: UInt64, 
+        /**
+         * The maximum value which may be relayed to the next hop via the channel.
+         */htlcMaximumMsat: UInt64, 
+        /**
+         * Fees charged when the channel is used for routing
+         */fees: RoutingFees) {
         self.lastUpdate = lastUpdate
         self.enabled = enabled
         self.cltvExpiryDelta = cltvExpiryDelta
@@ -4992,6 +8341,9 @@ public struct ChannelUpdateInfo {
     }
 }
 
+#if compiler(>=6)
+extension ChannelUpdateInfo: Sendable {}
+#endif
 
 
 extension ChannelUpdateInfo: Equatable, Hashable {
@@ -5026,6 +8378,7 @@ extension ChannelUpdateInfo: Equatable, Hashable {
         hasher.combine(fees)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -5070,20 +8423,206 @@ public func FfiConverterTypeChannelUpdateInfo_lower(_ value: ChannelUpdateInfo) 
 }
 
 
+/**
+ * Represents the configuration of an [`Node`] instance.
+ *
+ * ### Defaults
+ *
+ * | Parameter                              | Value              |
+ * |----------------------------------------|--------------------------------------|
+ * | `storage_dir_path`                     | /tmp/ldk_node/                       |
+ * | `network`                              | Bitcoin                              |
+ * | `listening_addresses`                  | None                                 |
+ * | `announcement_addresses`               | None                                 |
+ * | `node_alias`                           | None                                 |
+ * | `trusted_peers_0conf`                  | []                                   |
+ * | `probing_liquidity_limit_multiplier`   | 3                                    |
+ * | `anchor_channels_config`               | Some(..)                             |
+ * | `route_parameters`                     | None                                 |
+ * | `tor_config`                           | None                                 |
+ * | `hrn_config`                           | HumanReadableNamesConfig::default()  |
+ *
+ * See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
+ * respective default values.
+ *
+ * [`Node`]: crate::Node
+ */
 public struct Config {
+    /**
+     * The path where the underlying LDK and BDK persist their data.
+     */
     public var storageDirPath: String
+    /**
+     * The used Bitcoin network.
+     */
     public var network: Network
+    /**
+     * The addresses on which the node will listen for incoming connections.
+     *
+     * **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
+     * `listening_addresses` are set.
+     */
     public var listeningAddresses: [SocketAddress]?
+    /**
+     * The addresses which the node will announce to the gossip network that it accepts connections on.
+     *
+     * **Note**: If unset, the [`listening_addresses`] will be used as the list of addresses to announce.
+     *
+     * [`listening_addresses`]: Config::listening_addresses
+     */
     public var announcementAddresses: [SocketAddress]?
+    /**
+     * The node alias that will be used when broadcasting announcements to the gossip network.
+     *
+     * The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
+     *
+     * **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
+     * `listening_addresses` are set.
+     */
     public var nodeAlias: NodeAlias?
+    /**
+     * A list of peers that we allow to establish zero confirmation channels to us.
+     *
+     * **Note:** Allowing payments via zero-confirmation channels is potentially insecure if the
+     * funding transaction ends up never being confirmed on-chain. Zero-confirmation channels
+     * should therefore only be accepted from trusted peers.
+     */
     public var trustedPeers0conf: [PublicKey]
+    /**
+     * The liquidity factor by which we filter the outgoing channels used for sending probes.
+     *
+     * Channels with available liquidity less than the required amount times this value won't be
+     * used to send pre-flight probes.
+     */
     public var probingLiquidityLimitMultiplier: UInt64
+    /**
+     * Configuration options pertaining to Anchor channels, i.e., channels for which the
+     * `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
+     *
+     * Please refer to [`AnchorChannelsConfig`] for further information on Anchor channels.
+     *
+     * If set to `Some`, we'll try to open new channels with Anchors enabled, i.e., new channels
+     * will be negotiated with the `option_anchors_zero_fee_htlc_tx` channel type if supported by
+     * the counterparty. Note that this won't prevent us from opening non-Anchor channels if the
+     * counterparty doesn't support `option_anchors_zero_fee_htlc_tx`. If set to `None`, new
+     * channels will be negotiated with the legacy `option_static_remotekey` channel type only.
+     *
+     * **Note:** If set to `None` *after* some Anchor channels have already been
+     * opened, no dedicated emergency on-chain reserve will be maintained for these channels,
+     * which can be dangerous if only insufficient funds are available at the time of channel
+     * closure. We *will* however still try to get the Anchor spending transactions confirmed
+     * on-chain with the funds available.
+     */
     public var anchorChannelsConfig: AnchorChannelsConfig?
+    /**
+     * Configuration options for payment routing and pathfinding.
+     *
+     * Setting the [`RouteParametersConfig`] provides flexibility to customize how payments are routed,
+     * including setting limits on routing fees, CLTV expiry, and channel utilization.
+     *
+     * **Note:** If unset, default parameters will be used, and you will be able to override the
+     * parameters on a per-payment basis in the corresponding method calls.
+     */
     public var routeParameters: RouteParametersConfig?
+    /**
+     * Configuration options for enabling peer connections via the Tor network.
+     *
+     * Setting [`TorConfig`] enables connecting to peers with OnionV3 addresses. No other connections
+     * are routed via Tor. Please refer to [`TorConfig`] for further information.
+     *
+     * **Note**: If unset, connecting to peer OnionV3 addresses will fail.
+     */
+    public var torConfig: TorConfig?
+    /**
+     * Configuration options for Human-Readable Names ([BIP 353]).
+     *
+     * [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+     */
+    public var hrnConfig: HumanReadableNamesConfig
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(storageDirPath: String, network: Network, listeningAddresses: [SocketAddress]?, announcementAddresses: [SocketAddress]?, nodeAlias: NodeAlias?, trustedPeers0conf: [PublicKey], probingLiquidityLimitMultiplier: UInt64, anchorChannelsConfig: AnchorChannelsConfig?, routeParameters: RouteParametersConfig?) {
+    public init(
+        /**
+         * The path where the underlying LDK and BDK persist their data.
+         */storageDirPath: String, 
+        /**
+         * The used Bitcoin network.
+         */network: Network, 
+        /**
+         * The addresses on which the node will listen for incoming connections.
+         *
+         * **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
+         * `listening_addresses` are set.
+         */listeningAddresses: [SocketAddress]?, 
+        /**
+         * The addresses which the node will announce to the gossip network that it accepts connections on.
+         *
+         * **Note**: If unset, the [`listening_addresses`] will be used as the list of addresses to announce.
+         *
+         * [`listening_addresses`]: Config::listening_addresses
+         */announcementAddresses: [SocketAddress]?, 
+        /**
+         * The node alias that will be used when broadcasting announcements to the gossip network.
+         *
+         * The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
+         *
+         * **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
+         * `listening_addresses` are set.
+         */nodeAlias: NodeAlias?, 
+        /**
+         * A list of peers that we allow to establish zero confirmation channels to us.
+         *
+         * **Note:** Allowing payments via zero-confirmation channels is potentially insecure if the
+         * funding transaction ends up never being confirmed on-chain. Zero-confirmation channels
+         * should therefore only be accepted from trusted peers.
+         */trustedPeers0conf: [PublicKey], 
+        /**
+         * The liquidity factor by which we filter the outgoing channels used for sending probes.
+         *
+         * Channels with available liquidity less than the required amount times this value won't be
+         * used to send pre-flight probes.
+         */probingLiquidityLimitMultiplier: UInt64, 
+        /**
+         * Configuration options pertaining to Anchor channels, i.e., channels for which the
+         * `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
+         *
+         * Please refer to [`AnchorChannelsConfig`] for further information on Anchor channels.
+         *
+         * If set to `Some`, we'll try to open new channels with Anchors enabled, i.e., new channels
+         * will be negotiated with the `option_anchors_zero_fee_htlc_tx` channel type if supported by
+         * the counterparty. Note that this won't prevent us from opening non-Anchor channels if the
+         * counterparty doesn't support `option_anchors_zero_fee_htlc_tx`. If set to `None`, new
+         * channels will be negotiated with the legacy `option_static_remotekey` channel type only.
+         *
+         * **Note:** If set to `None` *after* some Anchor channels have already been
+         * opened, no dedicated emergency on-chain reserve will be maintained for these channels,
+         * which can be dangerous if only insufficient funds are available at the time of channel
+         * closure. We *will* however still try to get the Anchor spending transactions confirmed
+         * on-chain with the funds available.
+         */anchorChannelsConfig: AnchorChannelsConfig?, 
+        /**
+         * Configuration options for payment routing and pathfinding.
+         *
+         * Setting the [`RouteParametersConfig`] provides flexibility to customize how payments are routed,
+         * including setting limits on routing fees, CLTV expiry, and channel utilization.
+         *
+         * **Note:** If unset, default parameters will be used, and you will be able to override the
+         * parameters on a per-payment basis in the corresponding method calls.
+         */routeParameters: RouteParametersConfig?, 
+        /**
+         * Configuration options for enabling peer connections via the Tor network.
+         *
+         * Setting [`TorConfig`] enables connecting to peers with OnionV3 addresses. No other connections
+         * are routed via Tor. Please refer to [`TorConfig`] for further information.
+         *
+         * **Note**: If unset, connecting to peer OnionV3 addresses will fail.
+         */torConfig: TorConfig?, 
+        /**
+         * Configuration options for Human-Readable Names ([BIP 353]).
+         *
+         * [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+         */hrnConfig: HumanReadableNamesConfig) {
         self.storageDirPath = storageDirPath
         self.network = network
         self.listeningAddresses = listeningAddresses
@@ -5093,9 +8632,14 @@ public struct Config {
         self.probingLiquidityLimitMultiplier = probingLiquidityLimitMultiplier
         self.anchorChannelsConfig = anchorChannelsConfig
         self.routeParameters = routeParameters
+        self.torConfig = torConfig
+        self.hrnConfig = hrnConfig
     }
 }
 
+#if compiler(>=6)
+extension Config: Sendable {}
+#endif
 
 
 extension Config: Equatable, Hashable {
@@ -5127,6 +8671,12 @@ extension Config: Equatable, Hashable {
         if lhs.routeParameters != rhs.routeParameters {
             return false
         }
+        if lhs.torConfig != rhs.torConfig {
+            return false
+        }
+        if lhs.hrnConfig != rhs.hrnConfig {
+            return false
+        }
         return true
     }
 
@@ -5140,8 +8690,11 @@ extension Config: Equatable, Hashable {
         hasher.combine(probingLiquidityLimitMultiplier)
         hasher.combine(anchorChannelsConfig)
         hasher.combine(routeParameters)
+        hasher.combine(torConfig)
+        hasher.combine(hrnConfig)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -5159,7 +8712,9 @@ public struct FfiConverterTypeConfig: FfiConverterRustBuffer {
                 trustedPeers0conf: FfiConverterSequenceTypePublicKey.read(from: &buf), 
                 probingLiquidityLimitMultiplier: FfiConverterUInt64.read(from: &buf), 
                 anchorChannelsConfig: FfiConverterOptionTypeAnchorChannelsConfig.read(from: &buf), 
-                routeParameters: FfiConverterOptionTypeRouteParametersConfig.read(from: &buf)
+                routeParameters: FfiConverterOptionTypeRouteParametersConfig.read(from: &buf), 
+                torConfig: FfiConverterOptionTypeTorConfig.read(from: &buf), 
+                hrnConfig: FfiConverterTypeHumanReadableNamesConfig.read(from: &buf)
         )
     }
 
@@ -5173,6 +8728,8 @@ public struct FfiConverterTypeConfig: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.probingLiquidityLimitMultiplier, into: &buf)
         FfiConverterOptionTypeAnchorChannelsConfig.write(value.anchorChannelsConfig, into: &buf)
         FfiConverterOptionTypeRouteParametersConfig.write(value.routeParameters, into: &buf)
+        FfiConverterOptionTypeTorConfig.write(value.torConfig, into: &buf)
+        FfiConverterTypeHumanReadableNamesConfig.write(value.hrnConfig, into: &buf)
     }
 }
 
@@ -5192,18 +8749,36 @@ public func FfiConverterTypeConfig_lower(_ value: Config) -> RustBuffer {
 }
 
 
+/**
+ * Custom TLV entry.
+ */
 public struct CustomTlvRecord {
+    /**
+     * Type number.
+     */
     public var typeNum: UInt64
-    public var value: [UInt8]
+    /**
+     * Serialized value.
+     */
+    public var value: Data
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(typeNum: UInt64, value: [UInt8]) {
+    public init(
+        /**
+         * Type number.
+         */typeNum: UInt64, 
+        /**
+         * Serialized value.
+         */value: Data) {
         self.typeNum = typeNum
         self.value = value
     }
 }
 
+#if compiler(>=6)
+extension CustomTlvRecord: Sendable {}
+#endif
 
 
 extension CustomTlvRecord: Equatable, Hashable {
@@ -5224,6 +8799,7 @@ extension CustomTlvRecord: Equatable, Hashable {
 }
 
 
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
@@ -5232,13 +8808,13 @@ public struct FfiConverterTypeCustomTlvRecord: FfiConverterRustBuffer {
         return
             try CustomTlvRecord(
                 typeNum: FfiConverterUInt64.read(from: &buf), 
-                value: FfiConverterSequenceUInt8.read(from: &buf)
+                value: FfiConverterData.read(from: &buf)
         )
     }
 
     public static func write(_ value: CustomTlvRecord, into buf: inout [UInt8]) {
         FfiConverterUInt64.write(value.typeNum, into: &buf)
-        FfiConverterSequenceUInt8.write(value.value, into: &buf)
+        FfiConverterData.write(value.value, into: &buf)
     }
 }
 
@@ -5258,16 +8834,49 @@ public func FfiConverterTypeCustomTlvRecord_lower(_ value: CustomTlvRecord) -> R
 }
 
 
+/**
+ * Configuration for syncing with an Electrum backend.
+ *
+ * Background syncing is enabled by default, using the default values specified in
+ * [`BackgroundSyncConfig`].
+ */
 public struct ElectrumSyncConfig {
+    /**
+     * Background sync configuration.
+     *
+     * If set to `None`, background syncing will be disabled. Users will need to manually
+     * sync via [`Node::sync_wallets`] for the wallets and fee rate updates.
+     *
+     * [`Node::sync_wallets`]: crate::Node::sync_wallets
+     */
     public var backgroundSyncConfig: BackgroundSyncConfig?
+    /**
+     * Sync timeouts configuration.
+     */
+    public var timeoutsConfig: SyncTimeoutsConfig
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(backgroundSyncConfig: BackgroundSyncConfig?) {
+    public init(
+        /**
+         * Background sync configuration.
+         *
+         * If set to `None`, background syncing will be disabled. Users will need to manually
+         * sync via [`Node::sync_wallets`] for the wallets and fee rate updates.
+         *
+         * [`Node::sync_wallets`]: crate::Node::sync_wallets
+         */backgroundSyncConfig: BackgroundSyncConfig?, 
+        /**
+         * Sync timeouts configuration.
+         */timeoutsConfig: SyncTimeoutsConfig) {
         self.backgroundSyncConfig = backgroundSyncConfig
+        self.timeoutsConfig = timeoutsConfig
     }
 }
 
+#if compiler(>=6)
+extension ElectrumSyncConfig: Sendable {}
+#endif
 
 
 extension ElectrumSyncConfig: Equatable, Hashable {
@@ -5275,13 +8884,18 @@ extension ElectrumSyncConfig: Equatable, Hashable {
         if lhs.backgroundSyncConfig != rhs.backgroundSyncConfig {
             return false
         }
+        if lhs.timeoutsConfig != rhs.timeoutsConfig {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(backgroundSyncConfig)
+        hasher.combine(timeoutsConfig)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -5291,12 +8905,14 @@ public struct FfiConverterTypeElectrumSyncConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ElectrumSyncConfig {
         return
             try ElectrumSyncConfig(
-                backgroundSyncConfig: FfiConverterOptionTypeBackgroundSyncConfig.read(from: &buf)
+                backgroundSyncConfig: FfiConverterOptionTypeBackgroundSyncConfig.read(from: &buf), 
+                timeoutsConfig: FfiConverterTypeSyncTimeoutsConfig.read(from: &buf)
         )
     }
 
     public static func write(_ value: ElectrumSyncConfig, into buf: inout [UInt8]) {
         FfiConverterOptionTypeBackgroundSyncConfig.write(value.backgroundSyncConfig, into: &buf)
+        FfiConverterTypeSyncTimeoutsConfig.write(value.timeoutsConfig, into: &buf)
     }
 }
 
@@ -5316,16 +8932,49 @@ public func FfiConverterTypeElectrumSyncConfig_lower(_ value: ElectrumSyncConfig
 }
 
 
+/**
+ * Configuration for syncing with an Esplora backend.
+ *
+ * Background syncing is enabled by default, using the default values specified in
+ * [`BackgroundSyncConfig`].
+ */
 public struct EsploraSyncConfig {
+    /**
+     * Background sync configuration.
+     *
+     * If set to `None`, background syncing will be disabled. Users will need to manually
+     * sync via [`Node::sync_wallets`] for the wallets and fee rate updates.
+     *
+     * [`Node::sync_wallets`]: crate::Node::sync_wallets
+     */
     public var backgroundSyncConfig: BackgroundSyncConfig?
+    /**
+     * Sync timeouts configuration.
+     */
+    public var timeoutsConfig: SyncTimeoutsConfig
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(backgroundSyncConfig: BackgroundSyncConfig?) {
+    public init(
+        /**
+         * Background sync configuration.
+         *
+         * If set to `None`, background syncing will be disabled. Users will need to manually
+         * sync via [`Node::sync_wallets`] for the wallets and fee rate updates.
+         *
+         * [`Node::sync_wallets`]: crate::Node::sync_wallets
+         */backgroundSyncConfig: BackgroundSyncConfig?, 
+        /**
+         * Sync timeouts configuration.
+         */timeoutsConfig: SyncTimeoutsConfig) {
         self.backgroundSyncConfig = backgroundSyncConfig
+        self.timeoutsConfig = timeoutsConfig
     }
 }
 
+#if compiler(>=6)
+extension EsploraSyncConfig: Sendable {}
+#endif
 
 
 extension EsploraSyncConfig: Equatable, Hashable {
@@ -5333,13 +8982,18 @@ extension EsploraSyncConfig: Equatable, Hashable {
         if lhs.backgroundSyncConfig != rhs.backgroundSyncConfig {
             return false
         }
+        if lhs.timeoutsConfig != rhs.timeoutsConfig {
+            return false
+        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(backgroundSyncConfig)
+        hasher.combine(timeoutsConfig)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -5349,12 +9003,14 @@ public struct FfiConverterTypeEsploraSyncConfig: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EsploraSyncConfig {
         return
             try EsploraSyncConfig(
-                backgroundSyncConfig: FfiConverterOptionTypeBackgroundSyncConfig.read(from: &buf)
+                backgroundSyncConfig: FfiConverterOptionTypeBackgroundSyncConfig.read(from: &buf), 
+                timeoutsConfig: FfiConverterTypeSyncTimeoutsConfig.read(from: &buf)
         )
     }
 
     public static func write(_ value: EsploraSyncConfig, into buf: inout [UInt8]) {
         FfiConverterOptionTypeBackgroundSyncConfig.write(value.backgroundSyncConfig, into: &buf)
+        FfiConverterTypeSyncTimeoutsConfig.write(value.timeoutsConfig, into: &buf)
     }
 }
 
@@ -5374,53 +9030,98 @@ public func FfiConverterTypeEsploraSyncConfig_lower(_ value: EsploraSyncConfig) 
 }
 
 
-public struct LspFeeLimits {
-    public var maxTotalOpeningFeeMsat: UInt64?
-    public var maxProportionalOpeningFeePpmMsat: UInt64?
+/**
+ * Identifies the channel and counterparty that a HTLC was processed with.
+ */
+public struct HtlcLocator {
+    /**
+     * The channel that the HTLC was sent or received on.
+     */
+    public var channelId: ChannelId
+    /**
+     * The `user_channel_id` for the channel.
+     *
+     * Will only be `None` for events serialized with LDK Node v0.3.0 or prior, or if the
+     * payment was settled via an on-chain transaction.
+     */
+    public var userChannelId: UserChannelId?
+    /**
+     * The node id of the counterparty for this HTLC.
+     *
+     * This is only `None` for HTLCs received prior to LDK Node v0.5 or for events serialized by
+     * versions prior to v0.5.
+     */
+    public var nodeId: PublicKey?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(maxTotalOpeningFeeMsat: UInt64?, maxProportionalOpeningFeePpmMsat: UInt64?) {
-        self.maxTotalOpeningFeeMsat = maxTotalOpeningFeeMsat
-        self.maxProportionalOpeningFeePpmMsat = maxProportionalOpeningFeePpmMsat
+    public init(
+        /**
+         * The channel that the HTLC was sent or received on.
+         */channelId: ChannelId, 
+        /**
+         * The `user_channel_id` for the channel.
+         *
+         * Will only be `None` for events serialized with LDK Node v0.3.0 or prior, or if the
+         * payment was settled via an on-chain transaction.
+         */userChannelId: UserChannelId?, 
+        /**
+         * The node id of the counterparty for this HTLC.
+         *
+         * This is only `None` for HTLCs received prior to LDK Node v0.5 or for events serialized by
+         * versions prior to v0.5.
+         */nodeId: PublicKey?) {
+        self.channelId = channelId
+        self.userChannelId = userChannelId
+        self.nodeId = nodeId
     }
 }
 
+#if compiler(>=6)
+extension HtlcLocator: Sendable {}
+#endif
 
 
-extension LspFeeLimits: Equatable, Hashable {
-    public static func ==(lhs: LspFeeLimits, rhs: LspFeeLimits) -> Bool {
-        if lhs.maxTotalOpeningFeeMsat != rhs.maxTotalOpeningFeeMsat {
+extension HtlcLocator: Equatable, Hashable {
+    public static func ==(lhs: HtlcLocator, rhs: HtlcLocator) -> Bool {
+        if lhs.channelId != rhs.channelId {
             return false
         }
-        if lhs.maxProportionalOpeningFeePpmMsat != rhs.maxProportionalOpeningFeePpmMsat {
+        if lhs.userChannelId != rhs.userChannelId {
+            return false
+        }
+        if lhs.nodeId != rhs.nodeId {
             return false
         }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
-        hasher.combine(maxTotalOpeningFeeMsat)
-        hasher.combine(maxProportionalOpeningFeePpmMsat)
+        hasher.combine(channelId)
+        hasher.combine(userChannelId)
+        hasher.combine(nodeId)
     }
 }
+
 
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeLSPFeeLimits: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> LspFeeLimits {
+public struct FfiConverterTypeHTLCLocator: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HtlcLocator {
         return
-            try LspFeeLimits(
-                maxTotalOpeningFeeMsat: FfiConverterOptionUInt64.read(from: &buf), 
-                maxProportionalOpeningFeePpmMsat: FfiConverterOptionUInt64.read(from: &buf)
+            try HtlcLocator(
+                channelId: FfiConverterTypeChannelId.read(from: &buf), 
+                userChannelId: FfiConverterOptionTypeUserChannelId.read(from: &buf), 
+                nodeId: FfiConverterOptionTypePublicKey.read(from: &buf)
         )
     }
 
-    public static func write(_ value: LspFeeLimits, into buf: inout [UInt8]) {
-        FfiConverterOptionUInt64.write(value.maxTotalOpeningFeeMsat, into: &buf)
-        FfiConverterOptionUInt64.write(value.maxProportionalOpeningFeePpmMsat, into: &buf)
+    public static func write(_ value: HtlcLocator, into buf: inout [UInt8]) {
+        FfiConverterTypeChannelId.write(value.channelId, into: &buf)
+        FfiConverterOptionTypeUserChannelId.write(value.userChannelId, into: &buf)
+        FfiConverterOptionTypePublicKey.write(value.nodeId, into: &buf)
     }
 }
 
@@ -5428,28 +9129,142 @@ public struct FfiConverterTypeLSPFeeLimits: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeLSPFeeLimits_lift(_ buf: RustBuffer) throws -> LspFeeLimits {
-    return try FfiConverterTypeLSPFeeLimits.lift(buf)
+public func FfiConverterTypeHTLCLocator_lift(_ buf: RustBuffer) throws -> HtlcLocator {
+    return try FfiConverterTypeHTLCLocator.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeLSPFeeLimits_lower(_ value: LspFeeLimits) -> RustBuffer {
-    return FfiConverterTypeLSPFeeLimits.lower(value)
+public func FfiConverterTypeHTLCLocator_lower(_ value: HtlcLocator) -> RustBuffer {
+    return FfiConverterTypeHTLCLocator.lower(value)
 }
 
 
+/**
+ * Configuration options for Human-Readable Names ([BIP 353]).
+ *
+ * [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+ */
+public struct HumanReadableNamesConfig {
+    /**
+     * This sets how our node resolves names when we want to send a payment.
+     *
+     * By default, this uses the `Dns` variant with the following settings:
+     * * **DNS Server**: `8.8.8.8:53` (Google Public DNS)
+     * * **Resolution Service**: Disabled (`false`)
+     */
+    public var resolutionConfig: HrnResolverConfig
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * This sets how our node resolves names when we want to send a payment.
+         *
+         * By default, this uses the `Dns` variant with the following settings:
+         * * **DNS Server**: `8.8.8.8:53` (Google Public DNS)
+         * * **Resolution Service**: Disabled (`false`)
+         */resolutionConfig: HrnResolverConfig) {
+        self.resolutionConfig = resolutionConfig
+    }
+}
+
+#if compiler(>=6)
+extension HumanReadableNamesConfig: Sendable {}
+#endif
+
+
+extension HumanReadableNamesConfig: Equatable, Hashable {
+    public static func ==(lhs: HumanReadableNamesConfig, rhs: HumanReadableNamesConfig) -> Bool {
+        if lhs.resolutionConfig != rhs.resolutionConfig {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(resolutionConfig)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHumanReadableNamesConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HumanReadableNamesConfig {
+        return
+            try HumanReadableNamesConfig(
+                resolutionConfig: FfiConverterTypeHRNResolverConfig.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: HumanReadableNamesConfig, into buf: inout [UInt8]) {
+        FfiConverterTypeHRNResolverConfig.write(value.resolutionConfig, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHumanReadableNamesConfig_lift(_ buf: RustBuffer) throws -> HumanReadableNamesConfig {
+    return try FfiConverterTypeHumanReadableNamesConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHumanReadableNamesConfig_lower(_ value: HumanReadableNamesConfig) -> RustBuffer {
+    return FfiConverterTypeHumanReadableNamesConfig.lower(value)
+}
+
+
+/**
+ * A Lightning payment using BOLT 11.
+ */
 public struct Lsps1Bolt11PaymentInfo {
+    /**
+     * Indicates the current state of the payment.
+     */
     public var state: Lsps1PaymentState
+    /**
+     * The datetime when the payment option expires.
+     */
     public var expiresAt: LspsDateTime
+    /**
+     * The total fee the LSP will charge to open this channel in satoshi.
+     */
     public var feeTotalSat: UInt64
+    /**
+     * The amount the client needs to pay to have the requested channel openend.
+     */
     public var orderTotalSat: UInt64
+    /**
+     * A BOLT11 invoice the client can pay to have to channel opened.
+     */
     public var invoice: Bolt11Invoice
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(state: Lsps1PaymentState, expiresAt: LspsDateTime, feeTotalSat: UInt64, orderTotalSat: UInt64, invoice: Bolt11Invoice) {
+    public init(
+        /**
+         * Indicates the current state of the payment.
+         */state: Lsps1PaymentState, 
+        /**
+         * The datetime when the payment option expires.
+         */expiresAt: LspsDateTime, 
+        /**
+         * The total fee the LSP will charge to open this channel in satoshi.
+         */feeTotalSat: UInt64, 
+        /**
+         * The amount the client needs to pay to have the requested channel openend.
+         */orderTotalSat: UInt64, 
+        /**
+         * A BOLT11 invoice the client can pay to have to channel opened.
+         */invoice: Bolt11Invoice) {
         self.state = state
         self.expiresAt = expiresAt
         self.feeTotalSat = feeTotalSat
@@ -5457,6 +9272,10 @@ public struct Lsps1Bolt11PaymentInfo {
         self.invoice = invoice
     }
 }
+
+#if compiler(>=6)
+extension Lsps1Bolt11PaymentInfo: Sendable {}
+#endif
 
 
 
@@ -5514,6 +9333,9 @@ public struct Lsps1ChannelInfo {
     }
 }
 
+#if compiler(>=6)
+extension Lsps1ChannelInfo: Sendable {}
+#endif
 
 
 extension Lsps1ChannelInfo: Equatable, Hashable {
@@ -5536,6 +9358,7 @@ extension Lsps1ChannelInfo: Equatable, Hashable {
         hasher.combine(expiresAt)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -5574,19 +9397,76 @@ public func FfiConverterTypeLSPS1ChannelInfo_lower(_ value: Lsps1ChannelInfo) ->
 }
 
 
+/**
+ * An onchain payment.
+ */
 public struct Lsps1OnchainPaymentInfo {
+    /**
+     * Indicates the current state of the payment.
+     */
     public var state: Lsps1PaymentState
+    /**
+     * The datetime when the payment option expires.
+     */
     public var expiresAt: LspsDateTime
+    /**
+     * The total fee the LSP will charge to open this channel in satoshi.
+     */
     public var feeTotalSat: UInt64
+    /**
+     * The amount the client needs to pay to have the requested channel opened.
+     */
     public var orderTotalSat: UInt64
+    /**
+     * An on-chain address the client can send [`Self::order_total_sat`] to have the channel
+     * opened.
+     */
     public var address: Address
+    /**
+     * The minimum number of block confirmations that are required for the on-chain payment to be
+     * considered confirmed.
+     */
     public var minOnchainPaymentConfirmations: UInt16?
+    /**
+     * The minimum fee rate for the on-chain payment in case the client wants the payment to be
+     * confirmed without a confirmation.
+     */
     public var minFeeFor0conf: FeeRate
+    /**
+     * The address where the LSP will send the funds if the order fails.
+     */
     public var refundOnchainAddress: Address?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(state: Lsps1PaymentState, expiresAt: LspsDateTime, feeTotalSat: UInt64, orderTotalSat: UInt64, address: Address, minOnchainPaymentConfirmations: UInt16?, minFeeFor0conf: FeeRate, refundOnchainAddress: Address?) {
+    public init(
+        /**
+         * Indicates the current state of the payment.
+         */state: Lsps1PaymentState, 
+        /**
+         * The datetime when the payment option expires.
+         */expiresAt: LspsDateTime, 
+        /**
+         * The total fee the LSP will charge to open this channel in satoshi.
+         */feeTotalSat: UInt64, 
+        /**
+         * The amount the client needs to pay to have the requested channel opened.
+         */orderTotalSat: UInt64, 
+        /**
+         * An on-chain address the client can send [`Self::order_total_sat`] to have the channel
+         * opened.
+         */address: Address, 
+        /**
+         * The minimum number of block confirmations that are required for the on-chain payment to be
+         * considered confirmed.
+         */minOnchainPaymentConfirmations: UInt16?, 
+        /**
+         * The minimum fee rate for the on-chain payment in case the client wants the payment to be
+         * confirmed without a confirmation.
+         */minFeeFor0conf: FeeRate, 
+        /**
+         * The address where the LSP will send the funds if the order fails.
+         */refundOnchainAddress: Address?) {
         self.state = state
         self.expiresAt = expiresAt
         self.feeTotalSat = feeTotalSat
@@ -5597,6 +9477,10 @@ public struct Lsps1OnchainPaymentInfo {
         self.refundOnchainAddress = refundOnchainAddress
     }
 }
+
+#if compiler(>=6)
+extension Lsps1OnchainPaymentInfo: Sendable {}
+#endif
 
 
 
@@ -5668,6 +9552,9 @@ public struct Lsps1OrderParams {
     }
 }
 
+#if compiler(>=6)
+extension Lsps1OrderParams: Sendable {}
+#endif
 
 
 extension Lsps1OrderParams: Equatable, Hashable {
@@ -5706,6 +9593,7 @@ extension Lsps1OrderParams: Equatable, Hashable {
         hasher.combine(announceChannel)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -5768,6 +9656,10 @@ public struct Lsps1OrderStatus {
     }
 }
 
+#if compiler(>=6)
+extension Lsps1OrderStatus: Sendable {}
+#endif
+
 
 
 #if swift(>=5.8)
@@ -5809,16 +9701,32 @@ public func FfiConverterTypeLSPS1OrderStatus_lower(_ value: Lsps1OrderStatus) ->
 
 
 public struct Lsps1PaymentInfo {
+    /**
+     * A Lightning payment using BOLT 11.
+     */
     public var bolt11: Lsps1Bolt11PaymentInfo?
+    /**
+     * An onchain payment.
+     */
     public var onchain: Lsps1OnchainPaymentInfo?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(bolt11: Lsps1Bolt11PaymentInfo?, onchain: Lsps1OnchainPaymentInfo?) {
+    public init(
+        /**
+         * A Lightning payment using BOLT 11.
+         */bolt11: Lsps1Bolt11PaymentInfo?, 
+        /**
+         * An onchain payment.
+         */onchain: Lsps1OnchainPaymentInfo?) {
         self.bolt11 = bolt11
         self.onchain = onchain
     }
 }
+
+#if compiler(>=6)
+extension Lsps1PaymentInfo: Sendable {}
+#endif
 
 
 
@@ -5856,21 +9764,244 @@ public func FfiConverterTypeLSPS1PaymentInfo_lower(_ value: Lsps1PaymentInfo) ->
 }
 
 
-public struct Lsps2ServiceConfig {
-    public var requireToken: String?
-    public var advertiseService: Bool
-    public var channelOpeningFeePpm: UInt32
-    public var channelOverProvisioningPpm: UInt32
-    public var minChannelOpeningFeeMsat: UInt64
-    public var minChannelLifetime: UInt32
-    public var maxClientToSelfDelay: UInt32
-    public var minPaymentSizeMsat: UInt64
-    public var maxPaymentSizeMsat: UInt64
-    public var clientTrustsLsp: Bool
+/**
+ * Limits applying to how much fee we allow an LSP to deduct from the payment amount.
+ *
+ * See [`LdkChannelConfig::accept_underpaying_htlcs`] for more information.
+ *
+ * [`LdkChannelConfig::accept_underpaying_htlcs`]: lightning::util::config::ChannelConfig::accept_underpaying_htlcs
+ */
+public struct Lsps2Parameters {
+    /**
+     * The maximal total amount we allow any configured LSP withhold from us when forwarding the
+     * payment.
+     */
+    public var maxTotalOpeningFeeMsat: UInt64?
+    /**
+     * The maximal proportional fee, in parts-per-million millisatoshi, we allow any configured
+     * LSP withhold from us when forwarding the payment.
+     */
+    public var maxProportionalOpeningFeePpmMsat: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(requireToken: String?, advertiseService: Bool, channelOpeningFeePpm: UInt32, channelOverProvisioningPpm: UInt32, minChannelOpeningFeeMsat: UInt64, minChannelLifetime: UInt32, maxClientToSelfDelay: UInt32, minPaymentSizeMsat: UInt64, maxPaymentSizeMsat: UInt64, clientTrustsLsp: Bool) {
+    public init(
+        /**
+         * The maximal total amount we allow any configured LSP withhold from us when forwarding the
+         * payment.
+         */maxTotalOpeningFeeMsat: UInt64?, 
+        /**
+         * The maximal proportional fee, in parts-per-million millisatoshi, we allow any configured
+         * LSP withhold from us when forwarding the payment.
+         */maxProportionalOpeningFeePpmMsat: UInt64?) {
+        self.maxTotalOpeningFeeMsat = maxTotalOpeningFeeMsat
+        self.maxProportionalOpeningFeePpmMsat = maxProportionalOpeningFeePpmMsat
+    }
+}
+
+#if compiler(>=6)
+extension Lsps2Parameters: Sendable {}
+#endif
+
+
+extension Lsps2Parameters: Equatable, Hashable {
+    public static func ==(lhs: Lsps2Parameters, rhs: Lsps2Parameters) -> Bool {
+        if lhs.maxTotalOpeningFeeMsat != rhs.maxTotalOpeningFeeMsat {
+            return false
+        }
+        if lhs.maxProportionalOpeningFeePpmMsat != rhs.maxProportionalOpeningFeePpmMsat {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(maxTotalOpeningFeeMsat)
+        hasher.combine(maxProportionalOpeningFeePpmMsat)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeLSPS2Parameters: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Lsps2Parameters {
+        return
+            try Lsps2Parameters(
+                maxTotalOpeningFeeMsat: FfiConverterOptionUInt64.read(from: &buf), 
+                maxProportionalOpeningFeePpmMsat: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: Lsps2Parameters, into buf: inout [UInt8]) {
+        FfiConverterOptionUInt64.write(value.maxTotalOpeningFeeMsat, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxProportionalOpeningFeePpmMsat, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLSPS2Parameters_lift(_ buf: RustBuffer) throws -> Lsps2Parameters {
+    return try FfiConverterTypeLSPS2Parameters.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeLSPS2Parameters_lower(_ value: Lsps2Parameters) -> RustBuffer {
+    return FfiConverterTypeLSPS2Parameters.lower(value)
+}
+
+
+/**
+ * Represents the configuration of the LSPS2 service.
+ *
+ * See [bLIP-52 / LSPS2] for more information.
+ *
+ * [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+ */
+public struct Lsps2ServiceConfig {
+    /**
+     * A token we may require to be sent by the clients.
+     *
+     * If set, only requests matching this token will be accepted.
+     */
+    public var requireToken: String?
+    /**
+     * Indicates whether the LSPS service will be announced via the gossip network.
+     */
+    public var advertiseService: Bool
+    /**
+     * The fee we withhold for the channel open from the initial payment.
+     *
+     * This fee is proportional to the client-requested amount, in parts-per-million.
+     */
+    public var channelOpeningFeePpm: UInt32
+    /**
+     * The proportional overprovisioning for the channel.
+     *
+     * This determines, in parts-per-million, how much value we'll provision on top of the amount
+     * we need to forward the payment to the client.
+     *
+     * For example, setting this to `100_000` will result in a channel being opened that is 10%
+     * larger than then the to-be-forwarded amount (i.e., client-requested amount minus the
+     * channel opening fee fee).
+     */
+    public var channelOverProvisioningPpm: UInt32
+    /**
+     * The minimum fee required for opening a channel.
+     */
+    public var minChannelOpeningFeeMsat: UInt64
+    /**
+     * The minimum number of blocks after confirmation we promise to keep the channel open.
+     */
+    public var minChannelLifetime: UInt32
+    /**
+     * The maximum number of blocks that the client is allowed to set its `to_self_delay` parameter.
+     */
+    public var maxClientToSelfDelay: UInt32
+    /**
+     * The minimum payment size that we will accept when opening a channel.
+     */
+    public var minPaymentSizeMsat: UInt64
+    /**
+     * The maximum payment size that we will accept when opening a channel.
+     */
+    public var maxPaymentSizeMsat: UInt64
+    /**
+     * Use the 'client-trusts-LSP' trust model.
+     *
+     * When set, the service will delay *broadcasting* the JIT channel's funding transaction until
+     * the client claimed sufficient HTLC parts to pay for the channel open.
+     *
+     * Note this will render the flow incompatible with clients utilizing the 'LSP-trust-client'
+     * trust model, i.e., in turn delay *claiming* any HTLCs until they see the funding
+     * transaction in the mempool.
+     *
+     * Please refer to [`bLIP-52`] for more information.
+     *
+     * [`bLIP-52`]: https://github.com/lightning/blips/blob/master/blip-0052.md#trust-models
+     */
+    public var clientTrustsLsp: Bool
+    /**
+     * When set, we will allow clients to spend their entire channel balance in the channels
+     * we open to them. This allows clients to try to steal your channel balance with
+     * no financial penalty, so this should only be set if you trust your clients.
+     *
+     * See [`Node::open_0reserve_channel`] to manually open these channels.
+     *
+     * [`Node::open_0reserve_channel`]: crate::Node::open_0reserve_channel
+     */
+    public var disableClientReserve: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * A token we may require to be sent by the clients.
+         *
+         * If set, only requests matching this token will be accepted.
+         */requireToken: String?, 
+        /**
+         * Indicates whether the LSPS service will be announced via the gossip network.
+         */advertiseService: Bool, 
+        /**
+         * The fee we withhold for the channel open from the initial payment.
+         *
+         * This fee is proportional to the client-requested amount, in parts-per-million.
+         */channelOpeningFeePpm: UInt32, 
+        /**
+         * The proportional overprovisioning for the channel.
+         *
+         * This determines, in parts-per-million, how much value we'll provision on top of the amount
+         * we need to forward the payment to the client.
+         *
+         * For example, setting this to `100_000` will result in a channel being opened that is 10%
+         * larger than then the to-be-forwarded amount (i.e., client-requested amount minus the
+         * channel opening fee fee).
+         */channelOverProvisioningPpm: UInt32, 
+        /**
+         * The minimum fee required for opening a channel.
+         */minChannelOpeningFeeMsat: UInt64, 
+        /**
+         * The minimum number of blocks after confirmation we promise to keep the channel open.
+         */minChannelLifetime: UInt32, 
+        /**
+         * The maximum number of blocks that the client is allowed to set its `to_self_delay` parameter.
+         */maxClientToSelfDelay: UInt32, 
+        /**
+         * The minimum payment size that we will accept when opening a channel.
+         */minPaymentSizeMsat: UInt64, 
+        /**
+         * The maximum payment size that we will accept when opening a channel.
+         */maxPaymentSizeMsat: UInt64, 
+        /**
+         * Use the 'client-trusts-LSP' trust model.
+         *
+         * When set, the service will delay *broadcasting* the JIT channel's funding transaction until
+         * the client claimed sufficient HTLC parts to pay for the channel open.
+         *
+         * Note this will render the flow incompatible with clients utilizing the 'LSP-trust-client'
+         * trust model, i.e., in turn delay *claiming* any HTLCs until they see the funding
+         * transaction in the mempool.
+         *
+         * Please refer to [`bLIP-52`] for more information.
+         *
+         * [`bLIP-52`]: https://github.com/lightning/blips/blob/master/blip-0052.md#trust-models
+         */clientTrustsLsp: Bool, 
+        /**
+         * When set, we will allow clients to spend their entire channel balance in the channels
+         * we open to them. This allows clients to try to steal your channel balance with
+         * no financial penalty, so this should only be set if you trust your clients.
+         *
+         * See [`Node::open_0reserve_channel`] to manually open these channels.
+         *
+         * [`Node::open_0reserve_channel`]: crate::Node::open_0reserve_channel
+         */disableClientReserve: Bool) {
         self.requireToken = requireToken
         self.advertiseService = advertiseService
         self.channelOpeningFeePpm = channelOpeningFeePpm
@@ -5881,9 +10012,13 @@ public struct Lsps2ServiceConfig {
         self.minPaymentSizeMsat = minPaymentSizeMsat
         self.maxPaymentSizeMsat = maxPaymentSizeMsat
         self.clientTrustsLsp = clientTrustsLsp
+        self.disableClientReserve = disableClientReserve
     }
 }
 
+#if compiler(>=6)
+extension Lsps2ServiceConfig: Sendable {}
+#endif
 
 
 extension Lsps2ServiceConfig: Equatable, Hashable {
@@ -5918,6 +10053,9 @@ extension Lsps2ServiceConfig: Equatable, Hashable {
         if lhs.clientTrustsLsp != rhs.clientTrustsLsp {
             return false
         }
+        if lhs.disableClientReserve != rhs.disableClientReserve {
+            return false
+        }
         return true
     }
 
@@ -5932,8 +10070,10 @@ extension Lsps2ServiceConfig: Equatable, Hashable {
         hasher.combine(minPaymentSizeMsat)
         hasher.combine(maxPaymentSizeMsat)
         hasher.combine(clientTrustsLsp)
+        hasher.combine(disableClientReserve)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -5952,7 +10092,8 @@ public struct FfiConverterTypeLSPS2ServiceConfig: FfiConverterRustBuffer {
                 maxClientToSelfDelay: FfiConverterUInt32.read(from: &buf), 
                 minPaymentSizeMsat: FfiConverterUInt64.read(from: &buf), 
                 maxPaymentSizeMsat: FfiConverterUInt64.read(from: &buf), 
-                clientTrustsLsp: FfiConverterBool.read(from: &buf)
+                clientTrustsLsp: FfiConverterBool.read(from: &buf), 
+                disableClientReserve: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -5967,6 +10108,7 @@ public struct FfiConverterTypeLSPS2ServiceConfig: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.minPaymentSizeMsat, into: &buf)
         FfiConverterUInt64.write(value.maxPaymentSizeMsat, into: &buf)
         FfiConverterBool.write(value.clientTrustsLsp, into: &buf)
+        FfiConverterBool.write(value.disableClientReserve, into: &buf)
     }
 }
 
@@ -5986,22 +10128,81 @@ public func FfiConverterTypeLSPS2ServiceConfig_lower(_ value: Lsps2ServiceConfig
 }
 
 
+/**
+ * A unit of logging output with metadata to enable filtering `module_path`,
+ * `file`, and `line` to inform on log's source.
+ *
+ * This version is used when the `uniffi` feature is enabled.
+ * It is similar to the non-`uniffi` version, but it omits the lifetime parameter
+ * for the `LogRecord`, as the Uniffi-exposed interface cannot handle lifetimes.
+ */
 public struct LogRecord {
+    /**
+     * The verbosity level of the message.
+     */
     public var level: LogLevel
+    /**
+     * The message body.
+     */
     public var args: String
+    /**
+     * The module path of the message.
+     */
     public var modulePath: String
+    /**
+     * The line containing the message.
+     */
     public var line: UInt32
+    /**
+     * The node id of the peer pertaining to the logged record.
+     */
+    public var peerId: PublicKey?
+    /**
+     * The channel id of the channel pertaining to the logged record.
+     */
+    public var channelId: ChannelId?
+    /**
+     * The payment hash pertaining to the logged record.
+     */
+    public var paymentHash: PaymentHash?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(level: LogLevel, args: String, modulePath: String, line: UInt32) {
+    public init(
+        /**
+         * The verbosity level of the message.
+         */level: LogLevel, 
+        /**
+         * The message body.
+         */args: String, 
+        /**
+         * The module path of the message.
+         */modulePath: String, 
+        /**
+         * The line containing the message.
+         */line: UInt32, 
+        /**
+         * The node id of the peer pertaining to the logged record.
+         */peerId: PublicKey?, 
+        /**
+         * The channel id of the channel pertaining to the logged record.
+         */channelId: ChannelId?, 
+        /**
+         * The payment hash pertaining to the logged record.
+         */paymentHash: PaymentHash?) {
         self.level = level
         self.args = args
         self.modulePath = modulePath
         self.line = line
+        self.peerId = peerId
+        self.channelId = channelId
+        self.paymentHash = paymentHash
     }
 }
 
+#if compiler(>=6)
+extension LogRecord: Sendable {}
+#endif
 
 
 extension LogRecord: Equatable, Hashable {
@@ -6018,6 +10219,15 @@ extension LogRecord: Equatable, Hashable {
         if lhs.line != rhs.line {
             return false
         }
+        if lhs.peerId != rhs.peerId {
+            return false
+        }
+        if lhs.channelId != rhs.channelId {
+            return false
+        }
+        if lhs.paymentHash != rhs.paymentHash {
+            return false
+        }
         return true
     }
 
@@ -6026,8 +10236,12 @@ extension LogRecord: Equatable, Hashable {
         hasher.combine(args)
         hasher.combine(modulePath)
         hasher.combine(line)
+        hasher.combine(peerId)
+        hasher.combine(channelId)
+        hasher.combine(paymentHash)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -6040,7 +10254,10 @@ public struct FfiConverterTypeLogRecord: FfiConverterRustBuffer {
                 level: FfiConverterTypeLogLevel.read(from: &buf), 
                 args: FfiConverterString.read(from: &buf), 
                 modulePath: FfiConverterString.read(from: &buf), 
-                line: FfiConverterUInt32.read(from: &buf)
+                line: FfiConverterUInt32.read(from: &buf), 
+                peerId: FfiConverterOptionTypePublicKey.read(from: &buf), 
+                channelId: FfiConverterOptionTypeChannelId.read(from: &buf), 
+                paymentHash: FfiConverterOptionTypePaymentHash.read(from: &buf)
         )
     }
 
@@ -6049,6 +10266,9 @@ public struct FfiConverterTypeLogRecord: FfiConverterRustBuffer {
         FfiConverterString.write(value.args, into: &buf)
         FfiConverterString.write(value.modulePath, into: &buf)
         FfiConverterUInt32.write(value.line, into: &buf)
+        FfiConverterOptionTypePublicKey.write(value.peerId, into: &buf)
+        FfiConverterOptionTypeChannelId.write(value.channelId, into: &buf)
+        FfiConverterOptionTypePaymentHash.write(value.paymentHash, into: &buf)
     }
 }
 
@@ -6068,20 +10288,52 @@ public func FfiConverterTypeLogRecord_lower(_ value: LogRecord) -> RustBuffer {
 }
 
 
+/**
+ * Information received in the latest node_announcement from this node.
+ *
+ * This is a simplified version of LDK's `NodeAnnouncementInfo` for bindings.
+ */
 public struct NodeAnnouncementInfo {
+    /**
+     * When the last known update to the node state was issued.
+     * Value is opaque, as set in the announcement.
+     */
     public var lastUpdate: UInt32
+    /**
+     * Moniker assigned to the node.
+     * May be invalid or malicious (eg control chars),
+     * should not be exposed to the user.
+     */
     public var alias: String
+    /**
+     * List of addresses on which this node is reachable
+     */
     public var addresses: [SocketAddress]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(lastUpdate: UInt32, alias: String, addresses: [SocketAddress]) {
+    public init(
+        /**
+         * When the last known update to the node state was issued.
+         * Value is opaque, as set in the announcement.
+         */lastUpdate: UInt32, 
+        /**
+         * Moniker assigned to the node.
+         * May be invalid or malicious (eg control chars),
+         * should not be exposed to the user.
+         */alias: String, 
+        /**
+         * List of addresses on which this node is reachable
+         */addresses: [SocketAddress]) {
         self.lastUpdate = lastUpdate
         self.alias = alias
         self.addresses = addresses
     }
 }
 
+#if compiler(>=6)
+extension NodeAnnouncementInfo: Sendable {}
+#endif
 
 
 extension NodeAnnouncementInfo: Equatable, Hashable {
@@ -6104,6 +10356,7 @@ extension NodeAnnouncementInfo: Equatable, Hashable {
         hasher.combine(addresses)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -6142,18 +10395,42 @@ public func FfiConverterTypeNodeAnnouncementInfo_lower(_ value: NodeAnnouncement
 }
 
 
+/**
+ * Details about a node in the network, known from the network announcement.
+ *
+ * This is a simplified version of LDK's `NodeInfo` for bindings.
+ */
 public struct NodeInfo {
+    /**
+     * All valid channels a node has announced
+     */
     public var channels: [UInt64]
+    /**
+     * More information about a node from node_announcement.
+     * Optional because we store a Node entry after learning about it from
+     * a channel announcement, but before receiving a node announcement.
+     */
     public var announcementInfo: NodeAnnouncementInfo?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(channels: [UInt64], announcementInfo: NodeAnnouncementInfo?) {
+    public init(
+        /**
+         * All valid channels a node has announced
+         */channels: [UInt64], 
+        /**
+         * More information about a node from node_announcement.
+         * Optional because we store a Node entry after learning about it from
+         * a channel announcement, but before receiving a node announcement.
+         */announcementInfo: NodeAnnouncementInfo?) {
         self.channels = channels
         self.announcementInfo = announcementInfo
     }
 }
 
+#if compiler(>=6)
+extension NodeInfo: Sendable {}
+#endif
 
 
 extension NodeInfo: Equatable, Hashable {
@@ -6172,6 +10449,7 @@ extension NodeInfo: Equatable, Hashable {
         hasher.combine(announcementInfo)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -6208,21 +10486,116 @@ public func FfiConverterTypeNodeInfo_lower(_ value: NodeInfo) -> RustBuffer {
 }
 
 
+/**
+ * Represents the status of the [`Node`].
+ */
 public struct NodeStatus {
+    /**
+     * Indicates whether the [`Node`] is running.
+     */
     public var isRunning: Bool
+    /**
+     * Network (e.g. mainnet, testnet4, signet) on which the [`Node`] is running.
+     */
+    public var network: Network
+    /**
+     * The best block to which our Lightning wallet is currently synced.
+     */
     public var currentBestBlock: BestBlock
+    /**
+     * The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced
+     * our Lightning wallet to the chain tip.
+     *
+     * Will be `None` if the wallet hasn't been synced yet.
+     */
     public var latestLightningWalletSyncTimestamp: UInt64?
+    /**
+     * The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced
+     * our on-chain wallet to the chain tip.
+     *
+     * Will be `None` if the wallet hasn't been synced yet.
+     */
     public var latestOnchainWalletSyncTimestamp: UInt64?
+    /**
+     * The timestamp, in seconds since start of the UNIX epoch, when we last successfully update
+     * our fee rate cache.
+     *
+     * Will be `None` if the cache hasn't been updated yet.
+     */
     public var latestFeeRateCacheUpdateTimestamp: UInt64?
+    /**
+     * The timestamp, in seconds since start of the UNIX epoch, when the last rapid gossip sync
+     * (RGS) snapshot we successfully applied was generated.
+     *
+     * Will be `None` if RGS isn't configured or the snapshot hasn't been updated yet.
+     */
     public var latestRgsSnapshotTimestamp: UInt64?
+    /**
+     * The timestamp, in seconds since start of the UNIX epoch, when we last successfully merged external scores.
+     */
     public var latestPathfindingScoresSyncTimestamp: UInt64?
+    /**
+     * The timestamp, in seconds since start of the UNIX epoch, when we last broadcasted a node
+     * announcement.
+     *
+     * Will be `None` if we have no public channels or we haven't broadcasted yet.
+     */
     public var latestNodeAnnouncementBroadcastTimestamp: UInt64?
-    public var latestChannelMonitorArchivalHeight: UInt32?
+    /**
+     * The features advertised in this node's `node_announcement` message.
+     */
+    public var nodeFeatures: NodeFeatures
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(isRunning: Bool, currentBestBlock: BestBlock, latestLightningWalletSyncTimestamp: UInt64?, latestOnchainWalletSyncTimestamp: UInt64?, latestFeeRateCacheUpdateTimestamp: UInt64?, latestRgsSnapshotTimestamp: UInt64?, latestPathfindingScoresSyncTimestamp: UInt64?, latestNodeAnnouncementBroadcastTimestamp: UInt64?, latestChannelMonitorArchivalHeight: UInt32?) {
+    public init(
+        /**
+         * Indicates whether the [`Node`] is running.
+         */isRunning: Bool, 
+        /**
+         * Network (e.g. mainnet, testnet4, signet) on which the [`Node`] is running.
+         */network: Network, 
+        /**
+         * The best block to which our Lightning wallet is currently synced.
+         */currentBestBlock: BestBlock, 
+        /**
+         * The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced
+         * our Lightning wallet to the chain tip.
+         *
+         * Will be `None` if the wallet hasn't been synced yet.
+         */latestLightningWalletSyncTimestamp: UInt64?, 
+        /**
+         * The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced
+         * our on-chain wallet to the chain tip.
+         *
+         * Will be `None` if the wallet hasn't been synced yet.
+         */latestOnchainWalletSyncTimestamp: UInt64?, 
+        /**
+         * The timestamp, in seconds since start of the UNIX epoch, when we last successfully update
+         * our fee rate cache.
+         *
+         * Will be `None` if the cache hasn't been updated yet.
+         */latestFeeRateCacheUpdateTimestamp: UInt64?, 
+        /**
+         * The timestamp, in seconds since start of the UNIX epoch, when the last rapid gossip sync
+         * (RGS) snapshot we successfully applied was generated.
+         *
+         * Will be `None` if RGS isn't configured or the snapshot hasn't been updated yet.
+         */latestRgsSnapshotTimestamp: UInt64?, 
+        /**
+         * The timestamp, in seconds since start of the UNIX epoch, when we last successfully merged external scores.
+         */latestPathfindingScoresSyncTimestamp: UInt64?, 
+        /**
+         * The timestamp, in seconds since start of the UNIX epoch, when we last broadcasted a node
+         * announcement.
+         *
+         * Will be `None` if we have no public channels or we haven't broadcasted yet.
+         */latestNodeAnnouncementBroadcastTimestamp: UInt64?, 
+        /**
+         * The features advertised in this node's `node_announcement` message.
+         */nodeFeatures: NodeFeatures) {
         self.isRunning = isRunning
+        self.network = network
         self.currentBestBlock = currentBestBlock
         self.latestLightningWalletSyncTimestamp = latestLightningWalletSyncTimestamp
         self.latestOnchainWalletSyncTimestamp = latestOnchainWalletSyncTimestamp
@@ -6230,56 +10603,14 @@ public struct NodeStatus {
         self.latestRgsSnapshotTimestamp = latestRgsSnapshotTimestamp
         self.latestPathfindingScoresSyncTimestamp = latestPathfindingScoresSyncTimestamp
         self.latestNodeAnnouncementBroadcastTimestamp = latestNodeAnnouncementBroadcastTimestamp
-        self.latestChannelMonitorArchivalHeight = latestChannelMonitorArchivalHeight
+        self.nodeFeatures = nodeFeatures
     }
 }
 
+#if compiler(>=6)
+extension NodeStatus: Sendable {}
+#endif
 
-
-extension NodeStatus: Equatable, Hashable {
-    public static func ==(lhs: NodeStatus, rhs: NodeStatus) -> Bool {
-        if lhs.isRunning != rhs.isRunning {
-            return false
-        }
-        if lhs.currentBestBlock != rhs.currentBestBlock {
-            return false
-        }
-        if lhs.latestLightningWalletSyncTimestamp != rhs.latestLightningWalletSyncTimestamp {
-            return false
-        }
-        if lhs.latestOnchainWalletSyncTimestamp != rhs.latestOnchainWalletSyncTimestamp {
-            return false
-        }
-        if lhs.latestFeeRateCacheUpdateTimestamp != rhs.latestFeeRateCacheUpdateTimestamp {
-            return false
-        }
-        if lhs.latestRgsSnapshotTimestamp != rhs.latestRgsSnapshotTimestamp {
-            return false
-        }
-        if lhs.latestPathfindingScoresSyncTimestamp != rhs.latestPathfindingScoresSyncTimestamp {
-            return false
-        }
-        if lhs.latestNodeAnnouncementBroadcastTimestamp != rhs.latestNodeAnnouncementBroadcastTimestamp {
-            return false
-        }
-        if lhs.latestChannelMonitorArchivalHeight != rhs.latestChannelMonitorArchivalHeight {
-            return false
-        }
-        return true
-    }
-
-    public func hash(into hasher: inout Hasher) {
-        hasher.combine(isRunning)
-        hasher.combine(currentBestBlock)
-        hasher.combine(latestLightningWalletSyncTimestamp)
-        hasher.combine(latestOnchainWalletSyncTimestamp)
-        hasher.combine(latestFeeRateCacheUpdateTimestamp)
-        hasher.combine(latestRgsSnapshotTimestamp)
-        hasher.combine(latestPathfindingScoresSyncTimestamp)
-        hasher.combine(latestNodeAnnouncementBroadcastTimestamp)
-        hasher.combine(latestChannelMonitorArchivalHeight)
-    }
-}
 
 
 #if swift(>=5.8)
@@ -6290,6 +10621,7 @@ public struct FfiConverterTypeNodeStatus: FfiConverterRustBuffer {
         return
             try NodeStatus(
                 isRunning: FfiConverterBool.read(from: &buf), 
+                network: FfiConverterTypeNetwork.read(from: &buf), 
                 currentBestBlock: FfiConverterTypeBestBlock.read(from: &buf), 
                 latestLightningWalletSyncTimestamp: FfiConverterOptionUInt64.read(from: &buf), 
                 latestOnchainWalletSyncTimestamp: FfiConverterOptionUInt64.read(from: &buf), 
@@ -6297,12 +10629,13 @@ public struct FfiConverterTypeNodeStatus: FfiConverterRustBuffer {
                 latestRgsSnapshotTimestamp: FfiConverterOptionUInt64.read(from: &buf), 
                 latestPathfindingScoresSyncTimestamp: FfiConverterOptionUInt64.read(from: &buf), 
                 latestNodeAnnouncementBroadcastTimestamp: FfiConverterOptionUInt64.read(from: &buf), 
-                latestChannelMonitorArchivalHeight: FfiConverterOptionUInt32.read(from: &buf)
+                nodeFeatures: FfiConverterTypeNodeFeatures.read(from: &buf)
         )
     }
 
     public static func write(_ value: NodeStatus, into buf: inout [UInt8]) {
         FfiConverterBool.write(value.isRunning, into: &buf)
+        FfiConverterTypeNetwork.write(value.network, into: &buf)
         FfiConverterTypeBestBlock.write(value.currentBestBlock, into: &buf)
         FfiConverterOptionUInt64.write(value.latestLightningWalletSyncTimestamp, into: &buf)
         FfiConverterOptionUInt64.write(value.latestOnchainWalletSyncTimestamp, into: &buf)
@@ -6310,7 +10643,7 @@ public struct FfiConverterTypeNodeStatus: FfiConverterRustBuffer {
         FfiConverterOptionUInt64.write(value.latestRgsSnapshotTimestamp, into: &buf)
         FfiConverterOptionUInt64.write(value.latestPathfindingScoresSyncTimestamp, into: &buf)
         FfiConverterOptionUInt64.write(value.latestNodeAnnouncementBroadcastTimestamp, into: &buf)
-        FfiConverterOptionUInt32.write(value.latestChannelMonitorArchivalHeight, into: &buf)
+        FfiConverterTypeNodeFeatures.write(value.nodeFeatures, into: &buf)
     }
 }
 
@@ -6342,6 +10675,9 @@ public struct OutPoint {
     }
 }
 
+#if compiler(>=6)
+extension OutPoint: Sendable {}
+#endif
 
 
 extension OutPoint: Equatable, Hashable {
@@ -6360,6 +10696,7 @@ extension OutPoint: Equatable, Hashable {
         hasher.combine(vout)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -6396,18 +10733,77 @@ public func FfiConverterTypeOutPoint_lower(_ value: OutPoint) -> RustBuffer {
 }
 
 
+/**
+ * Represents a payment.
+ */
 public struct PaymentDetails {
+    /**
+     * The identifier of this payment.
+     */
     public var id: PaymentId
+    /**
+     * The kind of the payment.
+     */
     public var kind: PaymentKind
+    /**
+     * The amount transferred.
+     *
+     * Will be `None` for variable-amount payments until we receive them.
+     */
     public var amountMsat: UInt64?
+    /**
+     * The fees that were paid for this payment.
+     *
+     * For Lightning payments, this will only be updated for outbound payments once they
+     * succeeded.
+     *
+     * Will be `None` for Lightning payments made with LDK Node v0.4.x and earlier.
+     */
     public var feePaidMsat: UInt64?
+    /**
+     * The direction of the payment.
+     */
     public var direction: PaymentDirection
+    /**
+     * The status of the payment.
+     */
     public var status: PaymentStatus
+    /**
+     * The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+     */
     public var latestUpdateTimestamp: UInt64
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(id: PaymentId, kind: PaymentKind, amountMsat: UInt64?, feePaidMsat: UInt64?, direction: PaymentDirection, status: PaymentStatus, latestUpdateTimestamp: UInt64) {
+    public init(
+        /**
+         * The identifier of this payment.
+         */id: PaymentId, 
+        /**
+         * The kind of the payment.
+         */kind: PaymentKind, 
+        /**
+         * The amount transferred.
+         *
+         * Will be `None` for variable-amount payments until we receive them.
+         */amountMsat: UInt64?, 
+        /**
+         * The fees that were paid for this payment.
+         *
+         * For Lightning payments, this will only be updated for outbound payments once they
+         * succeeded.
+         *
+         * Will be `None` for Lightning payments made with LDK Node v0.4.x and earlier.
+         */feePaidMsat: UInt64?, 
+        /**
+         * The direction of the payment.
+         */direction: PaymentDirection, 
+        /**
+         * The status of the payment.
+         */status: PaymentStatus, 
+        /**
+         * The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+         */latestUpdateTimestamp: UInt64) {
         self.id = id
         self.kind = kind
         self.amountMsat = amountMsat
@@ -6418,6 +10814,9 @@ public struct PaymentDetails {
     }
 }
 
+#if compiler(>=6)
+extension PaymentDetails: Sendable {}
+#endif
 
 
 extension PaymentDetails: Equatable, Hashable {
@@ -6456,6 +10855,7 @@ extension PaymentDetails: Equatable, Hashable {
         hasher.combine(latestUpdateTimestamp)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -6502,15 +10902,44 @@ public func FfiConverterTypePaymentDetails_lower(_ value: PaymentDetails) -> Rus
 }
 
 
+/**
+ * Details of a known Lightning peer as returned by [`Node::list_peers`].
+ *
+ * [`Node::list_peers`]: crate::Node::list_peers
+ */
 public struct PeerDetails {
+    /**
+     * The node ID of the peer.
+     */
     public var nodeId: PublicKey
+    /**
+     * The network address of the peer.
+     */
     public var address: SocketAddress
+    /**
+     * Indicates whether we'll try to reconnect to this peer after restarts.
+     */
     public var isPersisted: Bool
+    /**
+     * Indicates whether we currently have an active connection with the peer.
+     */
     public var isConnected: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(nodeId: PublicKey, address: SocketAddress, isPersisted: Bool, isConnected: Bool) {
+    public init(
+        /**
+         * The node ID of the peer.
+         */nodeId: PublicKey, 
+        /**
+         * The network address of the peer.
+         */address: SocketAddress, 
+        /**
+         * Indicates whether we'll try to reconnect to this peer after restarts.
+         */isPersisted: Bool, 
+        /**
+         * Indicates whether we currently have an active connection with the peer.
+         */isConnected: Bool) {
         self.nodeId = nodeId
         self.address = address
         self.isPersisted = isPersisted
@@ -6518,6 +10947,9 @@ public struct PeerDetails {
     }
 }
 
+#if compiler(>=6)
+extension PeerDetails: Sendable {}
+#endif
 
 
 extension PeerDetails: Equatable, Hashable {
@@ -6544,6 +10976,7 @@ extension PeerDetails: Equatable, Hashable {
         hasher.combine(isConnected)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -6584,26 +11017,71 @@ public func FfiConverterTypePeerDetails_lower(_ value: PeerDetails) -> RustBuffe
 }
 
 
+/**
+ * A channel descriptor for a hop along a payment path.
+ *
+ * While this generally comes from BOLT 11's `r` field, this struct includes more fields than are
+ * available in BOLT 11.
+ */
 public struct RouteHintHop {
+    /**
+     * The node_id of the non-target end of the route
+     */
     public var srcNodeId: PublicKey
+    /**
+     * The short_channel_id of this channel
+     */
     public var shortChannelId: UInt64
-    public var cltvExpiryDelta: UInt16
-    public var htlcMinimumMsat: UInt64?
-    public var htlcMaximumMsat: UInt64?
+    /**
+     * The fees which must be paid to use this channel
+     */
     public var fees: RoutingFees
+    /**
+     * The difference in CLTV values between this node and the next node.
+     */
+    public var cltvExpiryDelta: UInt16
+    /**
+     * The minimum value, in msat, which must be relayed to the next hop.
+     */
+    public var htlcMinimumMsat: UInt64?
+    /**
+     * The maximum value in msat available for routing with a single HTLC.
+     */
+    public var htlcMaximumMsat: UInt64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(srcNodeId: PublicKey, shortChannelId: UInt64, cltvExpiryDelta: UInt16, htlcMinimumMsat: UInt64?, htlcMaximumMsat: UInt64?, fees: RoutingFees) {
+    public init(
+        /**
+         * The node_id of the non-target end of the route
+         */srcNodeId: PublicKey, 
+        /**
+         * The short_channel_id of this channel
+         */shortChannelId: UInt64, 
+        /**
+         * The fees which must be paid to use this channel
+         */fees: RoutingFees, 
+        /**
+         * The difference in CLTV values between this node and the next node.
+         */cltvExpiryDelta: UInt16, 
+        /**
+         * The minimum value, in msat, which must be relayed to the next hop.
+         */htlcMinimumMsat: UInt64?, 
+        /**
+         * The maximum value in msat available for routing with a single HTLC.
+         */htlcMaximumMsat: UInt64?) {
         self.srcNodeId = srcNodeId
         self.shortChannelId = shortChannelId
+        self.fees = fees
         self.cltvExpiryDelta = cltvExpiryDelta
         self.htlcMinimumMsat = htlcMinimumMsat
         self.htlcMaximumMsat = htlcMaximumMsat
-        self.fees = fees
     }
 }
 
+#if compiler(>=6)
+extension RouteHintHop: Sendable {}
+#endif
 
 
 extension RouteHintHop: Equatable, Hashable {
@@ -6612,6 +11090,9 @@ extension RouteHintHop: Equatable, Hashable {
             return false
         }
         if lhs.shortChannelId != rhs.shortChannelId {
+            return false
+        }
+        if lhs.fees != rhs.fees {
             return false
         }
         if lhs.cltvExpiryDelta != rhs.cltvExpiryDelta {
@@ -6623,21 +11104,19 @@ extension RouteHintHop: Equatable, Hashable {
         if lhs.htlcMaximumMsat != rhs.htlcMaximumMsat {
             return false
         }
-        if lhs.fees != rhs.fees {
-            return false
-        }
         return true
     }
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(srcNodeId)
         hasher.combine(shortChannelId)
+        hasher.combine(fees)
         hasher.combine(cltvExpiryDelta)
         hasher.combine(htlcMinimumMsat)
         hasher.combine(htlcMaximumMsat)
-        hasher.combine(fees)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -6649,20 +11128,20 @@ public struct FfiConverterTypeRouteHintHop: FfiConverterRustBuffer {
             try RouteHintHop(
                 srcNodeId: FfiConverterTypePublicKey.read(from: &buf), 
                 shortChannelId: FfiConverterUInt64.read(from: &buf), 
+                fees: FfiConverterTypeRoutingFees.read(from: &buf), 
                 cltvExpiryDelta: FfiConverterUInt16.read(from: &buf), 
                 htlcMinimumMsat: FfiConverterOptionUInt64.read(from: &buf), 
-                htlcMaximumMsat: FfiConverterOptionUInt64.read(from: &buf), 
-                fees: FfiConverterTypeRoutingFees.read(from: &buf)
+                htlcMaximumMsat: FfiConverterOptionUInt64.read(from: &buf)
         )
     }
 
     public static func write(_ value: RouteHintHop, into buf: inout [UInt8]) {
         FfiConverterTypePublicKey.write(value.srcNodeId, into: &buf)
         FfiConverterUInt64.write(value.shortChannelId, into: &buf)
+        FfiConverterTypeRoutingFees.write(value.fees, into: &buf)
         FfiConverterUInt16.write(value.cltvExpiryDelta, into: &buf)
         FfiConverterOptionUInt64.write(value.htlcMinimumMsat, into: &buf)
         FfiConverterOptionUInt64.write(value.htlcMaximumMsat, into: &buf)
-        FfiConverterTypeRoutingFees.write(value.fees, into: &buf)
     }
 }
 
@@ -6698,6 +11177,9 @@ public struct RouteParametersConfig {
     }
 }
 
+#if compiler(>=6)
+extension RouteParametersConfig: Sendable {}
+#endif
 
 
 extension RouteParametersConfig: Equatable, Hashable {
@@ -6724,6 +11206,7 @@ extension RouteParametersConfig: Equatable, Hashable {
         hasher.combine(maxChannelSaturationPowerOfHalf)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -6776,6 +11259,9 @@ public struct RoutingFees {
     }
 }
 
+#if compiler(>=6)
+extension RoutingFees: Sendable {}
+#endif
 
 
 extension RoutingFees: Equatable, Hashable {
@@ -6794,6 +11280,7 @@ extension RoutingFees: Equatable, Hashable {
         hasher.combine(proportionalMillionths)
     }
 }
+
 
 
 #if swift(>=5.8)
@@ -6829,15 +11316,244 @@ public func FfiConverterTypeRoutingFees_lower(_ value: RoutingFees) -> RustBuffe
     return FfiConverterTypeRoutingFees.lower(value)
 }
 
+
+/**
+ * Timeout-related parameters for syncing the Lightning and on-chain wallets.
+ *
+ * ### Defaults
+ *
+ * | Parameter                              | Value              |
+ * |----------------------------------------|--------------------|
+ * | `onchain_wallet_sync_timeout_secs`     | 60                 |
+ * | `lightning_wallet_sync_timeout_secs`   | 30                 |
+ * | `fee_rate_cache_update_timeout_secs`   | 10                 |
+ * | `tx_broadcast_timeout_secs`            | 10                 |
+ * | `per_request_timeout_secs`             | 10                 |
+ */
+public struct SyncTimeoutsConfig {
+    /**
+     * The timeout after which we abort syncing the onchain wallet.
+     */
+    public var onchainWalletSyncTimeoutSecs: UInt64
+    /**
+     * The timeout after which we abort syncing the LDK wallet.
+     */
+    public var lightningWalletSyncTimeoutSecs: UInt64
+    /**
+     * The timeout after which we abort updating the fee rate cache.
+     */
+    public var feeRateCacheUpdateTimeoutSecs: UInt64
+    /**
+     * The timeout after which we abort broadcasting a transaction.
+     */
+    public var txBroadcastTimeoutSecs: UInt64
+    /**
+     * The per-request timeout after which we abort a single Electrum or Esplora API request.
+     */
+    public var perRequestTimeoutSecs: UInt8
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The timeout after which we abort syncing the onchain wallet.
+         */onchainWalletSyncTimeoutSecs: UInt64, 
+        /**
+         * The timeout after which we abort syncing the LDK wallet.
+         */lightningWalletSyncTimeoutSecs: UInt64, 
+        /**
+         * The timeout after which we abort updating the fee rate cache.
+         */feeRateCacheUpdateTimeoutSecs: UInt64, 
+        /**
+         * The timeout after which we abort broadcasting a transaction.
+         */txBroadcastTimeoutSecs: UInt64, 
+        /**
+         * The per-request timeout after which we abort a single Electrum or Esplora API request.
+         */perRequestTimeoutSecs: UInt8) {
+        self.onchainWalletSyncTimeoutSecs = onchainWalletSyncTimeoutSecs
+        self.lightningWalletSyncTimeoutSecs = lightningWalletSyncTimeoutSecs
+        self.feeRateCacheUpdateTimeoutSecs = feeRateCacheUpdateTimeoutSecs
+        self.txBroadcastTimeoutSecs = txBroadcastTimeoutSecs
+        self.perRequestTimeoutSecs = perRequestTimeoutSecs
+    }
+}
+
+#if compiler(>=6)
+extension SyncTimeoutsConfig: Sendable {}
+#endif
+
+
+extension SyncTimeoutsConfig: Equatable, Hashable {
+    public static func ==(lhs: SyncTimeoutsConfig, rhs: SyncTimeoutsConfig) -> Bool {
+        if lhs.onchainWalletSyncTimeoutSecs != rhs.onchainWalletSyncTimeoutSecs {
+            return false
+        }
+        if lhs.lightningWalletSyncTimeoutSecs != rhs.lightningWalletSyncTimeoutSecs {
+            return false
+        }
+        if lhs.feeRateCacheUpdateTimeoutSecs != rhs.feeRateCacheUpdateTimeoutSecs {
+            return false
+        }
+        if lhs.txBroadcastTimeoutSecs != rhs.txBroadcastTimeoutSecs {
+            return false
+        }
+        if lhs.perRequestTimeoutSecs != rhs.perRequestTimeoutSecs {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(onchainWalletSyncTimeoutSecs)
+        hasher.combine(lightningWalletSyncTimeoutSecs)
+        hasher.combine(feeRateCacheUpdateTimeoutSecs)
+        hasher.combine(txBroadcastTimeoutSecs)
+        hasher.combine(perRequestTimeoutSecs)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSyncTimeoutsConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SyncTimeoutsConfig {
+        return
+            try SyncTimeoutsConfig(
+                onchainWalletSyncTimeoutSecs: FfiConverterUInt64.read(from: &buf), 
+                lightningWalletSyncTimeoutSecs: FfiConverterUInt64.read(from: &buf), 
+                feeRateCacheUpdateTimeoutSecs: FfiConverterUInt64.read(from: &buf), 
+                txBroadcastTimeoutSecs: FfiConverterUInt64.read(from: &buf), 
+                perRequestTimeoutSecs: FfiConverterUInt8.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: SyncTimeoutsConfig, into buf: inout [UInt8]) {
+        FfiConverterUInt64.write(value.onchainWalletSyncTimeoutSecs, into: &buf)
+        FfiConverterUInt64.write(value.lightningWalletSyncTimeoutSecs, into: &buf)
+        FfiConverterUInt64.write(value.feeRateCacheUpdateTimeoutSecs, into: &buf)
+        FfiConverterUInt64.write(value.txBroadcastTimeoutSecs, into: &buf)
+        FfiConverterUInt8.write(value.perRequestTimeoutSecs, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncTimeoutsConfig_lift(_ buf: RustBuffer) throws -> SyncTimeoutsConfig {
+    return try FfiConverterTypeSyncTimeoutsConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSyncTimeoutsConfig_lower(_ value: SyncTimeoutsConfig) -> RustBuffer {
+    return FfiConverterTypeSyncTimeoutsConfig.lower(value)
+}
+
+
+/**
+ * Configuration for connecting to peers via the Tor Network.
+ */
+public struct TorConfig {
+    /**
+     * Tor daemon SOCKS proxy address. Only connections to OnionV3 peers will be made
+     * via this proxy; other connections (IPv4 peers, Electrum server) will not be
+     * routed over Tor.
+     */
+    public var proxyAddress: SocketAddress
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * Tor daemon SOCKS proxy address. Only connections to OnionV3 peers will be made
+         * via this proxy; other connections (IPv4 peers, Electrum server) will not be
+         * routed over Tor.
+         */proxyAddress: SocketAddress) {
+        self.proxyAddress = proxyAddress
+    }
+}
+
+#if compiler(>=6)
+extension TorConfig: Sendable {}
+#endif
+
+
+extension TorConfig: Equatable, Hashable {
+    public static func ==(lhs: TorConfig, rhs: TorConfig) -> Bool {
+        if lhs.proxyAddress != rhs.proxyAddress {
+            return false
+        }
+        return true
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(proxyAddress)
+    }
+}
+
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeTorConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> TorConfig {
+        return
+            try TorConfig(
+                proxyAddress: FfiConverterTypeSocketAddress.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: TorConfig, into buf: inout [UInt8]) {
+        FfiConverterTypeSocketAddress.write(value.proxyAddress, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTorConfig_lift(_ buf: RustBuffer) throws -> TorConfig {
+    return try FfiConverterTypeTorConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeTorConfig_lower(_ value: TorConfig) -> RustBuffer {
+    return FfiConverterTypeTorConfig.lower(value)
+}
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * The role of the node in an asynchronous payments context.
+ *
+ * See <https://github.com/lightning/bolts/pull/1149> for more information about the async payments protocol.
+ */
 
 public enum AsyncPaymentsRole {
     
+    /**
+     * Node acts a client in an async payments context. This means that if possible, it will instruct its peers to hold
+     * HTLCs for it, so that it can go offline.
+     */
     case client
+    /**
+     * Node acts as a server in an async payments context. This means that it will hold async payments HTLCs and onion
+     * messages for its peers.
+     */
     case server
 }
 
+
+#if compiler(>=6)
+extension AsyncPaymentsRole: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -6888,8 +11604,10 @@ public func FfiConverterTypeAsyncPaymentsRole_lower(_ value: AsyncPaymentsRole) 
 }
 
 
-
 extension AsyncPaymentsRole: Equatable, Hashable {}
+
+
+
 
 
 
@@ -6904,6 +11622,10 @@ public enum BalanceSource {
     case htlc
 }
 
+
+#if compiler(>=6)
+extension BalanceSource: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -6966,22 +11688,44 @@ public func FfiConverterTypeBalanceSource_lower(_ value: BalanceSource) -> RustB
 }
 
 
-
 extension BalanceSource: Equatable, Hashable {}
+
+
+
 
 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Represents the description of an invoice which has to be either a directly included string or
+ * a hash of a description provided out of band.
+ */
 
 public enum Bolt11InvoiceDescription {
     
-    case hash(hash: String
+    /**
+     * Contains a full description.
+     */
+    case direct(
+        /**
+         * Description of what the invoice is for
+         */description: String
     )
-    case direct(description: String
+    /**
+     * Contains a hash.
+     */
+    case hash(
+        /**
+         * Hash of the description of what the invoice is for
+         */hash: String
     )
 }
 
+
+#if compiler(>=6)
+extension Bolt11InvoiceDescription: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -6993,10 +11737,10 @@ public struct FfiConverterTypeBolt11InvoiceDescription: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .hash(hash: try FfiConverterString.read(from: &buf)
+        case 1: return .direct(description: try FfiConverterString.read(from: &buf)
         )
         
-        case 2: return .direct(description: try FfiConverterString.read(from: &buf)
+        case 2: return .hash(hash: try FfiConverterString.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -7007,14 +11751,14 @@ public struct FfiConverterTypeBolt11InvoiceDescription: FfiConverterRustBuffer {
         switch value {
         
         
-        case let .hash(hash):
+        case let .direct(description):
             writeInt(&buf, Int32(1))
-            FfiConverterString.write(hash, into: &buf)
+            FfiConverterString.write(description, into: &buf)
             
         
-        case let .direct(description):
+        case let .hash(hash):
             writeInt(&buf, Int32(2))
-            FfiConverterString.write(description, into: &buf)
+            FfiConverterString.write(hash, into: &buf)
             
         }
     }
@@ -7036,48 +11780,97 @@ public func FfiConverterTypeBolt11InvoiceDescription_lower(_ value: Bolt11Invoic
 }
 
 
-
 extension Bolt11InvoiceDescription: Equatable, Hashable {}
 
 
 
 
-public enum BuildError {
+
+
+
+/**
+ * An error encountered during building a [`Node`].
+ *
+ * [`Node`]: crate::Node
+ */
+public enum BuildError: Swift.Error {
 
     
     
-    case InvalidSeedBytes(message: String)
-    
-    case InvalidSeedFile(message: String)
-    
-    case InvalidSystemTime(message: String)
-    
-    case InvalidChannelMonitor(message: String)
-    
-    case InvalidListeningAddresses(message: String)
-    
-    case InvalidAnnouncementAddresses(message: String)
-    
-    case InvalidNodeAlias(message: String)
-    
-    case RuntimeSetupFailed(message: String)
-    
-    case ReadFailed(message: String)
-    
-    case WriteFailed(message: String)
-    
-    case StoragePathAccessFailed(message: String)
-    
-    case KvStoreSetupFailed(message: String)
-    
-    case WalletSetupFailed(message: String)
-    
-    case LoggerSetupFailed(message: String)
-    
-    case NetworkMismatch(message: String)
-    
-    case AsyncPaymentsConfigMismatch(message: String)
-    
+    /**
+     * The current system time is invalid, clocks might have gone backwards.
+     */
+    case InvalidSystemTime
+    /**
+     * The a read channel monitor is invalid.
+     */
+    case InvalidChannelMonitor
+    /**
+     * The given listening addresses are invalid, e.g. too many were passed.
+     */
+    case InvalidListeningAddresses
+    /**
+     * The given announcement addresses are invalid, e.g. too many were passed.
+     */
+    case InvalidAnnouncementAddresses
+    /**
+     * The given tor proxy address is invalid, e.g. an onion address was passed.
+     */
+    case InvalidTorProxyAddress
+    /**
+     * The provided alias is invalid.
+     */
+    case InvalidNodeAlias
+    /**
+     * An attempt to setup a runtime has failed.
+     */
+    case RuntimeSetupFailed
+    /**
+     * We failed to read data from the [`KVStore`].
+     *
+     * [`KVStore`]: lightning::util::persist::KVStoreSync
+     */
+    case ReadFailed
+    /**
+     * We failed to write data to the [`KVStore`].
+     *
+     * [`KVStore`]: lightning::util::persist::KVStoreSync
+     */
+    case WriteFailed
+    /**
+     * We failed to access the given `storage_dir_path`.
+     */
+    case StoragePathAccessFailed
+    /**
+     * We failed to setup our [`KVStore`].
+     *
+     * [`KVStore`]: lightning::util::persist::KVStoreSync
+     */
+    case KvStoreSetupFailed
+    /**
+     * We failed to setup the onchain wallet.
+     */
+    case WalletSetupFailed
+    /**
+     * We failed to setup the logger.
+     */
+    case LoggerSetupFailed
+    /**
+     * We failed to setup the configured chain source.
+     */
+    case ChainSourceSetupFailed
+    /**
+     * The given network does not match the node's previously configured network.
+     */
+    case NetworkMismatch
+    /**
+     * The role of the node in an asynchronous payments context is not compatible with the current configuration.
+     */
+    case AsyncPaymentsConfigMismatch
+    /**
+     * An attempt to setup a DNS Resolver failed.
+     */
+    case DnsResolverSetupFailed
 }
 
 
@@ -7094,72 +11887,25 @@ public struct FfiConverterTypeBuildError: FfiConverterRustBuffer {
         
 
         
-        case 1: return .InvalidSeedBytes(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 2: return .InvalidSeedFile(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 3: return .InvalidSystemTime(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 4: return .InvalidChannelMonitor(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 5: return .InvalidListeningAddresses(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 6: return .InvalidAnnouncementAddresses(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 7: return .InvalidNodeAlias(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 8: return .RuntimeSetupFailed(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 9: return .ReadFailed(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 10: return .WriteFailed(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 11: return .StoragePathAccessFailed(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 12: return .KvStoreSetupFailed(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 13: return .WalletSetupFailed(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 14: return .LoggerSetupFailed(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 15: return .NetworkMismatch(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
-        case 16: return .AsyncPaymentsConfigMismatch(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
+        case 1: return .InvalidSystemTime
+        case 2: return .InvalidChannelMonitor
+        case 3: return .InvalidListeningAddresses
+        case 4: return .InvalidAnnouncementAddresses
+        case 5: return .InvalidTorProxyAddress
+        case 6: return .InvalidNodeAlias
+        case 7: return .RuntimeSetupFailed
+        case 8: return .ReadFailed
+        case 9: return .WriteFailed
+        case 10: return .StoragePathAccessFailed
+        case 11: return .KvStoreSetupFailed
+        case 12: return .WalletSetupFailed
+        case 13: return .LoggerSetupFailed
+        case 14: return .ChainSourceSetupFailed
+        case 15: return .NetworkMismatch
+        case 16: return .AsyncPaymentsConfigMismatch
+        case 17: return .DnsResolverSetupFailed
 
-        default: throw UniffiInternalError.unexpectedEnumCase
+         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
@@ -7169,46 +11915,98 @@ public struct FfiConverterTypeBuildError: FfiConverterRustBuffer {
         
 
         
-        case .InvalidSeedBytes(_ /* message is ignored*/):
+        
+        case .InvalidSystemTime:
             writeInt(&buf, Int32(1))
-        case .InvalidSeedFile(_ /* message is ignored*/):
+        
+        
+        case .InvalidChannelMonitor:
             writeInt(&buf, Int32(2))
-        case .InvalidSystemTime(_ /* message is ignored*/):
+        
+        
+        case .InvalidListeningAddresses:
             writeInt(&buf, Int32(3))
-        case .InvalidChannelMonitor(_ /* message is ignored*/):
+        
+        
+        case .InvalidAnnouncementAddresses:
             writeInt(&buf, Int32(4))
-        case .InvalidListeningAddresses(_ /* message is ignored*/):
+        
+        
+        case .InvalidTorProxyAddress:
             writeInt(&buf, Int32(5))
-        case .InvalidAnnouncementAddresses(_ /* message is ignored*/):
+        
+        
+        case .InvalidNodeAlias:
             writeInt(&buf, Int32(6))
-        case .InvalidNodeAlias(_ /* message is ignored*/):
+        
+        
+        case .RuntimeSetupFailed:
             writeInt(&buf, Int32(7))
-        case .RuntimeSetupFailed(_ /* message is ignored*/):
+        
+        
+        case .ReadFailed:
             writeInt(&buf, Int32(8))
-        case .ReadFailed(_ /* message is ignored*/):
+        
+        
+        case .WriteFailed:
             writeInt(&buf, Int32(9))
-        case .WriteFailed(_ /* message is ignored*/):
+        
+        
+        case .StoragePathAccessFailed:
             writeInt(&buf, Int32(10))
-        case .StoragePathAccessFailed(_ /* message is ignored*/):
+        
+        
+        case .KvStoreSetupFailed:
             writeInt(&buf, Int32(11))
-        case .KvStoreSetupFailed(_ /* message is ignored*/):
+        
+        
+        case .WalletSetupFailed:
             writeInt(&buf, Int32(12))
-        case .WalletSetupFailed(_ /* message is ignored*/):
+        
+        
+        case .LoggerSetupFailed:
             writeInt(&buf, Int32(13))
-        case .LoggerSetupFailed(_ /* message is ignored*/):
+        
+        
+        case .ChainSourceSetupFailed:
             writeInt(&buf, Int32(14))
-        case .NetworkMismatch(_ /* message is ignored*/):
+        
+        
+        case .NetworkMismatch:
             writeInt(&buf, Int32(15))
-        case .AsyncPaymentsConfigMismatch(_ /* message is ignored*/):
+        
+        
+        case .AsyncPaymentsConfigMismatch:
             writeInt(&buf, Int32(16))
-
+        
+        
+        case .DnsResolverSetupFailed:
+            writeInt(&buf, Int32(17))
         
         }
     }
 }
 
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBuildError_lift(_ buf: RustBuffer) throws -> BuildError {
+    return try FfiConverterTypeBuildError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeBuildError_lower(_ value: BuildError) -> RustBuffer {
+    return FfiConverterTypeBuildError.lower(value)
+}
+
+
 extension BuildError: Equatable, Hashable {}
+
+
+
 
 extension BuildError: Foundation.LocalizedError {
     public var errorDescription: String? {
@@ -7216,33 +12014,248 @@ extension BuildError: Foundation.LocalizedError {
     }
 }
 
+
+
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * The shutdown state of a channel as returned in [`ChannelDetails::channel_shutdown_state`].
+ *
+ * [`ChannelDetails::channel_shutdown_state`]: crate::ChannelDetails::channel_shutdown_state
+ */
+
+public enum ChannelShutdownState {
+    
+    /**
+     * Channel has not sent or received a shutdown message.
+     */
+    case notShuttingDown
+    /**
+     * Local node has sent a shutdown message for this channel.
+     */
+    case shutdownInitiated
+    /**
+     * Shutdown message exchanges have concluded and the channels are in the midst of
+     * resolving all existing open HTLCs before closing can continue.
+     */
+    case resolvingHtlCs
+    /**
+     * All HTLCs have been resolved, nodes are currently negotiating channel close onchain fee rates.
+     */
+    case negotiatingClosingFee
+    /**
+     * We've successfully negotiated a closing_signed dance. At this point `ChannelManager` is about
+     * to drop the channel.
+     */
+    case shutdownComplete
+}
+
+
+#if compiler(>=6)
+extension ChannelShutdownState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeChannelShutdownState: FfiConverterRustBuffer {
+    typealias SwiftType = ChannelShutdownState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ChannelShutdownState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .notShuttingDown
+        
+        case 2: return .shutdownInitiated
+        
+        case 3: return .resolvingHtlCs
+        
+        case 4: return .negotiatingClosingFee
+        
+        case 5: return .shutdownComplete
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ChannelShutdownState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .notShuttingDown:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .shutdownInitiated:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .resolvingHtlCs:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .negotiatingClosingFee:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .shutdownComplete:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChannelShutdownState_lift(_ buf: RustBuffer) throws -> ChannelShutdownState {
+    return try FfiConverterTypeChannelShutdownState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeChannelShutdownState_lower(_ value: ChannelShutdownState) -> RustBuffer {
+    return FfiConverterTypeChannelShutdownState.lower(value)
+}
+
+
+extension ChannelShutdownState: Equatable, Hashable {}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * The reason the channel was closed. See individual variants for more details.
+ */
 
 public enum ClosureReason {
     
-    case counterpartyForceClosed(peerMsg: UntrustedString
+    /**
+     * Closure generated from receiving a peer error message.
+     *
+     * Our counterparty may have broadcasted their latest commitment state, and we have
+     * as well.
+     */
+    case counterpartyForceClosed(
+        /**
+         * The error which the peer sent us.
+         *
+         * Be careful about printing the peer_msg, a well-crafted message could exploit
+         * a security vulnerability in the terminal emulator or the logging subsystem.
+         */peerMsg: UntrustedString
     )
-    case holderForceClosed(broadcastedLatestTxn: Bool?, message: String
+    /**
+     * Closure generated from a force close initiated by us.
+     */
+    case holderForceClosed(
+        /**
+         * Whether or not the latest transaction was broadcasted when the channel was force
+         * closed.
+         *
+         * This will be set to `Some(true)` for any channels closed after their funding
+         * transaction was (or might have been) broadcasted, and `Some(false)` for any channels
+         * closed prior to their funding transaction being broadcasted.
+         */broadcastedLatestTxn: Bool?, 
+        /**
+         * The error message provided when initiating the force close.
+         */message: String
     )
+    /**
+     * The channel was closed after negotiating a cooperative close and we've now broadcasted
+     * the cooperative close transaction. Note the shutdown may have been initiated by us.
+     */
     case legacyCooperativeClosure
+    /**
+     * The channel was closed after negotiating a cooperative close and we've now broadcasted
+     * the cooperative close transaction. This indicates that the shutdown was initiated by our
+     * counterparty.
+     *
+     * In rare cases where we initiated closure immediately prior to shutting down without
+     * persisting, this value may be provided for channels we initiated closure for.
+     */
     case counterpartyInitiatedCooperativeClosure
+    /**
+     * The channel was closed after negotiating a cooperative close and we've now broadcasted
+     * the cooperative close transaction. This indicates that the shutdown was initiated by us.
+     */
     case locallyInitiatedCooperativeClosure
+    /**
+     * A commitment transaction was confirmed on chain, closing the channel. Most likely this
+     * commitment transaction came from our counterparty, but it may also have come from
+     * a copy of our own channel monitor.
+     */
     case commitmentTxConfirmed
+    /**
+     * The funding transaction failed to confirm in a timely manner on an inbound channel or the
+     * counterparty failed to fund the channel in a timely manner.
+     */
     case fundingTimedOut
-    case processingError(err: String
+    /**
+     * Closure generated from processing an event, likely a HTLC forward/relay/reception.
+     */
+    case processingError(
+        /**
+         * A developer-readable error message which we generated.
+         */err: String
     )
+    /**
+     * The peer disconnected prior to funding completing. In this case the spec mandates that we
+     * forget the channel entirely - we can attempt again if the peer reconnects.
+     */
     case disconnectedPeer
+    /**
+     * Closure generated during deserialization if the channel monitor is newer than
+     * the channel manager deserialized.
+     */
     case outdatedChannelManager
+    /**
+     * The counterparty requested a cooperative close of a channel that had not been funded yet.
+     * The channel has been immediately closed.
+     */
     case counterpartyCoopClosedUnfundedChannel
+    /**
+     * We requested a cooperative close of a channel that had not been funded yet.
+     * The channel has been immediately closed.
+     */
     case locallyCoopClosedUnfundedChannel
+    /**
+     * Another channel in the same funding batch closed before the funding transaction
+     * was ready to be broadcast.
+     */
     case fundingBatchClosure
-    case htlCsTimedOut(paymentHash: PaymentHash?
+    /**
+     * One of our HTLCs timed out in a channel, causing us to force close the channel.
+     */
+    case htlCsTimedOut(
+        /**
+         * The payment hash of an HTLC that timed out.
+         */paymentHash: PaymentHash?
     )
-    case peerFeerateTooLow(peerFeerateSatPerKw: UInt32, requiredFeerateSatPerKw: UInt32
+    /**
+     * Our peer provided a feerate which violated our required minimum.
+     */
+    case peerFeerateTooLow(
+        /**
+         * The feerate on our channel set by our peer.
+         */peerFeerateSatPerKw: UInt32, 
+        /**
+         * The required feerate we enforce.
+         */requiredFeerateSatPerKw: UInt32
     )
 }
 
+
+#if compiler(>=6)
+extension ClosureReason: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -7383,21 +12396,45 @@ public func FfiConverterTypeClosureReason_lower(_ value: ClosureReason) -> RustB
 }
 
 
-
 extension ClosureReason: Equatable, Hashable {}
+
+
+
 
 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Represents the confirmation status of a transaction.
+ */
 
 public enum ConfirmationStatus {
     
-    case confirmed(blockHash: BlockHash, height: UInt32, timestamp: UInt64
+    /**
+     * The transaction is confirmed in the best chain.
+     */
+    case confirmed(
+        /**
+         * The hash of the block in which the transaction was confirmed.
+         */blockHash: BlockHash, 
+        /**
+         * The height under which the block was confirmed.
+         */height: UInt32, 
+        /**
+         * The timestamp, in seconds since start of the UNIX epoch, when this entry was last updated.
+         */timestamp: UInt64
     )
+    /**
+     * The transaction is unconfirmed.
+     */
     case unconfirmed
 }
 
+
+#if compiler(>=6)
+extension ConfirmationStatus: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -7452,8 +12489,10 @@ public func FfiConverterTypeConfirmationStatus_lower(_ value: ConfirmationStatus
 }
 
 
-
 extension ConfirmationStatus: Equatable, Hashable {}
+
+
+
 
 
 
@@ -7469,6 +12508,10 @@ public enum Currency {
     case signet
 }
 
+
+#if compiler(>=6)
+extension Currency: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -7537,38 +12580,371 @@ public func FfiConverterTypeCurrency_lower(_ value: Currency) -> RustBuffer {
 }
 
 
-
 extension Currency: Equatable, Hashable {}
+
+
+
+
+
+
+
+/**
+ * An error that could arise during [`NodeEntropy`] construction.
+ */
+public enum EntropyError: Swift.Error {
+
+    
+    
+    /**
+     * The given seed bytes are invalid, e.g., have invalid length.
+     */
+    case InvalidSeedBytes
+    /**
+     * The given seed file is invalid, e.g., has invalid length, or could not be read.
+     */
+    case InvalidSeedFile
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeEntropyError: FfiConverterRustBuffer {
+    typealias SwiftType = EntropyError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> EntropyError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .InvalidSeedBytes
+        case 2: return .InvalidSeedFile
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: EntropyError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case .InvalidSeedBytes:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .InvalidSeedFile:
+            writeInt(&buf, Int32(2))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEntropyError_lift(_ buf: RustBuffer) throws -> EntropyError {
+    return try FfiConverterTypeEntropyError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeEntropyError_lower(_ value: EntropyError) -> RustBuffer {
+    return FfiConverterTypeEntropyError.lower(value)
+}
+
+
+extension EntropyError: Equatable, Hashable {}
+
+
+
+
+extension EntropyError: Foundation.LocalizedError {
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+}
+
 
 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * An event emitted by [`Node`], which should be handled by the user.
+ *
+ * [`Node`]: [`crate::Node`]
+ */
 
 public enum Event {
     
-    case paymentSuccessful(paymentId: PaymentId?, paymentHash: PaymentHash, paymentPreimage: PaymentPreimage?, feePaidMsat: UInt64?
+    /**
+     * A sent payment was successful.
+     */
+    case paymentSuccessful(
+        /**
+         * A local identifier used to track the payment.
+         *
+         * Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
+         */paymentId: PaymentId?, 
+        /**
+         * The hash of the payment.
+         */paymentHash: PaymentHash, 
+        /**
+         * The preimage to the `payment_hash`.
+         *
+         * Note that this serves as a payment receipt.
+         *
+         * Will only be `None` for events serialized with LDK Node v0.4.2 or prior.
+         */paymentPreimage: PaymentPreimage?, 
+        /**
+         * The total fee which was spent at intermediate hops in this payment.
+         */feePaidMsat: UInt64?, 
+        /**
+         * The BOLT12 invoice that was paid.
+         *
+         * This is useful for proof of payment. A third party can verify that the payment was made
+         * by checking that the `payment_hash` in the invoice matches `sha256(payment_preimage)`.
+         *
+         * Will be `None` for non-BOLT12 payments.
+         *
+         * Note that static invoices (indicated by [`PaidBolt12Invoice::StaticInvoice`], used for
+         * async payments) do not support proof of payment as the payment hash is not derived
+         * from a preimage known only to the recipient.
+         */bolt12Invoice: PaidBolt12Invoice?
     )
-    case paymentFailed(paymentId: PaymentId?, paymentHash: PaymentHash?, reason: PaymentFailureReason?
+    /**
+     * A sent payment has failed.
+     */
+    case paymentFailed(
+        /**
+         * A local identifier used to track the payment.
+         *
+         * Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
+         */paymentId: PaymentId?, 
+        /**
+         * The hash of the payment.
+         *
+         * This will be `None` if the payment failed before receiving an invoice when paying a
+         * BOLT12 [`Offer`].
+         *
+         * [`Offer`]: lightning::offers::offer::Offer
+         */paymentHash: PaymentHash?, 
+        /**
+         * The reason why the payment failed.
+         *
+         * This will be `None` for events serialized by LDK Node v0.2.1 and prior.
+         */reason: PaymentFailureReason?
     )
-    case paymentReceived(paymentId: PaymentId?, paymentHash: PaymentHash, amountMsat: UInt64, customRecords: [CustomTlvRecord]
+    /**
+     * A payment has been received.
+     */
+    case paymentReceived(
+        /**
+         * A local identifier used to track the payment.
+         *
+         * Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
+         */paymentId: PaymentId?, 
+        /**
+         * The hash of the payment.
+         */paymentHash: PaymentHash, 
+        /**
+         * The value, in thousandths of a satoshi, that has been received.
+         */amountMsat: UInt64, 
+        /**
+         * Custom TLV records received on the payment
+         */customRecords: [CustomTlvRecord]
     )
-    case paymentClaimable(paymentId: PaymentId, paymentHash: PaymentHash, claimableAmountMsat: UInt64, claimDeadline: UInt32?, customRecords: [CustomTlvRecord]
+    /**
+     * A payment has been forwarded.
+     */
+    case paymentForwarded(
+        /**
+         * The set of incoming HTLCs that were forwarded to our node. Contains a single HTLC for
+         * source-routed payments, and may contain multiple HTLCs when we acted as a trampoline
+         * router.
+         */prevHtlcs: [HtlcLocator], 
+        /**
+         * The set of outgoing HTLCs forwarded by our node. Contains a single HTLC for regular
+         * source-routed payments, and may contain multiple HTLCs when we acted as a trampoline
+         * router.
+         */nextHtlcs: [HtlcLocator], 
+        /**
+         * The total fee, in milli-satoshis, which was earned as a result of the payment.
+         *
+         * Note that if we force-closed the channel over which we forwarded an HTLC while the HTLC
+         * was pending, the amount the next hop claimed will have been rounded down to the nearest
+         * whole satoshi. Thus, the fee calculated here may be higher than expected as we still
+         * claimed the full value in millisatoshis from the source. In this case,
+         * `claim_from_onchain_tx` will be set.
+         *
+         * If the channel which sent us the payment has been force-closed, we will claim the funds
+         * via an on-chain transaction. In that case we do not yet know the on-chain transaction
+         * fees which we will spend and will instead set this to `None`.
+         */totalFeeEarnedMsat: UInt64?, 
+        /**
+         * The share of the total fee, in milli-satoshis, which was withheld in addition to the
+         * forwarding fee.
+         *
+         * This will only be `Some` if we forwarded an intercepted HTLC with less than the
+         * expected amount. This means our counterparty accepted to receive less than the invoice
+         * amount.
+         *
+         * The caveat described above the `total_fee_earned_msat` field applies here as well.
+         */skimmedFeeMsat: UInt64?, 
+        /**
+         * If this is `true`, the forwarded HTLC was claimed by our counterparty via an on-chain
+         * transaction.
+         */claimFromOnchainTx: Bool, 
+        /**
+         * The final amount forwarded, in milli-satoshis, after the fee is deducted.
+         *
+         * The caveat described above the `total_fee_earned_msat` field applies here as well.
+         */outboundAmountForwardedMsat: UInt64?
     )
-    case paymentForwarded(prevChannelId: ChannelId, nextChannelId: ChannelId, prevUserChannelId: UserChannelId?, nextUserChannelId: UserChannelId?, prevNodeId: PublicKey?, nextNodeId: PublicKey?, totalFeeEarnedMsat: UInt64?, skimmedFeeMsat: UInt64?, claimFromOnchainTx: Bool, outboundAmountForwardedMsat: UInt64?
+    /**
+     * A payment for a previously-registered payment hash has been received.
+     *
+     * This needs to be manually claimed by supplying the correct preimage to [`claim_for_hash`].
+     *
+     * If the provided parameters don't match the expectations or the preimage can't be
+     * retrieved in time, should be failed-back via [`fail_for_hash`].
+     *
+     * Note claiming will necessarily fail after the `claim_deadline` has been reached.
+     *
+     * [`claim_for_hash`]: crate::payment::Bolt11Payment::claim_for_hash
+     * [`fail_for_hash`]: crate::payment::Bolt11Payment::fail_for_hash
+     */
+    case paymentClaimable(
+        /**
+         * A local identifier used to track the payment.
+         */paymentId: PaymentId, 
+        /**
+         * The hash of the payment.
+         */paymentHash: PaymentHash, 
+        /**
+         * The value, in thousandths of a satoshi, that is claimable.
+         */claimableAmountMsat: UInt64, 
+        /**
+         * The block height at which this payment will be failed back and will no longer be
+         * eligible for claiming.
+         */claimDeadline: UInt32?, 
+        /**
+         * Custom TLV records attached to the payment
+         */customRecords: [CustomTlvRecord]
     )
-    case channelPending(channelId: ChannelId, userChannelId: UserChannelId, formerTemporaryChannelId: ChannelId, counterpartyNodeId: PublicKey, fundingTxo: OutPoint
+    /**
+     * A channel has been created and is pending confirmation on-chain.
+     */
+    case channelPending(
+        /**
+         * The `channel_id` of the channel.
+         */channelId: ChannelId, 
+        /**
+         * The `user_channel_id` of the channel.
+         */userChannelId: UserChannelId, 
+        /**
+         * The `temporary_channel_id` this channel used to be known by during channel establishment.
+         */formerTemporaryChannelId: ChannelId, 
+        /**
+         * The `node_id` of the channel counterparty.
+         */counterpartyNodeId: PublicKey, 
+        /**
+         * The outpoint of the channel's funding transaction.
+         */fundingTxo: OutPoint
     )
-    case channelReady(channelId: ChannelId, userChannelId: UserChannelId, counterpartyNodeId: PublicKey?, fundingTxo: OutPoint?
+    /**
+     * A channel is ready to be used.
+     *
+     * This event is emitted when:
+     * - A new channel has been established and is ready for use
+     * - An existing channel has been spliced and is ready with the new funding output
+     */
+    case channelReady(
+        /**
+         * The `channel_id` of the channel.
+         */channelId: ChannelId, 
+        /**
+         * The `user_channel_id` of the channel.
+         */userChannelId: UserChannelId, 
+        /**
+         * The `node_id` of the channel counterparty.
+         *
+         * This will be `None` for events serialized by LDK Node v0.1.0 and prior.
+         */counterpartyNodeId: PublicKey?, 
+        /**
+         * The outpoint of the channel's funding transaction.
+         *
+         * This represents the channel's current funding output, which may change when the
+         * channel is spliced. For spliced channels, this will contain the new funding output
+         * from the confirmed splice transaction.
+         *
+         * This will be `None` for events serialized by LDK Node v0.6.0 and prior.
+         */fundingTxo: OutPoint?
     )
-    case channelClosed(channelId: ChannelId, userChannelId: UserChannelId, counterpartyNodeId: PublicKey?, reason: ClosureReason?
+    /**
+     * A channel has been closed.
+     */
+    case channelClosed(
+        /**
+         * The `channel_id` of the channel.
+         */channelId: ChannelId, 
+        /**
+         * The `user_channel_id` of the channel.
+         */userChannelId: UserChannelId, 
+        /**
+         * The `node_id` of the channel counterparty.
+         *
+         * This will be `None` for events serialized by LDK Node v0.1.0 and prior.
+         */counterpartyNodeId: PublicKey?, 
+        /**
+         * This will be `None` for events serialized by LDK Node v0.2.1 and prior.
+         */reason: ClosureReason?
     )
-    case splicePending(channelId: ChannelId, userChannelId: UserChannelId, counterpartyNodeId: PublicKey, newFundingTxo: OutPoint
+    /**
+     * A channel splice has been negotiated and the funding transaction is pending
+     * confirmation on-chain.
+     */
+    case spliceNegotiated(
+        /**
+         * The `channel_id` of the channel.
+         */channelId: ChannelId, 
+        /**
+         * The `user_channel_id` of the channel.
+         */userChannelId: UserChannelId, 
+        /**
+         * The `node_id` of the channel counterparty.
+         */counterpartyNodeId: PublicKey, 
+        /**
+         * The outpoint of the channel's splice funding transaction.
+         */newFundingTxo: OutPoint
     )
-    case spliceFailed(channelId: ChannelId, userChannelId: UserChannelId, counterpartyNodeId: PublicKey, abandonedFundingTxo: OutPoint?
+    /**
+     * A channel splice negotiation round has failed.
+     */
+    case spliceNegotiationFailed(
+        /**
+         * The `channel_id` of the channel.
+         */channelId: ChannelId, 
+        /**
+         * The `user_channel_id` of the channel.
+         */userChannelId: UserChannelId, 
+        /**
+         * The `node_id` of the channel counterparty.
+         */counterpartyNodeId: PublicKey
     )
 }
 
+
+#if compiler(>=6)
+extension Event: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -7580,7 +12956,7 @@ public struct FfiConverterTypeEvent: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .paymentSuccessful(paymentId: try FfiConverterOptionTypePaymentId.read(from: &buf), paymentHash: try FfiConverterTypePaymentHash.read(from: &buf), paymentPreimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), feePaidMsat: try FfiConverterOptionUInt64.read(from: &buf)
+        case 1: return .paymentSuccessful(paymentId: try FfiConverterOptionTypePaymentId.read(from: &buf), paymentHash: try FfiConverterTypePaymentHash.read(from: &buf), paymentPreimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), feePaidMsat: try FfiConverterOptionUInt64.read(from: &buf), bolt12Invoice: try FfiConverterOptionTypePaidBolt12Invoice.read(from: &buf)
         )
         
         case 2: return .paymentFailed(paymentId: try FfiConverterOptionTypePaymentId.read(from: &buf), paymentHash: try FfiConverterOptionTypePaymentHash.read(from: &buf), reason: try FfiConverterOptionTypePaymentFailureReason.read(from: &buf)
@@ -7589,10 +12965,10 @@ public struct FfiConverterTypeEvent: FfiConverterRustBuffer {
         case 3: return .paymentReceived(paymentId: try FfiConverterOptionTypePaymentId.read(from: &buf), paymentHash: try FfiConverterTypePaymentHash.read(from: &buf), amountMsat: try FfiConverterUInt64.read(from: &buf), customRecords: try FfiConverterSequenceTypeCustomTlvRecord.read(from: &buf)
         )
         
-        case 4: return .paymentClaimable(paymentId: try FfiConverterTypePaymentId.read(from: &buf), paymentHash: try FfiConverterTypePaymentHash.read(from: &buf), claimableAmountMsat: try FfiConverterUInt64.read(from: &buf), claimDeadline: try FfiConverterOptionUInt32.read(from: &buf), customRecords: try FfiConverterSequenceTypeCustomTlvRecord.read(from: &buf)
+        case 4: return .paymentForwarded(prevHtlcs: try FfiConverterSequenceTypeHTLCLocator.read(from: &buf), nextHtlcs: try FfiConverterSequenceTypeHTLCLocator.read(from: &buf), totalFeeEarnedMsat: try FfiConverterOptionUInt64.read(from: &buf), skimmedFeeMsat: try FfiConverterOptionUInt64.read(from: &buf), claimFromOnchainTx: try FfiConverterBool.read(from: &buf), outboundAmountForwardedMsat: try FfiConverterOptionUInt64.read(from: &buf)
         )
         
-        case 5: return .paymentForwarded(prevChannelId: try FfiConverterTypeChannelId.read(from: &buf), nextChannelId: try FfiConverterTypeChannelId.read(from: &buf), prevUserChannelId: try FfiConverterOptionTypeUserChannelId.read(from: &buf), nextUserChannelId: try FfiConverterOptionTypeUserChannelId.read(from: &buf), prevNodeId: try FfiConverterOptionTypePublicKey.read(from: &buf), nextNodeId: try FfiConverterOptionTypePublicKey.read(from: &buf), totalFeeEarnedMsat: try FfiConverterOptionUInt64.read(from: &buf), skimmedFeeMsat: try FfiConverterOptionUInt64.read(from: &buf), claimFromOnchainTx: try FfiConverterBool.read(from: &buf), outboundAmountForwardedMsat: try FfiConverterOptionUInt64.read(from: &buf)
+        case 5: return .paymentClaimable(paymentId: try FfiConverterTypePaymentId.read(from: &buf), paymentHash: try FfiConverterTypePaymentHash.read(from: &buf), claimableAmountMsat: try FfiConverterUInt64.read(from: &buf), claimDeadline: try FfiConverterOptionUInt32.read(from: &buf), customRecords: try FfiConverterSequenceTypeCustomTlvRecord.read(from: &buf)
         )
         
         case 6: return .channelPending(channelId: try FfiConverterTypeChannelId.read(from: &buf), userChannelId: try FfiConverterTypeUserChannelId.read(from: &buf), formerTemporaryChannelId: try FfiConverterTypeChannelId.read(from: &buf), counterpartyNodeId: try FfiConverterTypePublicKey.read(from: &buf), fundingTxo: try FfiConverterTypeOutPoint.read(from: &buf)
@@ -7604,10 +12980,10 @@ public struct FfiConverterTypeEvent: FfiConverterRustBuffer {
         case 8: return .channelClosed(channelId: try FfiConverterTypeChannelId.read(from: &buf), userChannelId: try FfiConverterTypeUserChannelId.read(from: &buf), counterpartyNodeId: try FfiConverterOptionTypePublicKey.read(from: &buf), reason: try FfiConverterOptionTypeClosureReason.read(from: &buf)
         )
         
-        case 9: return .splicePending(channelId: try FfiConverterTypeChannelId.read(from: &buf), userChannelId: try FfiConverterTypeUserChannelId.read(from: &buf), counterpartyNodeId: try FfiConverterTypePublicKey.read(from: &buf), newFundingTxo: try FfiConverterTypeOutPoint.read(from: &buf)
+        case 9: return .spliceNegotiated(channelId: try FfiConverterTypeChannelId.read(from: &buf), userChannelId: try FfiConverterTypeUserChannelId.read(from: &buf), counterpartyNodeId: try FfiConverterTypePublicKey.read(from: &buf), newFundingTxo: try FfiConverterTypeOutPoint.read(from: &buf)
         )
         
-        case 10: return .spliceFailed(channelId: try FfiConverterTypeChannelId.read(from: &buf), userChannelId: try FfiConverterTypeUserChannelId.read(from: &buf), counterpartyNodeId: try FfiConverterTypePublicKey.read(from: &buf), abandonedFundingTxo: try FfiConverterOptionTypeOutPoint.read(from: &buf)
+        case 10: return .spliceNegotiationFailed(channelId: try FfiConverterTypeChannelId.read(from: &buf), userChannelId: try FfiConverterTypeUserChannelId.read(from: &buf), counterpartyNodeId: try FfiConverterTypePublicKey.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -7618,12 +12994,13 @@ public struct FfiConverterTypeEvent: FfiConverterRustBuffer {
         switch value {
         
         
-        case let .paymentSuccessful(paymentId,paymentHash,paymentPreimage,feePaidMsat):
+        case let .paymentSuccessful(paymentId,paymentHash,paymentPreimage,feePaidMsat,bolt12Invoice):
             writeInt(&buf, Int32(1))
             FfiConverterOptionTypePaymentId.write(paymentId, into: &buf)
             FfiConverterTypePaymentHash.write(paymentHash, into: &buf)
             FfiConverterOptionTypePaymentPreimage.write(paymentPreimage, into: &buf)
             FfiConverterOptionUInt64.write(feePaidMsat, into: &buf)
+            FfiConverterOptionTypePaidBolt12Invoice.write(bolt12Invoice, into: &buf)
             
         
         case let .paymentFailed(paymentId,paymentHash,reason):
@@ -7641,27 +13018,23 @@ public struct FfiConverterTypeEvent: FfiConverterRustBuffer {
             FfiConverterSequenceTypeCustomTlvRecord.write(customRecords, into: &buf)
             
         
-        case let .paymentClaimable(paymentId,paymentHash,claimableAmountMsat,claimDeadline,customRecords):
+        case let .paymentForwarded(prevHtlcs,nextHtlcs,totalFeeEarnedMsat,skimmedFeeMsat,claimFromOnchainTx,outboundAmountForwardedMsat):
             writeInt(&buf, Int32(4))
+            FfiConverterSequenceTypeHTLCLocator.write(prevHtlcs, into: &buf)
+            FfiConverterSequenceTypeHTLCLocator.write(nextHtlcs, into: &buf)
+            FfiConverterOptionUInt64.write(totalFeeEarnedMsat, into: &buf)
+            FfiConverterOptionUInt64.write(skimmedFeeMsat, into: &buf)
+            FfiConverterBool.write(claimFromOnchainTx, into: &buf)
+            FfiConverterOptionUInt64.write(outboundAmountForwardedMsat, into: &buf)
+            
+        
+        case let .paymentClaimable(paymentId,paymentHash,claimableAmountMsat,claimDeadline,customRecords):
+            writeInt(&buf, Int32(5))
             FfiConverterTypePaymentId.write(paymentId, into: &buf)
             FfiConverterTypePaymentHash.write(paymentHash, into: &buf)
             FfiConverterUInt64.write(claimableAmountMsat, into: &buf)
             FfiConverterOptionUInt32.write(claimDeadline, into: &buf)
             FfiConverterSequenceTypeCustomTlvRecord.write(customRecords, into: &buf)
-            
-        
-        case let .paymentForwarded(prevChannelId,nextChannelId,prevUserChannelId,nextUserChannelId,prevNodeId,nextNodeId,totalFeeEarnedMsat,skimmedFeeMsat,claimFromOnchainTx,outboundAmountForwardedMsat):
-            writeInt(&buf, Int32(5))
-            FfiConverterTypeChannelId.write(prevChannelId, into: &buf)
-            FfiConverterTypeChannelId.write(nextChannelId, into: &buf)
-            FfiConverterOptionTypeUserChannelId.write(prevUserChannelId, into: &buf)
-            FfiConverterOptionTypeUserChannelId.write(nextUserChannelId, into: &buf)
-            FfiConverterOptionTypePublicKey.write(prevNodeId, into: &buf)
-            FfiConverterOptionTypePublicKey.write(nextNodeId, into: &buf)
-            FfiConverterOptionUInt64.write(totalFeeEarnedMsat, into: &buf)
-            FfiConverterOptionUInt64.write(skimmedFeeMsat, into: &buf)
-            FfiConverterBool.write(claimFromOnchainTx, into: &buf)
-            FfiConverterOptionUInt64.write(outboundAmountForwardedMsat, into: &buf)
             
         
         case let .channelPending(channelId,userChannelId,formerTemporaryChannelId,counterpartyNodeId,fundingTxo):
@@ -7689,7 +13062,7 @@ public struct FfiConverterTypeEvent: FfiConverterRustBuffer {
             FfiConverterOptionTypeClosureReason.write(reason, into: &buf)
             
         
-        case let .splicePending(channelId,userChannelId,counterpartyNodeId,newFundingTxo):
+        case let .spliceNegotiated(channelId,userChannelId,counterpartyNodeId,newFundingTxo):
             writeInt(&buf, Int32(9))
             FfiConverterTypeChannelId.write(channelId, into: &buf)
             FfiConverterTypeUserChannelId.write(userChannelId, into: &buf)
@@ -7697,12 +13070,11 @@ public struct FfiConverterTypeEvent: FfiConverterRustBuffer {
             FfiConverterTypeOutPoint.write(newFundingTxo, into: &buf)
             
         
-        case let .spliceFailed(channelId,userChannelId,counterpartyNodeId,abandonedFundingTxo):
+        case let .spliceNegotiationFailed(channelId,userChannelId,counterpartyNodeId):
             writeInt(&buf, Int32(10))
             FfiConverterTypeChannelId.write(channelId, into: &buf)
             FfiConverterTypeUserChannelId.write(userChannelId, into: &buf)
             FfiConverterTypePublicKey.write(counterpartyNodeId, into: &buf)
-            FfiConverterOptionTypeOutPoint.write(abandonedFundingTxo, into: &buf)
             
         }
     }
@@ -7725,7 +13097,109 @@ public func FfiConverterTypeEvent_lower(_ value: Event) -> RustBuffer {
 
 
 
-extension Event: Equatable, Hashable {}
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Configuration options for how our node resolves Human-Readable Names (BIP 353).
+ *
+ * [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+ */
+
+public enum HrnResolverConfig {
+    
+    /**
+     * Use [bLIP-32] to ask other nodes to resolve names for us.
+     *
+     * [bLIP-32]: https://github.com/lightning/blips/blob/master/blip-0032.md
+     */
+    case blip32
+    /**
+     * Resolve names locally using a specific DNS server.
+     */
+    case dns(
+        /**
+         * The IP and port of the DNS server.
+         *
+         * **Default:** `8.8.8.8:53` (Google Public DNS)
+         */dnsServerAddress: SocketAddress, 
+        /**
+         * If set to true, this allows others to use our node for HRN resolutions.
+         *
+         * **Default:** `false`
+         *
+         * **Note:** Enabling `enable_hrn_resolution_service` allows your node to act
+         * as a resolver for the rest of the network. For this to work, your node must
+         * be announceable (publicly visible in the network graph) so that other nodes
+         * can route resolution requests to you via Onion Messages. This does not affect
+         * your node's ability to resolve names for its own outgoing payments.
+         */enableHrnResolutionService: Bool
+    )
+}
+
+
+#if compiler(>=6)
+extension HrnResolverConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeHRNResolverConfig: FfiConverterRustBuffer {
+    typealias SwiftType = HrnResolverConfig
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> HrnResolverConfig {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .blip32
+        
+        case 2: return .dns(dnsServerAddress: try FfiConverterTypeSocketAddress.read(from: &buf), enableHrnResolutionService: try FfiConverterBool.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: HrnResolverConfig, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .blip32:
+            writeInt(&buf, Int32(1))
+        
+        
+        case let .dns(dnsServerAddress,enableHrnResolutionService):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeSocketAddress.write(dnsServerAddress, into: &buf)
+            FfiConverterBool.write(enableHrnResolutionService, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHRNResolverConfig_lift(_ buf: RustBuffer) throws -> HrnResolverConfig {
+    return try FfiConverterTypeHRNResolverConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeHRNResolverConfig_lower(_ value: HrnResolverConfig) -> RustBuffer {
+    return FfiConverterTypeHRNResolverConfig.lower(value)
+}
+
+
+extension HrnResolverConfig: Equatable, Hashable {}
+
+
+
 
 
 
@@ -7735,10 +13209,15 @@ extension Event: Equatable, Hashable {}
 public enum Lsps1PaymentState {
     
     case expectPayment
+    case hold
     case paid
     case refunded
 }
 
+
+#if compiler(>=6)
+extension Lsps1PaymentState: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -7752,9 +13231,11 @@ public struct FfiConverterTypeLSPS1PaymentState: FfiConverterRustBuffer {
         
         case 1: return .expectPayment
         
-        case 2: return .paid
+        case 2: return .hold
         
-        case 3: return .refunded
+        case 3: return .paid
+        
+        case 4: return .refunded
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -7768,12 +13249,16 @@ public struct FfiConverterTypeLSPS1PaymentState: FfiConverterRustBuffer {
             writeInt(&buf, Int32(1))
         
         
-        case .paid:
+        case .hold:
             writeInt(&buf, Int32(2))
         
         
-        case .refunded:
+        case .paid:
             writeInt(&buf, Int32(3))
+        
+        
+        case .refunded:
+            writeInt(&buf, Int32(4))
         
         }
     }
@@ -7795,30 +13280,218 @@ public func FfiConverterTypeLSPS1PaymentState_lower(_ value: Lsps1PaymentState) 
 }
 
 
-
 extension Lsps1PaymentState: Equatable, Hashable {}
+
+
+
 
 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Details about the status of a known Lightning balance.
+ */
 
 public enum LightningBalance {
     
-    case claimableOnChannelClose(channelId: ChannelId, counterpartyNodeId: PublicKey, amountSatoshis: UInt64, transactionFeeSatoshis: UInt64, outboundPaymentHtlcRoundedMsat: UInt64, outboundForwardedHtlcRoundedMsat: UInt64, inboundClaimingHtlcRoundedMsat: UInt64, inboundHtlcRoundedMsat: UInt64
+    /**
+     * The channel is not yet closed (or the commitment or closing transaction has not yet
+     * appeared in a block). The given balance is claimable (less on-chain fees) if the channel is
+     * force-closed now. Values do not take into account any pending splices and are only based
+     * on the confirmed state of the channel.
+     */
+    case claimableOnChannelClose(
+        /**
+         * The identifier of the channel this balance belongs to.
+         */channelId: ChannelId, 
+        /**
+         * The identifier of our channel counterparty.
+         */counterpartyNodeId: PublicKey, 
+        /**
+         * The amount available to claim, in satoshis, excluding the on-chain fees which will be
+         * required to do so.
+         */amountSatoshis: UInt64, 
+        /**
+         * The transaction fee we pay for the closing commitment transaction. This amount is not
+         * included in the `amount_satoshis` value.
+         *
+         * Note that if this channel is inbound (and thus our counterparty pays the commitment
+         * transaction fee) this value will be zero. For channels created prior to LDK Node 0.4
+         * the channel is always treated as outbound (and thus this value is never zero).
+         */transactionFeeSatoshis: UInt64, 
+        /**
+         * The amount of millisatoshis which has been burned to fees from HTLCs which are outbound
+         * from us and are related to a payment which was sent by us. This is the sum of the
+         * millisatoshis part of all HTLCs which are otherwise represented by
+         * [`LightningBalance::MaybeTimeoutClaimableHTLC`] with their
+         * [`LightningBalance::MaybeTimeoutClaimableHTLC::outbound_payment`] flag set, as well as
+         * any dust HTLCs which would otherwise be represented the same.
+         *
+         * This amount (rounded up to a whole satoshi value) will not be included in `amount_satoshis`.
+         */outboundPaymentHtlcRoundedMsat: UInt64, 
+        /**
+         * The amount of millisatoshis which has been burned to fees from HTLCs which are outbound
+         * from us and are related to a forwarded HTLC. This is the sum of the millisatoshis part
+         * of all HTLCs which are otherwise represented by
+         * [`LightningBalance::MaybeTimeoutClaimableHTLC`] with their
+         * [`LightningBalance::MaybeTimeoutClaimableHTLC::outbound_payment`] flag *not* set, as
+         * well as any dust HTLCs which would otherwise be represented the same.
+         *
+         * This amount (rounded up to a whole satoshi value) will not be included in `amount_satoshis`.
+         */outboundForwardedHtlcRoundedMsat: UInt64, 
+        /**
+         * The amount of millisatoshis which has been burned to fees from HTLCs which are inbound
+         * to us and for which we know the preimage. This is the sum of the millisatoshis part of
+         * all HTLCs which would be represented by [`LightningBalance::ContentiousClaimable`] on
+         * channel close, but whose current value is included in `amount_satoshis`, as well as any
+         * dust HTLCs which would otherwise be represented the same.
+         *
+         * This amount (rounded up to a whole satoshi value) will not be included in the counterparty's
+         * `amount_satoshis`.
+         */inboundClaimingHtlcRoundedMsat: UInt64, 
+        /**
+         * The amount of millisatoshis which has been burned to fees from HTLCs which are inbound
+         * to us and for which we do not know the preimage. This is the sum of the millisatoshis
+         * part of all HTLCs which would be represented by
+         * [`LightningBalance::MaybePreimageClaimableHTLC`] on channel close, as well as any dust
+         * HTLCs which would otherwise be represented the same.
+         *
+         * This amount (rounded up to a whole satoshi value) will not be included in the
+         * counterparty's `amount_satoshis`.
+         */inboundHtlcRoundedMsat: UInt64
     )
-    case claimableAwaitingConfirmations(channelId: ChannelId, counterpartyNodeId: PublicKey, amountSatoshis: UInt64, confirmationHeight: UInt32, source: BalanceSource
+    /**
+     * The channel has been closed, and the given balance is ours but awaiting confirmations until
+     * we consider it spendable.
+     */
+    case claimableAwaitingConfirmations(
+        /**
+         * The identifier of the channel this balance belongs to.
+         */channelId: ChannelId, 
+        /**
+         * The identifier of our channel counterparty.
+         */counterpartyNodeId: PublicKey, 
+        /**
+         * The amount available to claim, in satoshis, possibly excluding the on-chain fees which
+         * were spent in broadcasting the transaction.
+         */amountSatoshis: UInt64, 
+        /**
+         * The height at which an [`Event::SpendableOutputs`] event will be generated for this
+         * amount.
+         *
+         * [`Event::SpendableOutputs`]: lightning::events::Event::SpendableOutputs
+         */confirmationHeight: UInt32, 
+        /**
+         * Whether this balance is a result of cooperative close, a force-close, or an HTLC.
+         */source: BalanceSource
     )
-    case contentiousClaimable(channelId: ChannelId, counterpartyNodeId: PublicKey, amountSatoshis: UInt64, timeoutHeight: UInt32, paymentHash: PaymentHash, paymentPreimage: PaymentPreimage
+    /**
+     * The channel has been closed, and the given balance should be ours but awaiting spending
+     * transaction confirmation. If the spending transaction does not confirm in time, it is
+     * possible our counterparty can take the funds by broadcasting an HTLC timeout on-chain.
+     *
+     * Once the spending transaction confirms, before it has reached enough confirmations to be
+     * considered safe from chain reorganizations, the balance will instead be provided via
+     * [`LightningBalance::ClaimableAwaitingConfirmations`].
+     */
+    case contentiousClaimable(
+        /**
+         * The identifier of the channel this balance belongs to.
+         */channelId: ChannelId, 
+        /**
+         * The identifier of our channel counterparty.
+         */counterpartyNodeId: PublicKey, 
+        /**
+         * The amount available to claim, in satoshis, excluding the on-chain fees which will be
+         * required to do so.
+         */amountSatoshis: UInt64, 
+        /**
+         * The height at which the counterparty may be able to claim the balance if we have not
+         * done so.
+         */timeoutHeight: UInt32, 
+        /**
+         * The payment hash that locks this HTLC.
+         */paymentHash: PaymentHash, 
+        /**
+         * The preimage that can be used to claim this HTLC.
+         */paymentPreimage: PaymentPreimage
     )
-    case maybeTimeoutClaimableHtlc(channelId: ChannelId, counterpartyNodeId: PublicKey, amountSatoshis: UInt64, claimableHeight: UInt32, paymentHash: PaymentHash, outboundPayment: Bool
+    /**
+     * HTLCs which we sent to our counterparty which are claimable after a timeout (less on-chain
+     * fees) if the counterparty does not know the preimage for the HTLCs. These are somewhat
+     * likely to be claimed by our counterparty before we do.
+     */
+    case maybeTimeoutClaimableHtlc(
+        /**
+         * The identifier of the channel this balance belongs to.
+         */channelId: ChannelId, 
+        /**
+         * The identifier of our channel counterparty.
+         */counterpartyNodeId: PublicKey, 
+        /**
+         * The amount potentially available to claim, in satoshis, excluding the on-chain fees
+         * which will be required to do so.
+         */amountSatoshis: UInt64, 
+        /**
+         * The height at which we will be able to claim the balance if our counterparty has not
+         * done so.
+         */claimableHeight: UInt32, 
+        /**
+         * The payment hash whose preimage our counterparty needs to claim this HTLC.
+         */paymentHash: PaymentHash, 
+        /**
+         * Indicates whether this HTLC represents a payment which was sent outbound from us.
+         */outboundPayment: Bool
     )
-    case maybePreimageClaimableHtlc(channelId: ChannelId, counterpartyNodeId: PublicKey, amountSatoshis: UInt64, expiryHeight: UInt32, paymentHash: PaymentHash
+    /**
+     * HTLCs which we received from our counterparty which are claimable with a preimage which we
+     * do not currently have. This will only be claimable if we receive the preimage from the node
+     * to which we forwarded this HTLC before the timeout.
+     */
+    case maybePreimageClaimableHtlc(
+        /**
+         * The identifier of the channel this balance belongs to.
+         */channelId: ChannelId, 
+        /**
+         * The identifier of our channel counterparty.
+         */counterpartyNodeId: PublicKey, 
+        /**
+         * The amount potentially available to claim, in satoshis, excluding the on-chain fees
+         * which will be required to do so.
+         */amountSatoshis: UInt64, 
+        /**
+         * The height at which our counterparty will be able to claim the balance if we have not
+         * yet received the preimage and claimed it ourselves.
+         */expiryHeight: UInt32, 
+        /**
+         * The payment hash whose preimage we need to claim this HTLC.
+         */paymentHash: PaymentHash
     )
-    case counterpartyRevokedOutputClaimable(channelId: ChannelId, counterpartyNodeId: PublicKey, amountSatoshis: UInt64
+    /**
+     * The channel has been closed, and our counterparty broadcasted a revoked commitment
+     * transaction.
+     *
+     * Thus, we're able to claim all outputs in the commitment transaction, one of which has the
+     * following amount.
+     */
+    case counterpartyRevokedOutputClaimable(
+        /**
+         * The identifier of the channel this balance belongs to.
+         */channelId: ChannelId, 
+        /**
+         * The identifier of our channel counterparty.
+         */counterpartyNodeId: PublicKey, 
+        /**
+         * The amount, in satoshis, of the output which we can claim.
+         */amountSatoshis: UInt64
     )
 }
 
+
+#if compiler(>=6)
+extension LightningBalance: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -7932,8 +13605,10 @@ public func FfiConverterTypeLightningBalance_lower(_ value: LightningBalance) ->
 }
 
 
-
 extension LightningBalance: Equatable, Hashable {}
+
+
+
 
 
 
@@ -7950,6 +13625,10 @@ public enum LogLevel {
     case error
 }
 
+
+#if compiler(>=6)
+extension LogLevel: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -8024,22 +13703,49 @@ public func FfiConverterTypeLogLevel_lower(_ value: LogLevel) -> RustBuffer {
 }
 
 
-
 extension LogLevel: Equatable, Hashable {}
+
+
+
 
 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Options for how to set the max dust exposure allowed on a channel.
+ *
+ * See [`LdkChannelConfig::max_dust_htlc_exposure`] for details.
+ */
 
 public enum MaxDustHtlcExposure {
     
-    case fixedLimit(limitMsat: UInt64
+    /**
+     * This sets a fixed limit on the total dust exposure in millisatoshis.
+     *
+     * Please refer to [`LdkMaxDustHTLCExposure`] for further details.
+     */
+    case fixedLimit(
+        /**
+         * The fixed limit, in millisatoshis.
+         */limitMsat: UInt64
     )
-    case feeRateMultiplier(multiplier: UInt64
+    /**
+     * This sets a multiplier on the feerate to determine the maximum allowed dust exposure.
+     *
+     * Please refer to [`LdkMaxDustHTLCExposure`] for further details.
+     */
+    case feeRateMultiplier(
+        /**
+         * The applied fee rate multiplier.
+         */multiplier: UInt64
     )
 }
 
+
+#if compiler(>=6)
+extension MaxDustHtlcExposure: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -8094,8 +13800,10 @@ public func FfiConverterTypeMaxDustHTLCExposure_lower(_ value: MaxDustHtlcExposu
 }
 
 
-
 extension MaxDustHtlcExposure: Equatable, Hashable {}
+
+
+
 
 
 
@@ -8110,6 +13818,10 @@ public enum Network {
     case regtest
 }
 
+
+#if compiler(>=6)
+extension Network: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -8172,13 +13884,15 @@ public func FfiConverterTypeNetwork_lower(_ value: Network) -> RustBuffer {
 }
 
 
-
 extension Network: Equatable, Hashable {}
 
 
 
 
-public enum NodeError {
+
+
+
+public enum NodeError: Swift.Error {
 
     
     
@@ -8278,6 +13992,8 @@ public enum NodeError {
     
     case InvalidFeeRate(message: String)
     
+    case InvalidScriptPubKey(message: String)
+    
     case DuplicatePayment(message: String)
     
     case UnsupportedCurrency(message: String)
@@ -8291,6 +14007,14 @@ public enum NodeError {
     case InvalidBlindedPaths(message: String)
     
     case AsyncPaymentServicesDisabled(message: String)
+    
+    case HrnParsingFailed(message: String)
+    
+    case LnurlAuthFailed(message: String)
+    
+    case LnurlAuthTimeout(message: String)
+    
+    case InvalidLnurl(message: String)
     
 }
 
@@ -8500,31 +14224,51 @@ public struct FfiConverterTypeNodeError: FfiConverterRustBuffer {
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 49: return .DuplicatePayment(
+        case 49: return .InvalidScriptPubKey(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 50: return .UnsupportedCurrency(
+        case 50: return .DuplicatePayment(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 51: return .InsufficientFunds(
+        case 51: return .UnsupportedCurrency(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 52: return .LiquiditySourceUnavailable(
+        case 52: return .InsufficientFunds(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 53: return .LiquidityFeeTooHigh(
+        case 53: return .LiquiditySourceUnavailable(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 54: return .InvalidBlindedPaths(
+        case 54: return .LiquidityFeeTooHigh(
             message: try FfiConverterString.read(from: &buf)
         )
         
-        case 55: return .AsyncPaymentServicesDisabled(
+        case 55: return .InvalidBlindedPaths(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 56: return .AsyncPaymentServicesDisabled(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 57: return .HrnParsingFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 58: return .LnurlAuthFailed(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 59: return .LnurlAuthTimeout(
+            message: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 60: return .InvalidLnurl(
             message: try FfiConverterString.read(from: &buf)
         )
         
@@ -8635,20 +14379,30 @@ public struct FfiConverterTypeNodeError: FfiConverterRustBuffer {
             writeInt(&buf, Int32(47))
         case .InvalidFeeRate(_ /* message is ignored*/):
             writeInt(&buf, Int32(48))
-        case .DuplicatePayment(_ /* message is ignored*/):
+        case .InvalidScriptPubKey(_ /* message is ignored*/):
             writeInt(&buf, Int32(49))
-        case .UnsupportedCurrency(_ /* message is ignored*/):
+        case .DuplicatePayment(_ /* message is ignored*/):
             writeInt(&buf, Int32(50))
-        case .InsufficientFunds(_ /* message is ignored*/):
+        case .UnsupportedCurrency(_ /* message is ignored*/):
             writeInt(&buf, Int32(51))
-        case .LiquiditySourceUnavailable(_ /* message is ignored*/):
+        case .InsufficientFunds(_ /* message is ignored*/):
             writeInt(&buf, Int32(52))
-        case .LiquidityFeeTooHigh(_ /* message is ignored*/):
+        case .LiquiditySourceUnavailable(_ /* message is ignored*/):
             writeInt(&buf, Int32(53))
-        case .InvalidBlindedPaths(_ /* message is ignored*/):
+        case .LiquidityFeeTooHigh(_ /* message is ignored*/):
             writeInt(&buf, Int32(54))
-        case .AsyncPaymentServicesDisabled(_ /* message is ignored*/):
+        case .InvalidBlindedPaths(_ /* message is ignored*/):
             writeInt(&buf, Int32(55))
+        case .AsyncPaymentServicesDisabled(_ /* message is ignored*/):
+            writeInt(&buf, Int32(56))
+        case .HrnParsingFailed(_ /* message is ignored*/):
+            writeInt(&buf, Int32(57))
+        case .LnurlAuthFailed(_ /* message is ignored*/):
+            writeInt(&buf, Int32(58))
+        case .LnurlAuthTimeout(_ /* message is ignored*/):
+            writeInt(&buf, Int32(59))
+        case .InvalidLnurl(_ /* message is ignored*/):
+            writeInt(&buf, Int32(60))
 
         
         }
@@ -8656,13 +14410,34 @@ public struct FfiConverterTypeNodeError: FfiConverterRustBuffer {
 }
 
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeError_lift(_ buf: RustBuffer) throws -> NodeError {
+    return try FfiConverterTypeNodeError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeNodeError_lower(_ value: NodeError) -> RustBuffer {
+    return FfiConverterTypeNodeError.lower(value)
+}
+
+
 extension NodeError: Equatable, Hashable {}
+
+
+
 
 extension NodeError: Foundation.LocalizedError {
     public var errorDescription: String? {
         String(reflecting: self)
     }
 }
+
+
+
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
@@ -8675,6 +14450,10 @@ public enum OfferAmount {
     )
 }
 
+
+#if compiler(>=6)
+extension OfferAmount: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -8730,20 +14509,120 @@ public func FfiConverterTypeOfferAmount_lower(_ value: OfferAmount) -> RustBuffe
 }
 
 
-
 extension OfferAmount: Equatable, Hashable {}
+
+
+
 
 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * The BOLT12 invoice that was paid, surfaced in [`Event::PaymentSuccessful`].
+ *
+ * [`Event::PaymentSuccessful`]: crate::Event::PaymentSuccessful
+ */
+
+public enum PaidBolt12Invoice {
+    
+    /**
+     * The BOLT12 invoice, allowing the user to perform proof of payment.
+     */
+    case bolt12(Bolt12Invoice
+    )
+    /**
+     * The static invoice, used in async payments, where the user cannot perform proof of
+     * payment.
+     */
+    case `static`(StaticInvoice
+    )
+}
+
+
+#if compiler(>=6)
+extension PaidBolt12Invoice: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePaidBolt12Invoice: FfiConverterRustBuffer {
+    typealias SwiftType = PaidBolt12Invoice
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PaidBolt12Invoice {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .bolt12(try FfiConverterTypeBolt12Invoice.read(from: &buf)
+        )
+        
+        case 2: return .`static`(try FfiConverterTypeStaticInvoice.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: PaidBolt12Invoice, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .bolt12(v1):
+            writeInt(&buf, Int32(1))
+            FfiConverterTypeBolt12Invoice.write(v1, into: &buf)
+            
+        
+        case let .`static`(v1):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeStaticInvoice.write(v1, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaidBolt12Invoice_lift(_ buf: RustBuffer) throws -> PaidBolt12Invoice {
+    return try FfiConverterTypePaidBolt12Invoice.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePaidBolt12Invoice_lower(_ value: PaidBolt12Invoice) -> RustBuffer {
+    return FfiConverterTypePaidBolt12Invoice.lower(value)
+}
+
+
+
+
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Represents the direction of a payment.
+ */
 
 public enum PaymentDirection {
     
+    /**
+     * The payment is inbound.
+     */
     case inbound
+    /**
+     * The payment is outbound.
+     */
     case outbound
 }
 
+
+#if compiler(>=6)
+extension PaymentDirection: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -8794,8 +14673,10 @@ public func FfiConverterTypePaymentDirection_lower(_ value: PaymentDirection) ->
 }
 
 
-
 extension PaymentDirection: Equatable, Hashable {}
+
+
+
 
 
 
@@ -8816,6 +14697,10 @@ public enum PaymentFailureReason {
     case blindedPathCreationFailed
 }
 
+
+#if compiler(>=6)
+extension PaymentFailureReason: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -8914,30 +14799,140 @@ public func FfiConverterTypePaymentFailureReason_lower(_ value: PaymentFailureRe
 }
 
 
-
 extension PaymentFailureReason: Equatable, Hashable {}
+
+
+
 
 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Represents the kind of a payment.
+ */
 
 public enum PaymentKind {
     
-    case onchain(txid: Txid, status: ConfirmationStatus
+    /**
+     * An on-chain payment.
+     *
+     * Payments of this kind will be considered pending until the respective transaction has
+     * reached [`ANTI_REORG_DELAY`] confirmations on-chain.
+     *
+     * [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+     */
+    case onchain(
+        /**
+         * The transaction identifier of this payment.
+         */txid: Txid, 
+        /**
+         * The confirmation status of this payment.
+         */status: ConfirmationStatus
     )
-    case bolt11(hash: PaymentHash, preimage: PaymentPreimage?, secret: PaymentSecret?
+    /**
+     * A [BOLT 11] payment.
+     *
+     * [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+     */
+    case bolt11(
+        /**
+         * The payment hash, i.e., the hash of the `preimage`.
+         */hash: PaymentHash, 
+        /**
+         * The pre-image used by the payment.
+         */preimage: PaymentPreimage?, 
+        /**
+         * The secret used by the payment.
+         */secret: PaymentSecret?, 
+        /**
+         * The value, in thousands of a satoshi, that was deducted from this payment as an extra
+         * fee taken by our channel counterparty.
+         *
+         * Will only ever be `Some` for inbound payments received via an [bLIP-52 / LSPS 2]
+         * just-in-time channel, and only after the payment is observed; `None` otherwise.
+         *
+         * [bLIP-52 / LSPS 2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+         */counterpartySkimmedFeeMsat: UInt64?
     )
-    case bolt11Jit(hash: PaymentHash, preimage: PaymentPreimage?, secret: PaymentSecret?, counterpartySkimmedFeeMsat: UInt64?, lspFeeLimits: LspFeeLimits
+    /**
+     * A [BOLT 12] 'offer' payment, i.e., a payment for an [`Offer`].
+     *
+     * [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+     * [`Offer`]: crate::lightning::offers::offer::Offer
+     */
+    case bolt12Offer(
+        /**
+         * The payment hash, i.e., the hash of the `preimage`.
+         */hash: PaymentHash?, 
+        /**
+         * The pre-image used by the payment.
+         */preimage: PaymentPreimage?, 
+        /**
+         * The secret used by the payment.
+         */secret: PaymentSecret?, 
+        /**
+         * The ID of the offer this payment is for.
+         */offerId: OfferId, 
+        /**
+         * The payer note for the payment.
+         *
+         * Truncated to [`PAYER_NOTE_LIMIT`] characters.
+         *
+         * This will always be `None` for payments serialized with version `v0.3.0`.
+         *
+         * [`PAYER_NOTE_LIMIT`]: lightning::offers::invoice_request::PAYER_NOTE_LIMIT
+         */payerNote: UntrustedString?, 
+        /**
+         * The quantity of an item requested in the offer.
+         *
+         * This will always be `None` for payments serialized with version `v0.3.0`.
+         */quantity: UInt64?
     )
-    case bolt12Offer(hash: PaymentHash?, preimage: PaymentPreimage?, secret: PaymentSecret?, offerId: OfferId, payerNote: UntrustedString?, quantity: UInt64?
+    /**
+     * A [BOLT 12] 'refund' payment, i.e., a payment for a [`Refund`].
+     *
+     * [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+     * [`Refund`]: lightning::offers::refund::Refund
+     */
+    case bolt12Refund(
+        /**
+         * The payment hash, i.e., the hash of the `preimage`.
+         */hash: PaymentHash?, 
+        /**
+         * The pre-image used by the payment.
+         */preimage: PaymentPreimage?, 
+        /**
+         * The secret used by the payment.
+         */secret: PaymentSecret?, 
+        /**
+         * The payer note for the refund payment.
+         *
+         * This will always be `None` for payments serialized with version `v0.3.0`.
+         */payerNote: UntrustedString?, 
+        /**
+         * The quantity of an item that the refund is for.
+         *
+         * This will always be `None` for payments serialized with version `v0.3.0`.
+         */quantity: UInt64?
     )
-    case bolt12Refund(hash: PaymentHash?, preimage: PaymentPreimage?, secret: PaymentSecret?, payerNote: UntrustedString?, quantity: UInt64?
-    )
-    case spontaneous(hash: PaymentHash, preimage: PaymentPreimage?
+    /**
+     * A spontaneous ("keysend") payment.
+     */
+    case spontaneous(
+        /**
+         * The payment hash, i.e., the hash of the `preimage`.
+         */hash: PaymentHash, 
+        /**
+         * The pre-image used by the payment.
+         */preimage: PaymentPreimage?
     )
 }
 
+
+#if compiler(>=6)
+extension PaymentKind: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -8952,19 +14947,16 @@ public struct FfiConverterTypePaymentKind: FfiConverterRustBuffer {
         case 1: return .onchain(txid: try FfiConverterTypeTxid.read(from: &buf), status: try FfiConverterTypeConfirmationStatus.read(from: &buf)
         )
         
-        case 2: return .bolt11(hash: try FfiConverterTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf)
+        case 2: return .bolt11(hash: try FfiConverterTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), counterpartySkimmedFeeMsat: try FfiConverterOptionUInt64.read(from: &buf)
         )
         
-        case 3: return .bolt11Jit(hash: try FfiConverterTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), counterpartySkimmedFeeMsat: try FfiConverterOptionUInt64.read(from: &buf), lspFeeLimits: try FfiConverterTypeLSPFeeLimits.read(from: &buf)
+        case 3: return .bolt12Offer(hash: try FfiConverterOptionTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), offerId: try FfiConverterTypeOfferId.read(from: &buf), payerNote: try FfiConverterOptionTypeUntrustedString.read(from: &buf), quantity: try FfiConverterOptionUInt64.read(from: &buf)
         )
         
-        case 4: return .bolt12Offer(hash: try FfiConverterOptionTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), offerId: try FfiConverterTypeOfferId.read(from: &buf), payerNote: try FfiConverterOptionTypeUntrustedString.read(from: &buf), quantity: try FfiConverterOptionUInt64.read(from: &buf)
+        case 4: return .bolt12Refund(hash: try FfiConverterOptionTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), payerNote: try FfiConverterOptionTypeUntrustedString.read(from: &buf), quantity: try FfiConverterOptionUInt64.read(from: &buf)
         )
         
-        case 5: return .bolt12Refund(hash: try FfiConverterOptionTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf), secret: try FfiConverterOptionTypePaymentSecret.read(from: &buf), payerNote: try FfiConverterOptionTypeUntrustedString.read(from: &buf), quantity: try FfiConverterOptionUInt64.read(from: &buf)
-        )
-        
-        case 6: return .spontaneous(hash: try FfiConverterTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf)
+        case 5: return .spontaneous(hash: try FfiConverterTypePaymentHash.read(from: &buf), preimage: try FfiConverterOptionTypePaymentPreimage.read(from: &buf)
         )
         
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -8981,24 +14973,16 @@ public struct FfiConverterTypePaymentKind: FfiConverterRustBuffer {
             FfiConverterTypeConfirmationStatus.write(status, into: &buf)
             
         
-        case let .bolt11(hash,preimage,secret):
+        case let .bolt11(hash,preimage,secret,counterpartySkimmedFeeMsat):
             writeInt(&buf, Int32(2))
             FfiConverterTypePaymentHash.write(hash, into: &buf)
             FfiConverterOptionTypePaymentPreimage.write(preimage, into: &buf)
             FfiConverterOptionTypePaymentSecret.write(secret, into: &buf)
-            
-        
-        case let .bolt11Jit(hash,preimage,secret,counterpartySkimmedFeeMsat,lspFeeLimits):
-            writeInt(&buf, Int32(3))
-            FfiConverterTypePaymentHash.write(hash, into: &buf)
-            FfiConverterOptionTypePaymentPreimage.write(preimage, into: &buf)
-            FfiConverterOptionTypePaymentSecret.write(secret, into: &buf)
             FfiConverterOptionUInt64.write(counterpartySkimmedFeeMsat, into: &buf)
-            FfiConverterTypeLSPFeeLimits.write(lspFeeLimits, into: &buf)
             
         
         case let .bolt12Offer(hash,preimage,secret,offerId,payerNote,quantity):
-            writeInt(&buf, Int32(4))
+            writeInt(&buf, Int32(3))
             FfiConverterOptionTypePaymentHash.write(hash, into: &buf)
             FfiConverterOptionTypePaymentPreimage.write(preimage, into: &buf)
             FfiConverterOptionTypePaymentSecret.write(secret, into: &buf)
@@ -9008,7 +14992,7 @@ public struct FfiConverterTypePaymentKind: FfiConverterRustBuffer {
             
         
         case let .bolt12Refund(hash,preimage,secret,payerNote,quantity):
-            writeInt(&buf, Int32(5))
+            writeInt(&buf, Int32(4))
             FfiConverterOptionTypePaymentHash.write(hash, into: &buf)
             FfiConverterOptionTypePaymentPreimage.write(preimage, into: &buf)
             FfiConverterOptionTypePaymentSecret.write(secret, into: &buf)
@@ -9017,7 +15001,7 @@ public struct FfiConverterTypePaymentKind: FfiConverterRustBuffer {
             
         
         case let .spontaneous(hash,preimage):
-            writeInt(&buf, Int32(6))
+            writeInt(&buf, Int32(5))
             FfiConverterTypePaymentHash.write(hash, into: &buf)
             FfiConverterOptionTypePaymentPreimage.write(preimage, into: &buf)
             
@@ -9041,21 +15025,39 @@ public func FfiConverterTypePaymentKind_lower(_ value: PaymentKind) -> RustBuffe
 }
 
 
-
 extension PaymentKind: Equatable, Hashable {}
+
+
+
 
 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Represents the current status of a payment.
+ */
 
 public enum PaymentStatus {
     
+    /**
+     * The payment is still pending.
+     */
     case pending
+    /**
+     * The payment succeeded.
+     */
     case succeeded
+    /**
+     * The payment failed.
+     */
     case failed
 }
 
+
+#if compiler(>=6)
+extension PaymentStatus: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -9112,24 +15114,81 @@ public func FfiConverterTypePaymentStatus_lower(_ value: PaymentStatus) -> RustB
 }
 
 
-
 extension PaymentStatus: Equatable, Hashable {}
+
+
+
 
 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Details about the status of a known balance currently being swept to our on-chain wallet.
+ */
 
 public enum PendingSweepBalance {
     
-    case pendingBroadcast(channelId: ChannelId?, amountSatoshis: UInt64
+    /**
+     * The spendable output is about to be swept, but a spending transaction has yet to be generated and
+     * broadcast.
+     */
+    case pendingBroadcast(
+        /**
+         * The identifier of the channel this balance belongs to.
+         */channelId: ChannelId?, 
+        /**
+         * The amount, in satoshis, of the output being swept.
+         */amountSatoshis: UInt64
     )
-    case broadcastAwaitingConfirmation(channelId: ChannelId?, latestBroadcastHeight: UInt32, latestSpendingTxid: Txid, amountSatoshis: UInt64
+    /**
+     * A spending transaction has been generated and broadcast and is awaiting confirmation
+     * on-chain.
+     */
+    case broadcastAwaitingConfirmation(
+        /**
+         * The identifier of the channel this balance belongs to.
+         */channelId: ChannelId?, 
+        /**
+         * The best height when we last broadcast a transaction spending the output being swept.
+         */latestBroadcastHeight: UInt32, 
+        /**
+         * The identifier of the transaction spending the swept output we last broadcast.
+         */latestSpendingTxid: Txid, 
+        /**
+         * The amount, in satoshis, of the output being swept.
+         */amountSatoshis: UInt64
     )
-    case awaitingThresholdConfirmations(channelId: ChannelId?, latestSpendingTxid: Txid, confirmationHash: BlockHash, confirmationHeight: UInt32, amountSatoshis: UInt64
+    /**
+     * A spending transaction has been confirmed on-chain and is awaiting threshold confirmations.
+     *
+     * It will be pruned after reaching [`PRUNE_DELAY_BLOCKS`] confirmations.
+     *
+     * [`PRUNE_DELAY_BLOCKS`]: lightning::util::sweep::PRUNE_DELAY_BLOCKS
+     */
+    case awaitingThresholdConfirmations(
+        /**
+         * The identifier of the channel this balance belongs to.
+         */channelId: ChannelId?, 
+        /**
+         * The identifier of the confirmed transaction spending the swept output.
+         */latestSpendingTxid: Txid, 
+        /**
+         * The hash of the block in which the spending transaction was confirmed.
+         */confirmationHash: BlockHash, 
+        /**
+         * The height at which the spending transaction was confirmed.
+         */confirmationHeight: UInt32, 
+        /**
+         * The amount, in satoshis, of the output being swept.
+         */amountSatoshis: UInt64
     )
 }
 
+
+#if compiler(>=6)
+extension PendingSweepBalance: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -9200,32 +15259,72 @@ public func FfiConverterTypePendingSweepBalance_lower(_ value: PendingSweepBalan
 }
 
 
-
 extension PendingSweepBalance: Equatable, Hashable {}
+
+
+
 
 
 
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Represents the result of a payment made using a [BIP 21] URI or a [BIP 353] Human-Readable Name.
+ *
+ * After a successful on-chain transaction, the transaction ID ([`Txid`]) is returned.
+ * For BOLT11 and BOLT12 payments, the corresponding [`PaymentId`] is returned.
+ *
+ * [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
+ * [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+ * [`PaymentId`]: lightning::ln::channelmanager::PaymentId
+ * [`Txid`]: bitcoin::hash_types::Txid
+ */
 
-public enum QrPaymentResult {
+public enum UnifiedPaymentResult {
     
-    case onchain(txid: Txid
+    /**
+     * An on-chain payment.
+     */
+    case onchain(
+        /**
+         * The transaction ID (txid) of the on-chain payment.
+         */txid: Txid
     )
-    case bolt11(paymentId: PaymentId
+    /**
+     * A [BOLT 11] payment.
+     *
+     * [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+     */
+    case bolt11(
+        /**
+         * The payment ID for the BOLT11 invoice.
+         */paymentId: PaymentId
     )
-    case bolt12(paymentId: PaymentId
+    /**
+     * A [BOLT 12] offer payment, i.e., a payment for an [`Offer`].
+     *
+     * [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+     * [`Offer`]: crate::lightning::offers::offer::Offer
+     */
+    case bolt12(
+        /**
+         * The payment ID for the BOLT12 offer.
+         */paymentId: PaymentId
     )
 }
 
 
+#if compiler(>=6)
+extension UnifiedPaymentResult: Sendable {}
+#endif
+
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public struct FfiConverterTypeQrPaymentResult: FfiConverterRustBuffer {
-    typealias SwiftType = QrPaymentResult
+public struct FfiConverterTypeUnifiedPaymentResult: FfiConverterRustBuffer {
+    typealias SwiftType = UnifiedPaymentResult
 
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> QrPaymentResult {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UnifiedPaymentResult {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
@@ -9242,7 +15341,7 @@ public struct FfiConverterTypeQrPaymentResult: FfiConverterRustBuffer {
         }
     }
 
-    public static func write(_ value: QrPaymentResult, into buf: inout [UInt8]) {
+    public static func write(_ value: UnifiedPaymentResult, into buf: inout [UInt8]) {
         switch value {
         
         
@@ -9268,36 +15367,65 @@ public struct FfiConverterTypeQrPaymentResult: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeQrPaymentResult_lift(_ buf: RustBuffer) throws -> QrPaymentResult {
-    return try FfiConverterTypeQrPaymentResult.lift(buf)
+public func FfiConverterTypeUnifiedPaymentResult_lift(_ buf: RustBuffer) throws -> UnifiedPaymentResult {
+    return try FfiConverterTypeUnifiedPaymentResult.lift(buf)
 }
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-public func FfiConverterTypeQrPaymentResult_lower(_ value: QrPaymentResult) -> RustBuffer {
-    return FfiConverterTypeQrPaymentResult.lower(value)
+public func FfiConverterTypeUnifiedPaymentResult_lower(_ value: UnifiedPaymentResult) -> RustBuffer {
+    return FfiConverterTypeUnifiedPaymentResult.lower(value)
 }
 
 
-
-extension QrPaymentResult: Equatable, Hashable {}
-
+extension UnifiedPaymentResult: Equatable, Hashable {}
 
 
 
-public enum VssHeaderProviderError {
+
+
+
+
+/**
+ * Errors around providing headers for each VSS request.
+ */
+public enum VssHeaderProviderError: Swift.Error {
 
     
     
-    case InvalidData(message: String)
-    
-    case RequestError(message: String)
-    
-    case AuthorizationError(message: String)
-    
-    case InternalError(message: String)
-    
+    /**
+     * Invalid data was encountered.
+     */
+    case InvalidData(
+        /**
+         * The error message.
+         */error: String
+    )
+    /**
+     * An external request failed.
+     */
+    case RequestError(
+        /**
+         * The error message.
+         */error: String
+    )
+    /**
+     * Authorization was refused.
+     */
+    case AuthorizationError(
+        /**
+         * The error message.
+         */error: String
+    )
+    /**
+     * An application-level error occurred specific to the header provider functionality.
+     */
+    case InternalError(
+        /**
+         * The error message.
+         */error: String
+    )
 }
 
 
@@ -9315,23 +15443,19 @@ public struct FfiConverterTypeVssHeaderProviderError: FfiConverterRustBuffer {
 
         
         case 1: return .InvalidData(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
+            error: try FfiConverterString.read(from: &buf)
+            )
         case 2: return .RequestError(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
+            error: try FfiConverterString.read(from: &buf)
+            )
         case 3: return .AuthorizationError(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
+            error: try FfiConverterString.read(from: &buf)
+            )
         case 4: return .InternalError(
-            message: try FfiConverterString.read(from: &buf)
-        )
-        
+            error: try FfiConverterString.read(from: &buf)
+            )
 
-        default: throw UniffiInternalError.unexpectedEnumCase
+         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
 
@@ -9341,22 +15465,50 @@ public struct FfiConverterTypeVssHeaderProviderError: FfiConverterRustBuffer {
         
 
         
-        case .InvalidData(_ /* message is ignored*/):
-            writeInt(&buf, Int32(1))
-        case .RequestError(_ /* message is ignored*/):
-            writeInt(&buf, Int32(2))
-        case .AuthorizationError(_ /* message is ignored*/):
-            writeInt(&buf, Int32(3))
-        case .InternalError(_ /* message is ignored*/):
-            writeInt(&buf, Int32(4))
-
         
+        case let .InvalidData(error):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(error, into: &buf)
+            
+        
+        case let .RequestError(error):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(error, into: &buf)
+            
+        
+        case let .AuthorizationError(error):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(error, into: &buf)
+            
+        
+        case let .InternalError(error):
+            writeInt(&buf, Int32(4))
+            FfiConverterString.write(error, into: &buf)
+            
         }
     }
 }
 
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVssHeaderProviderError_lift(_ buf: RustBuffer) throws -> VssHeaderProviderError {
+    return try FfiConverterTypeVssHeaderProviderError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVssHeaderProviderError_lower(_ value: VssHeaderProviderError) -> RustBuffer {
+    return FfiConverterTypeVssHeaderProviderError.lower(value)
+}
+
+
 extension VssHeaderProviderError: Equatable, Hashable {}
+
+
+
 
 extension VssHeaderProviderError: Foundation.LocalizedError {
     public var errorDescription: String? {
@@ -9364,18 +15516,43 @@ extension VssHeaderProviderError: Foundation.LocalizedError {
     }
 }
 
+
+
+
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Supported BIP39 mnemonic word counts for entropy generation.
+ */
 
 public enum WordCount {
     
+    /**
+     * 12-word mnemonic (128-bit entropy)
+     */
     case words12
+    /**
+     * 15-word mnemonic (160-bit entropy)
+     */
     case words15
+    /**
+     * 18-word mnemonic (192-bit entropy)
+     */
     case words18
+    /**
+     * 21-word mnemonic (224-bit entropy)
+     */
     case words21
+    /**
+     * 24-word mnemonic (256-bit entropy)
+     */
     case words24
 }
 
+
+#if compiler(>=6)
+extension WordCount: Sendable {}
+#endif
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
@@ -9444,8 +15621,10 @@ public func FfiConverterTypeWordCount_lower(_ value: WordCount) -> RustBuffer {
 }
 
 
-
 extension WordCount: Equatable, Hashable {}
+
+
+
 
 
 
@@ -9564,6 +15743,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -9956,6 +16159,30 @@ fileprivate struct FfiConverterOptionTypeRouteParametersConfig: FfiConverterRust
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeTorConfig: FfiConverterRustBuffer {
+    typealias SwiftType = TorConfig?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeTorConfig.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeTorConfig.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeAsyncPaymentsRole: FfiConverterRustBuffer {
     typealias SwiftType = AsyncPaymentsRole?
 
@@ -9972,6 +16199,30 @@ fileprivate struct FfiConverterOptionTypeAsyncPaymentsRole: FfiConverterRustBuff
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeAsyncPaymentsRole.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeChannelShutdownState: FfiConverterRustBuffer {
+    typealias SwiftType = ChannelShutdownState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeChannelShutdownState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeChannelShutdownState.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -10100,6 +16351,30 @@ fileprivate struct FfiConverterOptionTypeOfferAmount: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypePaidBolt12Invoice: FfiConverterRustBuffer {
+    typealias SwiftType = PaidBolt12Invoice?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypePaidBolt12Invoice.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypePaidBolt12Invoice.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypePaymentFailureReason: FfiConverterRustBuffer {
     typealias SwiftType = PaymentFailureReason?
 
@@ -10148,8 +16423,8 @@ fileprivate struct FfiConverterOptionTypeWordCount: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
-fileprivate struct FfiConverterOptionSequenceUInt8: FfiConverterRustBuffer {
-    typealias SwiftType = [UInt8]?
+fileprivate struct FfiConverterOptionSequenceData: FfiConverterRustBuffer {
+    typealias SwiftType = [Data]?
 
     public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
         guard let value = value else {
@@ -10157,37 +16432,13 @@ fileprivate struct FfiConverterOptionSequenceUInt8: FfiConverterRustBuffer {
             return
         }
         writeInt(&buf, Int8(1))
-        FfiConverterSequenceUInt8.write(value, into: &buf)
+        FfiConverterSequenceData.write(value, into: &buf)
     }
 
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
-        case 1: return try FfiConverterSequenceUInt8.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterOptionSequenceSequenceUInt8: FfiConverterRustBuffer {
-    typealias SwiftType = [[UInt8]]?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterSequenceSequenceUInt8.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterSequenceSequenceUInt8.read(from: &buf)
+        case 1: return try FfiConverterSequenceData.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -10412,6 +16663,30 @@ fileprivate struct FfiConverterOptionTypePublicKey: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeScriptBuf: FfiConverterRustBuffer {
+    typealias SwiftType = ScriptBuf?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeScriptBuf.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeScriptBuf.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeUntrustedString: FfiConverterRustBuffer {
     typealias SwiftType = UntrustedString?
 
@@ -10510,6 +16785,31 @@ fileprivate struct FfiConverterSequenceUInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceData: FfiConverterRustBuffer {
+    typealias SwiftType = [Data]
+
+    public static func write(_ value: [Data], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterData.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [Data] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [Data]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterData.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeChannelDetails: FfiConverterRustBuffer {
     typealias SwiftType = [ChannelDetails]
 
@@ -10552,6 +16852,31 @@ fileprivate struct FfiConverterSequenceTypeCustomTlvRecord: FfiConverterRustBuff
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeCustomTlvRecord.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeHTLCLocator: FfiConverterRustBuffer {
+    typealias SwiftType = [HtlcLocator]
+
+    public static func write(_ value: [HtlcLocator], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeHTLCLocator.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [HtlcLocator] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [HtlcLocator]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeHTLCLocator.read(from: &buf))
         }
         return seq
     }
@@ -10702,31 +17027,6 @@ fileprivate struct FfiConverterSequenceTypePendingSweepBalance: FfiConverterRust
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypePendingSweepBalance.read(from: &buf))
-        }
-        return seq
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterSequenceSequenceUInt8: FfiConverterRustBuffer {
-    typealias SwiftType = [[UInt8]]
-
-    public static func write(_ value: [[UInt8]], into buf: inout [UInt8]) {
-        let len = Int32(value.count)
-        writeInt(&buf, len)
-        for item in value {
-            FfiConverterSequenceUInt8.write(item, into: &buf)
-        }
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [[UInt8]] {
-        let len: Int32 = try readInt(&buf)
-        var seq = [[UInt8]]()
-        seq.reserveCapacity(Int(len))
-        for _ in 0 ..< len {
-            seq.append(try FfiConverterSequenceUInt8.read(from: &buf))
         }
         return seq
     }
@@ -11504,6 +17804,50 @@ public func FfiConverterTypePublicKey_lower(_ value: PublicKey) -> RustBuffer {
  * Typealias from the type name used in the UDL file to the builtin type.  This
  * is needed because the UDL type name is used in function/method signatures.
  */
+public typealias ScriptBuf = String
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeScriptBuf: FfiConverter {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ScriptBuf {
+        return try FfiConverterString.read(from: &buf)
+    }
+
+    public static func write(_ value: ScriptBuf, into buf: inout [UInt8]) {
+        return FfiConverterString.write(value, into: &buf)
+    }
+
+    public static func lift(_ value: RustBuffer) throws -> ScriptBuf {
+        return try FfiConverterString.lift(value)
+    }
+
+    public static func lower(_ value: ScriptBuf) -> RustBuffer {
+        return FfiConverterString.lower(value)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScriptBuf_lift(_ value: RustBuffer) throws -> ScriptBuf {
+    return try FfiConverterTypeScriptBuf.lift(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeScriptBuf_lower(_ value: ScriptBuf) -> RustBuffer {
+    return FfiConverterTypeScriptBuf.lower(value)
+}
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the builtin type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ */
 public typealias SocketAddress = String
 
 #if swift(>=5.8)
@@ -11687,9 +18031,9 @@ fileprivate func uniffiRustCallAsync<F, T>(
     liftFunc: (F) throws -> T,
     errorHandler: ((RustBuffer) throws -> Swift.Error)?
 ) async throws -> T {
-    // Make sure to call uniffiEnsureInitialized() since future creation doesn't have a
+    // Make sure to call the ensure init function since future creation doesn't have a
     // RustCallStatus param, so doesn't use makeRustCall()
-    uniffiEnsureInitialized()
+    uniffiEnsureLdkNodeInitialized()
     let rustFuture = rustFutureFunc()
     defer {
         freeFunc(rustFuture)
@@ -11720,14 +18064,97 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
         print("uniffiFutureContinuationCallback invalid handle")
     }
 }
-public func defaultConfig() -> Config {
-    return try!  FfiConverterTypeConfig.lift(try! rustCall() {
+private func uniffiTraitInterfaceCallAsync<T>(
+    makeCall: @escaping () async throws -> T,
+    handleSuccess: @escaping (T) -> (),
+    handleError: @escaping (Int8, RustBuffer) -> ()
+) -> UniffiForeignFuture {
+    let task = Task {
+        // Note: it's important we call either `handleSuccess` or `handleError` exactly once.  Each
+        // call consumes an Arc reference, which means there should be no possibility of a double
+        // call.  The following code is structured so that will will never call both `handleSuccess`
+        // and `handleError`, even in the face of weird errors.
+        //
+        // On platforms that need extra machinery to make C-ABI calls, like JNA or ctypes, it's
+        // possible that we fail to make either call.  However, it doesn't seem like this is
+        // possible on Swift since swift can just make the C call directly.
+        var callResult: T
+        do {
+            callResult = try await makeCall()
+        } catch {
+            handleError(CALL_UNEXPECTED_ERROR, FfiConverterString.lower(String(describing: error)))
+            return
+        }
+        handleSuccess(callResult)
+    }
+    let handle = UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.insert(obj: task)
+    return UniffiForeignFuture(handle: handle, free: uniffiForeignFutureFree)
+
+}
+
+private func uniffiTraitInterfaceCallAsyncWithError<T, E>(
+    makeCall: @escaping () async throws -> T,
+    handleSuccess: @escaping (T) -> (),
+    handleError: @escaping (Int8, RustBuffer) -> (),
+    lowerError: @escaping (E) -> RustBuffer
+) -> UniffiForeignFuture {
+    let task = Task {
+        // See the note in uniffiTraitInterfaceCallAsync for details on `handleSuccess` and
+        // `handleError`.
+        var callResult: T
+        do {
+            callResult = try await makeCall()
+        } catch let error as E {
+            handleError(CALL_ERROR, lowerError(error))
+            return
+        } catch {
+            handleError(CALL_UNEXPECTED_ERROR, FfiConverterString.lower(String(describing: error)))
+            return
+        }
+        handleSuccess(callResult)
+    }
+    let handle = UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.insert(obj: task)
+    return UniffiForeignFuture(handle: handle, free: uniffiForeignFutureFree)
+}
+
+// Borrow the callback handle map implementation to store foreign future handles
+// TODO: consolidate the handle-map code (https://github.com/mozilla/uniffi-rs/pull/1823)
+fileprivate let UNIFFI_FOREIGN_FUTURE_HANDLE_MAP = UniffiHandleMap<UniffiForeignFutureTask>()
+
+// Protocol for tasks that handle foreign futures.
+//
+// Defining a protocol allows all tasks to be stored in the same handle map.  This can't be done
+// with the task object itself, since has generic parameters.
+fileprivate protocol UniffiForeignFutureTask {
+    func cancel()
+}
+
+extension Task: UniffiForeignFutureTask {}
+
+private func uniffiForeignFutureFree(handle: UInt64) {
+    do {
+        let task = try UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.remove(handle: handle)
+        // Set the cancellation flag on the task.  If it's still running, the code can check the
+        // cancellation flag or call `Task.checkCancellation()`.  If the task has completed, this is
+        // a no-op.
+        task.cancel()
+    } catch {
+        print("uniffiForeignFutureFree: handle missing from handlemap")
+    }
+}
+
+// For testing
+public func uniffiForeignFutureHandleCountLdkNode() -> Int {
+    UNIFFI_FOREIGN_FUTURE_HANDLE_MAP.count
+}
+public func defaultConfig() -> Config  {
+    return try!  FfiConverterTypeConfig_lift(try! rustCall() {
     uniffi_ldk_node_fn_func_default_config($0
     )
 })
 }
-public func generateEntropyMnemonic(wordCount: WordCount?) -> Mnemonic {
-    return try!  FfiConverterTypeMnemonic.lift(try! rustCall() {
+public func generateEntropyMnemonic(wordCount: WordCount?) -> Mnemonic  {
+    return try!  FfiConverterTypeMnemonic_lift(try! rustCall() {
     uniffi_ldk_node_fn_func_generate_entropy_mnemonic(
         FfiConverterOptionTypeWordCount.lower(wordCount),$0
     )
@@ -11741,9 +18168,9 @@ private enum InitializationResult {
 }
 // Use a global variable to perform the versioning checks. Swift ensures that
 // the code inside is only computed once.
-private var initializationResult: InitializationResult = {
+private let initializationResult: InitializationResult = {
     // Get the bindings contract version from our ComponentInterface
-    let bindings_contract_version = 26
+    let bindings_contract_version = 29
     // Get the scaffolding contract version by calling the into the dylib
     let scaffolding_contract_version = ffi_ldk_node_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
@@ -11752,202 +18179,31 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_func_default_config() != 55381) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_func_generate_entropy_mnemonic() != 48014) {
+    if (uniffi_ldk_node_checksum_func_generate_entropy_mnemonic() != 15455) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_amount_milli_satoshis() != 50823) {
+    if (uniffi_ldk_node_checksum_method_builder_build() != 64768) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_currency() != 32179) {
+    if (uniffi_ldk_node_checksum_method_builder_build_with_fs_store() != 42069) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_expiry_time_seconds() != 23625) {
+    if (uniffi_ldk_node_checksum_method_builder_build_with_postgres_store() != 24596) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_fallback_addresses() != 55276) {
+    if (uniffi_ldk_node_checksum_method_builder_build_with_vss_store() != 9022) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_invoice_description() != 395) {
+    if (uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_fixed_headers() != 64024) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_is_expired() != 15932) {
+    if (uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_header_provider() != 29566) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_min_final_cltv_expiry_delta() != 8855) {
+    if (uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_lnurl_auth() != 8141) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_network() != 10420) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_payment_hash() != 42571) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_payment_secret() != 26081) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_recover_payee_pub_key() != 18874) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_route_hints() != 63051) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_seconds_since_epoch() != 53979) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_seconds_until_expiry() != 64193) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_signable_hash() != 30910) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11invoice_would_expire() != 30331) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_claim_for_hash() != 52848) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_fail_for_hash() != 24516) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_receive() != 6073) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_for_hash() != 27050) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_variable_amount() != 4893) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_variable_amount_for_hash() != 1402) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_variable_amount_via_jit_channel() != 24506) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_variable_amount_via_jit_channel_for_hash() != 38025) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_via_jit_channel() != 16532) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_via_jit_channel_for_hash() != 1143) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_send() != 12953) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_send_probes() != 19286) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_send_probes_using_amount() != 5976) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt11payment_send_using_amount() != 42793) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_absolute_expiry_seconds() != 28589) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_amount() != 5213) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_amount_msats() != 9297) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_chain() != 3308) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_created_at() != 56866) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_encode() != 13200) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_fallback_addresses() != 7925) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_invoice_description() != 1713) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_is_expired() != 39560) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_issuer() != 65270) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_issuer_signing_pubkey() != 55411) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_metadata() != 37374) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_offer_chains() != 39622) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_payer_note() != 28018) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_payer_signing_pubkey() != 12798) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_payment_hash() != 63778) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_quantity() != 43105) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_relative_expiry() != 14024) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_signable_hash() != 39303) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12invoice_signing_pubkey() != 35202) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12payment_blinded_paths_for_async_recipient() != 14695) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12payment_initiate_refund() != 15019) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12payment_receive() != 59252) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12payment_receive_async() != 23867) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12payment_receive_variable_amount() != 35484) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12payment_request_refund_payment() != 43248) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12payment_send() != 27679) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12payment_send_using_amount() != 33255) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_bolt12payment_set_paths_to_static_invoice_server() != 20921) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_builder_build() != 785) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_builder_build_with_fs_store() != 61304) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_builder_build_with_vss_store() != 2871) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_fixed_headers() != 24910) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_builder_build_with_vss_store_and_header_provider() != 9090) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_builder_set_announcement_addresses() != 39271) {
+    if (uniffi_ldk_node_checksum_method_builder_set_announcement_addresses() != 21735) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_builder_set_async_payments_role() != 16463) {
@@ -11968,15 +18224,6 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_method_builder_set_custom_logger() != 51232) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_builder_set_entropy_bip39_mnemonic() != 827) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_builder_set_entropy_seed_bytes() != 44799) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_builder_set_entropy_seed_path() != 64056) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_ldk_node_checksum_method_builder_set_filesystem_logger() != 10249) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -11986,13 +18233,13 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_method_builder_set_gossip_source_rgs() != 64312) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_builder_set_liquidity_source_lsps1() != 51527) {
+    if (uniffi_ldk_node_checksum_method_builder_set_liquidity_source_lsps1() != 30329) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_builder_set_liquidity_source_lsps2() != 14430) {
+    if (uniffi_ldk_node_checksum_method_builder_set_liquidity_source_lsps2() != 20666) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_builder_set_listening_addresses() != 14051) {
+    if (uniffi_ldk_node_checksum_method_builder_set_listening_addresses() != 57941) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_builder_set_log_facade_logger() != 58410) {
@@ -12010,6 +18257,12 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_method_builder_set_storage_dir_path() != 59019) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_ldk_node_checksum_method_builder_set_tor_config() != 53118) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_builder_set_wallet_recovery_mode() != 6703) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_ldk_node_checksum_method_feerate_to_sat_per_kwu() != 58911) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -12019,28 +18272,10 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_method_feerate_to_sat_per_vb_floor() != 59617) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_lsps1liquidity_check_order_status() != 57147) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_lsps1liquidity_request_channel() != 18153) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_ldk_node_checksum_method_logwriter_log() != 3299) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_networkgraph_channel() != 38070) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_networkgraph_list_channels() != 4693) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_networkgraph_list_nodes() != 36715) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_networkgraph_node() != 48925) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_ldk_node_checksum_method_node_announcement_addresses() != 61426) {
+    if (uniffi_ldk_node_checksum_method_node_announcement_addresses() != 26379) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_node_bolt11_payment() != 41402) {
@@ -12049,16 +18284,16 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_method_node_bolt12_payment() != 49254) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_close_channel() != 62479) {
+    if (uniffi_ldk_node_checksum_method_node_close_channel() != 19761) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_node_config() != 7511) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_connect() != 34120) {
+    if (uniffi_ldk_node_checksum_method_node_connect() != 4107) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_disconnect() != 43538) {
+    if (uniffi_ldk_node_checksum_method_node_disconnect() != 28878) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_node_event_handled() != 38712) {
@@ -12067,7 +18302,7 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_method_node_export_pathfinding_scores() != 62331) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_force_close_channel() != 48831) {
+    if (uniffi_ldk_node_checksum_method_node_force_close_channel() != 9265) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_node_list_balances() != 57528) {
@@ -12082,7 +18317,10 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_method_node_list_peers() != 14889) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_listening_addresses() != 2665) {
+    if (uniffi_ldk_node_checksum_method_node_listening_addresses() != 2357) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_node_lnurl_auth() != 45487) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_node_lsps1_liquidity() != 38201) {
@@ -12097,34 +18335,49 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_method_node_next_event_async() != 25426) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_node_alias() != 29526) {
+    if (uniffi_ldk_node_checksum_method_node_node_alias() != 54081) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_node_id() != 51489) {
+    if (uniffi_ldk_node_checksum_method_node_node_id() != 32528) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_node_onchain_payment() != 6092) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_open_announced_channel() != 36623) {
+    if (uniffi_ldk_node_checksum_method_node_open_0reserve_channel() != 59831) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_open_channel() != 40283) {
+    if (uniffi_ldk_node_checksum_method_node_open_0reserve_channel_with_all() != 16772) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_payment() != 60296) {
+    if (uniffi_ldk_node_checksum_method_node_open_announced_channel() != 42749) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_remove_payment() != 47952) {
+    if (uniffi_ldk_node_checksum_method_node_open_announced_channel_with_all() != 58472) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_node_open_channel() != 7411) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_node_open_channel_with_all() != 26760) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_node_payment() != 22178) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_node_remove_payment() != 22427) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_node_sign_message() != 49319) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_splice_in() != 46431) {
+    if (uniffi_ldk_node_checksum_method_node_splice_in() != 2355) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_splice_out() != 22115) {
+    if (uniffi_ldk_node_checksum_method_node_splice_in_with_all() != 42260) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_node_splice_out() != 12130) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_node_spontaneous_payment() != 37403) {
@@ -12142,147 +18395,369 @@ private var initializationResult: InitializationResult = {
     if (uniffi_ldk_node_checksum_method_node_sync_wallets() != 32474) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_unified_qr_payment() != 9837) {
+    if (uniffi_ldk_node_checksum_method_node_unified_payment() != 33932) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_update_channel_config() != 37852) {
+    if (uniffi_ldk_node_checksum_method_node_update_channel_config() != 22596) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_node_verify_signature() != 20486) {
+    if (uniffi_ldk_node_checksum_method_node_verify_signature() != 60677) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_ldk_node_checksum_method_node_wait_next_event() != 55101) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_absolute_expiry_seconds() != 22836) {
+    if (uniffi_ldk_node_checksum_method_vssheaderprovider_get_headers() != 53392) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_amount() != 59890) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_amount_milli_satoshis() != 32418) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_chains() != 59522) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_currency() != 23097) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_expects_quantity() != 58457) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_expiry_time_seconds() != 13550) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_id() != 8391) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_fallback_addresses() != 43969) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_is_expired() != 22651) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_invoice_description() != 58644) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_is_valid_quantity() != 58469) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_is_expired() != 7799) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_issuer() != 41632) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_min_final_cltv_expiry_delta() != 55712) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_issuer_signing_pubkey() != 38162) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_network() != 48075) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_metadata() != 18979) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_payment_hash() != 30556) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_offer_description() != 11122) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_payment_secret() != 2591) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_offer_supports_chain() != 2135) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_recover_payee_pub_key() != 29418) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_onchainpayment_new_address() != 37251) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_route_hints() != 40413) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_onchainpayment_send_all_to_address() != 37748) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_seconds_since_epoch() != 29057) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_onchainpayment_send_to_address() != 55646) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_seconds_until_expiry() != 40162) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_refund_absolute_expiry_seconds() != 43722) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_signable_hash() != 17620) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_refund_amount_msats() != 26467) {
+    if (uniffi_ldk_node_checksum_method_bolt11invoice_would_expire() != 31077) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_refund_chain() != 36565) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_claim_for_hash() != 20569) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_refund_is_expired() != 10232) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_fail_for_hash() != 40917) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_refund_issuer() != 40306) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_receive() != 29930) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_refund_payer_metadata() != 23501) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_for_hash() != 50974) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_refund_payer_note() != 47799) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_variable_amount() != 3285) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_refund_payer_signing_pubkey() != 40880) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_variable_amount_for_hash() != 18560) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_refund_quantity() != 15192) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_variable_amount_via_jit_channel() != 17693) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_refund_refund_description() != 39295) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_variable_amount_via_jit_channel_for_hash() != 64861) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_spontaneouspayment_send() != 27905) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_via_jit_channel() != 8559) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_spontaneouspayment_send_probes() != 25937) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_receive_via_jit_channel_for_hash() != 57288) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_spontaneouspayment_send_with_custom_tlvs() != 17876) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_send() != 37617) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_spontaneouspayment_send_with_preimage() != 30854) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_send_probes() != 2041) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_spontaneouspayment_send_with_preimage_and_custom_tlvs() != 12104) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_send_probes_using_amount() != 27145) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_unifiedqrpayment_receive() != 913) {
+    if (uniffi_ldk_node_checksum_method_bolt11payment_send_using_amount() != 24457) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_unifiedqrpayment_send() != 28285) {
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_absolute_expiry_seconds() != 64960) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_method_vssheaderprovider_get_headers() != 7788) {
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_amount() != 49725) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_constructor_bolt11invoice_from_str() != 349) {
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_amount_msats() != 60333) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_constructor_bolt12invoice_from_str() != 22276) {
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_chain() != 58655) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_constructor_builder_from_config() != 994) {
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_created_at() != 49933) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_constructor_builder_new() != 40499) {
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_encode() != 5305) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_constructor_feerate_from_sat_per_kwu() != 50548) {
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_fallback_addresses() != 44968) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_constructor_feerate_from_sat_per_vb_unchecked() != 41808) {
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_invoice_description() != 40225) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_constructor_offer_from_str() != 37070) {
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_is_expired() != 25200) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_ldk_node_checksum_constructor_refund_from_str() != 64884) {
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_issuer() != 30831) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_issuer_signing_pubkey() != 64809) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_metadata() != 46678) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_offer_chains() != 26217) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_payer_note() != 55340) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_payer_signing_pubkey() != 16324) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_payment_hash() != 26138) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_quantity() != 2731) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_relative_expiry() != 2637) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_signable_hash() != 8693) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12invoice_signing_pubkey() != 40070) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12payment_blinded_paths_for_async_recipient() != 63122) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12payment_initiate_refund() != 1556) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12payment_receive() != 62366) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12payment_receive_async() != 18142) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12payment_receive_variable_amount() != 38705) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12payment_request_refund_payment() != 64220) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12payment_send() != 39845) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12payment_send_using_amount() != 58098) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_bolt12payment_set_paths_to_static_invoice_server() != 4432) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_humanreadablename_domain() != 24546) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_humanreadablename_user() != 19941) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_lsps1liquidity_check_order_status() != 56905) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_lsps1liquidity_request_channel() != 8762) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_networkgraph_channel() != 19476) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_networkgraph_list_channels() != 15785) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_networkgraph_list_nodes() != 362) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_networkgraph_node() != 57416) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_absolute_expiry_seconds() != 63488) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_amount() != 57542) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_chains() != 452) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_expects_quantity() != 63436) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_id() != 37816) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_is_expired() != 28193) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_is_valid_quantity() != 52411) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_issuer() != 3667) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_issuer_signing_pubkey() != 24676) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_metadata() != 38207) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_offer_description() != 28248) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_offer_supports_chain() != 55723) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_onchainpayment_bump_fee_rbf() != 54102) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_onchainpayment_new_address() != 43992) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_onchainpayment_send_all_to_address() != 37128) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_onchainpayment_send_to_address() != 21558) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_refund_absolute_expiry_seconds() != 1700) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_refund_amount_msats() != 14905) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_refund_chain() != 65505) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_refund_is_expired() != 42373) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_refund_issuer() != 16526) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_refund_payer_metadata() != 39486) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_refund_payer_note() != 4011) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_refund_payer_signing_pubkey() != 27530) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_refund_quantity() != 7212) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_refund_refund_description() != 28138) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_spontaneouspayment_send() != 46594) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_spontaneouspayment_send_probes() != 14653) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_spontaneouspayment_send_with_custom_tlvs() != 56266) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_spontaneouspayment_send_with_preimage() != 21182) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_spontaneouspayment_send_with_preimage_and_custom_tlvs() != 44297) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_staticinvoice_amount() != 49018) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_unifiedpayment_receive() != 33768) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_method_unifiedpayment_send() != 54400) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_builder_from_config() != 56211) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_builder_new() != 42021) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_feerate_from_sat_per_kwu() != 33347) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_feerate_from_sat_per_vb_u32() != 40663) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_bolt11invoice_from_str() != 6641) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_bolt12invoice_from_str() != 2587) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_humanreadablename_from_encoded() != 34127) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_nodeentropy_from_bip39_mnemonic() != 49277) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_nodeentropy_from_seed_bytes() != 13290) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_nodeentropy_from_seed_path() != 60826) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_offer_from_str() != 16902) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_ldk_node_checksum_constructor_refund_from_str() != 46403) {
         return InitializationResult.apiChecksumMismatch
     }
 
     uniffiCallbackInitLogWriter()
+    uniffiCallbackInitVssHeaderProvider()
     return InitializationResult.ok
 }()
 
-private func uniffiEnsureInitialized() {
+// Make the ensure init function public so that other modules which have external type references to
+// our types can call it.
+public func uniffiEnsureLdkNodeInitialized() {
     switch initializationResult {
     case .ok:
         break
