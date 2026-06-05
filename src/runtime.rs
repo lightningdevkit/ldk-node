@@ -32,7 +32,20 @@ impl Runtime {
 		let mode = match tokio::runtime::Handle::try_current() {
 			Ok(handle) => RuntimeMode::Handle(handle),
 			Err(_) => {
-				let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+				let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
+				runtime_builder.enable_all();
+				// Eager driver handoff lets Tokio move the I/O driver to another worker sooner
+				// when this runtime's current worker enters `block_in_place` via `block_on`.
+				// That marginally reduces the chance that a synchronous caller blocks the same
+				// worker that would otherwise drive the I/O resource it is waiting on. It does
+				// not solve the issue completely: it only applies to node runtimes we build
+				// ourselves under `tokio_unstable`, does not affect externally supplied runtime
+				// handles, and cannot guarantee that every persistence driver task needed by the
+				// blocked future is already polling elsewhere. See the `StoreRuntime` docs below
+				// for the full deadlock scenario and the temporary store-runtime isolation.
+				#[cfg(tokio_unstable)]
+				runtime_builder.enable_eager_driver_handoff();
+				let rt = runtime_builder.build()?;
 				RuntimeMode::Owned(rt)
 			},
 		};

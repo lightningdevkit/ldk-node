@@ -5,6 +5,11 @@ PROJECT_DIR="ldk-node-jvm"
 PACKAGE_DIR="org/lightningdevkit/ldknode"
 UNIFFI_BINDGEN_BIN="cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml"
 
+case " ${RUSTFLAGS:-} " in
+	*" --cfg tokio_unstable "*|*" --cfg=tokio_unstable "*) ;;
+	*) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg tokio_unstable" ;;
+esac
+
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
 	rustup target add x86_64-unknown-linux-gnu || exit 1
 	cargo build --release --target x86_64-unknown-linux-gnu --features uniffi || exit 1
