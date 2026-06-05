@@ -352,12 +352,14 @@ impl EsploraChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
-		for tx in &package {
+	pub(crate) async fn process_broadcast_package(
+		&self, txs: impl IntoIterator<Item = Transaction>,
+	) {
+		for tx in txs {
 			let txid = tx.compute_txid();
 			let timeout_fut = tokio::time::timeout(
 				Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
-				self.esplora_client.broadcast(tx),
+				self.esplora_client.broadcast(&tx),
 			);
 			match timeout_fut.await {
 				Ok(res) => match res {

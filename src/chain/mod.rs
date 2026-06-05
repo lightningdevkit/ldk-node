@@ -24,7 +24,7 @@ use crate::config::{
 	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
 };
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, NodeMetrics};
@@ -453,15 +453,27 @@ impl ChainSource {
 					return;
 				}
 				Some(next_package) = receiver.recv() => {
+					let package = match self.tx_broadcaster.classify_package(next_package).await {
+						Ok(p) => p,
+						Err(e) => {
+							log_error!(
+								tx_bcast_logger,
+								"Skipping broadcast: failed to persist payment records: {:?}",
+								e,
+							);
+							continue;
+						},
+					};
+					let txs = package.into_iter().map(|(tx, _)| tx);
 					match &self.kind {
 						ChainSourceKind::Esplora(esplora_chain_source) => {
-							esplora_chain_source.process_broadcast_package(next_package).await
+							esplora_chain_source.process_broadcast_package(txs).await
 						},
 						ChainSourceKind::Electrum(electrum_chain_source) => {
-							electrum_chain_source.process_broadcast_package(next_package).await
+							electrum_chain_source.process_broadcast_package(txs).await
 						},
 						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
-							bitcoind_chain_source.process_broadcast_package(next_package).await
+							bitcoind_chain_source.process_broadcast_package(txs).await
 						},
 					}
 				}

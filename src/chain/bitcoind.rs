@@ -568,16 +568,18 @@ impl BitcoindChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
+	pub(crate) async fn process_broadcast_package(
+		&self, txs: impl IntoIterator<Item = Transaction>,
+	) {
 		// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
 		// features, we should eventually switch to use `submitpackage` via the
 		// `rust-bitcoind-json-rpc` crate rather than just broadcasting individual
 		// transactions.
-		for tx in &package {
+		for tx in txs {
 			let txid = tx.compute_txid();
 			let timeout_fut = tokio::time::timeout(
 				Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
-				self.api_client.broadcast_transaction(tx),
+				self.api_client.broadcast_transaction(&tx),
 			);
 			match timeout_fut.await {
 				Ok(res) => match res {
