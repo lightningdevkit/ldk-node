@@ -194,6 +194,7 @@ required-features = ["chain-bitcoind"]
 [[bench]]
 name = "operations"
 harness = false
+required-features = ["chain-bitcoind", "storage-sqlite", "storage-filesystem"]
 
 [[bench]]
 name = "database"

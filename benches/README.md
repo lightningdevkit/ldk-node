@@ -19,6 +19,9 @@ is comparatively quick.
   `BITCOIND_EXE` and `ELECTRS_EXE` environment variables at them (see
   `scripts/download_bitcoind_electrs.sh` for a convenient way to fetch them).
 - The `bench` feature is required for the `database` benchmark.
+- The `payments` and `operations` targets require `chain-bitcoind`; `operations` also requires
+  `storage-sqlite` and `storage-filesystem` for its startup fixtures. These features are enabled by
+  default. Cargo skips these targets when their required features are disabled.
 - The `storage-postgres` feature plus a reachable PostgreSQL server (set `TEST_POSTGRES_URL`) are required
   to include the PostgreSQL backend. Without it, the filesystem and SQLite backends still run.
 
