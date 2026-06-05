@@ -9,7 +9,7 @@ concurrency:
 jobs:
   check-python:
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     env:
       LDK_NODE_PYTHON_DIR: bindings/python

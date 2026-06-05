@@ -4,7 +4,7 @@ on: [push, pull_request]
 jobs:
   semver-checks:
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout source code
         uses: actions/checkout@v6

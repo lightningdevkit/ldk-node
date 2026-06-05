@@ -13,7 +13,7 @@ jobs:
     strategy:
       matrix:
         platform: [
-          ubuntu-latest,
+          self-hosted,
           macos-latest,
           windows-latest,
           ]

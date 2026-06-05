@@ -12,7 +12,7 @@ jobs:
     strategy:
       matrix:
         platform: [
-          ubuntu-latest,
+          self-hosted,
           macos-latest,
           windows-latest,
           ]
@@ -25,7 +25,7 @@ jobs:
           - toolchain: stable
             check-fmt: true
             build-uniffi: true
-            platform: ubuntu-latest
+            platform: self-hosted
           - toolchain: stable
             platform: macos-latest
           - toolchain: stable
@@ -94,7 +94,7 @@ jobs:
   linting:
     name: Linting
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout source code
         uses: actions/checkout@v6
@@ -110,7 +110,7 @@ jobs:
   doc:
     name: Documentation
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     env:
       RUSTDOCFLAGS: -Dwarnings
     steps:

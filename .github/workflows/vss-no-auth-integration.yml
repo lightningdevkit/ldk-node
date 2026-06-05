@@ -9,7 +9,7 @@ concurrency:
 jobs:
   build-and-test:
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
 
     services:
       postgres:

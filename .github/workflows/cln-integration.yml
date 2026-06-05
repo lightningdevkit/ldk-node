@@ -9,7 +9,7 @@ concurrency:
 jobs:
   check-cln:
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

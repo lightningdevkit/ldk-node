@@ -12,7 +12,7 @@ jobs:
   format:
     name: Nightly rustfmt
     timeout-minutes: 60
-    runs-on: ubuntu-24.04
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
