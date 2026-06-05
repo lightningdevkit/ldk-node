@@ -1100,6 +1100,36 @@ pub async fn open_channel_push_amt(
 	funding_txo
 }
 
+pub async fn wait_for_channel_ready_events(
+	node: &Node, counterparty_node_id: PublicKey, count: u64,
+) {
+	let mut remaining_count = count;
+	while remaining_count > 0 {
+		let event = tokio::time::timeout(
+			Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+			node.next_event_async(),
+		)
+		.await
+		.unwrap_or_else(|_| {
+			panic!("{} timed out waiting for ChannelReady event after 60s", node.node_id())
+		});
+
+		match event {
+			ref e @ Event::ChannelReady { counterparty_node_id: Some(node_id), .. }
+				if node_id == counterparty_node_id =>
+			{
+				println!("{} got event {:?}", node.node_id(), e);
+				remaining_count -= 1;
+			},
+			ref e @ Event::ChannelReady { .. } => {
+				panic!("{} got unexpected ChannelReady event: {:?}", node.node_id(), e);
+			},
+			_ => {},
+		}
+		node.event_handled().unwrap();
+	}
+}
+
 pub async fn open_channel_with_all(
 	node_a: &TestNode, node_b: &TestNode, should_announce: bool, electrsd: &ElectrsD,
 ) -> OutPoint {
