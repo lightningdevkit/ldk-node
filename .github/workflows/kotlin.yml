@@ -8,6 +8,7 @@ concurrency:
 
 jobs:
   check-kotlin:
+    timeout-minutes: 60
     runs-on: ubuntu-latest
 
     env:
