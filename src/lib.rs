@@ -179,7 +179,9 @@ use types::{
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId};
+pub use types::{
+	ChannelCounterparty, ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId,
+};
 pub use vss_client;
 
 use crate::ffi::maybe_wrap;
