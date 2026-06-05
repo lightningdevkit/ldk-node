@@ -12,7 +12,7 @@ jobs:
     strategy:
       matrix:
         platform: [
-          ubuntu-latest,
+          self-hosted,
           macos-latest,
           windows-latest,
           ]
@@ -25,7 +25,7 @@ jobs:
           - toolchain: stable
             check-fmt: true
             build-uniffi: true
-            platform: ubuntu-latest
+            platform: self-hosted
           - toolchain: stable
             platform: macos-latest
           - toolchain: stable
@@ -35,7 +35,7 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
       - name: Install Rust ${{ matrix.toolchain }} toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
@@ -51,13 +51,13 @@ jobs:
         run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
       - name: Enable caching for bitcoind
         id: cache-bitcoind
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
           key: bitcoind-29.0-${{ runner.os }}-${{ runner.arch }}
       - name: Enable caching for electrs
         id: cache-electrs
-        uses: actions/cache@v5
+        uses: actions/cache@v4
         with:
           path: bin/electrs-${{ runner.os }}-${{ runner.arch }}
           key: electrs-${{ runner.os }}-${{ runner.arch }}
@@ -94,14 +94,15 @@ jobs:
   linting:
     name: Linting
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v6
-      - name: Install Rust and clippy
+        uses: actions/checkout@v4
+      - name: Install Rust stable toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable
-          rustup component add clippy
+      - name: Add clippy component
+        run: rustup component add clippy
       - name: Ban `unwrap` in library code
         run: |
           cargo clippy --lib --verbose --color always -- -A warnings -D clippy::unwrap_used -A clippy::tabs_in_doc_comments
@@ -110,11 +111,11 @@ jobs:
   doc:
     name: Documentation
     timeout-minutes: 60
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     env:
       RUSTDOCFLAGS: -Dwarnings
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: dtolnay/install@cargo-docs-rs
       - run: cargo docs-rs
