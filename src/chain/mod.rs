@@ -376,13 +376,14 @@ impl ChainSource {
 					.await
 			},
 			ChainSourceKind::Cbf(cbf_chain_source) => {
-				cbf_chain_source.process_kyoto_events(
-					stop_sync_receiver,
-					onchain_wallet,
-					channel_manager,
-					chain_monitor,
-					output_sweeper,
-				);
+				todo!();
+				// cbf_chain_source.process_kyoto_events(
+				// 	stop_sync_receiver,
+				// 	onchain_wallet,
+				// 	channel_manager,
+				// 	chain_monitor,
+				// 	output_sweeper,
+				// );
 			},
 		}
 	}

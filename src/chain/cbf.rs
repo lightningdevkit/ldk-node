@@ -5,12 +5,13 @@ use std::time::Duration;
 
 use bip157::chain::ChainState;
 use bip157::{
-	Builder as KyotoBuilder, Client, HashCheckpoint, Info, Node as KyotoNode, Requester,
-	TrustedPeer, Warning,
+	chain::BlockHeaderChanges, error::FetchBlockError, Builder as KyotoBuilder, Client, Event,
+	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Requester, TrustedPeer, Warning,
 };
 use bitcoin::{BlockHash, FeeRate, Script, ScriptBuf, Txid};
-use lightning::chain::WatchedOutput;
-use tokio::sync::mpsc;
+use lightning::chain::{Listen, WatchedOutput};
+
+use tokio::sync::{mpsc, oneshot};
 
 use crate::chain::bitcoind::ChainListener;
 use crate::chain::CbfFeeSourceConfig;
@@ -50,13 +51,43 @@ enum CbfRuntimeStatus {
 pub struct CbfChainSource {
 	/// Trusted peer addresses for kyoto's `Builder::add_peers`.
 	trusted_peers: Vec<TrustedPeer>,
-	registered_scripts: Mutex<HashSet<ScriptBuf>>,
+	registered_scripts: Arc<Mutex<HashSet<ScriptBuf>>>,
 	fee_source: FeeSource,
 	/// Tracks whether the kyoto node is running and holds the live requester.
 	cbf_runtime_status: Arc<Mutex<CbfRuntimeStatus>>,
 	/// Node configuration (network, storage path).
 	config: Arc<Config>,
 	logger: Arc<Logger>,
+}
+
+enum ChainOp {
+	ConnectFull { block_rx: oneshot::Receiver<Result<IndexedBlock, FetchBlockError>> },
+	ConnectFiltered { header: Header, height: u32 },
+	//Reorg { /* accepted / reorganized from BlockHeaderChanges */ },
+}
+
+struct BlockApplicator {
+	chain_listener: ChainListener,
+	ops_rx: mpsc::UnboundedReceiver<ChainOp>,
+	logger: Arc<Logger>,
+}
+
+impl BlockApplicator {
+	async fn run(mut self) {
+		while let Some(op) = self.ops_rx.recv().await {
+			match op {
+				ChainOp::ConnectFull { block_rx } => match block_rx.await {
+					Ok(Ok(ib)) => self.chain_listener.block_connected(&ib.block, ib.height),
+					Ok(Err(e)) => log_error!(self.logger, "block fetch failed: {:?}", e),
+					Err(_) => log_error!(self.logger, "block oneshot dropped"),
+				},
+				ChainOp::ConnectFiltered { header, height } => {
+					self.chain_listener.filtered_block_connected(&header, &[], height)
+				},
+				//ChainOp::Reorg { .. } => {},
+			}
+		}
+	}
 }
 
 enum FeeSource {
@@ -68,6 +99,17 @@ enum FeeSource {
 	///
 	/// A fresh connection is opened for each estimation cycle.
 	Electrum { server_url: String },
+}
+
+impl FeeSource {
+	fn insert_cached_block(&self, block_hash: BlockHash, fee_rate: FeeRate) {
+		match &self {
+			Self::Cbf { block_fee_cache } => {
+				block_fee_cache.lock().expect("lock").push_back((block_hash, fee_rate));
+			},
+			_ => {},
+		}
+	}
 }
 
 impl CbfChainSource {
@@ -97,7 +139,7 @@ impl CbfChainSource {
 				block_fee_cache: Mutex::new(VecDeque::with_capacity(BLOCK_FEE_CACHE_CAPACITY)),
 			},
 		};
-		let registered_scripts = Mutex::new(HashSet::new());
+		let registered_scripts = Arc::new(Mutex::new(HashSet::new()));
 		let cbf_runtime_status = Arc::new(Mutex::new(CbfRuntimeStatus::Stopped));
 		Ok(Self {
 			trusted_peers,
@@ -109,8 +151,7 @@ impl CbfChainSource {
 		})
 	}
 
-	//builds kyoto
-	fn build(
+	fn build_kyoto(
 		trusted_peers: &[TrustedPeer], config: &Config, logger: &Logger,
 		chain_listener: &ChainListener,
 	) -> (KyotoNode, Client) {
@@ -128,7 +169,7 @@ impl CbfChainSource {
 		kyoto_builder =
 			kyoto_builder.response_timeout(Duration::from_secs(DEFAULT_RESPONSE_TIMEOUT_SECS));
 
-		if let Some(header_cp) = Self::resume_checkpoint(logger, chain_listener) {
+		if let Some(header_cp) = resume_checkpoint(logger, chain_listener) {
 			log_debug!(
 				logger,
 				"CBF builder: resuming from checkpoint height={}, hash={}",
@@ -141,47 +182,15 @@ impl CbfChainSource {
 		kyoto_builder.build()
 	}
 
-	fn resume_checkpoint(
-		logger: &Logger, chain_listener: &ChainListener,
-	) -> Option<HashCheckpoint> {
-		let min_best_block = chain_listener.get_best_block();
-		let bdk_cp = chain_listener.onchain_wallet.latest_checkpoint();
-
-		if let Some(bdk_at_height) = bdk_cp.get(min_best_block.height) {
-			if bdk_at_height.hash() != min_best_block.block_hash {
-				log_error!(
-					logger,
-					"CBF resume: listener best block at height {} has hash {} but BDK has {}; \
-					 a component may be on a stale fork. Anchoring on BDK's chain.",
-					min_best_block.height,
-					min_best_block.block_hash,
-					bdk_at_height.hash(),
-				);
-			}
-		}
-
-		// Walk BDK's checkpoint chain back to the reorg-safe anchor height.
-		let target_height = min_best_block.height.saturating_sub(REORG_SAFETY_BLOCKS);
-		let mut cursor = bdk_cp;
-		while cursor.height() > target_height {
-			match cursor.prev() {
-				Some(prev) => cursor = prev,
-				None => break,
-			}
-		}
-
-		(cursor.height() > 0).then(|| HashCheckpoint::new(cursor.height(), cursor.hash()))
-	}
-
 	pub(crate) fn start(&self, runtime: Arc<Runtime>, chain_listener: ChainListener) {
-		//we populate registered scripts with all the scripts from the onchain wallet
+		//populate registered scripts with all the scripts from the onchain wallet
 		for script in chain_listener.onchain_wallet.list_revealed_scripts() {
 			self.register_script(script);
 		}
 
 		let (node, client) =
-			Self::build(&self.trusted_peers, &self.config, &self.logger, &chain_listener);
-		let Client { requester, info_rx, warn_rx, event_rx: _ } = client;
+			Self::build_kyoto(&self.trusted_peers, &self.config, &self.logger, &chain_listener);
+		let Client { requester, info_rx, warn_rx, event_rx } = client;
 
 		{
 			let mut status = self.cbf_runtime_status.lock().expect("lock");
@@ -192,6 +201,14 @@ impl CbfChainSource {
 			*status = CbfRuntimeStatus::Started { requester };
 		}
 
+		let (ops_tx, ops_rx) = mpsc::unbounded_channel();
+		let block_applicator = BlockApplicator {
+			chain_listener: chain_listener.clone(),
+			ops_rx,
+			logger: Arc::clone(&self.logger),
+		};
+		runtime.spawn_background_task(block_applicator.run());
+
 		log_info!(self.logger, "CBF chain source started.");
 
 		let restart_status = Arc::clone(&self.cbf_runtime_status);
@@ -199,11 +216,15 @@ impl CbfChainSource {
 		let restart_peers = self.trusted_peers.clone();
 		let restart_config = Arc::clone(&self.config);
 		let restart_listener = chain_listener;
+		let restart_registered_scripts = Arc::clone(&self.registered_scripts);
+		let restart_cbf_runtime_status = Arc::clone(&self.cbf_runtime_status);
+		// let restart_block_applicator =
 
 		runtime.spawn_background_task(async move {
 			let mut current_node = node;
 			let mut current_info_rx = info_rx;
 			let mut current_warn_rx = warn_rx;
+			let mut current_event_rx = event_rx;
 			let mut retries = 0u32;
 			let mut backoff_ms = INITIAL_BACKOFF_MS;
 
@@ -215,6 +236,13 @@ impl CbfChainSource {
 				let warn_handle = tokio::spawn(Self::process_warn_messages(
 					current_warn_rx,
 					Arc::clone(&restart_logger),
+				));
+
+				let event_handle = tokio::spawn(Self::process_kyoto_events(
+					current_event_rx,
+					Arc::clone(&restart_registered_scripts),
+					Arc::clone(&restart_cbf_runtime_status),
+					ops_tx.clone(),
 				));
 
 				match current_node.run().await {
@@ -249,8 +277,9 @@ impl CbfChainSource {
 						// Abort the old log consumers before rebuilding.
 						info_handle.abort();
 						warn_handle.abort();
+						event_handle.abort();
 
-						let (new_node, new_client) = Self::build(
+						let (new_node, new_client) = Self::build_kyoto(
 							&restart_peers,
 							&restart_config,
 							&restart_logger,
@@ -260,7 +289,7 @@ impl CbfChainSource {
 							requester: new_requester,
 							info_rx: new_info_rx,
 							warn_rx: new_warn_rx,
-							event_rx: _,
+							event_rx: new_event_rx,
 						} = new_client;
 
 						*restart_status.lock().expect("lock") =
@@ -269,6 +298,7 @@ impl CbfChainSource {
 						current_node = new_node;
 						current_info_rx = new_info_rx;
 						current_warn_rx = new_warn_rx;
+						current_event_rx = new_event_rx;
 					},
 				}
 			}
@@ -293,13 +323,49 @@ impl CbfChainSource {
 		}
 	}
 
-	pub(crate) fn process_kyoto_events(
-		&self, _stop_sync_receiver: tokio::sync::watch::Receiver<()>, _onchain_wallet: Arc<Wallet>,
-		_channel_manager: Arc<ChannelManager>, _chain_monitor: Arc<ChainMonitor>,
-		_output_sweeper: Arc<Sweeper>,
+	async fn process_kyoto_events(
+		mut event_rx: mpsc::UnboundedReceiver<Event>,
+		registered_scripts: Arc<Mutex<HashSet<ScriptBuf>>>,
+		cbf_runtime_status: Arc<Mutex<CbfRuntimeStatus>>, ops_tx: mpsc::UnboundedSender<ChainOp>,
 	) {
-		//here we need to calculate chain update and feed to all listeners
-		todo!();
+		while let Some(event) = event_rx.recv().await {
+			match event {
+				// match download
+				Event::IndexedFilter(indexed_filter) => {
+					let matched = indexed_filter
+						.contains_any(registered_scripts.lock().expect("lock").iter());
+					if matched {
+						let rtm = &*cbf_runtime_status.lock().expect("lock");
+						let requestor = match rtm {
+							CbfRuntimeStatus::Started { requester } => requester.clone(),
+							CbfRuntimeStatus::Stopped => {
+								//panic
+								// todo!();
+								continue;
+							},
+						};
+						let block_rx = requestor
+							.request_block(indexed_filter.block_hash())
+							.expect("cannot request block");
+						let chop = ChainOp::ConnectFull { block_rx };
+						//here we feed evets to the driver
+						ops_tx.send(chop);
+					}
+				},
+				Event::FiltersSynced(sync_update) => {
+					todo!();
+				},
+				Event::ChainUpdate(BlockHeaderChanges::Connected(connected_blocks)) => {
+					todo!();
+				},
+				Event::ChainUpdate(BlockHeaderChanges::Reorganized { reorganized, accepted }) => {
+					todo!();
+				},
+				Event::ChainUpdate(BlockHeaderChanges::ForkAdded(fork)) => {
+					todo!();
+				},
+			}
+		}
 	}
 
 	pub(crate) fn register_tx(&self, _txid: &Txid, script_pubkey: &Script) {
@@ -313,4 +379,34 @@ impl CbfChainSource {
 	pub(crate) fn register_script(&self, script: ScriptBuf) {
 		self.registered_scripts.lock().expect("lock").insert(script);
 	}
+}
+
+fn resume_checkpoint(logger: &Logger, chain_listener: &ChainListener) -> Option<HashCheckpoint> {
+	let min_best_block = chain_listener.get_best_block();
+	let bdk_cp = chain_listener.onchain_wallet.latest_checkpoint();
+
+	if let Some(bdk_at_height) = bdk_cp.get(min_best_block.height) {
+		if bdk_at_height.hash() != min_best_block.block_hash {
+			log_error!(
+				logger,
+				"CBF resume: listener best block at height {} has hash {} but BDK has {}; \
+					 a component may be on a stale fork. Anchoring on BDK's chain.",
+				min_best_block.height,
+				min_best_block.block_hash,
+				bdk_at_height.hash(),
+			);
+		}
+	}
+
+	// Walk BDK's checkpoint chain back to the reorg-safe anchor height.
+	let target_height = min_best_block.height.saturating_sub(REORG_SAFETY_BLOCKS);
+	let mut cursor = bdk_cp;
+	while cursor.height() > target_height {
+		match cursor.prev() {
+			Some(prev) => cursor = prev,
+			None => break,
+		}
+	}
+
+	(cursor.height() > 0).then(|| HashCheckpoint::new(cursor.height(), cursor.hash()))
 }
