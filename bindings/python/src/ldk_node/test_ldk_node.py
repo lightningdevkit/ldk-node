@@ -118,8 +118,59 @@ def expect_event(node, expected_event_type):
     assert isinstance(event, expected_event_type)
     print("EVENT:", event)
     node.event_handled()
-    return event 
+    return event
 
+def setup_two_nodes(esplora_endpoint):
+    tmp_dir_1 = tempfile.TemporaryDirectory("_ldk_node_1")
+    listening_addresses_1 = ["127.0.0.1:2323"]
+    node_1 = setup_node(tmp_dir_1.name, esplora_endpoint, listening_addresses_1)
+    node_1.start()
+    node_id_1 = node_1.node_id()
+
+    tmp_dir_2 = tempfile.TemporaryDirectory("_ldk_node_2")
+    listening_addresses_2 = ["127.0.0.1:2324"]
+    node_2 = setup_node(tmp_dir_2.name, esplora_endpoint, listening_addresses_2)
+    node_2.start()
+    node_id_2 = node_2.node_id()
+
+    return node_1, node_2, tmp_dir_1, tmp_dir_2, node_id_1, node_id_2, listening_addresses_2
+
+def fund_nodes(node_1, node_2, esplora_endpoint, amount_sats=100000):
+    address_1 = node_1.onchain_payment().new_address()
+    txid_1 = send_to_address(address_1, amount_sats)
+    address_2 = node_2.onchain_payment().new_address()
+    txid_2 = send_to_address(address_2, amount_sats)
+
+    wait_for_tx(esplora_endpoint, txid_1)
+    wait_for_tx(esplora_endpoint, txid_2)
+    mine_and_wait(esplora_endpoint, 6)
+
+    node_1.sync_wallets()
+    node_2.sync_wallets()
+
+def open_channel_and_wait_ready(node_1, node_2, node_id_2, listening_address_2, esplora_endpoint, channel_amount_sats=50000):
+    node_1.open_channel(node_id_2, listening_address_2, channel_amount_sats, None, None)
+
+    channel_pending_event_1 = expect_event(node_1, Event.CHANNEL_PENDING)
+    expect_event(node_2, Event.CHANNEL_PENDING)
+
+    funding_txid = channel_pending_event_1.funding_txo.txid
+    wait_for_tx(esplora_endpoint, funding_txid)
+    mine_and_wait(esplora_endpoint, 6)
+
+    node_1.sync_wallets()
+    node_2.sync_wallets()
+
+    channel_ready_event_1 = expect_event(node_1, Event.CHANNEL_READY)
+    channel_ready_event_2 = expect_event(node_2, Event.CHANNEL_READY)
+    return channel_ready_event_1, channel_ready_event_2, funding_txid
+
+def stop_and_cleanup(node_1, node_2, tmp_dir_1, tmp_dir_2):
+    node_1.stop()
+    node_2.stop()
+    time.sleep(1)
+    tmp_dir_1.cleanup()
+    tmp_dir_2.cleanup()
 
 
 class TestLdkNode(unittest.TestCase):
@@ -130,65 +181,13 @@ class TestLdkNode(unittest.TestCase):
         esplora_endpoint = get_esplora_endpoint()
         mine_and_wait(esplora_endpoint, 1)
 
-    def _setup_two_nodes(self, esplora_endpoint):
-        tmp_dir_1 = tempfile.TemporaryDirectory("_ldk_node_1")
-        listening_addresses_1 = ["127.0.0.1:2323"]
-        node_1 = setup_node(tmp_dir_1.name, esplora_endpoint, listening_addresses_1)
-        node_1.start()
-        node_id_1 = node_1.node_id()
-
-        tmp_dir_2 = tempfile.TemporaryDirectory("_ldk_node_2")
-        listening_addresses_2 = ["127.0.0.1:2324"]
-        node_2 = setup_node(tmp_dir_2.name, esplora_endpoint, listening_addresses_2)
-        node_2.start()
-        node_id_2 = node_2.node_id()
-
-        return node_1, node_2, tmp_dir_1, tmp_dir_2, node_id_1, node_id_2, listening_addresses_2
-
-    def _fund_nodes(self, node_1, node_2, esplora_endpoint, amount_sats=100000):
-        address_1 = node_1.onchain_payment().new_address()
-        txid_1 = send_to_address(address_1, amount_sats)
-        address_2 = node_2.onchain_payment().new_address()
-        txid_2 = send_to_address(address_2, amount_sats)
-
-        wait_for_tx(esplora_endpoint, txid_1)
-        wait_for_tx(esplora_endpoint, txid_2)
-        mine_and_wait(esplora_endpoint, 6)
-
-        node_1.sync_wallets()
-        node_2.sync_wallets()
-
-    def _open_channel_and_wait_ready(self, node_1, node_2, node_id_2, listening_address_2, esplora_endpoint, channel_amount_sats=50000):
-        node_1.open_channel(node_id_2, listening_address_2, channel_amount_sats, None, None)
-
-        channel_pending_event_1 = expect_event(node_1, Event.CHANNEL_PENDING)
-        expect_event(node_2, Event.CHANNEL_PENDING)
-
-        funding_txid = channel_pending_event_1.funding_txo.txid
-        wait_for_tx(esplora_endpoint, funding_txid)
-        mine_and_wait(esplora_endpoint, 6)
-
-        node_1.sync_wallets()
-        node_2.sync_wallets()
-
-        channel_ready_event_1 = expect_event(node_1, Event.CHANNEL_READY)
-        channel_ready_event_2 = expect_event(node_2, Event.CHANNEL_READY)
-        return channel_ready_event_1, channel_ready_event_2, funding_txid
-
-    def _stop_and_cleanup(self, node_1, node_2, tmp_dir_1, tmp_dir_2):
-        node_1.stop()
-        node_2.stop()
-        time.sleep(1)
-        tmp_dir_1.cleanup()
-        tmp_dir_2.cleanup()
-
     def test_spontaneous_payment(self):
         """Spontaneous payment test in python: keysend after channel ready."""
         esplora_endpoint = get_esplora_endpoint()
 
-        node_1, node_2, tmp_dir_1, tmp_dir_2, node_id_1, node_id_2, listening_addresses_2 = self._setup_two_nodes(esplora_endpoint)
-        self._fund_nodes(node_1, node_2, esplora_endpoint)
-        self._open_channel_and_wait_ready(node_1, node_2, node_id_2, listening_addresses_2[0], esplora_endpoint)
+        node_1, node_2, tmp_dir_1, tmp_dir_2, node_id_1, node_id_2, listening_addresses_2 = setup_two_nodes(esplora_endpoint)
+        fund_nodes(node_1, node_2, esplora_endpoint)
+        open_channel_and_wait_ready(node_1, node_2, node_id_2, listening_addresses_2[0], esplora_endpoint)
 
         keysend_amount_msat = 2_500_000
         custom_tlvs = [CustomTlvRecord(type_num=13377331, value=bytes([1, 2, 3]))]
@@ -217,7 +216,7 @@ class TestLdkNode(unittest.TestCase):
         self.assertEqual(receiver_payment.amount_msat, keysend_amount_msat)
         self.assertTrue(receiver_payment.kind.is_spontaneous())
 
-        self._stop_and_cleanup(node_1, node_2, tmp_dir_1, tmp_dir_2)
+        stop_and_cleanup(node_1, node_2, tmp_dir_1, tmp_dir_2)
 
     def test_channel_full_cycle(self):
         esplora_endpoint = get_esplora_endpoint()
