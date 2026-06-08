@@ -16,6 +16,16 @@
 //! Lightning node with an integrated on-chain wallet. While minimalism is at its core, LDK Node
 //! aims to be sufficiently modular and configurable to be useful for a variety of use cases.
 //!
+//! ## Runtime Assumptions
+//!
+//! LDK Node's Rust API is async and expects its futures to be polled by a Tokio runtime. When a
+//! node is built from within an existing Tokio context, LDK Node reuses that runtime handle for
+//! internally spawned work; otherwise it creates an owned multi-thread Tokio runtime for its
+//! background tasks. Callers should keep the runtime threads available to drive network, timer, and
+//! persistence futures while node operations are in progress. Long synchronous work should run
+//! outside those worker threads, or on a dedicated blocking pool, so it does not prevent LDK Node's
+//! I/O and storage tasks from making progress.
+//!
 //! ## Getting Started
 //!
 //! The primary abstraction of the library is the [`Node`], which can be retrieved by setting up
