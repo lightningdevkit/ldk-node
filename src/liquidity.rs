@@ -78,7 +78,7 @@ struct LSPS2Client {
 	lsp_address: SocketAddress,
 	token: Option<String>,
 	ldk_client_config: LdkLSPS2ClientConfig,
-	pending_fee_requests: Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2FeeResponse>>>,
+	pending_fee_requests: Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2GetInfoResponse>>>,
 	pending_buy_requests: Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2BuyResponse>>>,
 }
 
@@ -829,7 +829,7 @@ where
 					if let Some(sender) =
 						lsps2_client.pending_fee_requests.lock().unwrap().remove(&request_id)
 					{
-						let response = LSPS2FeeResponse { opening_fee_params_menu };
+						let response = LSPS2GetInfoResponse { opening_fee_params_menu };
 
 						match sender.send(response) {
 							Ok(()) => (),
@@ -1189,7 +1189,7 @@ where
 		Ok((invoice, min_prop_fee_ppm_msat))
 	}
 
-	async fn lsps2_request_opening_fee_params(&self) -> Result<LSPS2FeeResponse, Error> {
+	async fn lsps2_request_opening_fee_params(&self) -> Result<LSPS2GetInfoResponse, Error> {
 		let lsps2_client = self.lsps2_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
 		let client_handler = self.liquidity_manager.lsps2_client_handler().ok_or_else(|| {
@@ -1431,9 +1431,15 @@ type LSPS1PaymentInfo = lightning_liquidity::lsps1::msgs::LSPS1PaymentInfo;
 #[cfg(feature = "uniffi")]
 type LSPS1PaymentInfo = crate::ffi::LSPS1PaymentInfo;
 
+/// Response to an LSPS2 `get_info` request.
+///
+/// See [bLIP-52 / LSPS2] for more information.
+///
+/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
 #[derive(Debug, Clone)]
-pub(crate) struct LSPS2FeeResponse {
-	opening_fee_params_menu: Vec<LSPS2OpeningFeeParams>,
+pub struct LSPS2GetInfoResponse {
+	/// The set of opening fee parameters offered by the LSP.
+	pub opening_fee_params_menu: Vec<LSPS2OpeningFeeParams>,
 }
 
 #[derive(Debug, Clone)]
@@ -1446,13 +1452,13 @@ pub(crate) struct LSPS2BuyResponse {
 ///
 /// Should be retrieved by calling [`Node::lsps1_liquidity`].
 ///
-/// To open [bLIP-52 / LSPS2] JIT channels, please refer to
-/// [`Bolt11Payment::receive_via_jit_channel`].
+/// To query [bLIP-52 / LSPS2] JIT channel fees and limits, please refer to
+/// [`Node::lsps2_liquidity`].
 ///
 /// [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
 /// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
 /// [`Node::lsps1_liquidity`]: crate::Node::lsps1_liquidity
-/// [`Bolt11Payment::receive_via_jit_channel`]: crate::payment::Bolt11Payment::receive_via_jit_channel
+/// [`Node::lsps2_liquidity`]: crate::Node::lsps2_liquidity
 #[derive(Clone)]
 pub struct LSPS1Liquidity {
 	runtime: Arc<Runtime>,
@@ -1539,4 +1545,76 @@ impl LSPS1Liquidity {
 			.block_on(async move { liquidity_source.lsps1_check_order_status(order_id).await })?;
 		Ok(response)
 	}
+}
+
+/// A liquidity handler allowing to query [bLIP-52 / LSPS2] JIT channel parameters.
+///
+/// Should be retrieved by calling [`Node::lsps2_liquidity`].
+///
+/// To open [bLIP-52 / LSPS2] JIT channels, please refer to
+/// [`Bolt11Payment::receive_via_jit_channel`].
+///
+/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+/// [`Node::lsps2_liquidity`]: crate::Node::lsps2_liquidity
+/// [`Bolt11Payment::receive_via_jit_channel`]: crate::payment::Bolt11Payment::receive_via_jit_channel
+#[derive(Clone)]
+pub struct LSPS2Liquidity {
+	runtime: Arc<Runtime>,
+	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+	logger: Arc<Logger>,
+}
+
+impl LSPS2Liquidity {
+	pub(crate) fn new(
+		runtime: Arc<Runtime>,
+		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+		logger: Arc<Logger>,
+	) -> Self {
+		Self { runtime, connection_manager, liquidity_source, logger }
+	}
+
+	/// Connects to the configured LSP and requests its current JIT channel opening fee parameters.
+	///
+	/// This issues an `lsps2.get_info` request and returns the LSP's `opening_fee_params_menu`.
+	pub fn request_opening_fee_params(&self) -> Result<LSPS2GetInfoResponse, Error> {
+		let liquidity_source =
+			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let (lsp_node_id, lsp_address) =
+			liquidity_source.get_lsps2_lsp_details().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let con_node_id = lsp_node_id;
+		let con_addr = lsp_address.clone();
+		let con_cm = Arc::clone(&self.connection_manager);
+
+		// We need to use our main runtime here as a local runtime might not be around to poll
+		// connection futures going forward.
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
+		})?;
+
+		log_info!(self.logger, "Connected to LSPS2 LSP {}@{}. ", lsp_node_id, lsp_address);
+
+		let liquidity_source = Arc::clone(&liquidity_source);
+		self.runtime.block_on(async move {
+			liquidity_source.lsps2_request_opening_fee_params().await
+		})
+	}
+}
+
+/// Computes the LSPS2 opening fee for a given payment size and fee parameters.
+///
+/// See [bLIP-52 / LSPS2] for more information.
+///
+/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md#computing-the-opening_fee
+pub fn lsps2_compute_opening_fee_msat(
+	payment_size_msat: u64, opening_fee_params: LSPS2OpeningFeeParams,
+) -> Option<u64> {
+	compute_opening_fee(
+		payment_size_msat,
+		opening_fee_params.min_fee_msat,
+		opening_fee_params.proportional as u64,
+	)
 }

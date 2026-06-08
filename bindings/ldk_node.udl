@@ -1,6 +1,7 @@
 namespace ldk_node {
 	Mnemonic generate_entropy_mnemonic(WordCount? word_count);
 	Config default_config();
+	u64? lsps2_compute_opening_fee_msat(u64 payment_size_msat, LSPS2OpeningFeeParams opening_fee_params);
 };
 
 dictionary Config {
@@ -145,6 +146,7 @@ interface Node {
 	OnchainPayment onchain_payment();
 	UnifiedQrPayment unified_qr_payment();
 	LSPS1Liquidity lsps1_liquidity();
+	LSPS2Liquidity lsps2_liquidity();
 	[Throws=NodeError]
 	void connect(PublicKey node_id, SocketAddress address, boolean persist);
 	[Throws=NodeError]
@@ -291,6 +293,26 @@ interface LSPS1Liquidity {
 	LSPS1OrderStatus request_channel(u64 lsp_balance_sat, u64 client_balance_sat, u32 channel_expiry_blocks, boolean announce_channel);
 	[Throws=NodeError]
 	LSPS1OrderStatus check_order_status(LSPS1OrderId order_id);
+};
+
+interface LSPS2Liquidity {
+	[Throws=NodeError]
+	LSPS2GetInfoResponse request_opening_fee_params();
+};
+
+dictionary LSPS2OpeningFeeParams {
+	u64 min_fee_msat;
+	u32 proportional;
+	LSPSDateTime valid_until;
+	u32 min_lifetime;
+	u32 max_client_to_self_delay;
+	u64 min_payment_size_msat;
+	u64 max_payment_size_msat;
+	string promise;
+};
+
+dictionary LSPS2GetInfoResponse {
+	sequence<LSPS2OpeningFeeParams> opening_fee_params_menu;
 };
 
 [Error]
