@@ -7,8 +7,12 @@
 
 use std::panic::RefUnwindSafe;
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use lightning::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate};
+use lightning::chain::{chainmonitor, BlockLocator, ChannelMonitorUpdateStatus};
 use lightning::events::ClosureReason;
+use lightning::io;
 use lightning::ln::functional_test_utils::{
 	check_added_monitors, check_closed_broadcast, check_closed_event, connect_block,
 	create_announced_chan_between_nodes, create_chanmon_cfgs, create_dummy_block, create_network,
@@ -16,8 +20,13 @@ use lightning::ln::functional_test_utils::{
 	TestChanMonCfg,
 };
 use lightning::util::persist::{
-	KVStoreSync, MonitorUpdatingPersister, KVSTORE_NAMESPACE_KEY_MAX_LEN,
+	KVStore, KVStoreSync, MonitorName, ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+	ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVSTORE_NAMESPACE_KEY_MAX_LEN,
 };
+use lightning::util::ser::{ReadableArgs, Writeable};
+use lightning::util::test_channel_signer::TestChannelSigner;
 use lightning::util::test_utils;
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
@@ -25,14 +34,127 @@ use rand::{rng, Rng};
 #[path = "in_memory_store.rs"]
 mod in_memory_store;
 
-type TestMonitorUpdatePersister<'a, K> = MonitorUpdatingPersister<
-	&'a K,
-	&'a test_utils::TestLogger,
-	&'a test_utils::TestKeysInterface,
-	&'a test_utils::TestKeysInterface,
-	&'a test_utils::TestBroadcaster,
-	&'a test_utils::TestFeeEstimator,
->;
+use crate::logger::Logger;
+use crate::runtime::Runtime;
+
+pub(crate) struct TestMonitorUpdatePersister<'a, K> {
+	store: &'a K,
+	runtime: Runtime,
+	entropy_source: &'a test_utils::TestKeysInterface,
+	signer_provider: &'a test_utils::TestKeysInterface,
+}
+
+impl<K: KVStore + Sync> TestMonitorUpdatePersister<'_, K> {
+	pub(crate) fn read_all_channel_monitors_with_updates(
+		&self,
+	) -> Result<Vec<(BlockLocator, ChannelMonitor<TestChannelSigner>)>, io::Error> {
+		self.runtime.block_on(async {
+			let stored_keys = KVStore::list(
+				self.store,
+				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+			)
+			.await?;
+
+			let mut res = Vec::with_capacity(stored_keys.len());
+			for stored_key in stored_keys {
+				let data = KVStore::read(
+					self.store,
+					CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+					CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+					&stored_key,
+				)
+				.await?;
+				match <Option<(BlockLocator, ChannelMonitor<TestChannelSigner>)>>::read(
+					&mut io::Cursor::new(data),
+					(self.entropy_source, self.signer_provider),
+				) {
+					Ok(Some((best_block, channel_monitor))) => {
+						res.push((best_block, channel_monitor));
+					},
+					Ok(None) => {},
+					Err(_) => {
+						return Err(io::Error::new(
+							io::ErrorKind::InvalidData,
+							"Failed to read ChannelMonitor",
+						));
+					},
+				}
+			}
+			Ok(res)
+		})
+	}
+
+	fn write_monitor(
+		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<TestChannelSigner>,
+	) -> ChannelMonitorUpdateStatus {
+		let write_res = self.runtime.block_on(KVStore::write(
+			self.store,
+			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+			&monitor_name.to_string(),
+			monitor.encode(),
+		));
+		match write_res {
+			Ok(()) => ChannelMonitorUpdateStatus::Completed,
+			Err(_) => ChannelMonitorUpdateStatus::UnrecoverableError,
+		}
+	}
+}
+
+impl<K: KVStore + Sync> chainmonitor::Persist<TestChannelSigner>
+	for TestMonitorUpdatePersister<'_, K>
+{
+	fn persist_new_channel(
+		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<TestChannelSigner>,
+	) -> ChannelMonitorUpdateStatus {
+		self.write_monitor(monitor_name, monitor)
+	}
+
+	fn update_persisted_channel(
+		&self, monitor_name: MonitorName, _monitor_update: Option<&ChannelMonitorUpdate>,
+		monitor: &ChannelMonitor<TestChannelSigner>,
+	) -> ChannelMonitorUpdateStatus {
+		self.write_monitor(monitor_name, monitor)
+	}
+
+	fn archive_persisted_channel(&self, monitor_name: MonitorName) {
+		let key = monitor_name.to_string();
+		self.runtime.block_on(async {
+			let monitor = match KVStore::read(
+				self.store,
+				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+				&key,
+			)
+			.await
+			{
+				Ok(monitor) => monitor,
+				Err(_) => return,
+			};
+
+			if KVStore::write(
+				self.store,
+				ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+				&key,
+				monitor,
+			)
+			.await
+			.is_ok()
+			{
+				let _ = KVStore::remove(
+					self.store,
+					CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+					CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+					&key,
+					true,
+				)
+				.await;
+			}
+		});
+	}
+}
 
 const EXPECTED_UPDATES_PER_PAYMENT: u64 = 5;
 
@@ -96,21 +218,20 @@ pub(crate) fn do_read_write_remove_list_persist<K: KVStoreSync + RefUnwindSafe>(
 	assert_eq!(listed_keys.len(), 0);
 }
 
-pub(crate) fn create_persister<'a, K: KVStoreSync + Sync>(
-	store: &'a K, chanmon_cfg: &'a TestChanMonCfg, max_pending_updates: u64,
+pub(crate) fn create_persister<'a, K: KVStore + Sync>(
+	store: &'a K, chanmon_cfg: &'a TestChanMonCfg, _max_pending_updates: u64,
 ) -> TestMonitorUpdatePersister<'a, K> {
-	MonitorUpdatingPersister::new(
+	let runtime =
+		Runtime::new(Arc::new(Logger::new_log_facade())).expect("Failed to setup runtime");
+	TestMonitorUpdatePersister {
 		store,
-		&chanmon_cfg.logger,
-		max_pending_updates,
-		&chanmon_cfg.keys_manager,
-		&chanmon_cfg.keys_manager,
-		&chanmon_cfg.tx_broadcaster,
-		&chanmon_cfg.fee_estimator,
-	)
+		runtime,
+		entropy_source: &chanmon_cfg.keys_manager,
+		signer_provider: &chanmon_cfg.keys_manager,
+	}
 }
 
-pub(crate) fn create_chain_monitor<'a, K: KVStoreSync + Sync>(
+pub(crate) fn create_chain_monitor<'a, K: KVStore + Sync>(
 	chanmon_cfg: &'a TestChanMonCfg, persister: &'a TestMonitorUpdatePersister<'a, K>,
 ) -> test_utils::TestChainMonitor<'a> {
 	test_utils::TestChainMonitor::new(
@@ -125,7 +246,7 @@ pub(crate) fn create_chain_monitor<'a, K: KVStoreSync + Sync>(
 
 // Integration-test the given KVStore implementation. Test relaying a few payments and check that
 // the persisted data is updated the appropriate number of times.
-pub(crate) fn do_test_store<K: KVStoreSync + Sync>(store_0: &K, store_1: &K) {
+pub(crate) fn do_test_store<K: KVStore + Sync>(store_0: &K, store_1: &K) {
 	// This value is used later to limit how many iterations we perform.
 	let persister_0_max_pending_updates = 7;
 	// Intentionally set this to a smaller value to test a different alignment.
