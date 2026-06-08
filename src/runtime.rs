@@ -34,6 +34,11 @@ impl Runtime {
 			Err(_) => {
 				let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
 				runtime_builder.enable_all();
+				runtime_builder.thread_name_fn(|| {
+					static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+					let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+					format!("ldk-node-runtime-{}", id)
+				});
 				// Eager driver handoff lets Tokio move the I/O driver to another worker sooner
 				// when this runtime's current worker enters `block_in_place` via `block_on`.
 				// That marginally reduces the chance that a synchronous caller blocks the same
