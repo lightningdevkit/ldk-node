@@ -22,7 +22,6 @@ use tokio_postgres::{Config, Error as PgError};
 use self::pool::{make_config_connection, ClientConnection, PgTlsConnector, SmallPool};
 use crate::io::utils::check_namespace_key_validity;
 use crate::logger::{log_debug, log_info, LdkLogger, Logger};
-use crate::runtime::StoreRuntime;
 
 mod migrations;
 mod pool;
@@ -38,9 +37,6 @@ const SCHEMA_VERSION: u16 = 1;
 
 // The number of entries returned per page in paginated list operations.
 const PAGE_SIZE: usize = 50;
-
-// Keep this small while still allowing progress if one runtime worker blocks on sync store access.
-const INTERNAL_RUNTIME_WORKERS: usize = 2;
 
 fn sql_identifier(identifier: &str) -> io::Result<String> {
 	if identifier.is_empty() || identifier.contains('\0') {
@@ -92,8 +88,6 @@ macro_rules! query_with_retry {
 
 /// A [`KVStore`] implementation that writes to and reads from a [PostgreSQL] database.
 ///
-/// Maintains an internal runtime for the underlying tokio-postgres connection drivers.
-///
 /// [PostgreSQL]: https://www.postgresql.org
 pub struct PostgresStore {
 	inner: Arc<PostgresStoreInner>,
@@ -101,9 +95,6 @@ pub struct PostgresStore {
 	// Version counter to ensure that writes are applied in the correct order. It is assumed that read and list
 	// operations aren't sensitive to the order of execution.
 	next_write_version: AtomicU64,
-
-	// A store-internal runtime that drives PostgreSQL I/O independently from the node runtime.
-	internal_runtime: Option<Arc<StoreRuntime>>,
 }
 
 // tokio::sync::Mutex (used for the DB client) contains UnsafeCell which opts out of
@@ -146,21 +137,12 @@ impl PostgresStore {
 		connection_string: String, db_name: Option<String>, kv_table_name: Option<String>,
 		certificate_pem: Option<String>, logger: Option<Arc<Logger>>,
 	) -> io::Result<Self> {
-		let internal_runtime = Arc::new(StoreRuntime::new(
-			"ldk-node-postgres-runtime",
-			INTERNAL_RUNTIME_WORKERS,
-			"PostgreSQL",
-		)?);
 		let tls = Self::build_tls_connector(certificate_pem)?;
-		let task = internal_runtime.spawn(async move {
-			PostgresStoreInner::new(connection_string, db_name, kv_table_name, tls, logger).await
-		});
-		let inner = task.await.map_err(|e| {
-			io::Error::new(io::ErrorKind::Other, format!("PostgreSQL runtime task failed: {}", e))
-		})??;
+		let inner =
+			PostgresStoreInner::new(connection_string, db_name, kv_table_name, tls, logger).await?;
 		let inner = Arc::new(inner);
 		let next_write_version = AtomicU64::new(1);
-		Ok(Self { inner, next_write_version, internal_runtime: Some(internal_runtime) })
+		Ok(Self { inner, next_write_version })
 	}
 
 	fn build_tls_connector(certificate_pem: Option<String>) -> io::Result<PgTlsConnector> {
@@ -203,20 +185,6 @@ impl PostgresStore {
 
 		(inner_lock_ref, version)
 	}
-
-	fn internal_runtime(&self) -> Arc<StoreRuntime> {
-		Arc::clone(self.internal_runtime.as_ref().expect("PostgreSQL runtime must be available"))
-	}
-}
-
-impl Drop for PostgresStore {
-	fn drop(&mut self) {
-		if let Some(internal_runtime) = self.internal_runtime.take() {
-			if let Ok(internal_runtime) = Arc::try_unwrap(internal_runtime) {
-				internal_runtime.shutdown_background();
-			}
-		}
-	}
 }
 
 impl KVStore for PostgresStore {
@@ -227,18 +195,7 @@ impl KVStore for PostgresStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		let runtime = self.internal_runtime();
-		async move {
-			let task = runtime.spawn(async move {
-				inner.read_internal(&primary_namespace, &secondary_namespace, &key).await
-			});
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
-				)
-			})?
-		}
+		async move { inner.read_internal(&primary_namespace, &secondary_namespace, &key).await }
 	}
 
 	fn write(
@@ -250,27 +207,18 @@ impl KVStore for PostgresStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		let runtime = self.internal_runtime();
 		async move {
-			let task = runtime.spawn(async move {
-				inner
-					.write_internal(
-						inner_lock_ref,
-						locking_key,
-						version,
-						&primary_namespace,
-						&secondary_namespace,
-						&key,
-						buf,
-					)
-					.await
-			});
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
+			inner
+				.write_internal(
+					inner_lock_ref,
+					locking_key,
+					version,
+					&primary_namespace,
+					&secondary_namespace,
+					&key,
+					buf,
 				)
-			})?
+				.await
 		}
 	}
 
@@ -283,26 +231,17 @@ impl KVStore for PostgresStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		let runtime = self.internal_runtime();
 		async move {
-			let task = runtime.spawn(async move {
-				inner
-					.remove_internal(
-						inner_lock_ref,
-						locking_key,
-						version,
-						&primary_namespace,
-						&secondary_namespace,
-						&key,
-					)
-					.await
-			});
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
+			inner
+				.remove_internal(
+					inner_lock_ref,
+					locking_key,
+					version,
+					&primary_namespace,
+					&secondary_namespace,
+					&key,
 				)
-			})?
+				.await
 		}
 	}
 
@@ -312,18 +251,7 @@ impl KVStore for PostgresStore {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
-		let runtime = self.internal_runtime();
-		async move {
-			let task = runtime.spawn(async move {
-				inner.list_internal(&primary_namespace, &secondary_namespace).await
-			});
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
-				)
-			})?
-		}
+		async move { inner.list_internal(&primary_namespace, &secondary_namespace).await }
 	}
 }
 
@@ -334,19 +262,10 @@ impl PaginatedKVStore for PostgresStore {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
-		let runtime = self.internal_runtime();
 		async move {
-			let task = runtime.spawn(async move {
-				inner
-					.list_paginated_internal(&primary_namespace, &secondary_namespace, page_token)
-					.await
-			});
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
-				)
-			})?
+			inner
+				.list_paginated_internal(&primary_namespace, &secondary_namespace, page_token)
+				.await
 		}
 	}
 }
