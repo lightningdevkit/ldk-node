@@ -409,6 +409,8 @@ impl ChainSource {
 		match &self.kind {
 			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.stop(),
+			#[cfg(feature = "chain-cbf")]
+			ChainSourceKind::Cbf(cbf_chain_source) => cbf_chain_source.stop(),
 			_ => {
 				// Nothing to do for other chain sources.
 			},
