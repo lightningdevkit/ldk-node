@@ -121,7 +121,7 @@ async fn postgres_node_restart() {
 			bitcoin::Amount::from_sat(100_000),
 		)
 		.await;
-		node.sync_wallets().unwrap();
+		node.sync_wallets().await.unwrap();
 
 		let balance = node.list_balances().spendable_onchain_balance_sats;
 		assert!(balance > 0);
@@ -148,7 +148,7 @@ async fn postgres_node_restart() {
 		.unwrap();
 
 	node.start().unwrap();
-	node.sync_wallets().unwrap();
+	node.sync_wallets().await.unwrap();
 
 	assert_eq!(expected_node_id, node.node_id());
 	assert_eq!(expected_balance_sats, node.list_balances().spendable_onchain_balance_sats);

@@ -151,70 +151,24 @@ impl Wallet {
 		BlockLocator { block_hash: checkpoint.hash(), height: checkpoint.height(), previous_blocks }
 	}
 
-	pub(crate) fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
-		let mut locked_wallet = self.inner.lock().expect("lock");
-		match locked_wallet.apply_update_events(update) {
-			Ok(events) => {
-				self.update_payment_store(&mut *locked_wallet, events).map_err(|e| {
-					log_error!(self.logger, "Failed to update payment store: {}", e);
-					Error::PersistenceFailed
-				})?;
+	pub(crate) async fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
+		let events = {
+			let mut locked_wallet = self.inner.lock().expect("lock");
+			match locked_wallet.apply_update_events(update) {
+				Ok(events) => events,
+				Err(e) => {
+					log_error!(self.logger, "Sync failed due to chain connection error: {}", e);
+					return Err(Error::WalletOperationFailed);
+				},
+			}
+		};
 
-				let mut locked_persister = self.persister.lock().expect("lock");
-				self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(
-					|e| {
-						log_error!(self.logger, "Failed to persist wallet: {}", e);
-						Error::PersistenceFailed
-					},
-				)?;
-
-				Ok(())
-			},
-			Err(e) => {
-				log_error!(self.logger, "Sync failed due to chain connection error: {}", e);
-				Err(Error::WalletOperationFailed)
-			},
-		}
-	}
-
-	pub(crate) fn apply_mempool_txs(
-		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
-	) -> Result<(), Error> {
-		if unconfirmed_txs.is_empty() && evicted_txids.is_empty() {
-			return Ok(());
-		}
-
-		let mut locked_wallet = self.inner.lock().expect("lock");
-
-		let chain_tip1 = locked_wallet.latest_checkpoint().block_id();
-		let wallet_txs1 = locked_wallet
-			.transactions()
-			.map(|wtx| (wtx.tx_node.txid, (wtx.tx_node.tx.clone(), wtx.chain_position)))
-			.collect::<std::collections::BTreeMap<
-				Txid,
-				(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
-			>>();
-
-		locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
-		locked_wallet.apply_evicted_txs(evicted_txids);
-
-		let chain_tip2 = locked_wallet.latest_checkpoint().block_id();
-		let wallet_txs2 = locked_wallet
-			.transactions()
-			.map(|wtx| (wtx.tx_node.txid, (wtx.tx_node.tx.clone(), wtx.chain_position)))
-			.collect::<std::collections::BTreeMap<
-				Txid,
-				(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
-			>>();
-
-		let events =
-			wallet_events(&mut *locked_wallet, chain_tip1, chain_tip2, wallet_txs1, wallet_txs2);
-
-		self.update_payment_store(&mut *locked_wallet, events).map_err(|e| {
+		self.update_payment_store(events).await.map_err(|e| {
 			log_error!(self.logger, "Failed to update payment store: {}", e);
 			Error::PersistenceFailed
 		})?;
 
+		let mut locked_wallet = self.inner.lock().expect("lock");
 		let mut locked_persister = self.persister.lock().expect("lock");
 		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
@@ -224,10 +178,56 @@ impl Wallet {
 		Ok(())
 	}
 
-	fn update_payment_store<'a>(
-		&self, locked_wallet: &'a mut PersistedWallet<KVStoreWalletPersister>,
-		mut events: Vec<WalletEvent>,
+	pub(crate) async fn apply_mempool_txs(
+		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
 	) -> Result<(), Error> {
+		if unconfirmed_txs.is_empty() && evicted_txids.is_empty() {
+			return Ok(());
+		}
+
+		let events = {
+			let mut locked_wallet = self.inner.lock().expect("lock");
+
+			let chain_tip1 = locked_wallet.latest_checkpoint().block_id();
+			let wallet_txs1 = locked_wallet
+				.transactions()
+				.map(|wtx| (wtx.tx_node.txid, (wtx.tx_node.tx.clone(), wtx.chain_position)))
+				.collect::<std::collections::BTreeMap<
+					Txid,
+					(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
+				>>();
+
+			locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
+			locked_wallet.apply_evicted_txs(evicted_txids);
+
+			let chain_tip2 = locked_wallet.latest_checkpoint().block_id();
+			let wallet_txs2 = locked_wallet
+				.transactions()
+				.map(|wtx| (wtx.tx_node.txid, (wtx.tx_node.tx.clone(), wtx.chain_position)))
+				.collect::<std::collections::BTreeMap<
+					Txid,
+					(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
+				>>();
+
+			wallet_events(&mut *locked_wallet, chain_tip1, chain_tip2, wallet_txs1, wallet_txs2)
+		};
+
+		self.update_payment_store(events).await.map_err(|e| {
+			log_error!(self.logger, "Failed to update payment store: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		let mut locked_wallet = self.inner.lock().expect("lock");
+		let mut locked_persister = self.persister.lock().expect("lock");
+		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		Ok(())
+	}
+
+	async fn update_payment_store(&self, mut events: Vec<WalletEvent>) -> Result<(), Error> {
 		if events.is_empty() {
 			return Ok(());
 		}
@@ -255,14 +255,7 @@ impl Wallet {
 		for event in events {
 			match event {
 				WalletEvent::TxConfirmed { txid, tx, block_time, .. } => {
-					let cur_height = locked_wallet.latest_checkpoint().height();
 					let confirmation_height = block_time.block_id.height;
-					let payment_status = if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1
-					{
-						PaymentStatus::Succeeded
-					} else {
-						PaymentStatus::Pending
-					};
 
 					let confirmation_status = ConfirmationStatus::Confirmed {
 						block_hash: block_time.block_id.hash,
@@ -272,31 +265,42 @@ impl Wallet {
 
 					let payment_id = self
 						.find_payment_by_txid(txid)
+						.await
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
-					let payment = self.create_payment_from_tx(
-						locked_wallet,
-						txid,
-						payment_id,
-						&tx,
-						payment_status,
-						confirmation_status,
-					);
+					let payment = {
+						let locked_wallet = self.inner.lock().expect("lock");
+						let cur_height = locked_wallet.latest_checkpoint().height();
+						let payment_status =
+							if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1 {
+								PaymentStatus::Succeeded
+							} else {
+								PaymentStatus::Pending
+							};
 
-					self.runtime.block_on(self.payment_store.insert_or_update(payment.clone()))?;
+						self.create_payment_from_tx(
+							&locked_wallet,
+							txid,
+							payment_id,
+							&tx,
+							payment_status,
+							confirmation_status,
+						)
+					};
 
-					if payment_status == PaymentStatus::Pending {
+					self.payment_store.insert_or_update(payment.clone()).await?;
+
+					if payment.status == PaymentStatus::Pending {
 						let pending_payment =
 							self.create_pending_payment_from_tx(payment, Vec::new());
 
-						self.runtime.block_on(
-							self.pending_payment_store.insert_or_update(pending_payment),
-						)?;
+						self.pending_payment_store.insert_or_update(pending_payment).await?;
 					}
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
-					let pending_payments: Vec<PendingPaymentDetails> =
-						self.pending_payment_store.list_filter(|p| {
+					let pending_payments: Vec<PendingPaymentDetails> = self
+						.pending_payment_store
+						.list_filter(|p| {
 							debug_assert!(
 								p.details.status == PaymentStatus::Pending,
 								"Non-pending payment {:?} found in pending store",
@@ -304,7 +308,8 @@ impl Wallet {
 							);
 							p.details.status == PaymentStatus::Pending
 								&& matches!(p.details.kind, PaymentKind::Onchain { .. })
-						});
+						})
+						.await;
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
 
@@ -317,11 +322,8 @@ impl Wallet {
 								let payment_id = payment.details.id;
 								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
 									payment.details.status = PaymentStatus::Succeeded;
-									self.runtime.block_on(
-										self.payment_store.insert_or_update(payment.details),
-									)?;
-									self.runtime
-										.block_on(self.pending_payment_store.remove(&payment_id))?;
+									self.payment_store.insert_or_update(payment.details).await?;
+									self.pending_payment_store.remove(&payment_id).await?;
 								}
 							},
 							PaymentKind::Onchain {
@@ -338,6 +340,7 @@ impl Wallet {
 						let txs_to_broadcast: Vec<Transaction> = unconfirmed_outbound_txids
 							.iter()
 							.filter_map(|txid| {
+								let locked_wallet = self.inner.lock().expect("lock");
 								locked_wallet.tx_details(*txid).map(|d| (*d.tx).clone())
 							})
 							.collect();
@@ -365,24 +368,27 @@ impl Wallet {
 				WalletEvent::TxUnconfirmed { txid, tx, old_block_time: None } => {
 					let payment_id = self
 						.find_payment_by_txid(txid)
+						.await
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
-					let payment = self.create_payment_from_tx(
-						locked_wallet,
-						txid,
-						payment_id,
-						&tx,
-						PaymentStatus::Pending,
-						ConfirmationStatus::Unconfirmed,
-					);
+					let payment = {
+						let locked_wallet = self.inner.lock().expect("lock");
+						self.create_payment_from_tx(
+							&locked_wallet,
+							txid,
+							payment_id,
+							&tx,
+							PaymentStatus::Pending,
+							ConfirmationStatus::Unconfirmed,
+						)
+					};
 					let pending_payment =
 						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.runtime.block_on(self.payment_store.insert_or_update(payment))?;
-					self.runtime
-						.block_on(self.pending_payment_store.insert_or_update(pending_payment))?;
+					self.payment_store.insert_or_update(payment).await?;
+					self.pending_payment_store.insert_or_update(pending_payment).await?;
 				},
 				WalletEvent::TxReplaced { txid, conflicts, .. } => {
-					let Some(payment_id) = self.find_payment_by_txid(txid) else {
+					let Some(payment_id) = self.find_payment_by_txid(txid).await else {
 						log_error!(
 							self.logger,
 							"Could not find payment for replaced transaction {}. Skipping.",
@@ -400,36 +406,37 @@ impl Wallet {
 					// the payment store with the replacement txid before the next sync cycle, so we
 					// can safely fetch it here.
 					debug_assert!(
-						self.payment_store.get(&payment_id).is_some(),
+						self.payment_store.get(&payment_id).await.is_some(),
 						"Payment {:?} expected in store during WalletEvent::TxReplaced but not found",
 						payment_id,
 					);
 					let payment =
-						self.payment_store.get(&payment_id).ok_or(Error::InvalidPaymentId)?;
+						self.payment_store.get(&payment_id).await.ok_or(Error::InvalidPaymentId)?;
 					let pending_payment_details =
 						self.create_pending_payment_from_tx(payment, conflict_txids.clone());
 
-					self.runtime.block_on(
-						self.pending_payment_store.insert_or_update(pending_payment_details),
-					)?;
+					self.pending_payment_store.insert_or_update(pending_payment_details).await?;
 				},
 				WalletEvent::TxDropped { txid, tx } => {
 					let payment_id = self
 						.find_payment_by_txid(txid)
+						.await
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
-					let payment = self.create_payment_from_tx(
-						locked_wallet,
-						txid,
-						payment_id,
-						&tx,
-						PaymentStatus::Pending,
-						ConfirmationStatus::Unconfirmed,
-					);
+					let payment = {
+						let locked_wallet = self.inner.lock().expect("lock");
+						self.create_payment_from_tx(
+							&locked_wallet,
+							txid,
+							payment_id,
+							&tx,
+							PaymentStatus::Pending,
+							ConfirmationStatus::Unconfirmed,
+						)
+					};
 					let pending_payment =
 						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.runtime.block_on(self.payment_store.insert_or_update(payment))?;
-					self.runtime
-						.block_on(self.pending_payment_store.insert_or_update(pending_payment))?;
+					self.payment_store.insert_or_update(payment).await?;
+					self.pending_payment_store.insert_or_update(pending_payment).await?;
 				},
 				_ => {
 					continue;
@@ -1216,9 +1223,9 @@ impl Wallet {
 		PendingPaymentDetails::new(payment, conflicting_txids)
 	}
 
-	fn find_payment_by_txid(&self, target_txid: Txid) -> Option<PaymentId> {
+	async fn find_payment_by_txid(&self, target_txid: Txid) -> Option<PaymentId> {
 		let direct_payment_id = PaymentId(target_txid.to_byte_array());
-		if self.pending_payment_store.contains_key(&direct_payment_id) {
+		if self.pending_payment_store.contains_key(&direct_payment_id).await {
 			return Some(direct_payment_id);
 		}
 
@@ -1228,6 +1235,7 @@ impl Wallet {
 				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
 					|| p.conflicting_txids.contains(&target_txid)
 			})
+			.await
 			.first()
 		{
 			return Some(replaced_details.details.id);
@@ -1237,10 +1245,10 @@ impl Wallet {
 	}
 
 	#[allow(deprecated)]
-	pub(crate) fn bump_fee_rbf(
+	pub(crate) async fn bump_fee_rbf(
 		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
-		let payment = self.payment_store.get(&payment_id).ok_or_else(|| {
+		let payment = self.payment_store.get(&payment_id).await.ok_or_else(|| {
 			log_error!(self.logger, "Payment {} not found in payment store", payment_id);
 			Error::InvalidPaymentId
 		})?;
@@ -1280,163 +1288,195 @@ impl Wallet {
 			},
 		};
 
-		let mut locked_wallet = self.inner.lock().expect("lock");
+		let (fee_bumped_tx, new_txid, new_payment, pending_payment_store) = {
+			let mut locked_wallet = self.inner.lock().expect("lock");
 
-		debug_assert!(
-			locked_wallet.tx_details(txid).is_some(),
-			"Transaction {} expected in wallet but not found",
-			txid,
-		);
-		let old_tx = locked_wallet
-			.tx_details(txid)
-			.ok_or_else(|| {
-				log_error!(self.logger, "Transaction {} not found in wallet", txid);
-				Error::InvalidPaymentId
-			})?
-			.tx
-			.deref()
-			.clone();
+			debug_assert!(
+				locked_wallet.tx_details(txid).is_some(),
+				"Transaction {} expected in wallet but not found",
+				txid,
+			);
+			let old_tx = locked_wallet
+				.tx_details(txid)
+				.ok_or_else(|| {
+					log_error!(self.logger, "Transaction {} not found in wallet", txid);
+					Error::InvalidPaymentId
+				})?
+				.tx
+				.deref()
+				.clone();
 
-		let old_fee_rate = locked_wallet.calculate_fee_rate(&old_tx).map_err(|e| {
-			log_error!(self.logger, "Failed to calculate fee rate of transaction {}: {}", txid, e);
-			Error::WalletOperationFailed
-		})?;
-
-		// BIP 125 requires the replacement to pay a higher fee rate than the original.
-		// The minimum increase is the incremental relay fee.
-		let min_required_fee_rate_sat_per_kwu =
-			old_fee_rate.to_sat_per_kwu() + INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT as u64;
-
-		let confirmation_target = ConfirmationTarget::OnchainPayment;
-		let estimated_fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
-
-		// Use the higher of minimum RBF requirement or current network estimate
-		let final_fee_rate_sat_per_kwu =
-			min_required_fee_rate_sat_per_kwu.max(estimated_fee_rate.to_sat_per_kwu());
-		let final_fee_rate =
-			fee_rate.unwrap_or_else(|| FeeRate::from_sat_per_kwu(final_fee_rate_sat_per_kwu));
-
-		let mut psbt = {
-			let mut builder = locked_wallet.build_fee_bump(txid).map_err(|e| {
-				log_error!(self.logger, "BDK fee bump failed for {}: {:?}", txid, e);
-				match e {
-					BuildFeeBumpError::TransactionNotFound(_) => Error::InvalidPaymentId,
-					BuildFeeBumpError::TransactionConfirmed(_) => {
-						log_error!(self.logger, "Payment {} is already confirmed", payment_id);
-						Error::InvalidPaymentId
-					},
-					BuildFeeBumpError::IrreplaceableTransaction(_) => {
-						Error::OnchainTxCreationFailed
-					},
-					BuildFeeBumpError::FeeRateUnavailable => Error::FeerateEstimationUpdateFailed,
-					BuildFeeBumpError::UnknownUtxo(_) => Error::OnchainTxCreationFailed,
-					BuildFeeBumpError::InvalidOutputIndex(_) => Error::OnchainTxCreationFailed,
-				}
-			})?;
-
-			builder.fee_rate(final_fee_rate);
-
-			match builder.finish() {
-				Ok(psbt) => Ok(psbt),
-				Err(CreateTxError::FeeRateTooLow { required: required_fee_rate }) => {
-					if fee_rate.is_some() {
-						log_error!(
-							self.logger,
-							"Provided fee rate {} is too low for RBF fee bump of txid {}, required minimum fee rate: {}",
-							fee_rate.expect("fee rate is set"),
-							txid,
-							required_fee_rate
-						);
-						return Err(Error::InvalidFeeRate);
-					}
-
-					log_info!(self.logger, "BDK requires higher fee rate: {}", required_fee_rate);
-
-					// BDK may require a higher fee rate than our estimate due to
-					// differences in UTXO selection or transaction weight calculations.
-					// We cap the retry at 1.5x our target fee rate as a safety bound
-					// to avoid overpaying.
-					let max_allowed_fee_rate = FeeRate::from_sat_per_kwu(
-						final_fee_rate_sat_per_kwu.saturating_mul(3).saturating_div(2),
-					);
-					if required_fee_rate > max_allowed_fee_rate {
-						log_error!( self.logger, "BDK required fee rate {} exceeds sanity cap {} (1.5x our estimate) for tx {}", required_fee_rate, max_allowed_fee_rate, txid );
-						return Err(Error::InvalidFeeRate);
-					}
-
-					let mut builder = locked_wallet.build_fee_bump(txid).map_err(|e| {
-						log_error!(self.logger, "BDK fee bump retry failed for {}: {:?}", txid, e);
-						Error::InvalidFeeRate
-					})?;
-
-					builder.fee_rate(required_fee_rate);
-					builder.finish().map_err(|e| {
-						log_error!(
-							self.logger,
-							"Failed to finish PSBT with required fee rate: {:?}",
-							e
-						);
-						Error::InvalidFeeRate
-					})
-				},
-				Err(e) => {
-					log_error!(self.logger, "Failed to create fee bump PSBT: {:?}", e);
-					Err(Error::InvalidFeeRate)
-				},
-			}?
-		};
-
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
-			Ok(finalized) => {
-				if !finalized {
-					log_error!(self.logger, "Failed to finalize signing for fee bump of {}", txid);
-					return Err(Error::OnchainTxCreationFailed);
-				}
-			},
-			Err(err) => {
+			let old_fee_rate = locked_wallet.calculate_fee_rate(&old_tx).map_err(|e| {
 				log_error!(
 					self.logger,
-					"Failed to sign fee bump transaction for {}: {}",
+					"Failed to calculate fee rate of transaction {}: {}",
 					txid,
-					err
+					e
 				);
-				return Err(err.into());
-			},
-		}
+				Error::WalletOperationFailed
+			})?;
 
-		let mut locked_persister = self.persister.lock().expect("lock");
-		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet after fee bump of {}: {}", txid, e);
-			Error::PersistenceFailed
-		})?;
+			// BIP 125 requires the replacement to pay a higher fee rate than the original.
+			// The minimum increase is the incremental relay fee.
+			let min_required_fee_rate_sat_per_kwu =
+				old_fee_rate.to_sat_per_kwu() + INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT as u64;
 
-		let fee_bumped_tx = psbt.extract_tx().map_err(|e| {
-			log_error!(self.logger, "Failed to extract fee bump transaction for {}: {}", txid, e);
-			e
-		})?;
+			let confirmation_target = ConfirmationTarget::OnchainPayment;
+			let estimated_fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
 
-		let new_txid = fee_bumped_tx.compute_txid();
+			// Use the higher of minimum RBF requirement or current network estimate
+			let final_fee_rate_sat_per_kwu =
+				min_required_fee_rate_sat_per_kwu.max(estimated_fee_rate.to_sat_per_kwu());
+			let final_fee_rate =
+				fee_rate.unwrap_or_else(|| FeeRate::from_sat_per_kwu(final_fee_rate_sat_per_kwu));
+
+			let mut psbt = {
+				let mut builder = locked_wallet.build_fee_bump(txid).map_err(|e| {
+					log_error!(self.logger, "BDK fee bump failed for {}: {:?}", txid, e);
+					match e {
+						BuildFeeBumpError::TransactionNotFound(_) => Error::InvalidPaymentId,
+						BuildFeeBumpError::TransactionConfirmed(_) => {
+							log_error!(self.logger, "Payment {} is already confirmed", payment_id);
+							Error::InvalidPaymentId
+						},
+						BuildFeeBumpError::IrreplaceableTransaction(_) => {
+							Error::OnchainTxCreationFailed
+						},
+						BuildFeeBumpError::FeeRateUnavailable => {
+							Error::FeerateEstimationUpdateFailed
+						},
+						BuildFeeBumpError::UnknownUtxo(_) => Error::OnchainTxCreationFailed,
+						BuildFeeBumpError::InvalidOutputIndex(_) => Error::OnchainTxCreationFailed,
+					}
+				})?;
+
+				builder.fee_rate(final_fee_rate);
+
+				match builder.finish() {
+					Ok(psbt) => Ok(psbt),
+					Err(CreateTxError::FeeRateTooLow { required: required_fee_rate }) => {
+						if fee_rate.is_some() {
+							log_error!(
+								self.logger,
+								"Provided fee rate {} is too low for RBF fee bump of txid {}, required minimum fee rate: {}",
+								fee_rate.expect("fee rate is set"),
+								txid,
+								required_fee_rate
+							);
+							return Err(Error::InvalidFeeRate);
+						}
+
+						log_info!(
+							self.logger,
+							"BDK requires higher fee rate: {}",
+							required_fee_rate
+						);
+
+						// BDK may require a higher fee rate than our estimate due to
+						// differences in UTXO selection or transaction weight calculations.
+						// We cap the retry at 1.5x our target fee rate as a safety bound
+						// to avoid overpaying.
+						let max_allowed_fee_rate = FeeRate::from_sat_per_kwu(
+							final_fee_rate_sat_per_kwu.saturating_mul(3).saturating_div(2),
+						);
+						if required_fee_rate > max_allowed_fee_rate {
+							log_error!( self.logger, "BDK required fee rate {} exceeds sanity cap {} (1.5x our estimate) for tx {}", required_fee_rate, max_allowed_fee_rate, txid );
+							return Err(Error::InvalidFeeRate);
+						}
+
+						let mut builder = locked_wallet.build_fee_bump(txid).map_err(|e| {
+							log_error!(
+								self.logger,
+								"BDK fee bump retry failed for {}: {:?}",
+								txid,
+								e
+							);
+							Error::InvalidFeeRate
+						})?;
+
+						builder.fee_rate(required_fee_rate);
+						builder.finish().map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to finish PSBT with required fee rate: {:?}",
+								e
+							);
+							Error::InvalidFeeRate
+						})
+					},
+					Err(e) => {
+						log_error!(self.logger, "Failed to create fee bump PSBT: {:?}", e);
+						Err(Error::InvalidFeeRate)
+					},
+				}?
+			};
+
+			match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+				Ok(finalized) => {
+					if !finalized {
+						log_error!(
+							self.logger,
+							"Failed to finalize signing for fee bump of {}",
+							txid
+						);
+						return Err(Error::OnchainTxCreationFailed);
+					}
+				},
+				Err(err) => {
+					log_error!(
+						self.logger,
+						"Failed to sign fee bump transaction for {}: {}",
+						txid,
+						err
+					);
+					return Err(err.into());
+				},
+			}
+
+			let mut locked_persister = self.persister.lock().expect("lock");
+			self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(
+				|e| {
+					log_error!(
+						self.logger,
+						"Failed to persist wallet after fee bump of {}: {}",
+						txid,
+						e
+					);
+					Error::PersistenceFailed
+				},
+			)?;
+
+			let fee_bumped_tx = psbt.extract_tx().map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to extract fee bump transaction for {}: {}",
+					txid,
+					e
+				);
+				e
+			})?;
+
+			let new_txid = fee_bumped_tx.compute_txid();
+			let new_payment = self.create_payment_from_tx(
+				&locked_wallet,
+				new_txid,
+				payment.id,
+				&fee_bumped_tx,
+				PaymentStatus::Pending,
+				ConfirmationStatus::Unconfirmed,
+			);
+			let pending_payment_store =
+				self.create_pending_payment_from_tx(new_payment.clone(), Vec::new());
+			(fee_bumped_tx, new_txid, new_payment, pending_payment_store)
+		};
 
 		self.broadcaster.broadcast_transactions(&[(
 			&fee_bumped_tx,
 			lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] },
 		)]);
 
-		let new_payment = self.create_payment_from_tx(
-			&locked_wallet,
-			new_txid,
-			payment.id,
-			&fee_bumped_tx,
-			PaymentStatus::Pending,
-			ConfirmationStatus::Unconfirmed,
-		);
-
-		let pending_payment_store =
-			self.create_pending_payment_from_tx(new_payment.clone(), Vec::new());
-
-		self.runtime
-			.block_on(self.pending_payment_store.insert_or_update(pending_payment_store))?;
-		self.runtime.block_on(self.payment_store.insert_or_update(new_payment))?;
+		self.pending_payment_store.insert_or_update(pending_payment_store).await?;
+		self.payment_store.insert_or_update(new_payment).await?;
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
 
@@ -1456,57 +1496,60 @@ impl Listen for Wallet {
 	}
 
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
-		let mut locked_wallet = self.inner.lock().expect("lock");
+		let events = {
+			let mut locked_wallet = self.inner.lock().expect("lock");
 
-		let pre_checkpoint = locked_wallet.latest_checkpoint();
-		if pre_checkpoint.height() != height - 1
-			|| pre_checkpoint.hash() != block.header.prev_blockhash
-		{
-			log_debug!(
-				self.logger,
-				"Detected reorg while applying a connected block to on-chain wallet: new block with hash {} at height {}",
-				block.header.block_hash(),
-				height
-			);
-		}
+			let pre_checkpoint = locked_wallet.latest_checkpoint();
+			if pre_checkpoint.height() != height - 1
+				|| pre_checkpoint.hash() != block.header.prev_blockhash
+			{
+				log_debug!(
+					self.logger,
+					"Detected reorg while applying a connected block to on-chain wallet: new block with hash {} at height {}",
+					block.header.block_hash(),
+					height
+				);
+			}
 
-		// In order to be able to reliably calculate fees the `Wallet` needs access to the previous
-		// ouput data. To this end, we here insert any ouputs of transactions that LDK is intersted
-		// in (e.g., funding transaction ouputs) into the wallet's transaction graph when we see
-		// them, so it is reliably able to calculate fees for subsequent spends.
-		//
-		// FIXME: technically, we should also do this for mempool transactions. However, at the
-		// current time fixing the edge case doesn't seem worth the additional conplexity /
-		// additional overhead..
-		let registered_txids = self.chain_source.registered_txids();
-		for tx in &block.txdata {
-			let txid = tx.compute_txid();
-			if registered_txids.contains(&txid) {
-				for (vout, txout) in tx.output.iter().enumerate() {
-					let outpoint = OutPoint { txid, vout: vout as u32 };
-					locked_wallet.insert_txout(outpoint, txout.clone());
+			// In order to be able to reliably calculate fees the `Wallet` needs access to the previous
+			// ouput data. To this end, we here insert any ouputs of transactions that LDK is intersted
+			// in (e.g., funding transaction ouputs) into the wallet's transaction graph when we see
+			// them, so it is reliably able to calculate fees for subsequent spends.
+			//
+			// FIXME: technically, we should also do this for mempool transactions. However, at the
+			// current time fixing the edge case doesn't seem worth the additional conplexity /
+			// additional overhead..
+			let registered_txids = self.chain_source.registered_txids();
+			for tx in &block.txdata {
+				let txid = tx.compute_txid();
+				if registered_txids.contains(&txid) {
+					for (vout, txout) in tx.output.iter().enumerate() {
+						let outpoint = OutPoint { txid, vout: vout as u32 };
+						locked_wallet.insert_txout(outpoint, txout.clone());
+					}
 				}
 			}
-		}
 
-		match locked_wallet.apply_block_events(block, height) {
-			Ok(events) => {
-				if let Err(e) = self.update_payment_store(&mut *locked_wallet, events) {
-					log_error!(self.logger, "Failed to update payment store: {}", e);
+			match locked_wallet.apply_block_events(block, height) {
+				Ok(events) => events,
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to apply connected block to on-chain wallet: {}",
+						e
+					);
 					return;
-				}
-			},
-			Err(e) => {
-				log_error!(
-					self.logger,
-					"Failed to apply connected block to on-chain wallet: {}",
-					e
-				);
-				return;
-			},
+				},
+			}
 		};
 
+		if let Err(e) = self.runtime.block_on(self.update_payment_store(events)) {
+			log_error!(self.logger, "Failed to update payment store: {}", e);
+			return;
+		}
+
 		let mut locked_persister = self.persister.lock().expect("lock");
+		let mut locked_wallet = self.inner.lock().expect("lock");
 		match self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)) {
 			Ok(_) => (),
 			Err(e) => {

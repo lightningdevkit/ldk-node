@@ -175,6 +175,7 @@ use payment::{
 use peer_store::{PeerInfo, PeerStore};
 use runtime::Runtime;
 pub use tokio;
+use tokio::sync::RwLock as AsyncRwLock;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
@@ -243,7 +244,7 @@ pub struct Node {
 	payment_store: Arc<PaymentStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
-	node_metrics: Arc<PersistedNodeMetrics>,
+	node_metrics: Arc<AsyncRwLock<NodeMetrics>>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: HRNResolver,
@@ -459,27 +460,32 @@ impl Node {
 			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 			loop {
 				tokio::select! {
-						_ = stop_connect.changed() => {
-							log_debug!(
-								connect_logger,
-								"Stopping reconnecting known peers."
-							);
-							return;
-						}
-						_ = interval.tick() => {
-							let pm_peers = connect_pm
-								.list_peers()
-								.iter()
-								.map(|peer| peer.counterparty_node_id)
-								.collect::<Vec<_>>();
+					_ = stop_connect.changed() => {
+						log_debug!(
+							connect_logger,
+							"Stopping reconnecting known peers."
+						);
+						return;
+					}
+					_ = interval.tick() => {
+						let pm_peers = connect_pm
+							.list_peers()
+							.iter()
+							.map(|peer| peer.counterparty_node_id)
+							.collect::<Vec<_>>();
 
-							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
-								let _ = connect_cm.do_connect_peer(
-									peer_info.node_id,
-									peer_info.address.clone(),
-									).await;
-							}
+						for peer_info in connect_peer_store
+							.list_peers()
+							.await
+							.iter()
+							.filter(|info| !pm_peers.contains(&info.node_id))
+						{
+							let _ = connect_cm.do_connect_peer(
+								peer_info.node_id,
+								peer_info.address.clone(),
+							).await;
 						}
+					}
 				}
 			}
 		});
@@ -506,11 +512,11 @@ impl Node {
 							log_debug!(
 								bcast_logger,
 								"Stopping broadcasting node announcements.",
-								);
+							);
 							return;
 						}
 						_ = interval.tick() => {
-							let skip_broadcast = match bcast_node_metrics.read().expect("lock").latest_node_announcement_broadcast_timestamp {
+							let skip_broadcast = match bcast_node_metrics.read().await.latest_node_announcement_broadcast_timestamp {
 								Some(latest_bcast_time_secs) => {
 									// Skip if the time hasn't elapsed yet.
 									let next_bcast_unix_time = SystemTime::UNIX_EPOCH + Duration::from_secs(latest_bcast_time_secs) + NODE_ANN_BCAST_INTERVAL;
@@ -767,11 +773,11 @@ impl Node {
 	}
 
 	/// Returns the status of the [`Node`].
-	pub fn status(&self) -> NodeStatus {
+	pub async fn status(&self) -> NodeStatus {
 		let is_running = *self.is_running.read().expect("lock");
 		let network = self.config.network;
 		let current_best_block = self.channel_manager.current_best_block().into();
-		let locked_node_metrics = self.node_metrics.read().expect("lock");
+		let locked_node_metrics = self.node_metrics.read().await;
 		let latest_lightning_wallet_sync_timestamp =
 			locked_node_metrics.latest_lightning_wallet_sync_timestamp;
 		let latest_onchain_wallet_sync_timestamp =
@@ -1104,7 +1110,7 @@ impl Node {
 	/// Connect to a node on the peer-to-peer network.
 	///
 	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
-	pub fn connect(
+	pub async fn connect(
 		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
@@ -1117,16 +1123,12 @@ impl Node {
 		let con_addr = peer_info.address.clone();
 		let con_cm = Arc::clone(&self.connection_manager);
 
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
+		con_cm.connect_peer_if_necessary(con_node_id, con_addr).await?;
 
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
 
 		if persist {
-			self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
+			self.peer_store.add_peer(peer_info).await?;
 		}
 
 		Ok(())
@@ -1136,14 +1138,14 @@ impl Node {
 	///
 	/// Will also remove the peer from the peer store, i.e., after this has been called we won't
 	/// try to reconnect on restart.
-	pub fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
+	pub async fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
 
 		log_info!(self.logger, "Disconnecting peer {}..", counterparty_node_id);
 
-		match self.runtime.block_on(self.peer_store.remove_peer(&counterparty_node_id)) {
+		match self.peer_store.remove_peer(&counterparty_node_id).await {
 			Ok(()) => {},
 			Err(e) => {
 				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
@@ -1154,7 +1156,7 @@ impl Node {
 		Ok(())
 	}
 
-	fn open_channel_inner(
+	async fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: FundingAmount,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_for_forwarding: bool, disable_counterparty_reserve: bool,
@@ -1169,11 +1171,7 @@ impl Node {
 		let con_addr = peer_info.address.clone();
 		let con_cm = Arc::clone(&self.connection_manager);
 
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
+		con_cm.connect_peer_if_necessary(con_node_id, con_addr).await?;
 
 		let channel_amount_sats = match channel_amount_sats {
 			FundingAmount::Exact { amount_sats } => {
@@ -1260,7 +1258,7 @@ impl Node {
 					zero_reserve_string,
 					peer_info.node_id
 				);
-				self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
+				self.peer_store.add_peer(peer_info).await?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
@@ -1334,7 +1332,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
-	pub fn open_channel(
+	pub async fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
@@ -1347,6 +1345,7 @@ impl Node {
 			false,
 			false,
 		)
+		.await
 	}
 
 	/// Connect to a node and open a new announced channel.
@@ -1370,7 +1369,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
-	pub fn open_announced_channel(
+	pub async fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
@@ -1388,6 +1387,7 @@ impl Node {
 			true,
 			false,
 		)
+		.await
 	}
 
 	/// Connect to a node and open a new unannounced channel, using all available on-chain funds
@@ -1404,7 +1404,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
-	pub fn open_channel_with_all(
+	pub async fn open_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
@@ -1417,6 +1417,7 @@ impl Node {
 			false,
 			false,
 		)
+		.await
 	}
 
 	/// Connect to a node and open a new announced channel, using all available on-chain funds
@@ -1437,7 +1438,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
-	pub fn open_announced_channel_with_all(
+	pub async fn open_announced_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
@@ -1455,6 +1456,7 @@ impl Node {
 			true,
 			false,
 		)
+		.await
 	}
 
 	/// Connect to a node and open a new unannounced channel, in which the target node can
@@ -1476,7 +1478,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
-	pub fn open_0reserve_channel(
+	pub async fn open_0reserve_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
@@ -1489,6 +1491,7 @@ impl Node {
 			false,
 			true,
 		)
+		.await
 	}
 
 	/// Connect to a node and open a new unannounced channel, using all available on-chain funds
@@ -1505,7 +1508,7 @@ impl Node {
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
-	pub fn open_0reserve_channel_with_all(
+	pub async fn open_0reserve_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
@@ -1518,9 +1521,10 @@ impl Node {
 			false,
 			true,
 		)
+		.await
 	}
 
-	fn splice_in_inner(
+	async fn splice_in_inner(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: FundingAmount,
 	) -> Result<(), Error> {
@@ -1605,14 +1609,14 @@ impl Node {
 				return Err(Error::ChannelSplicingFailed);
 			}
 
-			let contribution = self
-				.runtime
-				.block_on(funding_template.splice_in(
+			let contribution = funding_template
+				.splice_in(
 					Amount::from_sat(splice_amount_sats),
 					min_feerate,
 					max_feerate,
 					Arc::clone(&self.wallet),
-				))
+				)
+				.await
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
@@ -1650,7 +1654,7 @@ impl Node {
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
 	/// this classification may change in the future.
-	pub fn splice_in(
+	pub async fn splice_in(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
@@ -1659,6 +1663,7 @@ impl Node {
 			counterparty_node_id,
 			FundingAmount::Exact { amount_sats: splice_amount_sats },
 		)
+		.await
 	}
 
 	/// Add all available on-chain funds into an existing channel.
@@ -1674,10 +1679,10 @@ impl Node {
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
 	/// this classification may change in the future.
-	pub fn splice_in_with_all(
+	pub async fn splice_in_with_all(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
-		self.splice_in_inner(user_channel_id, counterparty_node_id, FundingAmount::Max)
+		self.splice_in_inner(user_channel_id, counterparty_node_id, FundingAmount::Max).await
 	}
 
 	/// Remove funds from an existing channel, sending them to an on-chain address.
@@ -1768,7 +1773,7 @@ impl Node {
 	/// this method must be called manually to keep wallets in sync with the chain state.
 	///
 	/// [`EsploraSyncConfig::background_sync_config`]: crate::config::EsploraSyncConfig::background_sync_config
-	pub fn sync_wallets(&self) -> Result<(), Error> {
+	pub async fn sync_wallets(&self) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
@@ -1778,37 +1783,35 @@ impl Node {
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
-		self.runtime.block_on(async move {
-			if chain_source.is_transaction_based() {
-				chain_source.update_fee_rate_estimates().await?;
-				chain_source
-					.sync_lightning_wallet(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
-					.await?;
-				chain_source.sync_onchain_wallet(sync_wallet).await?;
-			} else {
-				chain_source.update_fee_rate_estimates().await?;
-				chain_source
-					.poll_and_update_listeners(
-						sync_wallet,
-						sync_cman,
-						sync_cmon,
-						Arc::clone(&sync_sweeper),
-					)
-					.await?;
-			}
-			let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
-			Ok(())
-		})
+		if chain_source.is_transaction_based() {
+			chain_source.update_fee_rate_estimates().await?;
+			chain_source
+				.sync_lightning_wallet(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
+				.await?;
+			chain_source.sync_onchain_wallet(sync_wallet).await?;
+		} else {
+			chain_source.update_fee_rate_estimates().await?;
+			chain_source
+				.poll_and_update_listeners(
+					sync_wallet,
+					sync_cman,
+					sync_cmon,
+					Arc::clone(&sync_sweeper),
+				)
+				.await?;
+		}
+		let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
+		Ok(())
 	}
 
 	/// Close a previously opened channel.
 	///
 	/// Will attempt to close a channel coopertively. If this fails, users might need to resort to
 	/// [`Node::force_close_channel`].
-	pub fn close_channel(
+	pub async fn close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
-		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None)
+		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None).await
 	}
 
 	/// Force-close a previously opened channel.
@@ -1824,14 +1827,14 @@ impl Node {
 	/// for more information).
 	///
 	/// [`AnchorChannelsConfig::trusted_peers_no_reserve`]: crate::config::AnchorChannelsConfig::trusted_peers_no_reserve
-	pub fn force_close_channel(
+	pub async fn force_close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		reason: Option<String>,
 	) -> Result<(), Error> {
-		self.close_channel_internal(user_channel_id, counterparty_node_id, true, reason)
+		self.close_channel_internal(user_channel_id, counterparty_node_id, true, reason).await
 	}
 
-	fn close_channel_internal(
+	async fn close_channel_internal(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, force: bool,
 		force_close_reason: Option<String>,
 	) -> Result<(), Error> {
@@ -1866,7 +1869,7 @@ impl Node {
 
 			// Check if this was the last open channel, if so, forget the peer.
 			if open_channels.len() == 1 {
-				self.runtime.block_on(self.peer_store.remove_peer(&counterparty_node_id))?;
+				self.peer_store.remove_peer(&counterparty_node_id).await?;
 			}
 		}
 
@@ -1898,13 +1901,13 @@ impl Node {
 	/// Retrieve the details of a specific payment with the given id.
 	///
 	/// Returns `Some` if the payment was known and `None` otherwise.
-	pub fn payment(&self, payment_id: &PaymentId) -> Option<PaymentDetails> {
-		self.payment_store.get(payment_id)
+	pub async fn payment(&self, payment_id: &PaymentId) -> Option<PaymentDetails> {
+		self.payment_store.get(payment_id).await
 	}
 
 	/// Remove the payment with the given id from the store.
-	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
-		self.runtime.block_on(self.payment_store.remove(&payment_id))
+	pub async fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
+		self.payment_store.remove(&payment_id).await
 	}
 
 	/// Retrieves an overview of all known balances.
@@ -1978,19 +1981,19 @@ impl Node {
 	/// # let node = builder.build(node_entropy.into()).unwrap();
 	/// node.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
 	/// ```
-	pub fn list_payments_with_filter<F: FnMut(&&PaymentDetails) -> bool>(
+	pub async fn list_payments_with_filter<F: FnMut(&&PaymentDetails) -> bool>(
 		&self, f: F,
 	) -> Vec<PaymentDetails> {
-		self.payment_store.list_filter(f)
+		self.payment_store.list_filter(f).await
 	}
 
 	/// Retrieves all payments.
-	pub fn list_payments(&self) -> Vec<PaymentDetails> {
-		self.payment_store.list_filter(|_| true)
+	pub async fn list_payments(&self) -> Vec<PaymentDetails> {
+		self.payment_store.list_filter(|_| true).await
 	}
 
 	/// Retrieves a list of known peers.
-	pub fn list_peers(&self) -> Vec<PeerDetails> {
+	pub async fn list_peers(&self) -> Vec<PeerDetails> {
 		let mut peers = Vec::new();
 
 		// First add all connected peers, preferring to list the connected address if available.
@@ -1998,7 +2001,7 @@ impl Node {
 		let connected_peers_len = connected_peers.len();
 		for connected_peer in connected_peers {
 			let node_id = connected_peer.counterparty_node_id;
-			let stored_peer = self.peer_store.get_peer(&node_id);
+			let stored_peer = self.peer_store.get_peer(&node_id).await;
 			let stored_addr_opt = stored_peer.as_ref().map(|p| p.address.clone());
 			let address = match (connected_peer.socket_address, stored_addr_opt) {
 				(Some(con_addr), _) => con_addr,
@@ -2013,7 +2016,7 @@ impl Node {
 		}
 
 		// Now add all known-but-offline peers, too.
-		for p in self.peer_store.list_peers() {
+		for p in self.peer_store.list_peers().await {
 			if peers.iter().take(connected_peers_len).any(|d| d.node_id == p.node_id) {
 				continue;
 			}
@@ -2061,22 +2064,22 @@ impl Node {
 
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
 	/// a limited view of the network.
-	pub fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
-		self.runtime
-			.block_on(KVStore::read(
-				&*self.kv_store,
-				lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-				lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-				lightning::util::persist::SCORER_PERSISTENCE_KEY,
-			))
-			.map_err(|e| {
-				log_error!(
-					self.logger,
-					"Failed to access store while exporting pathfinding scores: {}",
-					e
-				);
-				Error::PersistenceFailed
-			})
+	pub async fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
+		KVStore::read(
+			&*self.kv_store,
+			lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+			lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+			lightning::util::persist::SCORER_PERSISTENCE_KEY,
+		)
+		.await
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Failed to access store while exporting pathfinding scores: {}",
+				e
+			);
+			Error::PersistenceFailed
+		})
 	}
 
 	/// Return the features used in node announcement.
@@ -2184,42 +2187,6 @@ impl Default for NodeMetrics {
 			latest_pathfinding_scores_sync_timestamp: None,
 			latest_node_announcement_broadcast_timestamp: None,
 		}
-	}
-}
-
-pub(crate) struct PersistedNodeMetrics {
-	metrics: RwLock<NodeMetrics>,
-	mutation_lock: tokio::sync::Mutex<()>,
-}
-
-impl PersistedNodeMetrics {
-	pub(crate) fn new(metrics: NodeMetrics) -> Self {
-		Self { metrics: RwLock::new(metrics), mutation_lock: tokio::sync::Mutex::new(()) }
-	}
-
-	/// Returns the current in-memory metrics.
-	///
-	/// The async mutation lock serializes persistence updates, but this synchronous reader cannot
-	/// wait on it. Until metrics reads are async, callers may observe metrics changes that are
-	/// still being persisted.
-	pub(crate) fn read(
-		&self,
-	) -> std::sync::LockResult<std::sync::RwLockReadGuard<'_, NodeMetrics>> {
-		self.metrics.read()
-	}
-
-	/// Returns the in-memory metrics write lock.
-	///
-	/// Persistence updates should go through `update_and_persist_node_metrics` so writers are
-	/// serialized by the async mutation lock.
-	pub(crate) fn write(
-		&self,
-	) -> std::sync::LockResult<std::sync::RwLockWriteGuard<'_, NodeMetrics>> {
-		self.metrics.write()
-	}
-
-	pub(crate) async fn lock_mutation(&self) -> tokio::sync::MutexGuard<'_, ()> {
-		self.mutation_lock.lock().await
 	}
 }
 

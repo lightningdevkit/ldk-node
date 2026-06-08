@@ -135,10 +135,10 @@ impl OnchainPayment {
 	/// higher fee, resulting in faster confirmation potential.
 	///
 	/// Returns the [`Txid`] of the new replacement transaction if successful.
-	pub fn bump_fee_rbf(
+	pub async fn bump_fee_rbf(
 		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
-		self.wallet.bump_fee_rbf(payment_id, fee_rate_opt)
+		self.wallet.bump_fee_rbf(payment_id, fee_rate_opt).await
 	}
 }

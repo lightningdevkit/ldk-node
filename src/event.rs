@@ -724,7 +724,7 @@ where
 				..
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
-				let payment_info = self.payment_store.get(&payment_id);
+				let payment_info = self.payment_store.get(&payment_id).await;
 				if let Some(info) = payment_info.as_ref() {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
@@ -1142,7 +1142,7 @@ where
 					},
 				};
 
-				self.payment_store.get(&payment_id).map(|payment| {
+				self.payment_store.get(&payment_id).await.map(|payment| {
 					let amount_msat = payment.amount_msat.expect(
 						"outbound payments should record their amount before they can succeed",
 					);
@@ -1524,28 +1524,26 @@ where
 					},
 				};
 
-				let peer_to_store = {
+				let is_new_inbound_pending_channel = self
+					.channel_manager
+					.list_channels_with_counterparty(&counterparty_node_id)
+					.into_iter()
+					.any(|c| c.channel_id == channel_id && !c.is_outbound);
+				let peer_to_store = if is_new_inbound_pending_channel
+					&& self.peer_store.get_peer(&counterparty_node_id).await.is_none()
+				{
 					let network_graph = self.network_graph.read_only();
-					let channels =
-						self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
-					channels
-						.into_iter()
-						.find(|c| c.channel_id == channel_id)
-						.filter(|pending_channel| {
-							!pending_channel.is_outbound
-								&& self.peer_store.get_peer(&counterparty_node_id).is_none()
+					network_graph
+						.nodes()
+						.get(&NodeId::from_pubkey(&counterparty_node_id))
+						.and_then(|node_info| node_info.announcement_info.as_ref())
+						.and_then(|ann_info| ann_info.addresses().first())
+						.map(|address| PeerInfo {
+							node_id: counterparty_node_id,
+							address: address.clone(),
 						})
-						.and_then(|_| {
-							network_graph
-								.nodes()
-								.get(&NodeId::from_pubkey(&counterparty_node_id))
-								.and_then(|node_info| node_info.announcement_info.as_ref())
-								.and_then(|ann_info| ann_info.addresses().first())
-								.map(|address| PeerInfo {
-									node_id: counterparty_node_id,
-									address: address.clone(),
-								})
-						})
+				} else {
+					None
 				};
 				if let Some(peer) = peer_to_store {
 					self.peer_store.add_peer(peer).await.unwrap_or_else(|e| {

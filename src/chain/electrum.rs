@@ -22,6 +22,7 @@ use electrum_client::{
 use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::ElectrumSyncClient;
+use tokio::sync::RwLock as AsyncRwLock;
 
 use super::WalletSyncStatus;
 use crate::config::{Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP};
@@ -34,7 +35,7 @@ use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::PersistedNodeMetrics;
+use crate::NodeMetrics;
 
 const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
@@ -49,14 +50,14 @@ pub(super) struct ElectrumChainSource {
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
-	node_metrics: Arc<PersistedNodeMetrics>,
+	node_metrics: Arc<AsyncRwLock<NodeMetrics>>,
 }
 
 impl ElectrumChainSource {
 	pub(super) fn new(
 		server_url: String, sync_config: ElectrumSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
+		logger: Arc<Logger>, node_metrics: Arc<AsyncRwLock<NodeMetrics>>,
 	) -> Self {
 		let electrum_runtime_status = RwLock::new(ElectrumRuntimeStatus::new());
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
@@ -127,7 +128,7 @@ impl ElectrumChainSource {
 		// If this is our first sync, do a full scan with the configured gap limit.
 		// Otherwise just do an incremental sync.
 		let incremental_sync =
-			self.node_metrics.read().expect("lock").latest_onchain_wallet_sync_timestamp.is_some();
+			self.node_metrics.read().await.latest_onchain_wallet_sync_timestamp.is_some();
 
 		let cached_txs = onchain_wallet.get_cached_txs();
 
@@ -168,7 +169,7 @@ impl ElectrumChainSource {
 		update_res: Result<BdkUpdate, Error>, now: Instant,
 	) -> Result<(), Error> {
 		match update_res {
-			Ok(update) => match onchain_wallet.apply_update(update) {
+			Ok(update) => match onchain_wallet.apply_update(update).await {
 				Ok(()) => {
 					log_debug!(
 						self.logger,

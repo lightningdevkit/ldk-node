@@ -53,7 +53,7 @@ async fn vss_v0_schema_backwards_compatibility() {
 			bitcoin::Amount::from_sat(100_000),
 		)
 		.await;
-		node_old.sync_wallets().unwrap();
+		node_old.sync_wallets().await.unwrap();
 
 		let balance = node_old.list_balances().spendable_onchain_balance_sats;
 		assert!(balance > 0);
@@ -84,7 +84,7 @@ async fn vss_v0_schema_backwards_compatibility() {
 		.unwrap();
 
 	node_new.start().unwrap();
-	node_new.sync_wallets().unwrap();
+	node_new.sync_wallets().await.unwrap();
 
 	let new_balance = node_new.list_balances().spendable_onchain_balance_sats;
 	let new_node_id = node_new.node_id();

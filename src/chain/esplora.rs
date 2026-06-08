@@ -15,6 +15,7 @@ use esplora_client::AsyncClient as EsploraAsyncClient;
 use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::EsploraSyncClient;
+use tokio::sync::RwLock as AsyncRwLock;
 
 use super::WalletSyncStatus;
 use crate::config::{Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP};
@@ -25,7 +26,7 @@ use crate::fee_estimator::{
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, PersistedNodeMetrics};
+use crate::{Error, NodeMetrics};
 
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,
@@ -37,14 +38,14 @@ pub(super) struct EsploraChainSource {
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
-	node_metrics: Arc<PersistedNodeMetrics>,
+	node_metrics: Arc<AsyncRwLock<NodeMetrics>>,
 }
 
 impl EsploraChainSource {
 	pub(crate) fn new(
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
+		logger: Arc<Logger>, node_metrics: Arc<AsyncRwLock<NodeMetrics>>,
 	) -> Result<Self, ()> {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder =
@@ -103,14 +104,14 @@ impl EsploraChainSource {
 		// If this is our first sync, do a full scan with the configured gap limit.
 		// Otherwise just do an incremental sync.
 		let incremental_sync =
-			self.node_metrics.read().expect("lock").latest_onchain_wallet_sync_timestamp.is_some();
+			self.node_metrics.read().await.latest_onchain_wallet_sync_timestamp.is_some();
 
 		macro_rules! get_and_apply_wallet_update {
 			($sync_future: expr) => {{
 				let now = Instant::now();
 				match $sync_future.await {
 					Ok(res) => match res {
-						Ok(update) => match onchain_wallet.apply_update(update) {
+						Ok(update) => match onchain_wallet.apply_update(update).await {
 							Ok(()) => {
 								log_debug!(
 									self.logger,

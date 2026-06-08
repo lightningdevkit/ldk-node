@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use lightning::routing::scoring::ChannelLiquidities;
 use lightning::util::ser::Readable;
 use lightning::{log_error, log_info, log_trace};
+use tokio::sync::RwLock;
 
 use crate::config::{
 	EXTERNAL_PATHFINDING_SCORES_MAX_SIZE, EXTERNAL_PATHFINDING_SCORES_SYNC_INTERVAL,

@@ -58,7 +58,7 @@ proptest! {
 			macro_rules! sync_wallets {
 				() => {
 					for node in &nodes {
-						node.sync_wallets().unwrap();
+						node.sync_wallets().await.unwrap();
 					}
 				};
 			}
@@ -104,6 +104,7 @@ proptest! {
 					node
 						.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
 							&& matches!(p.kind, PaymentKind::Onchain { .. }))
+						.await
 						.len(),
 					1
 				);
@@ -126,9 +127,9 @@ proptest! {
 				let funding = nodes_funding_tx.get(&node.node_id()).expect("Funding tx not exist");
 
 				if force_close {
-					node.force_close_channel(&user_channel_id, next_node.node_id(), None).unwrap();
+					node.force_close_channel(&user_channel_id, next_node.node_id(), None).await.unwrap();
 				} else {
-					node.close_channel(&user_channel_id, next_node.node_id()).unwrap();
+					node.close_channel(&user_channel_id, next_node.node_id()).await.unwrap();
 				}
 
 				expect_event!(node, ChannelClosed);
@@ -145,7 +146,7 @@ proptest! {
 
 			if force_close {
 				for node in &nodes {
-					node.sync_wallets().unwrap();
+					node.sync_wallets().await.unwrap();
 					// If there is no more balance, there is nothing to process here.
 					if node.list_balances().lightning_balances.len() < 1 {
 						return;
@@ -155,10 +156,10 @@ proptest! {
 							confirmation_height,
 							..
 						} => {
-							let cur_height = node.status().current_best_block.height;
+							let cur_height = node.status().await.current_best_block.height;
 							let blocks_to_go = confirmation_height - cur_height;
 							generate_blocks_and_wait(bitcoind, electrs, blocks_to_go as usize).await;
-							node.sync_wallets().unwrap();
+							node.sync_wallets().await.unwrap();
 						},
 						_ => panic!("Unexpected balance state for node_hub!"),
 					}
@@ -171,7 +172,7 @@ proptest! {
 					}
 
 					generate_blocks_and_wait(&bitcoind, electrs, 1).await;
-					node.sync_wallets().unwrap();
+					node.sync_wallets().await.unwrap();
 					assert!(node.list_balances().lightning_balances.len() < 2);
 					assert!(node.list_balances().pending_balances_from_channel_closures.len() > 0);
 					match node.list_balances().pending_balances_from_channel_closures[0] {

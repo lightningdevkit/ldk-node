@@ -23,7 +23,7 @@ pub(crate) async fn disconnect_by_side(
 ) -> Result<(), String> {
 	let ext_node_id = peer.get_node_id().await.unwrap();
 	match side {
-		Side::Ldk => node.disconnect(ext_node_id).map_err(|e| format!("{:?}", e)),
+		Side::Ldk => node.disconnect(ext_node_id).await.map_err(|e| format!("{:?}", e)),
 		Side::External => {
 			peer.disconnect_peer(node.node_id()).await.map_err(|e| format!("{:?}", e))
 		},
@@ -34,10 +34,10 @@ pub(crate) async fn disconnect_by_side(
 pub(crate) async fn reconnect_and_wait(
 	node: &Node, peer_id: PublicKey, addr: SocketAddress, context: &str,
 ) {
-	node.connect(peer_id, addr, true).unwrap();
+	node.connect(peer_id, addr, true).await.unwrap();
 	let max_attempts = super::super::INTEROP_TIMEOUT_SECS;
 	for i in 0..max_attempts {
-		if node.list_peers().iter().any(|p| p.node_id == peer_id && p.is_connected) {
+		if node.list_peers().await.iter().any(|p| p.node_id == peer_id && p.is_connected) {
 			tokio::time::sleep(Duration::from_secs(2)).await;
 			return;
 		}
@@ -59,7 +59,7 @@ pub(crate) async fn disconnect_during_payment(
 	let parsed_invoice = Bolt11Invoice::from_str(&invoice_str).unwrap();
 
 	// If send() fails immediately, no event will arrive, so skip event wait below.
-	let send_ok = node.bolt11_payment().send(&parsed_invoice, None).is_ok();
+	let send_ok = node.bolt11_payment().send(&parsed_invoice, None).await.is_ok();
 
 	// Disconnect may race with payment delivery; tolerate failure.
 	let _ = disconnect_by_side(node, peer, disconnect_side).await;

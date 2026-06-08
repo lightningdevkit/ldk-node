@@ -187,21 +187,23 @@ async fn channel_open_fails_when_funds_insufficient() {
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
 	println!("\nA -- open_channel -> B");
 	assert_eq!(
 		Err(NodeError::InsufficientFunds),
-		node_a.open_channel(
-			node_b.node_id(),
-			node_b.listening_addresses().unwrap().first().unwrap().clone(),
-			120000,
-			None,
-			None,
-		)
+		node_a
+			.open_channel(
+				node_b.node_id(),
+				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				120000,
+				None,
+				None,
+			)
+			.await
 	);
 }
 
@@ -234,7 +236,7 @@ async fn multi_hop_sending() {
 	.await;
 
 	for n in &nodes {
-		n.sync_wallets().unwrap();
+		n.sync_wallets().await.unwrap();
 		assert_eq!(n.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 		assert_eq!(n.next_event(), None);
 	}
@@ -252,7 +254,7 @@ async fn multi_hop_sending() {
 	// wallet picks up on the broadcast funding tx and doesn't double-spend itself.
 	//
 	// TODO: Remove once fixed in BDK.
-	nodes[1].sync_wallets().unwrap();
+	nodes[1].sync_wallets().await.unwrap();
 	open_channel(&nodes[1], &nodes[3], 1_000_000, true, &electrsd).await;
 	open_channel(&nodes[2], &nodes[4], 1_000_000, true, &electrsd).await;
 	open_channel(&nodes[3], &nodes[4], 1_000_000, true, &electrsd).await;
@@ -260,7 +262,7 @@ async fn multi_hop_sending() {
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
 	for n in &nodes {
-		n.sync_wallets().unwrap();
+		n.sync_wallets().await.unwrap();
 	}
 
 	expect_event!(nodes[0], ChannelReady);
@@ -289,8 +291,9 @@ async fn multi_hop_sending() {
 	let invoice = nodes[4]
 		.bolt11_payment()
 		.receive(2_500_000, &invoice_description.clone().into(), 9217)
+		.await
 		.unwrap();
-	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
+	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).await.unwrap();
 
 	expect_event!(nodes[1], PaymentForwarded);
 
@@ -338,7 +341,7 @@ async fn start_stop_reinit() {
 	)
 	.await;
 
-	node.sync_wallets().unwrap();
+	node.sync_wallets().await.unwrap();
 	assert_eq!(node.list_balances().spendable_onchain_balance_sats, expected_amount.to_sat());
 
 	let log_file = format!("{}/ldk_node.log", config.node_config.clone().storage_dir_path);
@@ -367,7 +370,7 @@ async fn start_stop_reinit() {
 		expected_amount.to_sat()
 	);
 
-	reinitialized_node.sync_wallets().unwrap();
+	reinitialized_node.sync_wallets().await.unwrap();
 	assert_eq!(
 		reinitialized_node.list_balances().spendable_onchain_balance_sats,
 		expected_amount.to_sat()
@@ -398,13 +401,13 @@ async fn onchain_send_receive() {
 	)
 	.await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
-	let node_a_payments = node_a.list_payments();
-	let node_b_payments = node_b.list_payments();
+	let node_a_payments = node_a.list_payments().await;
+	let node_b_payments = node_b.list_payments().await;
 	for payments in [&node_a_payments, &node_b_payments] {
 		assert_eq!(payments.len(), 1)
 	}
@@ -426,16 +429,16 @@ async fn onchain_send_receive() {
 	open_channel(&node_b, &node_a, channel_amount_sat, true, &electrsd).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	let node_a_payments =
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. })).await;
 	assert_eq!(node_a_payments.len(), 1);
 	let node_b_payments =
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. })).await;
 	assert_eq!(node_b_payments.len(), 2);
 
 	let onchain_fee_buffer_sat = 1000;
@@ -467,11 +470,11 @@ async fn onchain_send_receive() {
 	let txid =
 		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
 	wait_for_tx(&electrsd.client, txid).await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	let payment_id = PaymentId(txid.to_byte_array());
-	let payment_a = node_a.payment(&payment_id).unwrap();
+	let payment_a = node_a.payment(&payment_id).await.unwrap();
 	assert_eq!(payment_a.status, PaymentStatus::Pending);
 	match payment_a.kind {
 		PaymentKind::Onchain { status, .. } => {
@@ -480,7 +483,7 @@ async fn onchain_send_receive() {
 		_ => panic!("Unexpected payment kind"),
 	}
 	assert!(payment_a.fee_paid_msat > Some(0));
-	let payment_b = node_b.payment(&payment_id).unwrap();
+	let payment_b = node_b.payment(&payment_id).await.unwrap();
 	assert_eq!(payment_b.status, PaymentStatus::Pending);
 	match payment_a.kind {
 		PaymentKind::Onchain { status, .. } => {
@@ -494,8 +497,8 @@ async fn onchain_send_receive() {
 	assert_eq!(payment_a.fee_paid_msat, payment_b.fee_paid_msat);
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	let expected_node_a_balance = expected_node_a_balance + amount_to_send_sats;
 	let expected_node_b_balance_lower = expected_node_b_balance_lower - amount_to_send_sats;
@@ -505,13 +508,13 @@ async fn onchain_send_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	let node_a_payments =
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. })).await;
 	assert_eq!(node_a_payments.len(), 2);
 	let node_b_payments =
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. })).await;
 	assert_eq!(node_b_payments.len(), 3);
 
-	let payment_a = node_a.payment(&payment_id).unwrap();
+	let payment_a = node_a.payment(&payment_id).await.unwrap();
 	match payment_a.kind {
 		PaymentKind::Onchain { txid: _txid, status } => {
 			assert_eq!(_txid, txid);
@@ -520,7 +523,7 @@ async fn onchain_send_receive() {
 		_ => panic!("Unexpected payment kind"),
 	}
 
-	let payment_b = node_a.payment(&payment_id).unwrap();
+	let payment_b = node_a.payment(&payment_id).await.unwrap();
 	match payment_b.kind {
 		PaymentKind::Onchain { txid: _txid, status } => {
 			assert_eq!(_txid, txid);
@@ -534,8 +537,8 @@ async fn onchain_send_receive() {
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 	wait_for_tx(&electrsd.client, txid).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	let expected_node_b_balance_lower = expected_node_b_balance_lower + expected_node_a_balance;
 	let expected_node_b_balance_upper = expected_node_b_balance_upper + expected_node_a_balance;
@@ -546,10 +549,10 @@ async fn onchain_send_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	let node_a_payments =
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. })).await;
 	assert_eq!(node_a_payments.len(), 3);
 	let node_b_payments =
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. })).await;
 	assert_eq!(node_b_payments.len(), 4);
 
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -557,8 +560,8 @@ async fn onchain_send_receive() {
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 	wait_for_tx(&electrsd.client, txid).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	let expected_node_b_balance_lower = expected_node_b_balance_lower + reserve_amount_sat;
 	let expected_node_b_balance_upper = expected_node_b_balance_upper + reserve_amount_sat;
@@ -570,10 +573,10 @@ async fn onchain_send_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	let node_a_payments =
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. })).await;
 	assert_eq!(node_a_payments.len(), 4);
 	let node_b_payments =
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. })).await;
 	assert_eq!(node_b_payments.len(), 5);
 }
 
@@ -598,8 +601,8 @@ async fn onchain_send_all_retains_reserve() {
 	)
 	.await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
@@ -609,8 +612,8 @@ async fn onchain_send_all_retains_reserve() {
 	wait_for_tx(&electrsd.client, txid).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	// Check node a sent all and node b received it
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 0);
 	assert!(((premine_amount_sat * 2 - onchain_fee_buffer_sat)..=(premine_amount_sat * 2))
@@ -626,15 +629,15 @@ async fn onchain_send_all_retains_reserve() {
 		.unwrap();
 	wait_for_tx(&electrsd.client, txid).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, reserve_amount_sat);
 
 	// Open a channel.
 	open_channel(&node_b, &node_a, premine_amount_sat, false, &electrsd).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
@@ -650,8 +653,8 @@ async fn onchain_send_all_retains_reserve() {
 	wait_for_tx(&electrsd.client, txid).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	// Check node b sent all and node a received it
 	assert_eq!(node_b.list_balances().total_onchain_balance_sats, reserve_amount_sat);
@@ -682,7 +685,7 @@ async fn onchain_wallet_recovery() {
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;
-	original_node.sync_wallets().unwrap();
+	original_node.sync_wallets().await.unwrap();
 	assert_eq!(original_node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
 	let addr_2 = original_node.onchain_payment().new_address().unwrap();
@@ -698,7 +701,7 @@ async fn onchain_wallet_recovery() {
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
 
-	original_node.sync_wallets().unwrap();
+	original_node.sync_wallets().await.unwrap();
 	assert_eq!(
 		original_node.list_balances().spendable_onchain_balance_sats,
 		premine_amount_sat * 2
@@ -713,7 +716,7 @@ async fn onchain_wallet_recovery() {
 	recovered_config.recovery_mode = true;
 	let recovered_node = setup_node(&chain_source, recovered_config);
 
-	recovered_node.sync_wallets().unwrap();
+	recovered_node.sync_wallets().await.unwrap();
 	assert_eq!(
 		recovered_node.list_balances().spendable_onchain_balance_sats,
 		premine_amount_sat * 2
@@ -736,7 +739,7 @@ async fn onchain_wallet_recovery() {
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
 
-	recovered_node.sync_wallets().unwrap();
+	recovered_node.sync_wallets().await.unwrap();
 	assert_eq!(
 		recovered_node.list_balances().spendable_onchain_balance_sats,
 		premine_amount_sat * 3
@@ -799,7 +802,7 @@ async fn run_rbf_test(is_insert_block: bool) {
 		($expected_balance_sat:expr, $is_spendable:expr) => {
 			let spend_balance = if $is_spendable { $expected_balance_sat } else { 0 };
 			for node in &nodes {
-				node.sync_wallets().unwrap();
+				node.sync_wallets().await.unwrap();
 				let balances = node.list_balances();
 				assert_eq!(balances.spendable_onchain_balance_sats, spend_balance);
 				assert_eq!(balances.total_onchain_balance_sats, $expected_balance_sat);
@@ -903,8 +906,8 @@ async fn connection_multi_listen() {
 
 	let node_addrs_b = node_b.listening_addresses().unwrap();
 	for node_addr_b in &node_addrs_b {
-		node_a.connect(node_id_b, node_addr_b.clone(), false).unwrap();
-		node_a.disconnect(node_id_b).unwrap();
+		node_a.connect(node_id_b, node_addr_b.clone(), false).await.unwrap();
+		node_a.disconnect(node_id_b).await.unwrap();
 	}
 }
 
@@ -923,14 +926,14 @@ async fn do_connection_restart_behavior(persist: bool) {
 	let node_id_b = node_b.node_id();
 
 	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
-	node_a.connect(node_id_b, node_addr_b, persist).unwrap();
+	node_a.connect(node_id_b, node_addr_b, persist).await.unwrap();
 
-	let peer_details_a = node_a.list_peers().first().unwrap().clone();
+	let peer_details_a = node_a.list_peers().await.first().unwrap().clone();
 	assert_eq!(peer_details_a.node_id, node_id_b);
 	assert_eq!(peer_details_a.is_persisted, persist);
 	assert!(peer_details_a.is_connected);
 
-	let peer_details_b = node_b.list_peers().first().unwrap().clone();
+	let peer_details_b = node_b.list_peers().await.first().unwrap().clone();
 	assert_eq!(peer_details_b.node_id, node_id_a);
 	assert_eq!(peer_details_b.is_persisted, false);
 	assert!(peer_details_a.is_connected);
@@ -945,18 +948,18 @@ async fn do_connection_restart_behavior(persist: bool) {
 	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
 	if persist {
-		let peer_details_a = node_a.list_peers().first().unwrap().clone();
+		let peer_details_a = node_a.list_peers().await.first().unwrap().clone();
 		assert_eq!(peer_details_a.node_id, node_id_b);
 		assert_eq!(peer_details_a.is_persisted, persist);
 		assert!(peer_details_a.is_connected);
 
-		let peer_details_b = node_b.list_peers().first().unwrap().clone();
+		let peer_details_b = node_b.list_peers().await.first().unwrap().clone();
 		assert_eq!(peer_details_b.node_id, node_id_a);
 		assert_eq!(peer_details_b.is_persisted, false);
 		assert!(peer_details_a.is_connected);
 	} else {
-		assert!(node_a.list_peers().is_empty());
-		assert!(node_b.list_peers().is_empty());
+		assert!(node_a.list_peers().await.is_empty());
+		assert!(node_b.list_peers().await.is_empty());
 	}
 }
 
@@ -977,7 +980,10 @@ async fn concurrent_connections_succeed() {
 		let thread_node = Arc::clone(&node_a);
 		let thread_addr = node_addr_b.clone();
 		let handle = std::thread::spawn(move || {
-			thread_node.connect(node_id_b, thread_addr, false).unwrap();
+			tokio::runtime::Runtime::new()
+				.unwrap()
+				.block_on(async move { thread_node.connect(node_id_b, thread_addr, false).await })
+				.unwrap();
 		});
 		handles.push(handle);
 	}
@@ -1005,8 +1011,8 @@ async fn splice_channel() {
 	)
 	.await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	assert_eq!(node_a.list_balances().total_onchain_balance_sats, premine_amount_sat);
 	assert_eq!(node_b.list_balances().total_onchain_balance_sats, premine_amount_sat);
@@ -1016,8 +1022,8 @@ async fn splice_channel() {
 	// Open a channel with Node A contributing the funding
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
@@ -1041,7 +1047,7 @@ async fn splice_channel() {
 	let amount_msat = 400_000_000;
 
 	assert_eq!(
-		node_b.splice_in(&user_channel_id_b, node_b.node_id(), 5_000_000),
+		node_b.splice_in(&user_channel_id_b, node_b.node_id(), 5_000_000).await,
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
@@ -1049,20 +1055,20 @@ async fn splice_channel() {
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
-		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None),
+		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None).await,
 		Err(NodeError::PaymentSendingFailed)
 	);
 
 	// Splice-in funds for Node B so that it has outbound liquidity to make a payment
-	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).unwrap();
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).await.unwrap();
 
 	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
@@ -1078,7 +1084,7 @@ async fn splice_channel() {
 	// updating the BDK wallet dependency. See: https://github.com/bitcoindevkit/bdk_wallet/pull/479
 	let expected_splice_in_lightning_balance_sat = 4_000_003;
 
-	let payments = node_b.list_payments();
+	let payments = node_b.list_payments().await;
 	let payment =
 		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
 	assert_eq!(payment.fee_paid_msat, Some(expected_splice_in_fee_sat * 1_000));
@@ -1093,7 +1099,7 @@ async fn splice_channel() {
 	);
 
 	let payment_id =
-		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None).unwrap();
+		node_b.spontaneous_payment().send(amount_msat, node_a.node_id(), None).await.unwrap();
 
 	expect_payment_successful_event!(node_b, Some(payment_id), None);
 	expect_payment_received_event!(node_a, amount_msat);
@@ -1119,15 +1125,15 @@ async fn splice_channel() {
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	let expected_splice_out_fee_sat = 183;
 
-	let payments = node_a.list_payments();
+	let payments = node_a.list_payments().await;
 	let payment =
 		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
 	assert_eq!(payment.fee_paid_msat, Some(expected_splice_out_fee_sat * 1_000));
@@ -1158,19 +1164,19 @@ async fn simple_bolt12_send_receive() {
 	)
 	.await;
 
-	node_a.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
 	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	// Sleep until we broadcasted a node announcement.
-	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+	while node_b.status().await.latest_node_announcement_broadcast_timestamp.is_none() {
 		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 	}
 
@@ -1185,6 +1191,7 @@ async fn simple_bolt12_send_receive() {
 	let payment_id = node_a
 		.bolt12_payment()
 		.send(&offer, expected_quantity, expected_payer_note.clone(), None)
+		.await
 		.unwrap();
 
 	let event = node_a.next_event_async().await;
@@ -1200,8 +1207,9 @@ async fn simple_bolt12_send_receive() {
 		},
 		ref e => panic!("{} got unexpected event!: {:?}", "node_a", e),
 	}
-	let node_a_payments =
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
+	let node_a_payments = node_a
+		.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }))
+		.await;
 	assert_eq!(node_a_payments.len(), 1);
 	match node_a_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer {
@@ -1227,8 +1235,9 @@ async fn simple_bolt12_send_receive() {
 	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
 
 	expect_payment_received_event!(node_b, expected_amount_msat);
-	let node_b_payments =
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
+	let node_b_payments = node_b
+		.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }))
+		.await;
 	assert_eq!(node_b_payments.len(), 1);
 	match node_b_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, .. } => {
@@ -1253,6 +1262,7 @@ async fn simple_bolt12_send_receive() {
 	assert!(node_a
 		.bolt12_payment()
 		.send_using_amount(&offer, less_than_offer_amount, None, None, None)
+		.await
 		.is_err());
 	let payment_id = node_a
 		.bolt12_payment()
@@ -1263,12 +1273,15 @@ async fn simple_bolt12_send_receive() {
 			expected_payer_note.clone(),
 			None,
 		)
+		.await
 		.unwrap();
 
 	expect_payment_successful_event!(node_a, Some(payment_id), None);
-	let node_a_payments = node_a.list_payments_with_filter(|p| {
-		matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == payment_id
-	});
+	let node_a_payments = node_a
+		.list_payments_with_filter(|p| {
+			matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == payment_id
+		})
+		.await;
 	assert_eq!(node_a_payments.len(), 1);
 	let payment_hash = match node_a_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer {
@@ -1296,9 +1309,11 @@ async fn simple_bolt12_send_receive() {
 
 	expect_payment_received_event!(node_b, expected_amount_msat);
 	let node_b_payment_id = PaymentId(payment_hash.0);
-	let node_b_payments = node_b.list_payments_with_filter(|p| {
-		matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == node_b_payment_id
-	});
+	let node_b_payments = node_b
+		.list_payments_with_filter(|p| {
+			matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == node_b_payment_id
+		})
+		.await;
 	assert_eq!(node_b_payments.len(), 1);
 	match node_b_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, .. } => {
@@ -1326,8 +1341,9 @@ async fn simple_bolt12_send_receive() {
 			expected_payer_note.clone(),
 			None,
 		)
+		.await
 		.unwrap();
-	let invoice = node_a.bolt12_payment().request_refund_payment(&refund).unwrap();
+	let invoice = node_a.bolt12_payment().request_refund_payment(&refund).await.unwrap();
 	expect_payment_received_event!(node_a, overpaid_amount);
 
 	let node_b_payment_id = node_b
@@ -1335,14 +1351,17 @@ async fn simple_bolt12_send_receive() {
 			matches!(p.kind, PaymentKind::Bolt12Refund { .. })
 				&& p.amount_msat == Some(overpaid_amount)
 		})
+		.await
 		.first()
 		.unwrap()
 		.id;
 	expect_payment_successful_event!(node_b, Some(node_b_payment_id), None);
 
-	let node_b_payments = node_b.list_payments_with_filter(|p| {
-		matches!(p.kind, PaymentKind::Bolt12Refund { .. }) && p.id == node_b_payment_id
-	});
+	let node_b_payments = node_b
+		.list_payments_with_filter(|p| {
+			matches!(p.kind, PaymentKind::Bolt12Refund { .. }) && p.id == node_b_payment_id
+		})
+		.await;
 	assert_eq!(node_b_payments.len(), 1);
 	match node_b_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Refund {
@@ -1366,9 +1385,11 @@ async fn simple_bolt12_send_receive() {
 	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(overpaid_amount));
 
 	let node_a_payment_id = PaymentId(invoice.payment_hash().0);
-	let node_a_payments = node_a.list_payments_with_filter(|p| {
-		matches!(p.kind, PaymentKind::Bolt12Refund { .. }) && p.id == node_a_payment_id
-	});
+	let node_a_payments = node_a
+		.list_payments_with_filter(|p| {
+			matches!(p.kind, PaymentKind::Bolt12Refund { .. }) && p.id == node_a_payment_id
+		})
+		.await;
 	assert_eq!(node_a_payments.len(), 1);
 	match node_a_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Refund { hash, preimage, secret, .. } => {
@@ -1429,10 +1450,10 @@ async fn async_payment() {
 	)
 	.await;
 
-	node_sender.sync_wallets().unwrap();
-	node_sender_lsp.sync_wallets().unwrap();
-	node_receiver_lsp.sync_wallets().unwrap();
-	node_receiver.sync_wallets().unwrap();
+	node_sender.sync_wallets().await.unwrap();
+	node_sender_lsp.sync_wallets().await.unwrap();
+	node_receiver_lsp.sync_wallets().await.unwrap();
+	node_receiver.sync_wallets().await.unwrap();
 
 	open_channel(&node_sender, &node_sender_lsp, 400_000, false, &electrsd).await;
 	open_channel(&node_sender_lsp, &node_receiver_lsp, 400_000, true, &electrsd).await;
@@ -1448,10 +1469,10 @@ async fn async_payment() {
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_sender.sync_wallets().unwrap();
-	node_sender_lsp.sync_wallets().unwrap();
-	node_receiver_lsp.sync_wallets().unwrap();
-	node_receiver.sync_wallets().unwrap();
+	node_sender.sync_wallets().await.unwrap();
+	node_sender_lsp.sync_wallets().await.unwrap();
+	node_receiver_lsp.sync_wallets().await.unwrap();
+	node_receiver.sync_wallets().await.unwrap();
 
 	expect_channel_ready_event!(node_sender, node_sender_lsp.node_id());
 	expect_channel_ready_events!(
@@ -1504,8 +1525,11 @@ async fn async_payment() {
 
 	node_receiver.stop().unwrap();
 
-	let payment_id =
-		node_sender.bolt12_payment().send_using_amount(&offer, 5_000, None, None, None).unwrap();
+	let payment_id = node_sender
+		.bolt12_payment()
+		.send_using_amount(&offer, 5_000, None, None, None)
+		.await
+		.unwrap();
 
 	// Sleep to allow the payment reach a state where the htlc is held and waiting for the receiver to come online.
 	tokio::time::sleep(std::time::Duration::from_millis(3000)).await;
@@ -1557,21 +1581,21 @@ async fn test_node_announcement_propagation() {
 	)
 	.await;
 
-	node_a.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
 
 	// Open an announced channel from node_a to node_b
 	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	// Wait until node_b broadcasts a node announcement
-	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+	while node_b.status().await.latest_node_announcement_broadcast_timestamp.is_none() {
 		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 	}
 
@@ -1625,6 +1649,7 @@ async fn generate_bip21_uri() {
 	let initial_uni_payment = node_b
 		.unified_payment()
 		.receive(expected_amount_sats, "asdf", expiry_sec)
+		.await
 		.expect("Failed to generate URI");
 	println!("Initial URI (no channels): {}", initial_uni_payment);
 
@@ -1640,12 +1665,12 @@ async fn generate_bip21_uri() {
 	)
 	.await;
 
-	node_a.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
 	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
@@ -1654,6 +1679,7 @@ async fn generate_bip21_uri() {
 	let uni_payment = node_b
 		.unified_payment()
 		.receive(expected_amount_sats, "asdf", expiry_sec)
+		.await
 		.expect("Failed to generate URI");
 
 	println!("Generated URI: {}", uni_payment);
@@ -1680,18 +1706,18 @@ async fn unified_send_receive_bip21_uri() {
 	)
 	.await;
 
-	node_a.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
 	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	// Sleep until we broadcast a node announcement.
-	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+	while node_b.status().await.latest_node_announcement_broadcast_timestamp.is_none() {
 		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 	}
 
@@ -1701,7 +1727,8 @@ async fn unified_send_receive_bip21_uri() {
 	let expected_amount_sats = 100_000;
 	let expiry_sec = 4_000;
 
-	let uni_payment = node_b.unified_payment().receive(expected_amount_sats, "asdf", expiry_sec);
+	let uni_payment =
+		node_b.unified_payment().receive(expected_amount_sats, "asdf", expiry_sec).await;
 	let uri_str = uni_payment.clone().unwrap();
 	let offer_payment_id: PaymentId =
 		match node_a.unified_payment().send(&uri_str, None, None).await {
@@ -1744,7 +1771,7 @@ async fn unified_send_receive_bip21_uri() {
 
 	let expect_onchain_amount_sats = 800_000;
 	let onchain_uni_payment =
-		node_b.unified_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
+		node_b.unified_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).await.unwrap();
 
 	// Cut off any lightning part to fallback to on-chain only.
 	let uri_str_without_lightning = onchain_uni_payment.split("&lightning=").next().unwrap();
@@ -1767,8 +1794,8 @@ async fn unified_send_receive_bip21_uri() {
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 	wait_for_tx(&electrsd.client, txid).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	assert_eq!(node_b.list_balances().total_onchain_balance_sats, 800_000);
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 200_000);
@@ -1840,17 +1867,17 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;
-	service_node.sync_wallets().unwrap();
-	client_node.sync_wallets().unwrap();
-	payer_node.sync_wallets().unwrap();
+	service_node.sync_wallets().await.unwrap();
+	client_node.sync_wallets().await.unwrap();
+	payer_node.sync_wallets().await.unwrap();
 
 	// Open a channel payer -> service that will allow paying the JIT invoice
 	println!("Opening channel payer_node -> service_node!");
 	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-	service_node.sync_wallets().unwrap();
-	payer_node.sync_wallets().unwrap();
+	service_node.sync_wallets().await.unwrap();
+	payer_node.sync_wallets().await.unwrap();
 	expect_channel_ready_event!(payer_node, service_node.node_id());
 	expect_channel_ready_event!(service_node, payer_node.node_id());
 
@@ -1862,11 +1889,12 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let jit_invoice = client_node
 		.bolt11_payment()
 		.receive_via_jit_channel(jit_amount_msat, &invoice_description.into(), 1024, None)
+		.await
 		.unwrap();
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).await.unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_event!(service_node, PaymentForwarded);
@@ -1878,7 +1906,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
 	let client_payment_id =
 		expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
-	let client_payment = client_node.payment(&client_payment_id).unwrap();
+	let client_payment = client_node.payment(&client_payment_id).await.unwrap();
 	match client_payment.kind {
 		PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, Some(service_fee_msat));
@@ -1897,13 +1925,16 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let invoice_description =
 		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap()).into();
 	let amount_msat = 5_000_000;
-	let invoice =
-		client_node.bolt11_payment().receive(amount_msat, &invoice_description, 1024).unwrap();
+	let invoice = client_node
+		.bolt11_payment()
+		.receive(amount_msat, &invoice_description, 1024)
+		.await
+		.unwrap();
 
 	// Have the payer_node pay the invoice, to check regular forwards service_node -> client_node
 	// are working as expected.
 	println!("Paying regular invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&invoice, None).await.unwrap();
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
 	expect_event!(service_node, PaymentForwarded);
 	expect_payment_received_event!(client_node, amount_msat);
@@ -1925,11 +1956,12 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 			None,
 			manual_payment_hash,
 		)
+		.await
 		.unwrap();
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).await.unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -1947,13 +1979,14 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	client_node
 		.bolt11_payment()
 		.claim_for_hash(manual_payment_hash, claimable_amount_msat, manual_preimage)
+		.await
 		.unwrap();
 
 	expect_event!(service_node, PaymentForwarded);
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
 	let client_payment_id =
 		expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
-	let client_payment = client_node.payment(&client_payment_id).unwrap();
+	let client_payment = client_node.payment(&client_payment_id).await.unwrap();
 	match client_payment.kind {
 		PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, Some(service_fee_msat));
@@ -1978,11 +2011,12 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 			None,
 			manual_payment_hash,
 		)
+		.await
 		.unwrap();
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).await.unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -1997,10 +2031,10 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		expected_received_amount_msat
 	);
 	println!("Failing payment!");
-	client_node.bolt11_payment().fail_for_hash(manual_payment_hash).unwrap();
+	client_node.bolt11_payment().fail_for_hash(manual_payment_hash).await.unwrap();
 
 	expect_event!(payer_node, PaymentFailed);
-	assert_eq!(client_node.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
+	assert_eq!(client_node.payment(&payment_id).await.unwrap().status, PaymentStatus::Failed);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -2036,12 +2070,12 @@ async fn spontaneous_send_with_custom_preimage() {
 		Amount::from_sat(premine_sat),
 	)
 	.await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	open_channel(&node_a, &node_b, 500_000, true, &electrsd).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
@@ -2054,12 +2088,13 @@ async fn spontaneous_send_with_custom_preimage() {
 	let payment_id = node_a
 		.spontaneous_payment()
 		.send_with_preimage(amount_msat, node_b.node_id(), custom_preimage, None)
+		.await
 		.unwrap();
 
 	// check payment status and verify stored preimage
 	expect_payment_successful_event!(node_a, Some(payment_id), None);
 	let details: PaymentDetails =
-		node_a.list_payments_with_filter(|p| p.id == payment_id).first().unwrap().clone();
+		node_a.list_payments_with_filter(|p| p.id == payment_id).await.first().unwrap().clone();
 	assert_eq!(details.status, PaymentStatus::Succeeded);
 	if let PaymentKind::Spontaneous { preimage: Some(pi), .. } = details.kind {
 		assert_eq!(pi.0, custom_bytes);
@@ -2069,10 +2104,12 @@ async fn spontaneous_send_with_custom_preimage() {
 
 	// Verify receiver side (node_b)
 	expect_payment_received_event!(node_b, amount_msat);
-	let receiver_payments: Vec<PaymentDetails> = node_b.list_payments_with_filter(|p| {
-		p.direction == PaymentDirection::Inbound
-			&& matches!(p.kind, PaymentKind::Spontaneous { .. })
-	});
+	let receiver_payments: Vec<PaymentDetails> = node_b
+		.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Spontaneous { .. })
+		})
+		.await;
 
 	assert_eq!(receiver_payments.len(), 1);
 	let receiver_details = &receiver_payments[0];
@@ -2159,16 +2196,16 @@ async fn lsps2_client_trusts_lsp() {
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;
-	service_node.sync_wallets().unwrap();
-	client_node.sync_wallets().unwrap();
-	payer_node.sync_wallets().unwrap();
+	service_node.sync_wallets().await.unwrap();
+	client_node.sync_wallets().await.unwrap();
+	payer_node.sync_wallets().await.unwrap();
 	println!("Premine complete!");
 	// Open a channel payer -> service that will allow paying the JIT invoice
 	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-	service_node.sync_wallets().unwrap();
-	payer_node.sync_wallets().unwrap();
+	service_node.sync_wallets().await.unwrap();
+	payer_node.sync_wallets().await.unwrap();
 	expect_channel_ready_event!(payer_node, service_node.node_id());
 	expect_channel_ready_event!(service_node, payer_node.node_id());
 
@@ -2188,11 +2225,12 @@ async fn lsps2_client_trusts_lsp() {
 			None,
 			manual_payment_hash,
 		)
+		.await
 		.unwrap();
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&res, None).unwrap();
+	let payment_id = payer_node.bolt11_payment().send(&res, None).await.unwrap();
 	println!("Payment ID: {:?}", payment_id);
 	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
@@ -2206,8 +2244,8 @@ async fn lsps2_client_trusts_lsp() {
 	let funding_tx_found = mempool.0.iter().any(|txid| *txid == funding_txo.txid);
 	assert!(!funding_tx_found, "Funding transaction should NOT be broadcast yet");
 
-	service_node.sync_wallets().unwrap();
-	client_node.sync_wallets().unwrap();
+	service_node.sync_wallets().await.unwrap();
+	client_node.sync_wallets().await.unwrap();
 	assert_eq!(
 		client_node
 			.list_channels()
@@ -2241,6 +2279,7 @@ async fn lsps2_client_trusts_lsp() {
 	client_node
 		.bolt11_payment()
 		.claim_for_hash(manual_payment_hash, jit_amount_msat, manual_preimage)
+		.await
 		.unwrap();
 
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
@@ -2250,8 +2289,8 @@ async fn lsps2_client_trusts_lsp() {
 	// Check the nodes pick up on the confirmed funding tx now.
 	wait_for_tx(&electrsd.client, funding_txo.txid).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-	service_node.sync_wallets().unwrap();
-	client_node.sync_wallets().unwrap();
+	service_node.sync_wallets().await.unwrap();
+	client_node.sync_wallets().await.unwrap();
 	assert_eq!(
 		client_node
 			.list_channels()
@@ -2336,16 +2375,16 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;
-	service_node.sync_wallets().unwrap();
-	client_node.sync_wallets().unwrap();
-	payer_node.sync_wallets().unwrap();
+	service_node.sync_wallets().await.unwrap();
+	client_node.sync_wallets().await.unwrap();
+	payer_node.sync_wallets().await.unwrap();
 	println!("Premine complete!");
 	// Open a channel payer -> service that will allow paying the JIT invoice
 	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-	service_node.sync_wallets().unwrap();
-	payer_node.sync_wallets().unwrap();
+	service_node.sync_wallets().await.unwrap();
+	payer_node.sync_wallets().await.unwrap();
 	expect_channel_ready_event!(payer_node, service_node.node_id());
 	expect_channel_ready_event!(service_node, payer_node.node_id());
 
@@ -2365,11 +2404,12 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 			None,
 			manual_payment_hash,
 		)
+		.await
 		.unwrap();
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let _payment_id = payer_node.bolt11_payment().send(&res, None).unwrap();
+	let _payment_id = payer_node.bolt11_payment().send(&res, None).await.unwrap();
 	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -2379,8 +2419,8 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	// Check the nodes pick up on the confirmed funding tx now.
 	wait_for_tx(&electrsd.client, funding_txo.txid).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-	service_node.sync_wallets().unwrap();
-	client_node.sync_wallets().unwrap();
+	service_node.sync_wallets().await.unwrap();
+	client_node.sync_wallets().await.unwrap();
 	assert_eq!(
 		client_node
 			.list_channels()
@@ -2433,8 +2473,8 @@ async fn payment_persistence_after_restart() {
 			Amount::from_sat(premine_amount_sat),
 		)
 		.await;
-		node_a.sync_wallets().unwrap();
-		node_b.sync_wallets().unwrap();
+		node_a.sync_wallets().await.unwrap();
+		node_b.sync_wallets().await.unwrap();
 		assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 		assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
@@ -2442,8 +2482,8 @@ async fn payment_persistence_after_restart() {
 		let channel_amount_sat = 5_000_000;
 		open_channel(&node_a, &node_b, channel_amount_sat, true, &electrsd).await;
 		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-		node_a.sync_wallets().unwrap();
-		node_b.sync_wallets().unwrap();
+		node_a.sync_wallets().await.unwrap();
+		node_b.sync_wallets().await.unwrap();
 		expect_channel_ready_event!(node_a, node_b.node_id());
 		expect_channel_ready_event!(node_b, node_a.node_id());
 
@@ -2456,8 +2496,9 @@ async fn payment_persistence_after_restart() {
 			let invoice = node_b
 				.bolt11_payment()
 				.receive(payment_amount_msat, &invoice_description.clone().into(), 3600)
+				.await
 				.unwrap();
-			let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
+			let payment_id = node_a.bolt11_payment().send(&invoice, None).await.unwrap();
 			expect_event!(node_a, PaymentSuccessful);
 			expect_event!(node_b, PaymentReceived);
 
@@ -2466,15 +2507,17 @@ async fn payment_persistence_after_restart() {
 			}
 
 			// Verify payment succeeded
-			assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+			assert_eq!(node_a.payment(&payment_id).await.unwrap().status, PaymentStatus::Succeeded);
 		}
 		println!("All {} payments completed successfully", num_payments);
 
 		// Verify node_a has 200 outbound Bolt11 payments before shutdown
-		let outbound_payments_before = node_a.list_payments_with_filter(|p| {
-			p.direction == PaymentDirection::Outbound
-				&& matches!(p.kind, PaymentKind::Bolt11 { .. })
-		});
+		let outbound_payments_before = node_a
+			.list_payments_with_filter(|p| {
+				p.direction == PaymentDirection::Outbound
+					&& matches!(p.kind, PaymentKind::Bolt11 { .. })
+			})
+			.await;
 		assert_eq!(outbound_payments_before.len(), num_payments);
 
 		// Shut down both nodes
@@ -2488,9 +2531,12 @@ async fn payment_persistence_after_restart() {
 	let restarted_node_a = setup_node(&chain_source, config_a);
 
 	// Assert all 200 payments are still in the store
-	let outbound_payments_after = restarted_node_a.list_payments_with_filter(|p| {
-		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
-	});
+	let outbound_payments_after = restarted_node_a
+		.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Bolt11 { .. })
+		})
+		.await;
 	assert_eq!(
 		outbound_payments_after.len(),
 		num_payments,
@@ -2632,7 +2678,7 @@ async fn do_persistence_backwards_compatibility(version: OldLdkVersion) {
 	let node_new = builder_new.build(node_entropy.into()).unwrap();
 
 	node_new.start().unwrap();
-	node_new.sync_wallets().unwrap();
+	node_new.sync_wallets().await.unwrap();
 
 	let new_balance = node_new.list_balances().spendable_onchain_balance_sats;
 	let new_node_id = node_new.node_id();
@@ -2681,7 +2727,7 @@ async fn fs_store_persistence_backwards_compatibility() {
 	let node_new = builder_new.build_with_fs_store(node_entropy.into()).unwrap();
 
 	node_new.start().unwrap();
-	node_new.sync_wallets().unwrap();
+	node_new.sync_wallets().await.unwrap();
 
 	let new_balance = node_new.list_balances().spendable_onchain_balance_sats;
 	let new_node_id = node_new.node_id();
@@ -2711,8 +2757,8 @@ async fn onchain_fee_bump_rbf() {
 	)
 	.await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	// Send a transaction from node_b to node_a that we'll later bump
 	let amount_to_send_sats = 100_000;
@@ -2723,11 +2769,11 @@ async fn onchain_fee_bump_rbf() {
 	// Without this, Esplora may not yet have the tx, causing sync to miss it and
 	// leaving the BDK wallet graph empty.
 	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	let payment_id = PaymentId(txid.to_byte_array());
-	let original_payment = node_b.payment(&payment_id).unwrap();
+	let original_payment = node_b.payment(&payment_id).await.unwrap();
 	let original_fee = original_payment.fee_paid_msat.unwrap();
 
 	// Non-existent payment id
@@ -2736,27 +2782,27 @@ async fn onchain_fee_bump_rbf() {
 	let invalid_payment_id = PaymentId(fake_txid.to_byte_array());
 	assert_eq!(
 		Err(NodeError::InvalidPaymentId),
-		node_b.onchain_payment().bump_fee_rbf(invalid_payment_id, None)
+		node_b.onchain_payment().bump_fee_rbf(invalid_payment_id, None).await
 	);
 
 	// Bump an inbound payment
 	assert_eq!(
 		Err(NodeError::InvalidPaymentId),
-		node_a.onchain_payment().bump_fee_rbf(payment_id, None)
+		node_a.onchain_payment().bump_fee_rbf(payment_id, None).await
 	);
 
 	// Successful fee bump
-	let new_txid = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
+	let new_txid = node_b.onchain_payment().bump_fee_rbf(payment_id, None).await.unwrap();
 	wait_for_tx(&electrsd.client, new_txid).await;
 	// Give the chain source time to index the unconfirmed transaction before syncing.
 	// Without this, Esplora may not yet have the tx, causing sync to miss it and
 	// leaving the BDK wallet graph empty.
 	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	// Verify fee increased and txid updated for node_b
-	let new_payment = node_b.payment(&payment_id).unwrap();
+	let new_payment = node_b.payment(&payment_id).await.unwrap();
 	assert!(
 		new_payment.fee_paid_msat > Some(original_fee),
 		"Fee should increase after RBF bump. Original: {}, New: {}",
@@ -2774,13 +2820,13 @@ async fn onchain_fee_bump_rbf() {
 	}
 
 	// Multiple consecutive bumps
-	let second_bump_txid = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
+	let second_bump_txid = node_b.onchain_payment().bump_fee_rbf(payment_id, None).await.unwrap();
 	wait_for_tx(&electrsd.client, second_bump_txid).await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	// Verify second bump payment exists and txid updated for node_b
-	let second_payment = node_b.payment(&payment_id).unwrap();
+	let second_payment = node_b.payment(&payment_id).await.unwrap();
 	assert!(
 		second_payment.fee_paid_msat > new_payment.fee_paid_msat,
 		"Second bump should have higher fee than first bump"
@@ -2797,16 +2843,16 @@ async fn onchain_fee_bump_rbf() {
 
 	// Confirm the transaction and try to bump again (should fail)
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	assert_eq!(
 		Err(NodeError::InvalidPaymentId),
-		node_b.onchain_payment().bump_fee_rbf(payment_id, None)
+		node_b.onchain_payment().bump_fee_rbf(payment_id, None).await
 	);
 
 	// Verify final payment is confirmed
-	let final_payment = node_b.payment(&payment_id).unwrap();
+	let final_payment = node_b.payment(&payment_id).await.unwrap();
 	assert_eq!(final_payment.status, PaymentStatus::Succeeded);
 	match final_payment.kind {
 		PaymentKind::Onchain { status, .. } => {
@@ -2816,9 +2862,11 @@ async fn onchain_fee_bump_rbf() {
 	}
 
 	// Verify node A received the funds correctly
-	let node_a_received_payment = node_a.list_payments_with_filter(|p| {
-		p.id == payment_id && matches!(p.kind, PaymentKind::Onchain { .. })
-	});
+	let node_a_received_payment = node_a
+		.list_payments_with_filter(|p| {
+			p.id == payment_id && matches!(p.kind, PaymentKind::Onchain { .. })
+		})
+		.await;
 
 	assert_eq!(node_a_received_payment.len(), 1);
 	match &node_a_received_payment[0].kind {
@@ -2852,16 +2900,16 @@ async fn open_channel_with_all_with_anchors() {
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
 	let funding_txo = open_channel_with_all(&node_a, &node_b, false, &electrsd).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let _user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
@@ -2905,16 +2953,16 @@ async fn open_channel_with_all_without_anchors() {
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
 	let funding_txo = open_channel_with_all(&node_a, &node_b, false, &electrsd).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let _user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
@@ -2957,8 +3005,8 @@ async fn splice_in_with_all_balance() {
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
 	// Open a channel with a fixed amount first
@@ -2966,8 +3014,8 @@ async fn splice_in_with_all_balance() {
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let _user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
@@ -2985,8 +3033,8 @@ async fn splice_in_with_all_balance() {
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	let _user_channel_id_a2 = expect_channel_ready_event!(node_a, node_b.node_id());
 	let _user_channel_id_b2 = expect_channel_ready_event!(node_b, node_a.node_id());

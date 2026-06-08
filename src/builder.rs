@@ -43,6 +43,7 @@ use lightning::util::persist::{
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
 use lightning_dns_resolver::OMDomainResolver;
+use tokio::sync::RwLock as AsyncRwLock;
 use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
@@ -85,7 +86,7 @@ use crate::types::{
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
-use crate::{Node, NodeMetrics, PersistedNodeMetrics};
+use crate::{Node, NodeMetrics};
 
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
@@ -727,13 +728,18 @@ impl NodeBuilder {
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let runtime = self.setup_runtime(&logger)?;
 		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
 		let vss_store = builder.build_with_sigs_auth(fixed_headers).map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
+		runtime.block_on(vss_store.setup_schema_version()).map_err(|e| {
+			log_error!(logger, "Failed to setup VSS store: {}", e);
+			BuildError::KVStoreSetupFailed
+		})?;
 
-		self.build_with_store_and_logger(node_entropy, vss_store, logger)
+		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -763,14 +769,19 @@ impl NodeBuilder {
 		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let runtime = self.setup_runtime(&logger)?;
 		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
 		let vss_store =
 			builder.build_with_lnurl(lnurl_auth_server_url, fixed_headers).map_err(|e| {
 				log_error!(logger, "Failed to setup VSS store: {}", e);
 				BuildError::KVStoreSetupFailed
 			})?;
+		runtime.block_on(vss_store.setup_schema_version()).map_err(|e| {
+			log_error!(logger, "Failed to setup VSS store: {}", e);
+			BuildError::KVStoreSetupFailed
+		})?;
 
-		self.build_with_store_and_logger(node_entropy, vss_store, logger)
+		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -791,13 +802,18 @@ impl NodeBuilder {
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let runtime = self.setup_runtime(&logger)?;
 		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
 		let vss_store = builder.build_with_fixed_headers(fixed_headers).map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
+		runtime.block_on(vss_store.setup_schema_version()).map_err(|e| {
+			log_error!(logger, "Failed to setup VSS store: {}", e);
+			BuildError::KVStoreSetupFailed
+		})?;
 
-		self.build_with_store_and_logger(node_entropy, vss_store, logger)
+		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -816,13 +832,18 @@ impl NodeBuilder {
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let runtime = self.setup_runtime(&logger)?;
 		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
 		let vss_store = builder.build_with_header_provider(header_provider).map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
+		runtime.block_on(vss_store.setup_schema_version()).map_err(|e| {
+			log_error!(logger, "Failed to setup VSS store: {}", e);
+			BuildError::KVStoreSetupFailed
+		})?;
 
-		self.build_with_store_and_logger(node_entropy, vss_store, logger)
+		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
@@ -1416,10 +1437,10 @@ fn build_with_store_internal(
 
 	// Initialize the status fields.
 	let node_metrics = match node_metris_res {
-		Ok(metrics) => Arc::new(PersistedNodeMetrics::new(metrics)),
+		Ok(metrics) => Arc::new(AsyncRwLock::new(metrics)),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
-				Arc::new(PersistedNodeMetrics::new(NodeMetrics::default()))
+				Arc::new(AsyncRwLock::new(NodeMetrics::default()))
 			} else {
 				log_error!(logger, "Failed to read node metrics from store: {}", e);
 				return Err(BuildError::ReadFailed);
