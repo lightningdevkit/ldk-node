@@ -34,7 +34,8 @@
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
 //! use ldk_node::Builder;
 //!
-//! fn main() {
+//! #[tokio::main]
+//! async fn main() {
 //! 	let mut builder = Builder::new();
 //! 	builder.set_network(Network::Testnet);
 //! 	builder.set_chain_source_esplora("https://blockstream.info/testnet/api".to_string(), None);
@@ -44,26 +45,26 @@
 //!
 //! 	let mnemonic = generate_entropy_mnemonic(None);
 //! 	let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
-//! 	let node = builder.build(node_entropy).unwrap();
+//! 	let node = builder.build(node_entropy).await.unwrap();
 //!
-//! 	node.start().unwrap();
+//! 	node.start().await.unwrap();
 //!
-//! 	let funding_address = node.onchain_payment().new_address();
+//! 	let funding_address = node.onchain_payment().new_address().await.unwrap();
 //!
 //! 	// .. fund address ..
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 //! 	let node_addr = SocketAddress::from_str("IP_ADDR:PORT").unwrap();
-//! 	node.open_channel(node_id, node_addr, 10000, None, None).unwrap();
+//! 	node.open_channel(node_id, node_addr, 10000, None, None).await.unwrap();
 //!
-//! 	let event = node.wait_next_event();
+//! 	let event = node.wait_next_event().await;
 //! 	println!("EVENT: {:?}", event);
-//! 	node.event_handled();
+//! 	node.event_handled().await.unwrap();
 //!
 //! 	let invoice = Bolt11Invoice::from_str("INVOICE_STR").unwrap();
-//! 	node.bolt11_payment().send(&invoice, None).unwrap();
+//! 	node.bolt11_payment().send(&invoice, None).await.unwrap();
 //!
-//! 	node.stop().unwrap();
+//! 	node.stop().await.unwrap();
 //! }
 //! # }
 //! ```
@@ -261,11 +262,14 @@ impl Node {
 	///
 	/// After this returns, the [`Node`] instance can be controlled via the provided API methods in
 	/// a thread-safe manner.
-	pub fn start(&self) -> Result<(), Error> {
+	pub async fn start(&self) -> Result<(), Error> {
 		// Acquire a run lock and hold it until we're setup.
-		let mut is_running_lock = self.is_running.write().expect("lock");
-		if *is_running_lock {
-			return Err(Error::AlreadyRunning);
+		{
+			let mut is_running_lock = self.is_running.write().expect("lock");
+			if *is_running_lock {
+				return Err(Error::AlreadyRunning);
+			}
+			*is_running_lock = true;
 		}
 
 		log_info!(
@@ -275,34 +279,35 @@ impl Node {
 			self.config.network
 		);
 
-		// Start up any runtime-dependant chain sources (e.g. Electrum)
-		self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
-			log_error!(self.logger, "Failed to start chain syncing: {}", e);
-			e
-		})?;
+		let startup_res = async {
+			// Start up any runtime-dependant chain sources (e.g. Electrum)
+			self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
+				log_error!(self.logger, "Failed to start chain syncing: {}", e);
+				e
+			})?;
 
-		// Block to ensure we update our fee rate cache once on startup
-		let chain_source = Arc::clone(&self.chain_source);
-		self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await })?;
+			// Ensure we update our fee rate cache once on startup.
+			let chain_source = Arc::clone(&self.chain_source);
+			chain_source.update_fee_rate_estimates().await?;
 
-		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
-		let stop_sync_receiver = self.stop_sender.subscribe();
-		let chain_source = Arc::clone(&self.chain_source);
-		let sync_wallet = Arc::clone(&self.wallet);
-		let sync_cman = Arc::clone(&self.channel_manager);
-		let sync_cmon = Arc::clone(&self.chain_monitor);
-		let sync_sweeper = Arc::clone(&self.output_sweeper);
-		self.runtime.spawn_background_task(async move {
-			chain_source
-				.continuously_sync_wallets(
-					stop_sync_receiver,
-					sync_wallet,
-					sync_cman,
-					sync_cmon,
-					sync_sweeper,
-				)
-				.await;
-		});
+			// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
+			let stop_sync_receiver = self.stop_sender.subscribe();
+			let chain_source = Arc::clone(&self.chain_source);
+			let sync_wallet = Arc::clone(&self.wallet);
+			let sync_cman = Arc::clone(&self.channel_manager);
+			let sync_cmon = Arc::clone(&self.chain_monitor);
+			let sync_sweeper = Arc::clone(&self.output_sweeper);
+			self.runtime.spawn_background_task(async move {
+				chain_source
+					.continuously_sync_wallets(
+						stop_sync_receiver,
+						sync_wallet,
+						sync_cman,
+						sync_cmon,
+						sync_sweeper,
+					)
+					.await;
+			});
 
 		if self.gossip_source.is_rgs() {
 			let gossip_source = Arc::clone(&self.gossip_source);
@@ -362,7 +367,7 @@ impl Node {
 
 			let logger = Arc::clone(&listening_logger);
 			let listening_addrs = listening_addresses.clone();
-			let listeners = self.runtime.block_on(async move {
+			let listeners = async move {
 				let mut bind_addrs = Vec::with_capacity(listening_addrs.len());
 
 				for listening_addr in &listening_addrs {
@@ -401,7 +406,8 @@ impl Node {
 				}
 
 				Ok(listeners)
-			})?;
+			}
+			.await?;
 
 			for listener in listeners {
 				let logger = Arc::clone(&listening_logger);
@@ -701,18 +707,27 @@ impl Node {
 			});
 		}
 
-		log_info!(self.logger, "Startup complete.");
-		*is_running_lock = true;
-		Ok(())
+			log_info!(self.logger, "Startup complete.");
+			Ok(())
+		}
+		.await;
+
+		if startup_res.is_err() {
+			*self.is_running.write().expect("lock") = false;
+		}
+		startup_res
 	}
 
 	/// Disconnects all peers, stops all running background tasks, and shuts down [`Node`].
 	///
 	/// After this returns most API methods will return [`Error::NotRunning`].
-	pub fn stop(&self) -> Result<(), Error> {
-		let mut is_running_lock = self.is_running.write().expect("lock");
-		if !*is_running_lock {
-			return Err(Error::NotRunning);
+	pub async fn stop(&self) -> Result<(), Error> {
+		{
+			let mut is_running_lock = self.is_running.write().expect("lock");
+			if !*is_running_lock {
+				return Err(Error::NotRunning);
+			}
+			*is_running_lock = false;
 		}
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
@@ -733,14 +748,14 @@ impl Node {
 			});
 
 		// Cancel cancellable background tasks
-		self.runtime.abort_cancellable_background_tasks();
+		self.runtime.abort_cancellable_background_tasks().await;
 
 		// Disconnect all peers.
 		self.peer_manager.disconnect_all_peers();
 		log_debug!(self.logger, "Disconnected all network peers.");
 
 		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
-		self.runtime.wait_on_background_tasks();
+		self.runtime.wait_on_background_tasks().await;
 
 		// Stop any runtime-dependant chain sources.
 		self.chain_source.stop();
@@ -762,13 +777,12 @@ impl Node {
 			});
 
 		// Finally, wait until background processing stopped, at least until a timeout is reached.
-		self.runtime.wait_on_background_processor_task();
+		self.runtime.wait_on_background_processor_task().await;
 
 		#[cfg(tokio_unstable)]
 		self.runtime.log_metrics();
 
 		log_info!(self.logger, "Shutdown complete.");
-		*is_running_lock = false;
 		Ok(())
 	}
 
@@ -837,27 +851,21 @@ impl Node {
 
 	/// Returns the next event in the event queue.
 	///
-	/// Will block the current thread until the next event is available.
+	/// Will asynchronously wait until the next event is available.
 	///
 	/// **Note:** this will always return the same event until handling is confirmed via [`Node::event_handled`].
 	///
 	/// **Caution:** Users must handle events as quickly as possible to prevent a large event backlog,
 	/// which can increase the memory footprint of [`Node`].
-	pub fn wait_next_event(&self) -> Event {
-		let fut = self.event_queue.next_event_async();
-		// We use our runtime for the sync variant to ensure `tokio::task::block_in_place` is
-		// always called if we'd ever hit this in an outer runtime context.
-		self.runtime.block_on(fut)
+	pub async fn wait_next_event(&self) -> Event {
+		self.event_queue.next_event_async().await
 	}
 
 	/// Confirm the last retrieved event handled.
 	///
 	/// **Note:** This **MUST** be called after each event has been handled.
-	pub fn event_handled(&self) -> Result<(), Error> {
-		// We use our runtime for the sync variant to ensure `tokio::task::block_in_place` is
-		// always called if we'd ever hit this in an outer runtime context.
-		let fut = self.event_queue.event_handled();
-		self.runtime.block_on(fut).map_err(|e| {
+	pub async fn event_handled(&self) -> Result<(), Error> {
+		self.event_queue.event_handled().await.map_err(|e| {
 			log_error!(
 				self.logger,
 				"Couldn't mark event handled due to persistence failure: {}",
@@ -1057,21 +1065,19 @@ impl Node {
 	/// Authenticates the user via [LNURL-auth] for the given LNURL string.
 	///
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
-	pub fn lnurl_auth(&self, lnurl: String) -> Result<(), Error> {
+	pub async fn lnurl_auth(&self, lnurl: String) -> Result<(), Error> {
 		let auth = Arc::clone(&self.lnurl_auth);
-		self.runtime.block_on(async move {
-			let res = tokio::time::timeout(
-				Duration::from_secs(LNURL_AUTH_TIMEOUT_SECS),
-				auth.authenticate(&lnurl),
-			)
-			.await;
+		let res = tokio::time::timeout(
+			Duration::from_secs(LNURL_AUTH_TIMEOUT_SECS),
+			auth.authenticate(&lnurl),
+		)
+		.await;
 
-			match res {
-				Ok(Ok(())) => Ok(()),
-				Ok(Err(e)) => Err(e),
-				Err(_) => Err(Error::LnurlAuthTimeout),
-			}
-		})
+		match res {
+			Ok(Ok(())) => Ok(()),
+			Ok(Err(e)) => Err(e),
+			Err(_) => Err(Error::LnurlAuthTimeout),
+		}
 	}
 
 	/// Returns a liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
@@ -1080,7 +1086,6 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn lsps1_liquidity(&self) -> LSPS1Liquidity {
 		LSPS1Liquidity::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
@@ -1094,7 +1099,6 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn lsps1_liquidity(&self) -> Arc<LSPS1Liquidity> {
 		Arc::new(LSPS1Liquidity::new(
-			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.clone(),
@@ -2107,7 +2111,15 @@ impl Node {
 
 impl Drop for Node {
 	fn drop(&mut self) {
-		let _ = self.stop();
+		if let Ok(mut is_running_lock) = self.is_running.write() {
+			if *is_running_lock {
+				*is_running_lock = false;
+				let _ = self.stop_sender.send(());
+				let _ = self.background_processor_stop_sender.send(());
+				self.peer_manager.disconnect_all_peers();
+				self.chain_source.stop();
+			}
+		}
 	}
 }
 

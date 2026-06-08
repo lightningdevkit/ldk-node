@@ -630,12 +630,16 @@ where
 
 				// Sign the final funding transaction and broadcast it.
 				let channel_amount = Amount::from_sat(channel_value_satoshis);
-				match self.wallet.create_funding_transaction(
-					output_script,
-					channel_amount,
-					confirmation_target,
-					locktime,
-				) {
+				match self
+					.wallet
+					.create_funding_transaction(
+						output_script,
+						channel_amount,
+						confirmation_target,
+						locktime,
+					)
+					.await
+				{
 					Ok(final_tx) => {
 						let needs_manual_broadcast =
 							self.liquidity_source.as_ref().map_or(false, |ls| {
@@ -1644,7 +1648,7 @@ where
 							})
 							.collect(),
 					};
-					if let Err(e) = self.wallet.cancel_tx(&tx) {
+					if let Err(e) = self.wallet.cancel_tx(&tx).await {
 						log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
 						return Err(ReplayEvent());
 					}

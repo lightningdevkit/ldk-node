@@ -35,14 +35,15 @@ fn spawn_payment(node_a: Arc<Node>, node_b: Arc<Node>, amount_msat: u64) {
 				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 			}
 
-			let payment_id = node_a.spontaneous_payment().send_with_preimage(
+			let spontaneous_payment = node_a.spontaneous_payment();
+			let payment_id = spontaneous_payment.send_with_preimage(
 				amount_msat,
 				node_b.node_id(),
 				preimage,
 				None,
 			);
 
-			match payment_id {
+			match payment_id.await {
 				Ok(payment_id) => {
 					println!(
 						"{}: Awaiting payment with id {}",
@@ -93,7 +94,7 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 			},
 		}
 
-		node_a.event_handled().unwrap();
+		node_a.event_handled().await.unwrap();
 	}
 
 	let duration = start.elapsed();
@@ -110,6 +111,7 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 			PaymentPreimage(preimage_bytes),
 			None,
 		)
+		.await
 		.ok()
 		.unwrap();
 
@@ -117,30 +119,28 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 }
 
 fn payment_benchmark(c: &mut Criterion) {
-	// Set up two nodes. Because this is slow, we reuse the same nodes for each sample.
-	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
-	let chain_source = random_chain_source(&bitcoind, &electrsd);
-
-	let (node_a, node_b) = setup_two_nodes_with_store(
-		&chain_source,
-		false,
-		true,
-		false,
-		common::TestStoreType::Sqlite,
-	);
-
 	let runtime =
 		tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();
 
-	let node_a = Arc::new(node_a);
-	let node_b = Arc::new(node_b);
+	// Set up two nodes. Because this is slow, we reuse the same nodes for each sample.
+	let (setup_done, setup_result) = std::sync::mpsc::channel();
+	runtime.spawn(async move {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let chain_source = random_chain_source(&bitcoind, &electrsd);
+		let (node_a, node_b) = setup_two_nodes_with_store(
+			&chain_source,
+			false,
+			true,
+			false,
+			common::TestStoreType::Sqlite,
+		)
+		.await;
 
-	// Fund the nodes and setup a channel between them. The criterion function cannot be async, so we need to execute
-	// the setup using a runtime.
-	let node_a_cloned = Arc::clone(&node_a);
-	let node_b_cloned = Arc::clone(&node_b);
-	runtime.block_on(async move {
-		let address_a = node_a_cloned.onchain_payment().new_address().unwrap();
+		let node_a = Arc::new(node_a);
+		let node_b = Arc::new(node_b);
+
+		// Fund the nodes and setup a channel between them.
+		let address_a = node_a.onchain_payment().new_address().await.unwrap();
 		let premine_sat = 25_000_000;
 		premine_and_distribute_funds(
 			&bitcoind.client,
@@ -149,23 +149,18 @@ fn payment_benchmark(c: &mut Criterion) {
 			Amount::from_sat(premine_sat),
 		)
 		.await;
-		node_a_cloned.sync_wallets().unwrap();
-		node_b_cloned.sync_wallets().unwrap();
-		open_channel_push_amt(
-			&node_a_cloned,
-			&node_b_cloned,
-			16_000_000,
-			Some(1_000_000_000),
-			false,
-			&electrsd,
-		)
-		.await;
+		node_a.sync_wallets().await.unwrap();
+		node_b.sync_wallets().await.unwrap();
+		open_channel_push_amt(&node_a, &node_b, 16_000_000, Some(1_000_000_000), false, &electrsd)
+			.await;
 		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
-		node_a_cloned.sync_wallets().unwrap();
-		node_b_cloned.sync_wallets().unwrap();
-		expect_channel_ready_event!(node_a_cloned, node_b_cloned.node_id());
-		expect_channel_ready_event!(node_b_cloned, node_a_cloned.node_id());
+		node_a.sync_wallets().await.unwrap();
+		node_b.sync_wallets().await.unwrap();
+		expect_channel_ready_event!(node_a, node_b.node_id());
+		expect_channel_ready_event!(node_b, node_a.node_id());
+		setup_done.send((node_a, node_b)).unwrap();
 	});
+	let (node_a, node_b) = setup_result.recv().unwrap();
 
 	let mut group = c.benchmark_group("payments");
 	group.sample_size(10);

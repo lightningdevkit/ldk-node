@@ -282,7 +282,7 @@ impl std::error::Error for BuildError {}
 /// [`set_custom_logger`]: Self::set_custom_logger
 /// [`log`]: https://crates.io/crates/log
 /// [Logging]: #logging
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NodeBuilder {
 	config: Config,
 	chain_data_source_config: Option<ChainDataSourceConfig>,
@@ -628,7 +628,7 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
+	pub async fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let storage_dir_path = self.config.storage_dir_path.clone();
 		fs::create_dir_all(storage_dir_path.clone())
@@ -642,7 +642,7 @@ impl NodeBuilder {
 			log_error!(logger, "Failed to setup Sqlite store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
-		self.build_with_store_and_logger(node_entropy, kv_store, logger)
+		self.build_with_store_and_logger(node_entropy, kv_store, logger).await
 	}
 
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
@@ -668,25 +668,25 @@ impl NodeBuilder {
 	///
 	/// [PostgreSQL]: https://www.postgresql.org
 	#[cfg(feature = "postgres")]
-	pub fn build_with_postgres_store(
+	pub async fn build_with_postgres_store(
 		&self, node_entropy: NodeEntropy, connection_string: String, db_name: Option<String>,
 		kv_table_name: Option<String>, certificate_pem: Option<String>,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let runtime = self.setup_runtime(&logger)?;
-		let kv_store = runtime
-			.block_on(io::postgres_store::PostgresStore::new_with_logger(
-				connection_string,
-				db_name,
-				kv_table_name,
-				certificate_pem,
-				Some(Arc::clone(&logger)),
-			))
-			.map_err(|e| {
-				log_error!(logger, "Failed to set up Postgres store: {e}");
-				BuildError::KVStoreSetupFailed
-			})?;
-		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
+		let kv_store = io::postgres_store::PostgresStore::new_with_logger(
+			connection_string,
+			db_name,
+			kv_table_name,
+			certificate_pem,
+			Some(Arc::clone(&logger)),
+		)
+		.await
+		.map_err(|e| {
+			log_error!(logger, "Failed to set up Postgres store: {e}");
+			BuildError::KVStoreSetupFailed
+		})?;
+		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger).await
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
@@ -696,14 +696,14 @@ impl NodeBuilder {
 	/// automatically migrated to the v2 format.
 	///
 	/// [`FilesystemStoreV2`]: lightning_persister::fs_store::v2::FilesystemStoreV2
-	pub fn build_with_fs_store(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
+	pub async fn build_with_fs_store(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let runtime = self.setup_runtime(&logger)?;
 		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
 		storage_dir_path.push("fs_store");
 
-		let kv_store = runtime.block_on(open_or_migrate_fs_store(storage_dir_path))?;
-		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
+		let kv_store = open_or_migrate_fs_store(storage_dir_path).await?;
+		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger).await
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -723,7 +723,7 @@ impl NodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	pub fn build_with_vss_store(
+	pub async fn build_with_vss_store(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
@@ -734,12 +734,12 @@ impl NodeBuilder {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
-		runtime.block_on(vss_store.setup_schema_version()).map_err(|e| {
+		vss_store.setup_schema_version().await.map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
 
-		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger)
+		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger).await
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -764,7 +764,7 @@ impl NodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
-	pub fn build_with_vss_store_and_lnurl_auth(
+	pub async fn build_with_vss_store_and_lnurl_auth(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
@@ -776,12 +776,12 @@ impl NodeBuilder {
 				log_error!(logger, "Failed to setup VSS store: {}", e);
 				BuildError::KVStoreSetupFailed
 			})?;
-		runtime.block_on(vss_store.setup_schema_version()).map_err(|e| {
+		vss_store.setup_schema_version().await.map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
 
-		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger)
+		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger).await
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -797,7 +797,7 @@ impl NodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [`FixedHeaders`]: vss_client::headers::FixedHeaders
-	pub fn build_with_vss_store_and_fixed_headers(
+	pub async fn build_with_vss_store_and_fixed_headers(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
@@ -808,12 +808,12 @@ impl NodeBuilder {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
-		runtime.block_on(vss_store.setup_schema_version()).map_err(|e| {
+		vss_store.setup_schema_version().await.map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
 
-		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger)
+		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger).await
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -827,7 +827,7 @@ impl NodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	pub fn build_with_vss_store_and_header_provider(
+	pub async fn build_with_vss_store_and_header_provider(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Node, BuildError> {
@@ -838,21 +838,21 @@ impl NodeBuilder {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
-		runtime.block_on(vss_store.setup_schema_version()).map_err(|e| {
+		vss_store.setup_schema_version().await.map_err(|e| {
 			log_error!(logger, "Failed to setup VSS store: {}", e);
 			BuildError::KVStoreSetupFailed
 		})?;
 
-		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger)
+		self.build_with_store_runtime_and_logger(node_entropy, vss_store, runtime, logger).await
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
+	pub async fn build_with_store<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
-		self.build_with_store_and_logger(node_entropy, kv_store, logger)
+		self.build_with_store_and_logger(node_entropy, kv_store, logger).await
 	}
 
 	fn setup_runtime(&self, logger: &Arc<Logger>) -> Result<Arc<Runtime>, BuildError> {
@@ -866,14 +866,14 @@ impl NodeBuilder {
 		}
 	}
 
-	fn build_with_store_and_logger<S: KVStore + Send + Sync + 'static>(
+	async fn build_with_store_and_logger<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
 		let runtime = self.setup_runtime(&logger)?;
-		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
+		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger).await
 	}
 
-	fn build_with_store_runtime_and_logger<S: KVStore + Send + Sync + 'static>(
+	async fn build_with_store_runtime_and_logger<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, runtime: Arc<Runtime>, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
 		let seed_bytes = node_entropy.to_seed_bytes();
@@ -892,6 +892,7 @@ impl NodeBuilder {
 			logger,
 			Arc::new(DynStoreWrapper(kv_store)),
 		)
+		.await
 	}
 }
 
@@ -1187,8 +1188,9 @@ impl ArcedNodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().expect("lock").build(*node_entropy).map(Arc::new)
+	pub async fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
+		let builder = self.inner.read().expect("lock").clone();
+		builder.build(*node_entropy).await.map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
@@ -1214,13 +1216,12 @@ impl ArcedNodeBuilder {
 	///
 	/// [PostgreSQL]: https://www.postgresql.org
 	#[cfg(feature = "postgres")]
-	pub fn build_with_postgres_store(
+	pub async fn build_with_postgres_store(
 		&self, node_entropy: Arc<NodeEntropy>, connection_string: String, db_name: Option<String>,
 		kv_table_name: Option<String>, certificate_pem: Option<String>,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner
-			.read()
-			.unwrap()
+		let builder = self.inner.read().expect("lock").clone();
+		builder
 			.build_with_postgres_store(
 				*node_entropy,
 				connection_string,
@@ -1228,6 +1229,7 @@ impl ArcedNodeBuilder {
 				kv_table_name,
 				certificate_pem,
 			)
+			.await
 			.map(Arc::new)
 	}
 
@@ -1236,7 +1238,7 @@ impl ArcedNodeBuilder {
 	///
 	/// This requires the `postgres` crate feature.
 	#[cfg(not(feature = "postgres"))]
-	pub fn build_with_postgres_store(
+	pub async fn build_with_postgres_store(
 		&self, _node_entropy: Arc<NodeEntropy>, _connection_string: String,
 		_db_name: Option<String>, _kv_table_name: Option<String>, _certificate_pem: Option<String>,
 	) -> Result<Arc<Node>, BuildError> {
@@ -1245,10 +1247,11 @@ impl ArcedNodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
 	/// previously configured.
-	pub fn build_with_fs_store(
+	pub async fn build_with_fs_store(
 		&self, node_entropy: Arc<NodeEntropy>,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().expect("lock").build_with_fs_store(*node_entropy).map(Arc::new)
+		let builder = self.inner.read().expect("lock").clone();
+		builder.build_with_fs_store(*node_entropy).await.map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -1268,14 +1271,14 @@ impl ArcedNodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	pub fn build_with_vss_store(
+	pub async fn build_with_vss_store(
 		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner
-			.read()
-			.expect("lock")
+		let builder = self.inner.read().expect("lock").clone();
+		builder
 			.build_with_vss_store(*node_entropy, vss_url, store_id, fixed_headers)
+			.await
 			.map(Arc::new)
 	}
 
@@ -1301,13 +1304,12 @@ impl ArcedNodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
-	pub fn build_with_vss_store_and_lnurl_auth(
+	pub async fn build_with_vss_store_and_lnurl_auth(
 		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
 		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner
-			.read()
-			.expect("lock")
+		let builder = self.inner.read().expect("lock").clone();
+		builder
 			.build_with_vss_store_and_lnurl_auth(
 				*node_entropy,
 				vss_url,
@@ -1315,6 +1317,7 @@ impl ArcedNodeBuilder {
 				lnurl_auth_server_url,
 				fixed_headers,
 			)
+			.await
 			.map(Arc::new)
 	}
 
@@ -1330,14 +1333,14 @@ impl ArcedNodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	pub fn build_with_vss_store_and_fixed_headers(
+	pub async fn build_with_vss_store_and_fixed_headers(
 		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner
-			.read()
-			.expect("lock")
+		let builder = self.inner.read().expect("lock").clone();
+		builder
 			.build_with_vss_store_and_fixed_headers(*node_entropy, vss_url, store_id, fixed_headers)
+			.await
 			.map(Arc::new)
 	}
 
@@ -1352,30 +1355,31 @@ impl ArcedNodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	pub fn build_with_vss_store_and_header_provider(
+	pub async fn build_with_vss_store_and_header_provider(
 		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
 		header_provider: Arc<dyn crate::ffi::VssHeaderProvider>,
 	) -> Result<Arc<Node>, BuildError> {
 		let adapter = Arc::new(crate::ffi::VssHeaderProviderAdapter::new(header_provider));
-		self.inner
-			.read()
-			.expect("lock")
+		let builder = self.inner.read().expect("lock").clone();
+		builder
 			.build_with_vss_store_and_header_provider(*node_entropy, vss_url, store_id, adapter)
+			.await
 			.map(Arc::new)
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
 	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
 	// this so its not needed.
-	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
+	pub async fn build_with_store<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
-		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)
+		let builder = self.inner.read().expect("lock").clone();
+		builder.build_with_store(*node_entropy, kv_store).await.map(Arc::new)
 	}
 }
 
 /// Builds a [`Node`] instance according to the options previously configured.
-fn build_with_store_internal(
+async fn build_with_store_internal(
 	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
@@ -1416,24 +1420,21 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res) =
-		runtime.block_on(async move {
-			tokio::join!(
-				read_all_objects(
-					&*kv_store_ref,
-					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					Arc::clone(&logger_ref),
-				),
-				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_all_objects(
-					&*kv_store_ref,
-					PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					Arc::clone(&logger_ref),
-				)
-			)
-		});
+	let (payment_store_res, node_metris_res, pending_payment_store_res) = tokio::join!(
+		read_all_objects(
+			&*kv_store_ref,
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			Arc::clone(&logger_ref),
+		),
+		read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
+		read_all_objects(
+			&*kv_store_ref,
+			PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			Arc::clone(&logger_ref),
+		)
+	);
 
 	// Initialize the status fields.
 	let node_metrics = match node_metris_res {
@@ -1498,7 +1499,7 @@ fn build_with_store_internal(
 			rpc_password,
 			rest_client_config,
 		}) => match rest_client_config {
-			Some(rest_client_config) => runtime.block_on(async {
+			Some(rest_client_config) => {
 				ChainSource::new_bitcoind_rest(
 					rpc_host.clone(),
 					*rpc_port,
@@ -1513,8 +1514,8 @@ fn build_with_store_internal(
 					Arc::clone(&node_metrics),
 				)
 				.await
-			}),
-			None => runtime.block_on(async {
+			},
+			None => {
 				ChainSource::new_bitcoind_rpc(
 					rpc_host.clone(),
 					*rpc_port,
@@ -1528,7 +1529,7 @@ fn build_with_store_internal(
 					Arc::clone(&node_metrics),
 				)
 				.await
-			}),
+			},
 		},
 
 		None => {
@@ -1561,16 +1562,13 @@ fn build_with_store_internal(
 	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
 	let mut wallet_persister =
 		KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger));
-	let wallet_opt = runtime
-		.block_on(async {
-			BdkWallet::load()
-				.descriptor(KeychainKind::External, Some(descriptor.clone()))
-				.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
-				.extract_keys()
-				.check_network(config.network)
-				.load_wallet_async(&mut wallet_persister)
-				.await
-		})
+	let wallet_opt = BdkWallet::load()
+		.descriptor(KeychainKind::External, Some(descriptor.clone()))
+		.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
+		.extract_keys()
+		.check_network(config.network)
+		.load_wallet_async(&mut wallet_persister)
+		.await
 		.map_err(|e| match e {
 			bdk_wallet::LoadWithPersistError::InvalidChangeSet(
 				bdk_wallet::LoadError::Mismatch(bdk_wallet::LoadMismatch::Network {
@@ -1594,13 +1592,10 @@ fn build_with_store_internal(
 	let bdk_wallet = match wallet_opt {
 		Some(wallet) => wallet,
 		None => {
-			let mut wallet = runtime
-				.block_on(async {
-					BdkWallet::create(descriptor, change_descriptor)
-						.network(config.network)
-						.create_wallet_async(&mut wallet_persister)
-						.await
-				})
+			let mut wallet = BdkWallet::create(descriptor, change_descriptor)
+				.network(config.network)
+				.create_wallet_async(&mut wallet_persister)
+				.await
 				.map_err(|e| {
 					log_error!(logger, "Failed to set up wallet: {}", e);
 					BuildError::WalletSetupFailed
@@ -1685,12 +1680,10 @@ fn build_with_store_internal(
 	// Read ChannelMonitors and the NetworkGraph
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (monitor_read_res, network_graph_res) = runtime.block_on(async {
-		tokio::join!(
-			monitor_reader.read_all_channel_monitors_with_updates_parallel(),
-			read_network_graph(&*kv_store_ref, logger_ref),
-		)
-	});
+	let (monitor_read_res, network_graph_res) = tokio::join!(
+		monitor_reader.read_all_channel_monitors_with_updates_parallel(),
+		read_network_graph(&*kv_store_ref, logger_ref),
+	);
 
 	// Read ChannelMonitor state from store
 	let channel_monitors = match monitor_read_res {
@@ -1753,21 +1746,19 @@ fn build_with_store_internal(
 		sweeper_bytes_res,
 		event_queue_res,
 		peer_info_res,
-	) = runtime.block_on(async move {
-		tokio::join!(
-			read_scorer(&*kv_store_ref, network_graph_ref, Arc::clone(&logger_ref)),
-			read_external_pathfinding_scores_from_cache(&*kv_store_ref, Arc::clone(&logger_ref)),
-			KVStore::read(
-				&*kv_store_ref,
-				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
-				CHANNEL_MANAGER_PERSISTENCE_KEY,
-			),
-			output_sweeper_future,
-			read_event_queue(Arc::clone(&kv_store_ref), Arc::clone(&logger_ref)),
-			read_peer_info(Arc::clone(&kv_store_ref), Arc::clone(&logger_ref)),
-		)
-	});
+	) = tokio::join!(
+		read_scorer(&*kv_store_ref, network_graph_ref, Arc::clone(&logger_ref)),
+		read_external_pathfinding_scores_from_cache(&*kv_store_ref, Arc::clone(&logger_ref)),
+		KVStore::read(
+			&*kv_store_ref,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		),
+		output_sweeper_future,
+		read_event_queue(Arc::clone(&kv_store_ref), Arc::clone(&logger_ref)),
+		read_peer_info(Arc::clone(&kv_store_ref), Arc::clone(&logger_ref)),
+	);
 
 	let local_scorer = match scorer_res {
 		Ok(scorer) => scorer,
@@ -2037,8 +2028,7 @@ fn build_with_store_internal(
 				liquidity_source_builder.lsps2_service(promise_secret, config.clone())
 			});
 
-			let liquidity_source = runtime
-				.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
+			let liquidity_source = liquidity_source_builder.build().await.map(Arc::new)?;
 			let custom_message_handler =
 				Arc::new(NodeCustomMessageHandler::new_liquidity(Arc::clone(&liquidity_source)));
 			(Some(liquidity_source), custom_message_handler)

@@ -83,7 +83,7 @@ macro_rules! expect_event {
 		match event {
 			ref e @ Event::$event_type { .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
-				$node.event_handled().unwrap();
+				$node.event_handled().await.unwrap();
 			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
@@ -108,7 +108,7 @@ macro_rules! expect_channel_pending_event {
 			ref e @ Event::ChannelPending { funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
-				$node.event_handled().unwrap();
+				$node.event_handled().await.unwrap();
 				funding_txo
 			},
 			ref e => {
@@ -134,7 +134,7 @@ macro_rules! expect_channel_ready_event {
 			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
-				$node.event_handled().unwrap();
+				$node.event_handled().await.unwrap();
 				user_channel_id
 			},
 			ref e => {
@@ -162,7 +162,7 @@ macro_rules! expect_channel_ready_events {
 				ref e @ Event::ChannelReady { counterparty_node_id, .. } => {
 					println!("{} got event {:?}", $node.node_id(), e);
 					ids.push(counterparty_node_id);
-					$node.event_handled().unwrap();
+					$node.event_handled().await.unwrap();
 				},
 				ref e => {
 					panic!("{} got unexpected event!: {:?}", std::stringify!($node), e);
@@ -196,7 +196,7 @@ macro_rules! expect_splice_negotiated_event {
 			ref e @ Event::SpliceNegotiated { new_funding_txo, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(counterparty_node_id, $counterparty_node_id);
-				$node.event_handled().unwrap();
+				$node.event_handled().await.unwrap();
 				new_funding_txo
 			},
 			ref e => {
@@ -226,7 +226,7 @@ macro_rules! expect_payment_received_event {
 				if !matches!(payment.kind, ldk_node::payment::PaymentKind::Onchain { .. }) {
 					assert_eq!(payment.fee_paid_msat, None);
 				}
-				$node.event_handled().unwrap();
+				$node.event_handled().await.unwrap();
 				payment_id
 			},
 			ref e => {
@@ -262,7 +262,7 @@ macro_rules! expect_payment_claimable_event {
 				assert_eq!(payment_hash, $payment_hash);
 				assert_eq!(payment_id, $payment_id);
 				assert_eq!(claimable_amount_msat, $claimable_amount_msat);
-				$node.event_handled().unwrap();
+				$node.event_handled().await.unwrap();
 				claimable_amount_msat
 			},
 			ref e => {
@@ -293,7 +293,7 @@ macro_rules! expect_payment_successful_event {
 				let payment = $node.payment(&$payment_id.unwrap()).await.unwrap();
 				assert_eq!(payment.fee_paid_msat, fee_paid_msat);
 				assert_eq!(payment_id, $payment_id);
-				$node.event_handled().unwrap();
+				$node.event_handled().await.unwrap();
 			},
 			ref e => {
 				panic!("{} got unexpected event!: {:?}", std::stringify!(node_b), e);
@@ -473,8 +473,8 @@ pub(crate) use setup_builder;
 #[cfg(any(cln_test, lnd_test, eclair_test))]
 pub(crate) mod scenarios;
 
-pub(crate) fn setup_two_nodes(
-	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
+pub(crate) async fn setup_two_nodes(
+	chain_source: &TestChainSource<'_>, allow_0conf: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool,
 ) -> (TestNode, TestNode) {
 	setup_two_nodes_with_store(
@@ -484,10 +484,11 @@ pub(crate) fn setup_two_nodes(
 		anchors_trusted_no_reserve,
 		TestStoreType::TestSyncStore,
 	)
+	.await
 }
 
-pub(crate) fn setup_two_nodes_with_store(
-	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
+pub(crate) async fn setup_two_nodes_with_store(
+	chain_source: &TestChainSource<'_>, allow_0conf: bool, anchor_channels: bool,
 	anchors_trusted_no_reserve: bool, store_type: TestStoreType,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
@@ -499,7 +500,7 @@ pub(crate) fn setup_two_nodes_with_store(
 			HumanReadableNamesConfig { resolution_config: HRNResolverConfig::Blip32 };
 	}
 
-	let node_a = setup_node(chain_source, config_a);
+	let node_a = setup_node(chain_source, config_a).await;
 
 	println!("\n== Node B ==");
 	let mut config_b = random_config(anchor_channels);
@@ -526,11 +527,11 @@ pub(crate) fn setup_two_nodes_with_store(
 			.trusted_peers_no_reserve
 			.push(node_a.node_id());
 	}
-	let node_b = setup_node(chain_source, config_b);
+	let node_b = setup_node(chain_source, config_b).await;
 	(node_a, node_b)
 }
 
-pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
+pub(crate) async fn setup_node(chain_source: &TestChainSource<'_>, config: TestConfig) -> TestNode {
 	setup_builder!(builder, config.node_config);
 	match chain_source {
 		TestChainSource::Esplora(electrsd) => {
@@ -593,11 +594,11 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
 			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
-			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
+			builder.build_with_store(config.node_entropy.into(), kv_store).await.unwrap()
 		},
-		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
+		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).await.unwrap(),
 		TestStoreType::FilesystemStore => {
-			builder.build_with_fs_store(config.node_entropy.into()).unwrap()
+			builder.build_with_fs_store(config.node_entropy.into()).await.unwrap()
 		},
 	};
 
@@ -605,7 +606,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		builder.set_wallet_recovery_mode();
 	}
 
-	node.start().unwrap();
+	node.start().await.unwrap();
 	node
 }
 
@@ -906,8 +907,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a: TestNode, node_b: TestNode, bitcoind: &BitcoindClient, electrsd: &E, allow_0conf: bool,
 	disable_node_b_reserve: bool, expect_anchor_channel: bool, force_close: bool,
 ) {
-	let addr_a = node_a.onchain_payment().new_address().unwrap();
-	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().await.unwrap();
+	let addr_b = node_b.onchain_payment().new_address().await.unwrap();
 
 	let premine_amount_sat = if expect_anchor_channel { 2_125_000 } else { 2_100_000 };
 
@@ -1125,7 +1126,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		ref e @ Event::PaymentSuccessful { ref bolt12_invoice, .. } => {
 			println!("{} got event {:?}", node_a.node_id(), e);
 			assert!(bolt12_invoice.is_none(), "bolt12_invoice should be None for BOLT11 payments");
-			node_a.event_handled().unwrap();
+			node_a.event_handled().await.unwrap();
 		},
 		ref e => {
 			panic!("{} got unexpected event!: {:?}", std::stringify!(node_a), e);
@@ -1185,7 +1186,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let received_amount = match node_b.next_event_async().await {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled().unwrap();
+			node_b.event_handled().await.unwrap();
 			amount_msat
 		},
 		ref e => {
@@ -1225,7 +1226,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let received_amount = match node_b.next_event_async().await {
 		ref e @ Event::PaymentReceived { amount_msat, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled().unwrap();
+			node_b.event_handled().await.unwrap();
 			amount_msat
 		},
 		ref e => {
@@ -1377,7 +1378,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let (received_keysend_amount, received_custom_records) = match next_event {
 		ref e @ Event::PaymentReceived { amount_msat, ref custom_records, .. } => {
 			println!("{} got event {:?}", std::stringify!(node_b), e);
-			node_b.event_handled().unwrap();
+			node_b.event_handled().await.unwrap();
 			(amount_msat, custom_records)
 		},
 		ref e => {
@@ -1445,7 +1446,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 
 	println!("\nB splices out to pay A");
-	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_a = node_a.onchain_payment().new_address().await.unwrap();
 	let splice_out_sat = funding_amount_sat / 2;
 	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
 
@@ -1730,9 +1731,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_a.next_event(), None);
 	assert_eq!(node_b.next_event(), None);
 
-	node_a.stop().unwrap();
+	node_a.stop().await.unwrap();
 	println!("\nA stopped");
-	node_b.stop().unwrap();
+	node_b.stop().await.unwrap();
 	println!("\nB stopped");
 }
 

@@ -44,7 +44,6 @@ use crate::connection::ConnectionManager;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::LSPS2Parameters;
 use crate::payment::PaymentMetadata;
-use crate::runtime::Runtime;
 use crate::types::{
 	Broadcaster, ChannelManager, DynStore, KeysManager, LiquidityManager, PeerManager, Wallet,
 };
@@ -1510,7 +1509,6 @@ pub(crate) struct LSPS2BuyResponse {
 #[derive(Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct LSPS1Liquidity {
-	runtime: Arc<Runtime>,
 	wallet: Arc<Wallet>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
@@ -1519,11 +1517,10 @@ pub struct LSPS1Liquidity {
 
 impl LSPS1Liquidity {
 	pub(crate) fn new(
-		runtime: Arc<Runtime>, wallet: Arc<Wallet>,
-		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+		wallet: Arc<Wallet>, connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>, logger: Arc<Logger>,
 	) -> Self {
-		Self { runtime, wallet, connection_manager, liquidity_source, logger }
+		Self { wallet, connection_manager, liquidity_source, logger }
 	}
 }
 
@@ -1533,7 +1530,7 @@ impl LSPS1Liquidity {
 	///
 	/// The channel will be opened after one of the returned payment options has successfully been
 	/// paid.
-	pub fn request_channel(
+	pub async fn request_channel(
 		&self, lsp_balance_sat: u64, client_balance_sat: u64, channel_expiry_blocks: u32,
 		announce_channel: bool,
 	) -> Result<LSPS1OrderStatus, Error> {
@@ -1547,34 +1544,30 @@ impl LSPS1Liquidity {
 		let con_addr = lsp_address.clone();
 		let con_cm = Arc::clone(&self.connection_manager);
 
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
+		con_cm.connect_peer_if_necessary(con_node_id, con_addr).await?;
 
 		log_info!(self.logger, "Connected to LSP {}@{}. ", lsp_node_id, lsp_address);
 
-		let refund_address = self.wallet.get_new_address()?;
+		let refund_address = self.wallet.get_new_address().await?;
 
 		let liquidity_source = Arc::clone(&liquidity_source);
-		let response = self.runtime.block_on(async move {
-			liquidity_source
-				.lsps1_request_channel(
-					lsp_balance_sat,
-					client_balance_sat,
-					channel_expiry_blocks,
-					announce_channel,
-					refund_address,
-				)
-				.await
-		})?;
+		let response = liquidity_source
+			.lsps1_request_channel(
+				lsp_balance_sat,
+				client_balance_sat,
+				channel_expiry_blocks,
+				announce_channel,
+				refund_address,
+			)
+			.await?;
 
 		Ok(response)
 	}
 
 	/// Connects to the configured LSP and checks for the status of a previously-placed order.
-	pub fn check_order_status(&self, order_id: LSPS1OrderId) -> Result<LSPS1OrderStatus, Error> {
+	pub async fn check_order_status(
+		&self, order_id: LSPS1OrderId,
+	) -> Result<LSPS1OrderStatus, Error> {
 		let liquidity_source =
 			self.liquidity_source.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
@@ -1585,16 +1578,10 @@ impl LSPS1Liquidity {
 		let con_addr = lsp_address.clone();
 		let con_cm = Arc::clone(&self.connection_manager);
 
-		// We need to use our main runtime here as a local runtime might not be around to poll
-		// connection futures going forward.
-		self.runtime.block_on(async move {
-			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
-		})?;
+		con_cm.connect_peer_if_necessary(con_node_id, con_addr).await?;
 
 		let liquidity_source = Arc::clone(&liquidity_source);
-		let response = self
-			.runtime
-			.block_on(async move { liquidity_source.lsps1_check_order_status(order_id).await })?;
+		let response = liquidity_source.lsps1_check_order_status(order_id).await?;
 		Ok(response)
 	}
 }

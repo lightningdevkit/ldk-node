@@ -818,7 +818,7 @@ mod tests {
 	async fn test_postgres_store() {
 		let store_0 = create_test_store("test_pg_store_0").await;
 		let store_1 = create_test_store("test_pg_store_1").await;
-		do_test_store(&store_0, &store_1);
+		do_test_store(&store_0, &store_1).await;
 		cleanup_store(&store_0).await;
 		cleanup_store(&store_1).await;
 	}
