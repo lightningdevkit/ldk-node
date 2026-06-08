@@ -277,6 +277,7 @@ impl ChainSource {
 	pub(crate) fn stop(&self) {
 		match &self.kind {
 			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.stop(),
+			ChainSourceKind::Cbf(cbf_chain_source) => cbf_chain_source.stop(),
 			_ => {
 				// Nothing to do for other chain sources.
 			},
