@@ -141,4 +141,27 @@ impl OnchainPayment {
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
 		self.wallet.bump_fee_rbf(payment_id, fee_rate_opt)
 	}
+
+	/// Bumps the fee of a given UTXO using Child-Pays-For-Parent (CPFP) by creating a new transaction.
+	///
+	/// This method creates a new transaction that spends the specified UTXO with a higher fee rate,
+	/// effectively increasing the priority of both the new transaction and the parent transaction
+	/// it depends on. This is useful when a transaction is stuck in the mempool due to insufficient
+	/// fees and you want to accelerate its confirmation.
+	///
+	/// CPFP works by creating a child transaction that spends one or more outputs from the parent
+	/// transaction. Miners will consider the combined fees of both transactions when deciding
+	/// which transactions to include in a block.
+	///
+	/// # Parameters
+	/// * `payment_id` - The identifier of the payment whose UTXO should be fee-bumped
+	/// * `fee_rate` - The fee rate to use for the CPFP transaction, if not provided, a reasonable fee rate is used
+	///
+	/// Returns the [`Txid`] of the newly created CPFP transaction if successful.
+	pub fn bump_fee_cpfp(
+		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>,
+	) -> Result<Txid, Error> {
+		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		self.wallet.bump_fee_cpfp(payment_id, fee_rate_opt)
+	}
 }
