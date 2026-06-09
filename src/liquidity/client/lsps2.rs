@@ -19,6 +19,7 @@ use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder,
 use lightning_liquidity::lsps0::ser::LSPSRequestId;
 use lightning_liquidity::lsps2::event::LSPS2ClientEvent;
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
+use lightning_liquidity::lsps2::router::LSPS2Bolt12InvoiceParameters;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::PaymentHash;
 use tokio::sync::oneshot;
@@ -136,6 +137,78 @@ where
 		Ok((invoice, cheapest_lsp))
 	}
 
+	pub(crate) async fn lsps2_bolt12_payment_metadata(
+		self: Arc<Self>, amount_msat: u64, max_total_lsp_fee_limit_msat: Option<u64>,
+		connection_manager: Arc<ConnectionManager<L>>,
+	) -> Result<(u64, PaymentMetadata, LspConfig), Error> {
+		// Connect to all candidate LSPs before querying fees.
+		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
+		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
+			.into_iter()
+			.flat_map(|(lsp, resp)| {
+				resp.opening_fee_params_menu
+					.into_iter()
+					.map(move |params| (lsp.clone(), params))
+			})
+			.filter_map(|(lsp, params)| {
+				if amount_msat < params.min_payment_size_msat
+					|| amount_msat > params.max_payment_size_msat
+				{
+					log_debug!(self.logger,
+						"Skipping LSP {}'s JIT offer as the payment of {}msat doesn't meet LSP limits (min: {}msat, max: {}msat)",
+						lsp.node_id,
+						amount_msat,
+						params.min_payment_size_msat,
+						params.max_payment_size_msat
+					);
+					None
+				} else {
+					compute_opening_fee(amount_msat, params.min_fee_msat, params.proportional as u64)
+						.map(|fee| (lsp, fee, params))
+				}
+			})
+			.min_by_key(|(_, fee, _)| *fee)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Failed to handle response from liquidity service",);
+				Error::LiquidityRequestFailed
+			})?;
+
+		if let Some(max_total_lsp_fee_limit_msat) = max_total_lsp_fee_limit_msat {
+			if min_total_fee_msat > max_total_lsp_fee_limit_msat {
+				log_error!(self.logger,
+					"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our fee limit of {}msat",
+					min_total_fee_msat, max_total_lsp_fee_limit_msat
+				);
+				return Err(Error::LiquidityFeeTooHigh);
+			}
+		}
+
+		log_debug!(
+			self.logger,
+			"Choosing cheapest liquidity offer from LSP {}, will pay {}msat in total LSP fees",
+			cheapest_lsp.node_id,
+			min_total_fee_msat
+		);
+
+		let buy_response = self
+			.lsps2_send_buy_request(
+				Some(amount_msat),
+				min_opening_params,
+				Some(&cheapest_lsp.node_id),
+			)
+			.await?;
+		let metadata = self.lsps2_bolt12_metadata_from_buy_response(
+			buy_response,
+			LSPS2Parameters {
+				max_total_opening_fee_msat: Some(min_total_fee_msat),
+				max_proportional_opening_fee_ppm_msat: None,
+			},
+			&cheapest_lsp,
+		);
+
+		Ok((min_total_fee_msat, metadata, cheapest_lsp))
+	}
+
 	pub(crate) async fn lsps2_receive_variable_amount_to_jit_channel(
 		self: Arc<Self>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
@@ -197,6 +270,62 @@ where
 
 		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
 		Ok((invoice, cheapest_lsp))
+	}
+
+	pub(crate) async fn lsps2_variable_amount_bolt12_payment_metadata(
+		self: Arc<Self>, max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+		connection_manager: Arc<ConnectionManager<L>>,
+	) -> Result<(u64, PaymentMetadata, LspConfig), Error> {
+		// Connect to all candidate LSPs before querying fees.
+		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
+		let (cheapest_lsp, min_prop_fee_ppm_msat, min_opening_params) = all_offers
+			.into_iter()
+			.flat_map(|(lsp, resp)| {
+				resp.opening_fee_params_menu.into_iter().map(move |params| (lsp.clone(), params))
+			})
+			.map(|(lsp, params)| {
+				let ppm = params.proportional as u64;
+				(lsp, ppm, params)
+			})
+			.min_by_key(|(_, ppm, _)| *ppm)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Failed to handle response from liquidity service",);
+				Error::LiquidityRequestFailed
+			})?;
+
+		if let Some(max_proportional_lsp_fee_limit_ppm_msat) =
+			max_proportional_lsp_fee_limit_ppm_msat
+		{
+			if min_prop_fee_ppm_msat > max_proportional_lsp_fee_limit_ppm_msat {
+				log_error!(self.logger,
+					"Failed to request inbound JIT channel as LSP's requested proportional opening fee of {} ppm msat exceeds our fee limit of {} ppm msat",
+					min_prop_fee_ppm_msat,
+					max_proportional_lsp_fee_limit_ppm_msat
+				);
+				return Err(Error::LiquidityFeeTooHigh);
+			}
+		}
+
+		log_debug!(
+			self.logger,
+			"Choosing cheapest liquidity offer from LSP {}, will pay {}ppm msat in proportional LSP fees",
+			cheapest_lsp.node_id,
+			min_prop_fee_ppm_msat
+		);
+
+		let buy_response = self
+			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
+			.await?;
+		let metadata = self.lsps2_bolt12_metadata_from_buy_response(
+			buy_response,
+			LSPS2Parameters {
+				max_total_opening_fee_msat: None,
+				max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
+			},
+			&cheapest_lsp,
+		);
+
+		Ok((min_prop_fee_ppm_msat, metadata, cheapest_lsp))
 	}
 
 	async fn gather_lsps2_offers(
@@ -341,8 +470,11 @@ where
 
 		// LSPS2 requires min_final_cltv_expiry_delta to be at least 2 more than usual.
 		let min_final_cltv_expiry_delta = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
-		let encoded_payment_metadata =
-			PaymentMetadata { lsps2_parameters: Some(lsps2_parameters) }.encode();
+		let encoded_payment_metadata = PaymentMetadata {
+			lsps2_parameters: Some(lsps2_parameters),
+			lsps2_bolt12_invoice_parameters: None,
+		}
+		.encode();
 		let (payment_hash, payment_secret, payment_metadata) = match payment_hash {
 			Some(payment_hash) => {
 				let (payment_secret, payment_metadata) = self
@@ -412,6 +544,19 @@ where
 			log_error!(self.logger, "Failed to build and sign invoice: {}", e);
 			Error::InvoiceCreationFailed
 		})
+	}
+
+	fn lsps2_bolt12_metadata_from_buy_response(
+		&self, buy_response: LSPS2BuyResponse, lsps2_parameters: LSPS2Parameters, lsp: &LspConfig,
+	) -> PaymentMetadata {
+		PaymentMetadata {
+			lsps2_parameters: Some(lsps2_parameters),
+			lsps2_bolt12_invoice_parameters: Some(LSPS2Bolt12InvoiceParameters {
+				counterparty_node_id: lsp.node_id,
+				intercept_scid: buy_response.intercept_scid,
+				cltv_expiry_delta: buy_response.cltv_expiry_delta,
+			}),
+		}
 	}
 
 	pub(crate) async fn handle_event(&self, event: LSPS2ClientEvent) {
