@@ -81,11 +81,11 @@ use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
 	GossipSync, Graph, HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
-	PeerManager, PendingPaymentStore, SyncAndAsyncKVStore,
+	PeerManager, PendingPaymentStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
-use crate::{Node, NodeMetrics};
+use crate::{Node, NodeMetrics, PersistedNodeMetrics};
 
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
@@ -176,17 +176,17 @@ pub enum BuildError {
 	RuntimeSetupFailed,
 	/// We failed to read data from the [`KVStore`].
 	///
-	/// [`KVStore`]: lightning::util::persist::KVStoreSync
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	ReadFailed,
 	/// We failed to write data to the [`KVStore`].
 	///
-	/// [`KVStore`]: lightning::util::persist::KVStoreSync
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	WriteFailed,
 	/// We failed to access the given `storage_dir_path`.
 	StoragePathAccessFailed,
 	/// We failed to setup our [`KVStore`].
 	///
-	/// [`KVStore`]: lightning::util::persist::KVStoreSync
+	/// [`KVStore`]: lightning::util::persist::KVStore
 	KVStoreSetupFailed,
 	/// We failed to setup the onchain wallet.
 	WalletSetupFailed,
@@ -697,11 +697,12 @@ impl NodeBuilder {
 	/// [`FilesystemStoreV2`]: lightning_persister::fs_store::v2::FilesystemStoreV2
 	pub fn build_with_fs_store(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		let runtime = self.setup_runtime(&logger)?;
 		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
 		storage_dir_path.push("fs_store");
 
-		let kv_store = open_or_migrate_fs_store(storage_dir_path)?;
-		self.build_with_store_and_logger(node_entropy, kv_store, logger)
+		let kv_store = runtime.block_on(open_or_migrate_fs_store(storage_dir_path))?;
+		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
 	}
 
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
@@ -825,7 +826,7 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
@@ -844,14 +845,14 @@ impl NodeBuilder {
 		}
 	}
 
-	fn build_with_store_and_logger<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	fn build_with_store_and_logger<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
 		let runtime = self.setup_runtime(&logger)?;
 		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
 	}
 
-	fn build_with_store_runtime_and_logger<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	fn build_with_store_runtime_and_logger<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, runtime: Arc<Runtime>, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
 		let seed_bytes = node_entropy.to_seed_bytes();
@@ -1345,7 +1346,7 @@ impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
 	// this so its not needed.
-	pub fn build_with_store<S: SyncAndAsyncKVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)
@@ -1415,10 +1416,10 @@ fn build_with_store_internal(
 
 	// Initialize the status fields.
 	let node_metrics = match node_metris_res {
-		Ok(metrics) => Arc::new(RwLock::new(metrics)),
+		Ok(metrics) => Arc::new(PersistedNodeMetrics::new(metrics)),
 		Err(e) => {
 			if e.kind() == std::io::ErrorKind::NotFound {
-				Arc::new(RwLock::new(NodeMetrics::default()))
+				Arc::new(PersistedNodeMetrics::new(NodeMetrics::default()))
 			} else {
 				log_error!(logger, "Failed to read node metrics from store: {}", e);
 				return Err(BuildError::ReadFailed);
@@ -1539,12 +1540,16 @@ fn build_with_store_internal(
 	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
 	let mut wallet_persister =
 		KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger));
-	let wallet_opt = BdkWallet::load()
-		.descriptor(KeychainKind::External, Some(descriptor.clone()))
-		.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
-		.extract_keys()
-		.check_network(config.network)
-		.load_wallet(&mut wallet_persister)
+	let wallet_opt = runtime
+		.block_on(async {
+			BdkWallet::load()
+				.descriptor(KeychainKind::External, Some(descriptor.clone()))
+				.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
+				.extract_keys()
+				.check_network(config.network)
+				.load_wallet_async(&mut wallet_persister)
+				.await
+		})
 		.map_err(|e| match e {
 			bdk_wallet::LoadWithPersistError::InvalidChangeSet(
 				bdk_wallet::LoadError::Mismatch(bdk_wallet::LoadMismatch::Network {
@@ -1568,9 +1573,13 @@ fn build_with_store_internal(
 	let bdk_wallet = match wallet_opt {
 		Some(wallet) => wallet,
 		None => {
-			let mut wallet = BdkWallet::create(descriptor, change_descriptor)
-				.network(config.network)
-				.create_wallet(&mut wallet_persister)
+			let mut wallet = runtime
+				.block_on(async {
+					BdkWallet::create(descriptor, change_descriptor)
+						.network(config.network)
+						.create_wallet_async(&mut wallet_persister)
+						.await
+				})
 				.map_err(|e| {
 					log_error!(logger, "Failed to set up wallet: {}", e);
 					BuildError::WalletSetupFailed
@@ -1619,6 +1628,7 @@ fn build_with_store_internal(
 		Arc::clone(&fee_estimator),
 		Arc::clone(&chain_source),
 		Arc::clone(&payment_store),
+		Arc::clone(&runtime),
 		Arc::clone(&config),
 		Arc::clone(&logger),
 		Arc::clone(&pending_payment_store),

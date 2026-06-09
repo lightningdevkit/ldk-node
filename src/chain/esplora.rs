@@ -6,7 +6,7 @@
 // accordance with one or both of these licenses.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bdk_esplora::EsploraAsyncExt;
@@ -25,7 +25,7 @@ use crate::fee_estimator::{
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, NodeMetrics};
+use crate::{Error, PersistedNodeMetrics};
 
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,
@@ -37,14 +37,14 @@ pub(super) struct EsploraChainSource {
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
-	node_metrics: Arc<RwLock<NodeMetrics>>,
+	node_metrics: Arc<PersistedNodeMetrics>,
 }
 
 impl EsploraChainSource {
 	pub(crate) fn new(
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
 	) -> Result<Self, ()> {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder =
@@ -127,7 +127,8 @@ impl EsploraChainSource {
 									&*self.kv_store,
 									&*self.logger,
 									|m| m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt,
-								)?;
+								)
+								.await?;
 								Ok(())
 							},
 							Err(e) => Err(e),
@@ -265,7 +266,8 @@ impl EsploraChainSource {
 						&*self.kv_store,
 						&*self.logger,
 						|m| m.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt,
-					)?;
+					)
+					.await?;
 					Ok(())
 				},
 				Err(e) => {
@@ -347,7 +349,8 @@ impl EsploraChainSource {
 			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
 		update_and_persist_node_metrics(&self.node_metrics, &*self.kv_store, &*self.logger, |m| {
 			m.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt
-		})?;
+		})
+		.await?;
 
 		Ok(())
 	}

@@ -4,6 +4,11 @@ set -eox pipefail
 BINDINGS_DIR="./bindings/swift"
 UNIFFI_BINDGEN_BIN="cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml"
 
+case " ${RUSTFLAGS:-} " in
+	*" --cfg tokio_unstable "*|*" --cfg=tokio_unstable "*) ;;
+	*) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg tokio_unstable" ;;
+esac
+
 mkdir -p $BINDINGS_DIR
 
 # Install rust target toolchains

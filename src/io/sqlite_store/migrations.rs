@@ -169,14 +169,14 @@ fn migrate_v2_to_v3(connection: &mut Connection, kv_table_name: &str) -> io::Res
 mod tests {
 	use std::fs;
 
-	use lightning::util::persist::{KVStoreSync, PaginatedKVStoreSync};
+	use lightning::util::persist::{KVStore, PaginatedKVStore};
 	use rusqlite::{named_params, Connection};
 
 	use crate::io::sqlite_store::SqliteStore;
 	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
 
-	#[test]
-	fn rwrl_post_schema_1_migration() {
+	#[tokio::test]
+	async fn rwrl_post_schema_1_migration() {
 		let old_schema_version = 1;
 
 		let mut temp_path = random_storage_path();
@@ -253,15 +253,15 @@ mod tests {
 
 		// Check we migrate the db just fine without losing our written data.
 		let store = SqliteStore::new(temp_path, Some(db_file_name), Some(kv_table_name)).unwrap();
-		let res = store.read(&test_namespace, "", &test_key).unwrap();
+		let res = KVStore::read(&store, &test_namespace, "", &test_key).await.unwrap();
 		assert_eq!(res, test_data);
 
 		// Check we can continue to use the store just fine.
-		do_read_write_remove_list_persist(&store);
+		do_read_write_remove_list_persist(&store).await;
 	}
 
-	#[test]
-	fn rwrl_post_schema_2_migration() {
+	#[tokio::test]
+	async fn rwrl_post_schema_2_migration() {
 		let old_schema_version = 2u16;
 
 		let mut temp_path = random_storage_path();
@@ -325,24 +325,24 @@ mod tests {
 		// Verify data survived
 		for i in 0..3 {
 			let key = format!("key_{}", i);
-			let data = store.read(test_ns, test_sub, &key).unwrap();
+			let data = KVStore::read(&store, test_ns, test_sub, &key).await.unwrap();
 			assert_eq!(data, vec![i as u8; 8]);
 		}
 
 		// Verify paginated listing works and returns entries in ROWID-backfilled order (newest first)
 		let response =
-			PaginatedKVStoreSync::list_paginated(&store, test_ns, test_sub, None).unwrap();
+			PaginatedKVStore::list_paginated(&store, test_ns, test_sub, None).await.unwrap();
 		assert_eq!(response.keys.len(), 3);
 		// ROWIDs were 1, 2, 3 so sort_order was backfilled as 1, 2, 3; newest first
 		assert_eq!(response.keys, vec!["key_2", "key_1", "key_0"]);
 
 		// Verify we can write new entries and they get proper ordering
-		KVStoreSync::write(&store, test_ns, test_sub, "key_new", vec![99u8; 8]).unwrap();
+		KVStore::write(&store, test_ns, test_sub, "key_new", vec![99u8; 8]).await.unwrap();
 		let response =
-			PaginatedKVStoreSync::list_paginated(&store, test_ns, test_sub, None).unwrap();
+			PaginatedKVStore::list_paginated(&store, test_ns, test_sub, None).await.unwrap();
 		assert_eq!(response.keys[0], "key_new");
 
 		// Check we can continue to use the store just fine.
-		do_read_write_remove_list_persist(&store);
+		do_read_write_remove_list_persist(&store).await;
 	}
 }

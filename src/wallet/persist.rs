@@ -5,10 +5,12 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use bdk_chain::Merge;
-use bdk_wallet::{ChangeSet, WalletPersister};
+use bdk_wallet::{AsyncWalletPersister, ChangeSet};
 
 use crate::io::utils::{
 	read_bdk_wallet_change_set, write_bdk_wallet_change_descriptor, write_bdk_wallet_descriptor,
@@ -17,6 +19,7 @@ use crate::io::utils::{
 };
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::types::DynStore;
+
 pub(crate) struct KVStoreWalletPersister {
 	latest_change_set: Option<ChangeSet>,
 	kv_store: Arc<DynStore>,
@@ -27,18 +30,14 @@ impl KVStoreWalletPersister {
 	pub(crate) fn new(kv_store: Arc<DynStore>, logger: Arc<Logger>) -> Self {
 		Self { latest_change_set: None, kv_store, logger }
 	}
-}
 
-impl WalletPersister for KVStoreWalletPersister {
-	type Error = std::io::Error;
-
-	fn initialize(persister: &mut Self) -> Result<ChangeSet, Self::Error> {
+	async fn initialize_inner(&mut self) -> Result<ChangeSet, std::io::Error> {
 		// Return immediately if we have already been initialized.
-		if let Some(latest_change_set) = persister.latest_change_set.as_ref() {
+		if let Some(latest_change_set) = self.latest_change_set.as_ref() {
 			return Ok(latest_change_set.clone());
 		}
 
-		let change_set_opt = read_bdk_wallet_change_set(&*persister.kv_store, &*persister.logger)?;
+		let change_set_opt = read_bdk_wallet_change_set(&*self.kv_store, &*self.logger).await?;
 
 		let change_set = match change_set_opt {
 			Some(persisted_change_set) => persisted_change_set,
@@ -49,18 +48,21 @@ impl WalletPersister for KVStoreWalletPersister {
 				ChangeSet::default()
 			},
 		};
-		persister.latest_change_set = Some(change_set.clone());
+		self.latest_change_set = Some(change_set.clone());
 		Ok(change_set)
 	}
 
-	fn persist(persister: &mut Self, change_set: &ChangeSet) -> Result<(), Self::Error> {
+	async fn persist_inner(&mut self, change_set: &ChangeSet) -> Result<(), std::io::Error> {
 		if change_set.is_empty() {
 			return Ok(());
 		}
 
+		let kv_store = Arc::clone(&self.kv_store);
+		let logger = Arc::clone(&self.logger);
+
 		// We're allowed to fail here if we're not initialized, BDK docs state: "This method can fail if the
 		// persister is not initialized."
-		let latest_change_set = persister.latest_change_set.as_mut().ok_or_else(|| {
+		let latest_change_set = self.latest_change_set.as_mut().ok_or_else(|| {
 			std::io::Error::new(
 				std::io::ErrorKind::Other,
 				"Wallet must be initialized before calling persist",
@@ -75,7 +77,7 @@ impl WalletPersister for KVStoreWalletPersister {
 			{
 				debug_assert!(false, "Wallet descriptor must never change");
 				log_error!(
-					persister.logger,
+					logger,
 					"Wallet change set doesn't match persisted descriptor. This should never happen."
 				);
 				return Err(std::io::Error::new(
@@ -84,7 +86,7 @@ impl WalletPersister for KVStoreWalletPersister {
 				));
 			} else {
 				latest_change_set.descriptor = Some(descriptor.clone());
-				write_bdk_wallet_descriptor(&descriptor, &*persister.kv_store, &*persister.logger)?;
+				write_bdk_wallet_descriptor(&descriptor, &*kv_store, Arc::clone(&logger)).await?;
 			}
 		}
 
@@ -94,7 +96,7 @@ impl WalletPersister for KVStoreWalletPersister {
 			{
 				debug_assert!(false, "Wallet change_descriptor must never change");
 				log_error!(
-					persister.logger,
+					logger,
 					"Wallet change set doesn't match persisted change_descriptor. This should never happen."
 				);
 				return Err(std::io::Error::new(
@@ -105,9 +107,10 @@ impl WalletPersister for KVStoreWalletPersister {
 				latest_change_set.change_descriptor = Some(change_descriptor.clone());
 				write_bdk_wallet_change_descriptor(
 					&change_descriptor,
-					&*persister.kv_store,
-					&*persister.logger,
-				)?;
+					&*kv_store,
+					Arc::clone(&logger),
+				)
+				.await?;
 			}
 		}
 
@@ -115,7 +118,7 @@ impl WalletPersister for KVStoreWalletPersister {
 			if latest_change_set.network.is_some() && latest_change_set.network != Some(network) {
 				debug_assert!(false, "Wallet network must never change");
 				log_error!(
-					persister.logger,
+					logger,
 					"Wallet change set doesn't match persisted network. This should never happen."
 				);
 				return Err(std::io::Error::new(
@@ -124,7 +127,7 @@ impl WalletPersister for KVStoreWalletPersister {
 				));
 			} else {
 				latest_change_set.network = Some(network);
-				write_bdk_wallet_network(&network, &*persister.kv_store, &*persister.logger)?;
+				write_bdk_wallet_network(&network, &*kv_store, Arc::clone(&logger)).await?;
 			}
 		}
 
@@ -144,31 +147,48 @@ impl WalletPersister for KVStoreWalletPersister {
 		// particular order.
 		if !change_set.indexer.is_empty() {
 			latest_change_set.indexer.merge(change_set.indexer.clone());
-			write_bdk_wallet_indexer(
-				&latest_change_set.indexer,
-				&*persister.kv_store,
-				Arc::clone(&persister.logger),
-			)?;
+			write_bdk_wallet_indexer(&latest_change_set.indexer, &*kv_store, Arc::clone(&logger))
+				.await?;
 		}
 
 		if !change_set.tx_graph.is_empty() {
 			latest_change_set.tx_graph.merge(change_set.tx_graph.clone());
-			write_bdk_wallet_tx_graph(
-				&latest_change_set.tx_graph,
-				&*persister.kv_store,
-				Arc::clone(&persister.logger),
-			)?;
+			write_bdk_wallet_tx_graph(&latest_change_set.tx_graph, &*kv_store, Arc::clone(&logger))
+				.await?;
 		}
 
 		if !change_set.local_chain.is_empty() {
 			latest_change_set.local_chain.merge(change_set.local_chain.clone());
 			write_bdk_wallet_local_chain(
 				&latest_change_set.local_chain,
-				&*persister.kv_store,
-				Arc::clone(&persister.logger),
-			)?;
+				&*kv_store,
+				Arc::clone(&logger),
+			)
+			.await?;
 		}
 
 		Ok(())
+	}
+}
+
+impl AsyncWalletPersister for KVStoreWalletPersister {
+	type Error = std::io::Error;
+
+	fn initialize<'a>(
+		persister: &'a mut Self,
+	) -> Pin<Box<dyn Future<Output = Result<ChangeSet, Self::Error>> + Send + 'a>>
+	where
+		Self: 'a,
+	{
+		Box::pin(persister.initialize_inner())
+	}
+
+	fn persist<'a>(
+		persister: &'a mut Self, change_set: &'a ChangeSet,
+	) -> Pin<Box<dyn Future<Output = Result<(), Self::Error>> + Send + 'a>>
+	where
+		Self: 'a,
+	{
+		Box::pin(persister.persist_inner(change_set))
 	}
 }

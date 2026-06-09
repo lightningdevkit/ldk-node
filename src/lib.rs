@@ -156,7 +156,7 @@ use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
-use lightning::util::persist::KVStoreSync;
+use lightning::util::persist::KVStore;
 use lightning::util::wallet_utils::{Input, Wallet as LdkWallet};
 use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
@@ -180,7 +180,7 @@ use types::{
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
-pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, SyncAndAsyncKVStore, UserChannelId};
+pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 pub use vss_client;
 
 use crate::scoring::setup_background_pathfinding_scores_sync;
@@ -243,7 +243,7 @@ pub struct Node {
 	payment_store: Arc<PaymentStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
-	node_metrics: Arc<RwLock<NodeMetrics>>,
+	node_metrics: Arc<PersistedNodeMetrics>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: HRNResolver,
@@ -556,6 +556,7 @@ impl Node {
 									Arc::clone(&bcast_logger),
 									|m| m.latest_node_announcement_broadcast_timestamp = unix_time_secs_opt,
 								)
+								.await
 								.unwrap_or_else(|e| {
 									log_error!(bcast_logger, "Persistence failed: {}", e);
 								});
@@ -925,6 +926,7 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn bolt12_payment(&self) -> Bolt12Payment {
 		Bolt12Payment::new(
+			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
@@ -941,6 +943,7 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn bolt12_payment(&self) -> Arc<Bolt12Payment> {
 		Arc::new(Bolt12Payment::new(
+			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
@@ -955,6 +958,7 @@ impl Node {
 	#[cfg(not(feature = "uniffi"))]
 	pub fn spontaneous_payment(&self) -> SpontaneousPayment {
 		SpontaneousPayment::new(
+			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
@@ -968,6 +972,7 @@ impl Node {
 	#[cfg(feature = "uniffi")]
 	pub fn spontaneous_payment(&self) -> Arc<SpontaneousPayment> {
 		Arc::new(SpontaneousPayment::new(
+			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
@@ -1121,7 +1126,7 @@ impl Node {
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
 
 		if persist {
-			self.peer_store.add_peer(peer_info)?;
+			self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
 		}
 
 		Ok(())
@@ -1138,7 +1143,7 @@ impl Node {
 
 		log_info!(self.logger, "Disconnecting peer {}..", counterparty_node_id);
 
-		match self.peer_store.remove_peer(&counterparty_node_id) {
+		match self.runtime.block_on(self.peer_store.remove_peer(&counterparty_node_id)) {
 			Ok(()) => {},
 			Err(e) => {
 				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
@@ -1255,7 +1260,7 @@ impl Node {
 					zero_reserve_string,
 					peer_info.node_id
 				);
-				self.peer_store.add_peer(peer_info)?;
+				self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
@@ -1861,7 +1866,7 @@ impl Node {
 
 			// Check if this was the last open channel, if so, forget the peer.
 			if open_channels.len() == 1 {
-				self.peer_store.remove_peer(&counterparty_node_id)?;
+				self.runtime.block_on(self.peer_store.remove_peer(&counterparty_node_id))?;
 			}
 		}
 
@@ -1899,7 +1904,7 @@ impl Node {
 
 	/// Remove the payment with the given id from the store.
 	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
-		self.payment_store.remove(&payment_id)
+		self.runtime.block_on(self.payment_store.remove(&payment_id))
 	}
 
 	/// Retrieves an overview of all known balances.
@@ -2057,20 +2062,21 @@ impl Node {
 	/// Exports the current state of the scorer. The result can be shared with and merged by light nodes that only have
 	/// a limited view of the network.
 	pub fn export_pathfinding_scores(&self) -> Result<Vec<u8>, Error> {
-		KVStoreSync::read(
-			&*self.kv_store,
-			lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
-			lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
-			lightning::util::persist::SCORER_PERSISTENCE_KEY,
-		)
-		.map_err(|e| {
-			log_error!(
-				self.logger,
-				"Failed to access store while exporting pathfinding scores: {}",
-				e
-			);
-			Error::PersistenceFailed
-		})
+		self.runtime
+			.block_on(KVStore::read(
+				&*self.kv_store,
+				lightning::util::persist::SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				lightning::util::persist::SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				lightning::util::persist::SCORER_PERSISTENCE_KEY,
+			))
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to access store while exporting pathfinding scores: {}",
+					e
+				);
+				Error::PersistenceFailed
+			})
 	}
 
 	/// Return the features used in node announcement.
@@ -2178,6 +2184,42 @@ impl Default for NodeMetrics {
 			latest_pathfinding_scores_sync_timestamp: None,
 			latest_node_announcement_broadcast_timestamp: None,
 		}
+	}
+}
+
+pub(crate) struct PersistedNodeMetrics {
+	metrics: RwLock<NodeMetrics>,
+	mutation_lock: tokio::sync::Mutex<()>,
+}
+
+impl PersistedNodeMetrics {
+	pub(crate) fn new(metrics: NodeMetrics) -> Self {
+		Self { metrics: RwLock::new(metrics), mutation_lock: tokio::sync::Mutex::new(()) }
+	}
+
+	/// Returns the current in-memory metrics.
+	///
+	/// The async mutation lock serializes persistence updates, but this synchronous reader cannot
+	/// wait on it. Until metrics reads are async, callers may observe metrics changes that are
+	/// still being persisted.
+	pub(crate) fn read(
+		&self,
+	) -> std::sync::LockResult<std::sync::RwLockReadGuard<'_, NodeMetrics>> {
+		self.metrics.read()
+	}
+
+	/// Returns the in-memory metrics write lock.
+	///
+	/// Persistence updates should go through `update_and_persist_node_metrics` so writers are
+	/// serialized by the async mutation lock.
+	pub(crate) fn write(
+		&self,
+	) -> std::sync::LockResult<std::sync::RwLockWriteGuard<'_, NodeMetrics>> {
+		self.metrics.write()
+	}
+
+	pub(crate) async fn lock_mutation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+		self.mutation_lock.lock().await
 	}
 }
 

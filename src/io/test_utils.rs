@@ -5,13 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::{hash_map, HashMap};
 use std::future::Future;
 use std::panic::RefUnwindSafe;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::Arc;
 
+use lightning::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate};
+use lightning::chain::{chainmonitor, BlockLocator, ChannelMonitorUpdateStatus};
 use lightning::events::ClosureReason;
 use lightning::io;
 use lightning::ln::functional_test_utils::{
@@ -21,232 +21,145 @@ use lightning::ln::functional_test_utils::{
 	TestChanMonCfg,
 };
 use lightning::util::persist::{
-	KVStore, KVStoreSync, MonitorUpdatingPersister, PageToken, PaginatedKVStore,
-	PaginatedKVStoreSync, PaginatedListResponse, KVSTORE_NAMESPACE_KEY_MAX_LEN,
+	KVStore, MonitorName, ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+	ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVSTORE_NAMESPACE_KEY_MAX_LEN,
 };
+use lightning::util::ser::{ReadableArgs, Writeable};
+use lightning::util::test_channel_signer::TestChannelSigner;
 use lightning::util::test_utils;
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
 
-type TestMonitorUpdatePersister<'a, K> = MonitorUpdatingPersister<
-	&'a K,
-	&'a test_utils::TestLogger,
-	&'a test_utils::TestKeysInterface,
-	&'a test_utils::TestKeysInterface,
-	&'a test_utils::TestBroadcaster,
-	&'a test_utils::TestFeeEstimator,
->;
+#[path = "in_memory_store.rs"]
+mod in_memory_store;
+
+use crate::logger::Logger;
+use crate::runtime::Runtime;
+
+pub(crate) struct TestMonitorUpdatePersister<'a, K> {
+	store: &'a K,
+	runtime: Runtime,
+	entropy_source: &'a test_utils::TestKeysInterface,
+	signer_provider: &'a test_utils::TestKeysInterface,
+}
+
+impl<K: KVStore + Sync> TestMonitorUpdatePersister<'_, K> {
+	pub(crate) fn read_all_channel_monitors_with_updates(
+		&self,
+	) -> Result<Vec<(BlockLocator, ChannelMonitor<TestChannelSigner>)>, io::Error> {
+		self.runtime.block_on(async {
+			let stored_keys = KVStore::list(
+				self.store,
+				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+			)
+			.await?;
+
+			let mut res = Vec::with_capacity(stored_keys.len());
+			for stored_key in stored_keys {
+				let data = KVStore::read(
+					self.store,
+					CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+					CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+					&stored_key,
+				)
+				.await?;
+				match <Option<(BlockLocator, ChannelMonitor<TestChannelSigner>)>>::read(
+					&mut io::Cursor::new(data),
+					(self.entropy_source, self.signer_provider),
+				) {
+					Ok(Some((best_block, channel_monitor))) => {
+						res.push((best_block, channel_monitor));
+					},
+					Ok(None) => {},
+					Err(_) => {
+						return Err(io::Error::new(
+							io::ErrorKind::InvalidData,
+							"Failed to read ChannelMonitor",
+						));
+					},
+				}
+			}
+			Ok(res)
+		})
+	}
+
+	fn write_monitor(
+		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<TestChannelSigner>,
+	) -> ChannelMonitorUpdateStatus {
+		let write_res = self.runtime.block_on(KVStore::write(
+			self.store,
+			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+			&monitor_name.to_string(),
+			monitor.encode(),
+		));
+		match write_res {
+			Ok(()) => ChannelMonitorUpdateStatus::Completed,
+			Err(_) => ChannelMonitorUpdateStatus::UnrecoverableError,
+		}
+	}
+}
+
+impl<K: KVStore + Sync> chainmonitor::Persist<TestChannelSigner>
+	for TestMonitorUpdatePersister<'_, K>
+{
+	fn persist_new_channel(
+		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<TestChannelSigner>,
+	) -> ChannelMonitorUpdateStatus {
+		self.write_monitor(monitor_name, monitor)
+	}
+
+	fn update_persisted_channel(
+		&self, monitor_name: MonitorName, _monitor_update: Option<&ChannelMonitorUpdate>,
+		monitor: &ChannelMonitor<TestChannelSigner>,
+	) -> ChannelMonitorUpdateStatus {
+		self.write_monitor(monitor_name, monitor)
+	}
+
+	fn archive_persisted_channel(&self, monitor_name: MonitorName) {
+		let key = monitor_name.to_string();
+		self.runtime.block_on(async {
+			let monitor = match KVStore::read(
+				self.store,
+				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+				&key,
+			)
+			.await
+			{
+				Ok(monitor) => monitor,
+				Err(_) => return,
+			};
+
+			if KVStore::write(
+				self.store,
+				ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+				&key,
+				monitor,
+			)
+			.await
+			.is_ok()
+			{
+				let _ = KVStore::remove(
+					self.store,
+					CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+					CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+					&key,
+					true,
+				)
+				.await;
+			}
+		});
+	}
+}
 
 const EXPECTED_UPDATES_PER_PAYMENT: u64 = 5;
 
-const IN_MEMORY_PAGE_SIZE: usize = 50;
-
-pub struct InMemoryStore {
-	persisted_bytes: Mutex<HashMap<String, HashMap<String, Vec<u8>>>>,
-	creation_counter: AtomicU64,
-	creation_times: Mutex<HashMap<String, HashMap<String, u64>>>,
-}
-
-impl InMemoryStore {
-	pub fn new() -> Self {
-		let persisted_bytes = Mutex::new(HashMap::new());
-		let creation_counter = AtomicU64::new(1);
-		let creation_times = Mutex::new(HashMap::new());
-		Self { persisted_bytes, creation_counter, creation_times }
-	}
-
-	fn read_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		let persisted_lock = self.persisted_bytes.lock().unwrap();
-		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
-
-		if let Some(outer_ref) = persisted_lock.get(&prefixed) {
-			if let Some(inner_ref) = outer_ref.get(key) {
-				let bytes = inner_ref.clone();
-				Ok(bytes)
-			} else {
-				Err(io::Error::new(io::ErrorKind::NotFound, "Key not found"))
-			}
-		} else {
-			Err(io::Error::new(io::ErrorKind::NotFound, "Namespace not found"))
-		}
-	}
-
-	fn write_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		let mut persisted_lock = self.persisted_bytes.lock().unwrap();
-
-		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
-		let outer_e = persisted_lock.entry(prefixed.clone()).or_insert(HashMap::new());
-		outer_e.insert(key.to_string(), buf);
-
-		// Only assign creation time on first write (not on update)
-		let mut ct_lock = self.creation_times.lock().unwrap();
-		let ct_ns = ct_lock.entry(prefixed).or_insert(HashMap::new());
-		ct_ns
-			.entry(key.to_string())
-			.or_insert_with(|| self.creation_counter.fetch_add(1, Ordering::Relaxed));
-
-		Ok(())
-	}
-
-	fn remove_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
-	) -> io::Result<()> {
-		let mut persisted_lock = self.persisted_bytes.lock().unwrap();
-
-		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
-		if let Some(outer_ref) = persisted_lock.get_mut(&prefixed) {
-			outer_ref.remove(&key.to_string());
-		}
-
-		// Remove creation time entry
-		let mut ct_lock = self.creation_times.lock().unwrap();
-		if let Some(ct_ns) = ct_lock.get_mut(&prefixed) {
-			ct_ns.remove(key);
-		}
-
-		Ok(())
-	}
-
-	fn list_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> io::Result<Vec<String>> {
-		let mut persisted_lock = self.persisted_bytes.lock().unwrap();
-
-		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
-		match persisted_lock.entry(prefixed) {
-			hash_map::Entry::Occupied(e) => Ok(e.get().keys().cloned().collect()),
-			hash_map::Entry::Vacant(_) => Ok(Vec::new()),
-		}
-	}
-}
-
-impl KVStore for InMemoryStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
-		let res = self.read_internal(&primary_namespace, &secondary_namespace, &key);
-		async move { res }
-	}
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
-		let res = self.write_internal(&primary_namespace, &secondary_namespace, &key, buf);
-		async move { res }
-	}
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
-		let res = self.remove_internal(&primary_namespace, &secondary_namespace, &key, lazy);
-		async move { res }
-	}
-	fn list(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
-		let res = self.list_internal(primary_namespace, secondary_namespace);
-		async move { res }
-	}
-}
-
-impl KVStoreSync for InMemoryStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		self.read_internal(primary_namespace, secondary_namespace, key)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		self.write_internal(primary_namespace, secondary_namespace, key, buf)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> io::Result<()> {
-		self.remove_internal(primary_namespace, secondary_namespace, key, lazy)
-	}
-
-	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		self.list_internal(primary_namespace, secondary_namespace)
-	}
-}
-
-impl InMemoryStore {
-	fn list_paginated_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
-	) -> io::Result<PaginatedListResponse> {
-		let ct_lock = self.creation_times.lock().unwrap();
-		let prefixed = format!("{primary_namespace}/{secondary_namespace}");
-
-		let ct_ns = match ct_lock.get(&prefixed) {
-			Some(m) => m,
-			None => {
-				return Ok(PaginatedListResponse { keys: Vec::new(), next_page_token: None });
-			},
-		};
-
-		// Build list of (key, sort_order) sorted by sort_order DESC (newest first).
-		let mut entries: Vec<(&String, &u64)> = ct_ns.iter().collect();
-		entries.sort_by(|a, b| b.1.cmp(a.1));
-
-		// Apply page token filter
-		let start_idx = if let Some(ref token) = page_token {
-			let token_sort_order: u64 = token
-				.as_str()
-				.parse()
-				.map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid page token"))?;
-
-			entries
-				.iter()
-				.position(|(_, sort_order)| **sort_order < token_sort_order)
-				.unwrap_or(entries.len())
-		} else {
-			0
-		};
-
-		// Fetch one extra entry beyond page size to determine whether a next page exists.
-		let mut page: Vec<(&String, &u64)> =
-			entries[start_idx..].iter().take(IN_MEMORY_PAGE_SIZE + 1).cloned().collect();
-
-		let has_more = page.len() > IN_MEMORY_PAGE_SIZE;
-		page.truncate(IN_MEMORY_PAGE_SIZE);
-
-		let next_page_token = if has_more {
-			let (_, last_sort_order) = page.last().unwrap();
-			Some(PageToken::new(last_sort_order.to_string()))
-		} else {
-			None
-		};
-
-		let page: Vec<String> = page.into_iter().map(|(k, _)| k.clone()).collect();
-
-		Ok(PaginatedListResponse { keys: page, next_page_token })
-	}
-}
-
-impl PaginatedKVStoreSync for InMemoryStore {
-	fn list_paginated(
-		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
-	) -> io::Result<PaginatedListResponse> {
-		self.list_paginated_internal(primary_namespace, secondary_namespace, page_token)
-	}
-}
-
-impl PaginatedKVStore for InMemoryStore {
-	fn list_paginated(
-		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
-	) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
-		let res = self.list_paginated_internal(primary_namespace, secondary_namespace, page_token);
-		async move { res }
-	}
-}
-
-unsafe impl Sync for InMemoryStore {}
-unsafe impl Send for InMemoryStore {}
+pub(crate) use in_memory_store::InMemoryStore;
 
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();
@@ -256,7 +169,32 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
-pub(crate) fn do_read_write_remove_list_persist<K: KVStoreSync + RefUnwindSafe>(kv_store: &K) {
+async fn catch_future_unwind<F: Future>(future: F) -> std::thread::Result<F::Output> {
+	let mut future = std::pin::pin!(future);
+	std::future::poll_fn(|cx| {
+		match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+			Ok(std::task::Poll::Ready(output)) => std::task::Poll::Ready(Ok(output)),
+			Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+			Err(panic) => std::task::Poll::Ready(Err(panic)),
+		}
+	})
+	.await
+}
+
+async fn assert_invalid_write_fails<K: KVStore + RefUnwindSafe>(
+	kv_store: &K, primary_namespace: &str, secondary_namespace: &str, key: &str, data: Vec<u8>,
+) {
+	let res = std::panic::catch_unwind(|| {
+		KVStore::write(kv_store, primary_namespace, secondary_namespace, key, data)
+	});
+	if let Ok(fut) = res {
+		if let Ok(write_res) = catch_future_unwind(fut).await {
+			assert!(write_res.is_err());
+		}
+	}
+}
+
+pub(crate) async fn do_read_write_remove_list_persist<K: KVStore + RefUnwindSafe>(kv_store: &K) {
 	let data = vec![42u8; 32];
 
 	let primary_namespace = "testspace";
@@ -264,63 +202,63 @@ pub(crate) fn do_read_write_remove_list_persist<K: KVStoreSync + RefUnwindSafe>(
 	let key = "testkey";
 
 	// Test the basic KVStore operations.
-	kv_store.write(primary_namespace, secondary_namespace, key, data.clone()).unwrap();
+	KVStore::write(kv_store, primary_namespace, secondary_namespace, key, data.clone())
+		.await
+		.unwrap();
 
 	// Test empty primary/secondary namespaces are allowed, but not empty primary namespace and non-empty
 	// secondary primary_namespace, and not empty key.
-	kv_store.write("", "", key, data.clone()).unwrap();
-	let res =
-		std::panic::catch_unwind(|| kv_store.write("", secondary_namespace, key, data.clone()));
-	assert!(res.is_err());
-	let res = std::panic::catch_unwind(|| {
-		kv_store.write(primary_namespace, secondary_namespace, "", data.clone())
-	});
-	assert!(res.is_err());
+	KVStore::write(kv_store, "", "", key, data.clone()).await.unwrap();
+	assert_invalid_write_fails(kv_store, "", secondary_namespace, key, data.clone()).await;
+	assert_invalid_write_fails(kv_store, primary_namespace, secondary_namespace, "", data.clone())
+		.await;
 
-	let listed_keys = kv_store.list(primary_namespace, secondary_namespace).unwrap();
+	let listed_keys =
+		KVStore::list(kv_store, primary_namespace, secondary_namespace).await.unwrap();
 	assert_eq!(listed_keys.len(), 1);
 	assert_eq!(listed_keys[0], key);
 
-	let read_data = kv_store.read(primary_namespace, secondary_namespace, key).unwrap();
+	let read_data =
+		KVStore::read(kv_store, primary_namespace, secondary_namespace, key).await.unwrap();
 	assert_eq!(data, &*read_data);
 
-	kv_store.remove(primary_namespace, secondary_namespace, key, false).unwrap();
+	KVStore::remove(kv_store, primary_namespace, secondary_namespace, key, false).await.unwrap();
 
-	let listed_keys = kv_store.list(primary_namespace, secondary_namespace).unwrap();
+	let listed_keys =
+		KVStore::list(kv_store, primary_namespace, secondary_namespace).await.unwrap();
 	assert_eq!(listed_keys.len(), 0);
 
 	// Ensure we have no issue operating with primary_namespace/secondary_namespace/key being KVSTORE_NAMESPACE_KEY_MAX_LEN
 	let max_chars: String = std::iter::repeat('A').take(KVSTORE_NAMESPACE_KEY_MAX_LEN).collect();
-	kv_store.write(&max_chars, &max_chars, &max_chars, data.clone()).unwrap();
+	KVStore::write(kv_store, &max_chars, &max_chars, &max_chars, data.clone()).await.unwrap();
 
-	let listed_keys = kv_store.list(&max_chars, &max_chars).unwrap();
+	let listed_keys = KVStore::list(kv_store, &max_chars, &max_chars).await.unwrap();
 	assert_eq!(listed_keys.len(), 1);
 	assert_eq!(listed_keys[0], max_chars);
 
-	let read_data = kv_store.read(&max_chars, &max_chars, &max_chars).unwrap();
+	let read_data = KVStore::read(kv_store, &max_chars, &max_chars, &max_chars).await.unwrap();
 	assert_eq!(data, &*read_data);
 
-	kv_store.remove(&max_chars, &max_chars, &max_chars, false).unwrap();
+	KVStore::remove(kv_store, &max_chars, &max_chars, &max_chars, false).await.unwrap();
 
-	let listed_keys = kv_store.list(&max_chars, &max_chars).unwrap();
+	let listed_keys = KVStore::list(kv_store, &max_chars, &max_chars).await.unwrap();
 	assert_eq!(listed_keys.len(), 0);
 }
 
-pub(crate) fn create_persister<'a, K: KVStoreSync + Sync>(
-	store: &'a K, chanmon_cfg: &'a TestChanMonCfg, max_pending_updates: u64,
+pub(crate) fn create_persister<'a, K: KVStore + Sync>(
+	store: &'a K, chanmon_cfg: &'a TestChanMonCfg, _max_pending_updates: u64,
 ) -> TestMonitorUpdatePersister<'a, K> {
-	MonitorUpdatingPersister::new(
+	let runtime =
+		Runtime::new(Arc::new(Logger::new_log_facade())).expect("Failed to setup runtime");
+	TestMonitorUpdatePersister {
 		store,
-		&chanmon_cfg.logger,
-		max_pending_updates,
-		&chanmon_cfg.keys_manager,
-		&chanmon_cfg.keys_manager,
-		&chanmon_cfg.tx_broadcaster,
-		&chanmon_cfg.fee_estimator,
-	)
+		runtime,
+		entropy_source: &chanmon_cfg.keys_manager,
+		signer_provider: &chanmon_cfg.keys_manager,
+	}
 }
 
-pub(crate) fn create_chain_monitor<'a, K: KVStoreSync + Sync>(
+pub(crate) fn create_chain_monitor<'a, K: KVStore + Sync>(
 	chanmon_cfg: &'a TestChanMonCfg, persister: &'a TestMonitorUpdatePersister<'a, K>,
 ) -> test_utils::TestChainMonitor<'a> {
 	test_utils::TestChainMonitor::new(
@@ -335,7 +273,7 @@ pub(crate) fn create_chain_monitor<'a, K: KVStoreSync + Sync>(
 
 // Integration-test the given KVStore implementation. Test relaying a few payments and check that
 // the persisted data is updated the appropriate number of times.
-pub(crate) fn do_test_store<K: KVStoreSync + Sync>(store_0: &K, store_1: &K) {
+pub(crate) fn do_test_store<K: KVStore + Sync>(store_0: &K, store_1: &K) {
 	// This value is used later to limit how many iterations we perform.
 	let persister_0_max_pending_updates = 7;
 	// Intentionally set this to a smaller value to test a different alignment.

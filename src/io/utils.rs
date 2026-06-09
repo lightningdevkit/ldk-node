@@ -11,7 +11,7 @@ use std::ops::Deref;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use bdk_chain::indexer::keychain_txout::ChangeSet as BdkIndexerChangeSet;
 use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
@@ -26,7 +26,7 @@ use lightning::routing::scoring::{
 	ChannelLiquidities, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
 };
 use lightning::util::persist::{
-	migrate_kv_store_data, KVStore, KVStoreSync, KVSTORE_NAMESPACE_KEY_ALPHABET,
+	migrate_kv_store_data_async, KVStore, KVSTORE_NAMESPACE_KEY_ALPHABET,
 	KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 	OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -49,7 +49,7 @@ use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
-use crate::{BuildError, Error, EventQueue, NodeMetrics};
+use crate::{BuildError, Error, EventQueue, NodeMetrics, PersistedNodeMetrics};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
 
@@ -336,26 +336,27 @@ where
 }
 
 /// Take a write lock on `node_metrics`, apply `update`, and persist the result to `kv_store`.
-///
-/// The write lock is held across the KV-store write, preserving the invariant that readers only
-/// observe the mutation once it has been durably persisted (or the persist has failed).
-pub(crate) fn update_and_persist_node_metrics<L: Deref>(
-	node_metrics: &RwLock<NodeMetrics>, kv_store: &DynStore, logger: L,
+pub(crate) async fn update_and_persist_node_metrics<L: Deref>(
+	node_metrics: &PersistedNodeMetrics, kv_store: &DynStore, logger: L,
 	update: impl FnOnce(&mut NodeMetrics),
 ) -> Result<(), Error>
 where
 	L::Target: LdkLogger,
 {
-	let mut locked_node_metrics = node_metrics.write().expect("lock");
-	update(&mut *locked_node_metrics);
-	let data = locked_node_metrics.encode();
-	KVStoreSync::write(
+	let _guard = node_metrics.lock_mutation().await;
+	let data = {
+		let mut locked_node_metrics = node_metrics.write().expect("lock");
+		update(&mut *locked_node_metrics);
+		locked_node_metrics.encode()
+	};
+	KVStore::write(
 		&*kv_store,
 		NODE_METRICS_PRIMARY_NAMESPACE,
 		NODE_METRICS_SECONDARY_NAMESPACE,
 		NODE_METRICS_KEY,
 		data,
 	)
+	.await
 	.map_err(|e| {
 		log_error!(
 			logger,
@@ -469,14 +470,15 @@ macro_rules! impl_read_write_change_set_type {
 		$secondary_namespace:expr,
 		$key:expr
 	) => {
-		pub(crate) fn $read_name<L: Deref>(
+		pub(crate) async fn $read_name<L: Deref>(
 			kv_store: &DynStore, logger: L,
 		) -> Result<Option<$change_set_type>, std::io::Error>
 		where
 			L::Target: LdkLogger,
 		{
 			let reader =
-				match KVStoreSync::read(&*kv_store, $primary_namespace, $secondary_namespace, $key)
+				match KVStore::read(&*kv_store, $primary_namespace, $secondary_namespace, $key)
+					.await
 				{
 					Ok(bytes) => bytes,
 					Err(e) => {
@@ -510,14 +512,15 @@ macro_rules! impl_read_write_change_set_type {
 			}
 		}
 
-		pub(crate) fn $write_name<L: Deref>(
+		pub(crate) async fn $write_name<L: Deref>(
 			value: &$change_set_type, kv_store: &DynStore, logger: L,
 		) -> Result<(), std::io::Error>
 		where
 			L::Target: LdkLogger,
 		{
 			let data = ChangeSetSerWrapper(value).encode();
-			KVStoreSync::write(&*kv_store, $primary_namespace, $secondary_namespace, $key, data)
+			KVStore::write(&*kv_store, $primary_namespace, $secondary_namespace, $key, data)
+				.await
 				.map_err(|e| {
 					log_error!(
 						logger,
@@ -588,36 +591,39 @@ impl_read_write_change_set_type!(
 );
 
 // Reads the full BdkWalletChangeSet or returns default fields
-pub(crate) fn read_bdk_wallet_change_set(
+pub(crate) async fn read_bdk_wallet_change_set(
 	kv_store: &DynStore, logger: &Logger,
 ) -> Result<Option<BdkWalletChangeSet>, std::io::Error> {
 	let mut change_set = BdkWalletChangeSet::default();
 
 	// We require a descriptor and return `None` to signal creation of a new wallet otherwise.
-	if let Some(descriptor) = read_bdk_wallet_descriptor(kv_store, logger)? {
+	if let Some(descriptor) = read_bdk_wallet_descriptor(kv_store, logger).await? {
 		change_set.descriptor = Some(descriptor);
 	} else {
 		return Ok(None);
 	}
 
 	// We require a change_descriptor and return `None` to signal creation of a new wallet otherwise.
-	if let Some(change_descriptor) = read_bdk_wallet_change_descriptor(kv_store, logger)? {
+	if let Some(change_descriptor) = read_bdk_wallet_change_descriptor(kv_store, logger).await? {
 		change_set.change_descriptor = Some(change_descriptor);
 	} else {
 		return Ok(None);
 	}
 
 	// We require a network and return `None` to signal creation of a new wallet otherwise.
-	if let Some(network) = read_bdk_wallet_network(kv_store, logger)? {
+	if let Some(network) = read_bdk_wallet_network(kv_store, logger).await? {
 		change_set.network = Some(network);
 	} else {
 		return Ok(None);
 	}
 
-	read_bdk_wallet_local_chain(&*kv_store, logger)?
+	read_bdk_wallet_local_chain(&*kv_store, logger)
+		.await?
 		.map(|local_chain| change_set.local_chain = local_chain);
-	read_bdk_wallet_tx_graph(&*kv_store, logger)?.map(|tx_graph| change_set.tx_graph = tx_graph);
-	read_bdk_wallet_indexer(&*kv_store, logger)?.map(|indexer| change_set.indexer = indexer);
+	read_bdk_wallet_tx_graph(&*kv_store, logger)
+		.await?
+		.map(|tx_graph| change_set.tx_graph = tx_graph);
+	read_bdk_wallet_indexer(&*kv_store, logger).await?.map(|indexer| change_set.indexer = indexer);
 	Ok(Some(change_set))
 }
 
@@ -626,7 +632,7 @@ pub(crate) fn read_bdk_wallet_change_set(
 /// If the directory contains v1 data (files at the top level), the data is migrated to v2 format
 /// in a temporary directory, the original is renamed to `fs_store_v1_backup`, and the migrated
 /// directory is moved into place.
-pub(crate) fn open_or_migrate_fs_store(
+pub(crate) async fn open_or_migrate_fs_store(
 	storage_dir_path: PathBuf,
 ) -> Result<FilesystemStoreV2, BuildError> {
 	let parent_dir = storage_dir_path.parent().ok_or(BuildError::StoragePathAccessFailed)?;
@@ -641,14 +647,15 @@ pub(crate) fn open_or_migrate_fs_store(
 		Ok(store) => Ok(store),
 		Err(FilesystemStoreV2Error::V1DataDetected(_)) => {
 			// The directory contains v1 data, migrate to v2.
-			let mut v1_store = FilesystemStore::new(storage_dir_path.clone());
+			let v1_store = FilesystemStore::new(storage_dir_path.clone());
 
 			let v2_dir = fs_store_sibling_path(&storage_dir_path, "fs_store_v2_migrating");
 			fs::create_dir_all(v2_dir.clone()).map_err(|_| BuildError::StoragePathAccessFailed)?;
-			let mut v2_store = FilesystemStoreV2::new(v2_dir.clone())
+			let v2_store = FilesystemStoreV2::new(v2_dir.clone())
 				.map_err(|_| BuildError::KVStoreSetupFailed)?;
 
-			migrate_kv_store_data(&mut v1_store, &mut v2_store)
+			migrate_kv_store_data_async(&v1_store, &v2_store)
+				.await
 				.map_err(|_| BuildError::KVStoreSetupFailed)?;
 
 			// Swap directories: rename v1 out of the way, move v2 into place.
@@ -712,7 +719,7 @@ mod tests {
 	use std::fs;
 	use std::path::{Path, PathBuf};
 
-	use lightning::util::persist::{migrate_kv_store_data, KVStoreSync};
+	use lightning::util::persist::{migrate_kv_store_data_async, KVStore};
 	use lightning_persister::fs_store::v1::FilesystemStore;
 	use lightning_persister::fs_store::v2::FilesystemStoreV2;
 
@@ -733,22 +740,23 @@ mod tests {
 		assert_eq!(expected_seed_bytes, read_seed_bytes);
 	}
 
-	#[test]
-	fn fs_store_migration_recovers_before_v1_backup_rename() {
+	#[tokio::test]
+	async fn fs_store_migration_recovers_before_v1_backup_rename() {
 		let fs_store_path = fs_store_path();
-		let mut v1_store = write_v1_test_data(&fs_store_path);
+		let v1_store = write_v1_test_data(&fs_store_path).await;
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
-		let mut v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
-		migrate_kv_store_data(&mut v1_store, &mut v2_store).unwrap();
+		let v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
+		migrate_kv_store_data_async(&v1_store, &v2_store).await.unwrap();
 
-		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
-			KVStoreSync::read(
+			KVStore::read(
 				&migrated_store,
 				TEST_PRIMARY_NAMESPACE,
 				TEST_SECONDARY_NAMESPACE,
 				TEST_KEY
 			)
+			.await
 			.unwrap(),
 			TEST_VALUE
 		);
@@ -756,25 +764,26 @@ mod tests {
 		assert!(!v2_migrating_path.exists());
 	}
 
-	#[test]
-	fn fs_store_migration_recovers_after_v1_backup_rename() {
+	#[tokio::test]
+	async fn fs_store_migration_recovers_after_v1_backup_rename() {
 		let fs_store_path = fs_store_path();
-		let mut v1_store = write_v1_test_data(&fs_store_path);
+		let v1_store = write_v1_test_data(&fs_store_path).await;
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
-		let mut v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
-		migrate_kv_store_data(&mut v1_store, &mut v2_store).unwrap();
+		let v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
+		migrate_kv_store_data_async(&v1_store, &v2_store).await.unwrap();
 
 		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
 		fs::rename(&fs_store_path, backup_path).unwrap();
 
-		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
-			KVStoreSync::read(
+			KVStore::read(
 				&migrated_store,
 				TEST_PRIMARY_NAMESPACE,
 				TEST_SECONDARY_NAMESPACE,
 				TEST_KEY
 			)
+			.await
 			.unwrap(),
 			TEST_VALUE
 		);
@@ -782,26 +791,27 @@ mod tests {
 		assert!(!v2_migrating_path.exists());
 	}
 
-	#[test]
-	fn fs_store_migration_recovers_after_v2_rename() {
+	#[tokio::test]
+	async fn fs_store_migration_recovers_after_v2_rename() {
 		let fs_store_path = fs_store_path();
-		let mut v1_store = write_v1_test_data(&fs_store_path);
+		let v1_store = write_v1_test_data(&fs_store_path).await;
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
-		let mut v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
-		migrate_kv_store_data(&mut v1_store, &mut v2_store).unwrap();
+		let v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
+		migrate_kv_store_data_async(&v1_store, &v2_store).await.unwrap();
 
 		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
 		fs::rename(&fs_store_path, &backup_path).unwrap();
 		fs::rename(&v2_migrating_path, &fs_store_path).unwrap();
 
-		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
-			KVStoreSync::read(
+			KVStore::read(
 				&migrated_store,
 				TEST_PRIMARY_NAMESPACE,
 				TEST_SECONDARY_NAMESPACE,
 				TEST_KEY
 			)
+			.await
 			.unwrap(),
 			TEST_VALUE
 		);
@@ -810,22 +820,23 @@ mod tests {
 		assert!(!v2_migrating_path.exists());
 	}
 
-	#[test]
-	fn fs_store_migration_recovers_backup_without_migrating_dir() {
+	#[tokio::test]
+	async fn fs_store_migration_recovers_backup_without_migrating_dir() {
 		let fs_store_path = fs_store_path();
-		write_v1_test_data(&fs_store_path);
+		write_v1_test_data(&fs_store_path).await;
 
 		let backup_path = sibling_path(&fs_store_path, "fs_store_v1_backup");
 		fs::rename(&fs_store_path, backup_path).unwrap();
 
-		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
-			KVStoreSync::read(
+			KVStore::read(
 				&migrated_store,
 				TEST_PRIMARY_NAMESPACE,
 				TEST_SECONDARY_NAMESPACE,
 				TEST_KEY
 			)
+			.await
 			.unwrap(),
 			TEST_VALUE
 		);
@@ -833,28 +844,30 @@ mod tests {
 		assert!(!sibling_path(&fs_store_path, "fs_store_v1_backup").exists());
 	}
 
-	#[test]
-	fn fs_store_migration_recovers_unexpected_migrating_dir_without_backup() {
+	#[tokio::test]
+	async fn fs_store_migration_recovers_unexpected_migrating_dir_without_backup() {
 		let fs_store_path = fs_store_path();
 		let v2_migrating_path = sibling_path(&fs_store_path, "fs_store_v2_migrating");
 		let v2_store = FilesystemStoreV2::new(v2_migrating_path.clone()).unwrap();
-		KVStoreSync::write(
+		KVStore::write(
 			&v2_store,
 			TEST_PRIMARY_NAMESPACE,
 			TEST_SECONDARY_NAMESPACE,
 			TEST_KEY,
 			TEST_VALUE.to_vec(),
 		)
+		.await
 		.unwrap();
 
-		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).unwrap();
+		let migrated_store = open_or_migrate_fs_store(fs_store_path.clone()).await.unwrap();
 		assert_eq!(
-			KVStoreSync::read(
+			KVStore::read(
 				&migrated_store,
 				TEST_PRIMARY_NAMESPACE,
 				TEST_SECONDARY_NAMESPACE,
 				TEST_KEY
 			)
+			.await
 			.unwrap(),
 			TEST_VALUE
 		);
@@ -874,15 +887,16 @@ mod tests {
 		sibling_path
 	}
 
-	fn write_v1_test_data(fs_store_path: &Path) -> FilesystemStore {
+	async fn write_v1_test_data(fs_store_path: &Path) -> FilesystemStore {
 		let v1_store = FilesystemStore::new(fs_store_path.to_path_buf());
-		KVStoreSync::write(
+		KVStore::write(
 			&v1_store,
 			TEST_PRIMARY_NAMESPACE,
 			TEST_SECONDARY_NAMESPACE,
 			TEST_KEY,
 			TEST_VALUE.to_vec(),
 		)
+		.await
 		.unwrap();
 		v1_store
 	}

@@ -42,7 +42,7 @@ use crate::fee_estimator::{
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, NodeMetrics};
+use crate::{Error, PersistedNodeMetrics};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
 const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
@@ -55,14 +55,14 @@ pub(super) struct BitcoindChainSource {
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
-	node_metrics: Arc<RwLock<NodeMetrics>>,
+	node_metrics: Arc<PersistedNodeMetrics>,
 }
 
 impl BitcoindChainSource {
 	pub(crate) fn new_rpc(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<RwLock<NodeMetrics>>,
+		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
 	) -> Self {
 		let api_client = Arc::new(BitcoindClient::new_rpc(
 			rpc_host.clone(),
@@ -89,7 +89,7 @@ impl BitcoindChainSource {
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
 		rest_client_config: BitcoindRestClientConfig, logger: Arc<Logger>,
-		node_metrics: Arc<RwLock<NodeMetrics>>,
+		node_metrics: Arc<PersistedNodeMetrics>,
 	) -> Self {
 		let api_client = Arc::new(BitcoindClient::new_rest(
 			rest_client_config.rest_host,
@@ -204,6 +204,7 @@ impl BitcoindChainSource {
 								m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
 							},
 						)
+						.await
 						.unwrap_or_else(|e| {
 							log_error!(self.logger, "Failed to persist node metrics: {}", e);
 						});
@@ -451,7 +452,8 @@ impl BitcoindChainSource {
 		update_and_persist_node_metrics(&self.node_metrics, &*self.kv_store, &*self.logger, |m| {
 			m.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
 			m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
-		})?;
+		})
+		.await?;
 
 		Ok(())
 	}
@@ -563,7 +565,8 @@ impl BitcoindChainSource {
 			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
 		update_and_persist_node_metrics(&self.node_metrics, &*self.kv_store, &*self.logger, |m| {
 			m.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt
-		})?;
+		})
+		.await?;
 
 		Ok(())
 	}

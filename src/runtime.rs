@@ -6,6 +6,8 @@
 // accordance with one or both of these licenses.
 
 use std::future::Future;
+use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -30,7 +32,25 @@ impl Runtime {
 		let mode = match tokio::runtime::Handle::try_current() {
 			Ok(handle) => RuntimeMode::Handle(handle),
 			Err(_) => {
-				let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+				let mut runtime_builder = tokio::runtime::Builder::new_multi_thread();
+				runtime_builder.enable_all();
+				runtime_builder.thread_name_fn(|| {
+					static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+					let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+					format!("ldk-node-runtime-{}", id)
+				});
+				// Eager driver handoff lets Tokio move the I/O driver to another worker sooner
+				// when this runtime's current worker enters `block_in_place` via `block_on`.
+				// That marginally reduces the chance that a synchronous caller blocks the same
+				// worker that would otherwise drive the I/O resource it is waiting on. It does
+				// not solve the issue completely: it only applies to node runtimes we build
+				// ourselves under `tokio_unstable`, does not affect externally supplied runtime
+				// handles, and cannot guarantee that every persistence driver task needed by the
+				// blocked future is already polling elsewhere. See the `StoreRuntime` docs below
+				// for the full deadlock scenario and the temporary store-runtime isolation.
+				#[cfg(tokio_unstable)]
+				runtime_builder.enable_eager_driver_handoff();
+				let rt = runtime_builder.build()?;
 				RuntimeMode::Owned(rt)
 			},
 		};
@@ -221,6 +241,90 @@ impl Runtime {
 enum RuntimeMode {
 	Owned(tokio::runtime::Runtime),
 	Handle(tokio::runtime::Handle),
+}
+
+/// Runtime used by async store backends while ldk-node still exposes synchronous APIs.
+///
+/// This is a temporary bridge for store implementations that need Tokio-driven I/O, such as VSS
+/// and PostgreSQL. Many public ldk-node methods are still synchronous, so they call
+/// [`Runtime::block_on`] when they need to wait for async persistence. If that persistence work is
+/// driven by the same Tokio runtime as the synchronous caller, a blocking call can deadlock in a
+/// narrow but realistic scheduler state.
+///
+/// The failure mode is that `block_on` parks the current worker with `block_in_place` while it
+/// waits for an async store operation. Suppose that store operation is waiting for an I/O future,
+/// and the connection driver or I/O driver task that can make the future progress is assigned to
+/// the same worker thread that just entered `block_in_place`. The blocked sync caller is waiting
+/// for the persistence future to complete, while the persistence future is waiting for an I/O task
+/// that cannot be polled because its worker is occupied by the blocking caller. With no worker
+/// driving that I/O resource, neither side can make progress.
+///
+/// A simple example is a synchronous node API calling `block_on(store.write(...))` for a
+/// tokio-postgres-backed store. The write future may wait for the postgres connection task or
+/// socket readiness. If the runtime worker that should poll that connection task is also the
+/// worker currently blocked in the synchronous API, the write cannot complete, and the synchronous
+/// API cannot unblock.
+///
+/// `StoreRuntime` gives each such store backend its own small runtime, workers, and I/O driver.
+/// Synchronous node APIs may still block the node runtime while waiting for persistence, but the
+/// persistence tasks they wait on are driven independently and can continue polling sockets and
+/// connection drivers.
+///
+/// Once ldk-node switches the remaining store-backed APIs to be fully async, callers will await
+/// persistence directly and these `block_on` bridges will be disallowed. At that point the store
+/// runtimes should be removed again and store I/O can run on the node runtime directly.
+pub(crate) struct StoreRuntime {
+	runtime: Option<tokio::runtime::Runtime>,
+}
+
+impl StoreRuntime {
+	pub(crate) fn new(
+		thread_name_prefix: &'static str, worker_threads: usize, runtime_name: &'static str,
+	) -> io::Result<Self> {
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.thread_name_fn(move || {
+				static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
+				let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
+				format!("{}-{}", thread_name_prefix, id)
+			})
+			.worker_threads(worker_threads)
+			.max_blocking_threads(worker_threads)
+			.build()
+			.map_err(|e| {
+				io::Error::new(
+					io::ErrorKind::Other,
+					format!("Failed to build {runtime_name} runtime: {e}"),
+				)
+			})?;
+		Ok(Self { runtime: Some(runtime) })
+	}
+
+	pub(crate) fn handle(&self) -> &tokio::runtime::Handle {
+		self.runtime.as_ref().expect("store runtime must be available").handle()
+	}
+
+	pub(crate) fn spawn<F>(&self, future: F) -> JoinHandle<F::Output>
+	where
+		F: Future + Send + 'static,
+		F::Output: Send + 'static,
+	{
+		self.handle().spawn(future)
+	}
+
+	pub(crate) fn shutdown_background(mut self) {
+		if let Some(runtime) = self.runtime.take() {
+			runtime.shutdown_background();
+		}
+	}
+}
+
+impl Drop for StoreRuntime {
+	fn drop(&mut self) {
+		if let Some(runtime) = self.runtime.take() {
+			runtime.shutdown_background();
+		}
+	}
 }
 
 pub(crate) struct RuntimeSpawner {

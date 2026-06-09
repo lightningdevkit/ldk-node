@@ -581,7 +581,7 @@ where
 		}
 	}
 
-	fn fail_claimable_payment(
+	async fn fail_claimable_payment(
 		&self, payment_id: PaymentId, payment_hash: &PaymentHash,
 	) -> Result<(), ReplayEvent> {
 		self.channel_manager.fail_htlc_backwards(payment_hash);
@@ -591,7 +591,7 @@ where
 			status: Some(PaymentStatus::Failed),
 			..PaymentDetailsUpdate::new(payment_id)
 		};
-		match self.payment_store.update(update) {
+		match self.payment_store.update(update).await {
 			Ok(_) => Ok(()),
 			Err(e) => {
 				log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -738,7 +738,7 @@ where
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
-						match self.payment_store.update(update) {
+						match self.payment_store.update(update).await {
 							Ok(_) => return Ok(()),
 							Err(e) => {
 								log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -781,7 +781,7 @@ where
 							status: Some(PaymentStatus::Failed),
 							..PaymentDetailsUpdate::new(payment_id)
 						};
-						match self.payment_store.update(update) {
+						match self.payment_store.update(update).await {
 							Ok(_) => return Ok(()),
 							Err(e) => {
 								log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -809,7 +809,7 @@ where
 							hex_utils::to_string(&payment_hash.0),
 							counterparty_skimmed_fee_msat,
 						);
-						self.fail_claimable_payment(payment_id, &payment_hash)?;
+						self.fail_claimable_payment(payment_id, &payment_hash).await?;
 						return Ok(());
 					};
 
@@ -821,7 +821,7 @@ where
 							counterparty_skimmed_fee_msat,
 							max_total_opening_fee_msat,
 						);
-						self.fail_claimable_payment(payment_id, &payment_hash)?;
+						self.fail_claimable_payment(payment_id, &payment_hash).await?;
 						return Ok(());
 					}
 
@@ -832,14 +832,14 @@ where
 									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
 									..PaymentDetailsUpdate::new(payment_id)
 								};
-								match self.payment_store.update(update) {
+								match self.payment_store.update(update).await {
 									Ok(_) => (),
 									Err(e) => {
 										log_error!(self.logger, "Failed to access payment store: {}", e);
 										return Err(ReplayEvent());
 									},
 								};
-							}
+							},
 							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for BOLT11 payments."),
 						}
 					}
@@ -923,7 +923,7 @@ where
 							PaymentStatus::Pending,
 						);
 
-						match self.payment_store.insert(payment) {
+						match self.payment_store.insert(payment).await {
 							Ok(false) => (),
 							Ok(true) => {
 								log_error!(
@@ -964,7 +964,7 @@ where
 							PaymentStatus::Pending,
 						);
 
-						match self.payment_store.insert(payment) {
+						match self.payment_store.insert(payment).await {
 							Ok(false) => (),
 							Ok(true) => {
 								log_error!(
@@ -1004,7 +1004,7 @@ where
 						status: Some(PaymentStatus::Failed),
 						..PaymentDetailsUpdate::new(payment_id)
 					};
-					match self.payment_store.update(update) {
+					match self.payment_store.update(update).await {
 						Ok(_) => return Ok(()),
 						Err(e) => {
 							log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -1072,7 +1072,7 @@ where
 					},
 				};
 
-				match self.payment_store.update(update) {
+				match self.payment_store.update(update).await {
 					Ok(DataStoreUpdateResult::Updated) | Ok(DataStoreUpdateResult::Unchanged) => (
 						// No need to do anything if the idempotent update was applied, which might
 						// be the result of a replayed event.
@@ -1134,7 +1134,7 @@ where
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
-				match self.payment_store.update(update) {
+				match self.payment_store.update(update).await {
 					Ok(_) => {},
 					Err(e) => {
 						log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -1189,7 +1189,7 @@ where
 					status: Some(PaymentStatus::Failed),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
-				match self.payment_store.update(update) {
+				match self.payment_store.update(update).await {
 					Ok(_) => {},
 					Err(e) => {
 						log_error!(self.logger, "Failed to access payment store: {}", e);
@@ -1524,36 +1524,38 @@ where
 					},
 				};
 
-				let network_graph = self.network_graph.read_only();
-				let channels =
-					self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
-				if let Some(pending_channel) =
-					channels.into_iter().find(|c| c.channel_id == channel_id)
-				{
-					if !pending_channel.is_outbound
-						&& self.peer_store.get_peer(&counterparty_node_id).is_none()
-					{
-						if let Some(address) = network_graph
-							.nodes()
-							.get(&NodeId::from_pubkey(&counterparty_node_id))
-							.and_then(|node_info| node_info.announcement_info.as_ref())
-							.and_then(|ann_info| ann_info.addresses().first())
-						{
-							let peer = PeerInfo {
-								node_id: counterparty_node_id,
-								address: address.clone(),
-							};
-
-							self.peer_store.add_peer(peer).unwrap_or_else(|e| {
-								log_error!(
-									self.logger,
-									"Failed to add peer {} to peer store: {}",
-									counterparty_node_id,
-									e
-								);
-							});
-						}
-					}
+				let peer_to_store = {
+					let network_graph = self.network_graph.read_only();
+					let channels =
+						self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+					channels
+						.into_iter()
+						.find(|c| c.channel_id == channel_id)
+						.filter(|pending_channel| {
+							!pending_channel.is_outbound
+								&& self.peer_store.get_peer(&counterparty_node_id).is_none()
+						})
+						.and_then(|_| {
+							network_graph
+								.nodes()
+								.get(&NodeId::from_pubkey(&counterparty_node_id))
+								.and_then(|node_info| node_info.announcement_info.as_ref())
+								.and_then(|ann_info| ann_info.addresses().first())
+								.map(|address| PeerInfo {
+									node_id: counterparty_node_id,
+									address: address.clone(),
+								})
+						})
+				};
+				if let Some(peer) = peer_to_store {
+					self.peer_store.add_peer(peer).await.unwrap_or_else(|e| {
+						log_error!(
+							self.logger,
+							"Failed to add peer {} to peer store: {}",
+							counterparty_node_id,
+							e
+						);
+					});
 				}
 			},
 			LdkEvent::ChannelReady {

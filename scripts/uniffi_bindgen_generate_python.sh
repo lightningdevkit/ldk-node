@@ -2,6 +2,11 @@
 BINDINGS_DIR="./bindings/python/src/ldk_node"
 UNIFFI_BINDGEN_BIN="cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml"
 
+case " ${RUSTFLAGS:-} " in
+	*" --cfg tokio_unstable "*|*" --cfg=tokio_unstable "*) ;;
+	*) export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg tokio_unstable" ;;
+esac
+
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
 	DYNAMIC_LIB_PATH="./target/release-smaller/libldk_node.so"
 else

@@ -14,9 +14,7 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lightning::io;
-use lightning::util::persist::{
-	KVStore, KVStoreSync, PageToken, PaginatedKVStore, PaginatedKVStoreSync, PaginatedListResponse,
-};
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 use lightning_types::string::PrintableString;
 use rusqlite::{named_params, Connection};
 
@@ -41,7 +39,7 @@ const SCHEMA_USER_VERSION: u16 = 3;
 // The number of entries returned per page in paginated list operations.
 const PAGE_SIZE: usize = 50;
 
-/// A [`KVStoreSync`] implementation that writes to and reads from an [SQLite] database.
+/// A [`KVStore`] implementation that writes to and reads from an [SQLite] database.
 ///
 /// [SQLite]: https://sqlite.org
 pub struct SqliteStore {
@@ -182,57 +180,6 @@ impl KVStore for SqliteStore {
 				Err(io::Error::new(io::ErrorKind::Other, msg))
 			})
 		}
-	}
-}
-
-impl KVStoreSync for SqliteStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		self.inner.read_internal(primary_namespace, secondary_namespace, key)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
-		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-		self.inner.write_internal(
-			inner_lock_ref,
-			locking_key,
-			version,
-			primary_namespace,
-			secondary_namespace,
-			key,
-			buf,
-		)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
-	) -> io::Result<()> {
-		let locking_key = self.build_locking_key(primary_namespace, secondary_namespace, key);
-		let (inner_lock_ref, version) = self.get_new_version_and_lock_ref(locking_key.clone());
-		self.inner.remove_internal(
-			inner_lock_ref,
-			locking_key,
-			version,
-			primary_namespace,
-			secondary_namespace,
-			key,
-		)
-	}
-
-	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		self.inner.list_internal(primary_namespace, secondary_namespace)
-	}
-}
-
-impl PaginatedKVStoreSync for SqliteStore {
-	fn list_paginated(
-		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
-	) -> io::Result<PaginatedListResponse> {
-		self.inner.list_paginated_internal(primary_namespace, secondary_namespace, page_token)
 	}
 }
 
@@ -700,8 +647,8 @@ mod tests {
 		}
 	}
 
-	#[test]
-	fn read_write_remove_list_persist() {
+	#[tokio::test]
+	async fn read_write_remove_list_persist() {
 		let mut temp_path = random_storage_path();
 		temp_path.push("read_write_remove_list_persist");
 		let store = SqliteStore::new(
@@ -710,11 +657,11 @@ mod tests {
 			Some("test_table".to_string()),
 		)
 		.unwrap();
-		do_read_write_remove_list_persist(&store);
+		do_read_write_remove_list_persist(&store).await;
 	}
 
-	#[test]
-	fn test_sqlite_store() {
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_sqlite_store() {
 		let mut temp_path = random_storage_path();
 		temp_path.push("test_sqlite_store");
 		let store_0 = SqliteStore::new(
@@ -732,8 +679,8 @@ mod tests {
 		do_test_store(&store_0, &store_1)
 	}
 
-	#[test]
-	fn test_sqlite_store_paginated_listing() {
+	#[tokio::test]
+	async fn test_sqlite_store_paginated_listing() {
 		let mut temp_path = random_storage_path();
 		temp_path.push("test_sqlite_store_paginated_listing");
 		let store = SqliteStore::new(
@@ -750,7 +697,9 @@ mod tests {
 		for i in 0..num_entries {
 			let key = format!("key_{:04}", i);
 			let data = vec![i as u8; 32];
-			KVStoreSync::write(&store, primary_namespace, secondary_namespace, &key, data).unwrap();
+			KVStore::write(&store, primary_namespace, secondary_namespace, &key, data)
+				.await
+				.unwrap();
 		}
 
 		// Paginate through all entries and collect them
@@ -759,12 +708,13 @@ mod tests {
 		let mut page_count = 0;
 
 		loop {
-			let response = PaginatedKVStoreSync::list_paginated(
+			let response = PaginatedKVStore::list_paginated(
 				&store,
 				primary_namespace,
 				secondary_namespace,
 				page_token,
 			)
+			.await
 			.unwrap();
 
 			all_keys.extend(response.keys.clone());
@@ -795,8 +745,8 @@ mod tests {
 		assert_eq!(all_keys[num_entries - 1], "key_0000");
 	}
 
-	#[test]
-	fn test_sqlite_store_paginated_update_preserves_order() {
+	#[tokio::test]
+	async fn test_sqlite_store_paginated_update_preserves_order() {
 		let mut temp_path = random_storage_path();
 		temp_path.push("test_sqlite_store_paginated_update");
 		let store = SqliteStore::new(
@@ -809,37 +759,38 @@ mod tests {
 		let primary_namespace = "test_ns";
 		let secondary_namespace = "test_sub";
 
-		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "first", vec![1u8; 8])
+		KVStore::write(&store, primary_namespace, secondary_namespace, "first", vec![1u8; 8])
+			.await
 			.unwrap();
-		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "second", vec![2u8; 8])
+		KVStore::write(&store, primary_namespace, secondary_namespace, "second", vec![2u8; 8])
+			.await
 			.unwrap();
-		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "third", vec![3u8; 8])
+		KVStore::write(&store, primary_namespace, secondary_namespace, "third", vec![3u8; 8])
+			.await
 			.unwrap();
 
 		// Update the first entry
-		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "first", vec![99u8; 8])
+		KVStore::write(&store, primary_namespace, secondary_namespace, "first", vec![99u8; 8])
+			.await
 			.unwrap();
 
 		// Paginated listing should still show "first" with its original creation order
-		let response = PaginatedKVStoreSync::list_paginated(
-			&store,
-			primary_namespace,
-			secondary_namespace,
-			None,
-		)
-		.unwrap();
+		let response =
+			PaginatedKVStore::list_paginated(&store, primary_namespace, secondary_namespace, None)
+				.await
+				.unwrap();
 
 		// Newest first: third, second, first
 		assert_eq!(response.keys, vec!["third", "second", "first"]);
 
 		// Verify the updated value was persisted
 		let data =
-			KVStoreSync::read(&store, primary_namespace, secondary_namespace, "first").unwrap();
+			KVStore::read(&store, primary_namespace, secondary_namespace, "first").await.unwrap();
 		assert_eq!(data, vec![99u8; 8]);
 	}
 
-	#[test]
-	fn test_sqlite_store_paginated_empty_namespace() {
+	#[tokio::test]
+	async fn test_sqlite_store_paginated_empty_namespace() {
 		let mut temp_path = random_storage_path();
 		temp_path.push("test_sqlite_store_paginated_empty");
 		let store = SqliteStore::new(
@@ -851,13 +802,13 @@ mod tests {
 
 		// Paginating an empty or unknown namespace returns an empty result with no token.
 		let response =
-			PaginatedKVStoreSync::list_paginated(&store, "nonexistent", "ns", None).unwrap();
+			PaginatedKVStore::list_paginated(&store, "nonexistent", "ns", None).await.unwrap();
 		assert!(response.keys.is_empty());
 		assert!(response.next_page_token.is_none());
 	}
 
-	#[test]
-	fn test_sqlite_store_paginated_namespace_isolation() {
+	#[tokio::test]
+	async fn test_sqlite_store_paginated_namespace_isolation() {
 		let mut temp_path = random_storage_path();
 		temp_path.push("test_sqlite_store_paginated_isolation");
 		let store = SqliteStore::new(
@@ -867,27 +818,28 @@ mod tests {
 		)
 		.unwrap();
 
-		KVStoreSync::write(&store, "ns_a", "sub", "key_1", vec![1u8; 8]).unwrap();
-		KVStoreSync::write(&store, "ns_a", "sub", "key_2", vec![2u8; 8]).unwrap();
-		KVStoreSync::write(&store, "ns_b", "sub", "key_3", vec![3u8; 8]).unwrap();
-		KVStoreSync::write(&store, "ns_a", "other", "key_4", vec![4u8; 8]).unwrap();
+		KVStore::write(&store, "ns_a", "sub", "key_1", vec![1u8; 8]).await.unwrap();
+		KVStore::write(&store, "ns_a", "sub", "key_2", vec![2u8; 8]).await.unwrap();
+		KVStore::write(&store, "ns_b", "sub", "key_3", vec![3u8; 8]).await.unwrap();
+		KVStore::write(&store, "ns_a", "other", "key_4", vec![4u8; 8]).await.unwrap();
 
 		// ns_a/sub should only contain key_1 and key_2 (newest first).
-		let response = PaginatedKVStoreSync::list_paginated(&store, "ns_a", "sub", None).unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, "ns_a", "sub", None).await.unwrap();
 		assert_eq!(response.keys, vec!["key_2", "key_1"]);
 		assert!(response.next_page_token.is_none());
 
 		// ns_b/sub should only contain key_3.
-		let response = PaginatedKVStoreSync::list_paginated(&store, "ns_b", "sub", None).unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, "ns_b", "sub", None).await.unwrap();
 		assert_eq!(response.keys, vec!["key_3"]);
 
 		// ns_a/other should only contain key_4.
-		let response = PaginatedKVStoreSync::list_paginated(&store, "ns_a", "other", None).unwrap();
+		let response =
+			PaginatedKVStore::list_paginated(&store, "ns_a", "other", None).await.unwrap();
 		assert_eq!(response.keys, vec!["key_4"]);
 	}
 
-	#[test]
-	fn test_sqlite_store_paginated_removal() {
+	#[tokio::test]
+	async fn test_sqlite_store_paginated_removal() {
 		let mut temp_path = random_storage_path();
 		temp_path.push("test_sqlite_store_paginated_removal");
 		let store = SqliteStore::new(
@@ -900,19 +852,19 @@ mod tests {
 		let ns = "test_ns";
 		let sub = "test_sub";
 
-		KVStoreSync::write(&store, ns, sub, "a", vec![1u8; 8]).unwrap();
-		KVStoreSync::write(&store, ns, sub, "b", vec![2u8; 8]).unwrap();
-		KVStoreSync::write(&store, ns, sub, "c", vec![3u8; 8]).unwrap();
+		KVStore::write(&store, ns, sub, "a", vec![1u8; 8]).await.unwrap();
+		KVStore::write(&store, ns, sub, "b", vec![2u8; 8]).await.unwrap();
+		KVStore::write(&store, ns, sub, "c", vec![3u8; 8]).await.unwrap();
 
-		KVStoreSync::remove(&store, ns, sub, "b", false).unwrap();
+		KVStore::remove(&store, ns, sub, "b", false).await.unwrap();
 
-		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
 		assert_eq!(response.keys, vec!["c", "a"]);
 		assert!(response.next_page_token.is_none());
 	}
 
-	#[test]
-	fn test_sqlite_store_paginated_exact_page_boundary() {
+	#[tokio::test]
+	async fn test_sqlite_store_paginated_exact_page_boundary() {
 		let mut temp_path = random_storage_path();
 		temp_path.push("test_sqlite_store_paginated_boundary");
 		let store = SqliteStore::new(
@@ -928,30 +880,30 @@ mod tests {
 		// Write exactly PAGE_SIZE entries (50).
 		for i in 0..PAGE_SIZE {
 			let key = format!("key_{:04}", i);
-			KVStoreSync::write(&store, ns, sub, &key, vec![i as u8; 8]).unwrap();
+			KVStore::write(&store, ns, sub, &key, vec![i as u8; 8]).await.unwrap();
 		}
 
 		// Exactly PAGE_SIZE entries: all returned in one page with no next-page token.
-		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
 		assert_eq!(response.keys.len(), PAGE_SIZE);
 		assert!(response.next_page_token.is_none());
 
 		// Add one more entry (PAGE_SIZE + 1 total). First page should now have a token.
-		KVStoreSync::write(&store, ns, sub, "key_extra", vec![0u8; 8]).unwrap();
-		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		KVStore::write(&store, ns, sub, "key_extra", vec![0u8; 8]).await.unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
 		assert_eq!(response.keys.len(), PAGE_SIZE);
 		assert!(response.next_page_token.is_some());
 
 		// Second page should have exactly 1 entry and no token.
-		let response =
-			PaginatedKVStoreSync::list_paginated(&store, ns, sub, response.next_page_token)
-				.unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, response.next_page_token)
+			.await
+			.unwrap();
 		assert_eq!(response.keys.len(), 1);
 		assert!(response.next_page_token.is_none());
 	}
 
-	#[test]
-	fn test_sqlite_store_paginated_fewer_than_page_size() {
+	#[tokio::test]
+	async fn test_sqlite_store_paginated_fewer_than_page_size() {
 		let mut temp_path = random_storage_path();
 		temp_path.push("test_sqlite_store_paginated_few");
 		let store = SqliteStore::new(
@@ -967,10 +919,10 @@ mod tests {
 		// Write fewer entries than PAGE_SIZE.
 		for i in 0..5 {
 			let key = format!("key_{}", i);
-			KVStoreSync::write(&store, ns, sub, &key, vec![i as u8; 8]).unwrap();
+			KVStore::write(&store, ns, sub, &key, vec![i as u8; 8]).await.unwrap();
 		}
 
-		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
 		assert_eq!(response.keys.len(), 5);
 		// Fewer than PAGE_SIZE means no next page.
 		assert!(response.next_page_token.is_none());
@@ -978,8 +930,8 @@ mod tests {
 		assert_eq!(response.keys, vec!["key_4", "key_3", "key_2", "key_1", "key_0"]);
 	}
 
-	#[test]
-	fn test_sqlite_store_write_version_persists_across_restart() {
+	#[tokio::test]
+	async fn test_sqlite_store_write_version_persists_across_restart() {
 		let mut temp_path = random_storage_path();
 		temp_path.push("test_sqlite_store_write_version_restart");
 
@@ -994,22 +946,12 @@ mod tests {
 			)
 			.unwrap();
 
-			KVStoreSync::write(
-				&store,
-				primary_namespace,
-				secondary_namespace,
-				"key_a",
-				vec![1u8; 8],
-			)
-			.unwrap();
-			KVStoreSync::write(
-				&store,
-				primary_namespace,
-				secondary_namespace,
-				"key_b",
-				vec![2u8; 8],
-			)
-			.unwrap();
+			KVStore::write(&store, primary_namespace, secondary_namespace, "key_a", vec![1u8; 8])
+				.await
+				.unwrap();
+			KVStore::write(&store, primary_namespace, secondary_namespace, "key_b", vec![2u8; 8])
+				.await
+				.unwrap();
 
 			// Don't drop/cleanup since we want to reopen
 			std::mem::forget(store);
@@ -1024,22 +966,18 @@ mod tests {
 			)
 			.unwrap();
 
-			KVStoreSync::write(
-				&store,
-				primary_namespace,
-				secondary_namespace,
-				"key_c",
-				vec![3u8; 8],
-			)
-			.unwrap();
+			KVStore::write(&store, primary_namespace, secondary_namespace, "key_c", vec![3u8; 8])
+				.await
+				.unwrap();
 
 			// Paginated listing should show newest first: key_c, key_b, key_a
-			let response = PaginatedKVStoreSync::list_paginated(
+			let response = PaginatedKVStore::list_paginated(
 				&store,
 				primary_namespace,
 				secondary_namespace,
 				None,
 			)
+			.await
 			.unwrap();
 
 			assert_eq!(response.keys, vec!["key_c", "key_b", "key_a"]);

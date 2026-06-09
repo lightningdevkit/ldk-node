@@ -24,7 +24,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bitcoin::hashes::hex::FromHex;
@@ -50,8 +50,7 @@ use ldk_node::{
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-use lightning::util::persist::{KVStore, KVStoreSync};
-use lightning::util::test_utils::TestStore;
+use lightning::util::persist::KVStore;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_persister::fs_store::v1::FilesystemStore;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -59,6 +58,10 @@ use logging::TestLogWriter;
 use rand::distr::Alphanumeric;
 use rand::{rng, Rng};
 use serde_json::{json, Value};
+
+#[path = "../../src/io/in_memory_store.rs"]
+mod in_memory_store;
+use in_memory_store::InMemoryStore;
 
 /// Shared timeout (in seconds) for waiting on LDK events and external node operations.
 pub(crate) const INTEROP_TIMEOUT_SECS: u64 = 60;
@@ -1660,16 +1663,9 @@ impl KVStore for TestSyncStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		let fut = tokio::task::spawn_blocking(move || {
-			inner.read_internal(&primary_namespace, &secondary_namespace, &key)
-		});
-		async move {
-			fut.await.unwrap_or_else(|e| {
-				let msg = format!("Failed to IO operation due join error: {}", e);
-				Err(io::Error::new(io::ErrorKind::Other, msg))
-			})
-		}
+		async move { inner.read_internal_async(&primary_namespace, &secondary_namespace, &key).await }
 	}
+
 	fn write(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
@@ -1677,16 +1673,11 @@ impl KVStore for TestSyncStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		let fut = tokio::task::spawn_blocking(move || {
-			inner.write_internal(&primary_namespace, &secondary_namespace, &key, buf)
-		});
 		async move {
-			fut.await.unwrap_or_else(|e| {
-				let msg = format!("Failed to IO operation due join error: {}", e);
-				Err(io::Error::new(io::ErrorKind::Other, msg))
-			})
+			inner.write_internal_async(&primary_namespace, &secondary_namespace, &key, buf).await
 		}
 	}
+
 	fn remove(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
@@ -1694,70 +1685,31 @@ impl KVStore for TestSyncStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		let fut = tokio::task::spawn_blocking(move || {
-			inner.remove_internal(&primary_namespace, &secondary_namespace, &key, lazy)
-		});
 		async move {
-			fut.await.unwrap_or_else(|e| {
-				let msg = format!("Failed to IO operation due join error: {}", e);
-				Err(io::Error::new(io::ErrorKind::Other, msg))
-			})
+			inner.remove_internal_async(&primary_namespace, &secondary_namespace, &key, lazy).await
 		}
 	}
+
 	fn list(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
-		let fut = tokio::task::spawn_blocking(move || {
-			inner.list_internal(&primary_namespace, &secondary_namespace)
-		});
-		async move {
-			fut.await.unwrap_or_else(|e| {
-				let msg = format!("Failed to IO operation due join error: {}", e);
-				Err(io::Error::new(io::ErrorKind::Other, msg))
-			})
-		}
-	}
-}
-
-impl KVStoreSync for TestSyncStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> lightning::io::Result<Vec<u8>> {
-		self.inner.read_internal(primary_namespace, secondary_namespace, key)
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> lightning::io::Result<()> {
-		self.inner.write_internal(primary_namespace, secondary_namespace, key, buf)
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> lightning::io::Result<()> {
-		self.inner.remove_internal(primary_namespace, secondary_namespace, key, lazy)
-	}
-
-	fn list(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> lightning::io::Result<Vec<String>> {
-		self.inner.list_internal(primary_namespace, secondary_namespace)
+		async move { inner.list_internal_async(&primary_namespace, &secondary_namespace).await }
 	}
 }
 
 struct TestSyncStoreInner {
-	serializer: RwLock<()>,
-	test_store: TestStore,
+	serializer: tokio::sync::RwLock<()>,
+	test_store: InMemoryStore,
 	fs_store: FilesystemStore,
 	sqlite_store: SqliteStore,
 }
 
 impl TestSyncStoreInner {
 	fn new(dest_dir: PathBuf) -> Self {
-		let serializer = RwLock::new(());
+		let serializer = tokio::sync::RwLock::new(());
 		let mut fs_dir = dest_dir.clone();
 		fs_dir.push("fs_store");
 		let fs_store = FilesystemStore::new(fs_dir);
@@ -1769,17 +1721,18 @@ impl TestSyncStoreInner {
 			Some("test_sync_table".to_string()),
 		)
 		.unwrap();
-		let test_store = TestStore::new(false);
+		let test_store = InMemoryStore::new();
 		Self { serializer, fs_store, sqlite_store, test_store }
 	}
 
-	fn do_list(
+	async fn do_list_async(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> lightning::io::Result<Vec<String>> {
-		let fs_res = KVStoreSync::list(&self.fs_store, primary_namespace, secondary_namespace);
+		let fs_res = KVStore::list(&self.fs_store, primary_namespace, secondary_namespace).await;
 		let sqlite_res =
-			KVStoreSync::list(&self.sqlite_store, primary_namespace, secondary_namespace);
-		let test_res = KVStoreSync::list(&self.test_store, primary_namespace, secondary_namespace);
+			KVStore::list(&self.sqlite_store, primary_namespace, secondary_namespace).await;
+		let test_res =
+			KVStore::list(&self.test_store, primary_namespace, secondary_namespace).await;
 
 		match fs_res {
 			Ok(mut list) => {
@@ -1803,16 +1756,24 @@ impl TestSyncStoreInner {
 		}
 	}
 
-	fn read_internal(
+	async fn list_internal_async(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> lightning::io::Result<Vec<String>> {
+		let _guard = self.serializer.read().await;
+		self.do_list_async(primary_namespace, secondary_namespace).await
+	}
+
+	async fn read_internal_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> lightning::io::Result<Vec<u8>> {
-		let _guard = self.serializer.read().unwrap();
+		let _guard = self.serializer.read().await;
 
-		let fs_res = KVStoreSync::read(&self.fs_store, primary_namespace, secondary_namespace, key);
+		let fs_res =
+			KVStore::read(&self.fs_store, primary_namespace, secondary_namespace, key).await;
 		let sqlite_res =
-			KVStoreSync::read(&self.sqlite_store, primary_namespace, secondary_namespace, key);
+			KVStore::read(&self.sqlite_store, primary_namespace, secondary_namespace, key).await;
 		let test_res =
-			KVStoreSync::read(&self.test_store, primary_namespace, secondary_namespace, key);
+			KVStore::read(&self.test_store, primary_namespace, secondary_namespace, key).await;
 
 		match fs_res {
 			Ok(read) => {
@@ -1830,34 +1791,38 @@ impl TestSyncStoreInner {
 		}
 	}
 
-	fn write_internal(
+	async fn write_internal_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> lightning::io::Result<()> {
-		let _guard = self.serializer.write().unwrap();
-		let fs_res = KVStoreSync::write(
+		let _guard = self.serializer.write().await;
+		let fs_res = KVStore::write(
 			&self.fs_store,
 			primary_namespace,
 			secondary_namespace,
 			key,
 			buf.clone(),
-		);
-		let sqlite_res = KVStoreSync::write(
+		)
+		.await;
+		let sqlite_res = KVStore::write(
 			&self.sqlite_store,
 			primary_namespace,
 			secondary_namespace,
 			key,
 			buf.clone(),
-		);
-		let test_res = KVStoreSync::write(
+		)
+		.await;
+		let test_res = KVStore::write(
 			&self.test_store,
 			primary_namespace,
 			secondary_namespace,
 			key,
 			buf.clone(),
-		);
+		)
+		.await;
 
 		assert!(self
-			.do_list(primary_namespace, secondary_namespace)
+			.do_list_async(primary_namespace, secondary_namespace)
+			.await
 			.unwrap()
 			.contains(&key.to_string()));
 
@@ -1875,29 +1840,23 @@ impl TestSyncStoreInner {
 		}
 	}
 
-	fn remove_internal(
+	async fn remove_internal_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> lightning::io::Result<()> {
-		let _guard = self.serializer.write().unwrap();
+		let _guard = self.serializer.write().await;
 		let fs_res =
-			KVStoreSync::remove(&self.fs_store, primary_namespace, secondary_namespace, key, lazy);
-		let sqlite_res = KVStoreSync::remove(
-			&self.sqlite_store,
-			primary_namespace,
-			secondary_namespace,
-			key,
-			lazy,
-		);
-		let test_res = KVStoreSync::remove(
-			&self.test_store,
-			primary_namespace,
-			secondary_namespace,
-			key,
-			lazy,
-		);
+			KVStore::remove(&self.fs_store, primary_namespace, secondary_namespace, key, lazy)
+				.await;
+		let sqlite_res =
+			KVStore::remove(&self.sqlite_store, primary_namespace, secondary_namespace, key, lazy)
+				.await;
+		let test_res =
+			KVStore::remove(&self.test_store, primary_namespace, secondary_namespace, key, lazy)
+				.await;
 
 		assert!(!self
-			.do_list(primary_namespace, secondary_namespace)
+			.do_list_async(primary_namespace, secondary_namespace)
+			.await
 			.unwrap()
 			.contains(&key.to_string()));
 
@@ -1913,12 +1872,5 @@ impl TestSyncStoreInner {
 				Err(e)
 			},
 		}
-	}
-
-	fn list_internal(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> lightning::io::Result<Vec<String>> {
-		let _guard = self.serializer.read().unwrap();
-		self.do_list(primary_namespace, secondary_namespace)
 	}
 }

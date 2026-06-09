@@ -8,13 +8,11 @@
 //! Objects related to [`PostgresStore`] live here.
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lightning::io;
-use lightning::util::persist::{
-	KVStore, KVStoreSync, PageToken, PaginatedKVStore, PaginatedKVStoreSync, PaginatedListResponse,
-};
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 use lightning_types::string::PrintableString;
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
@@ -24,6 +22,7 @@ use tokio_postgres::{Config, Error as PgError};
 use self::pool::{make_config_connection, ClientConnection, PgTlsConnector, SmallPool};
 use crate::io::utils::check_namespace_key_validity;
 use crate::logger::{log_debug, log_info, LdkLogger, Logger};
+use crate::runtime::StoreRuntime;
 
 mod migrations;
 mod pool;
@@ -91,10 +90,9 @@ macro_rules! query_with_retry {
 	}};
 }
 
-/// A [`KVStoreSync`] implementation that writes to and reads from a [PostgreSQL] database.
+/// A [`KVStore`] implementation that writes to and reads from a [PostgreSQL] database.
 ///
-/// Maintains an internal runtime for the underlying tokio-postgres connection drivers and for
-/// synchronous [`KVStoreSync`] and [`PaginatedKVStoreSync`] calls.
+/// Maintains an internal runtime for the underlying tokio-postgres connection drivers.
 ///
 /// [PostgreSQL]: https://www.postgresql.org
 pub struct PostgresStore {
@@ -104,14 +102,14 @@ pub struct PostgresStore {
 	// operations aren't sensitive to the order of execution.
 	next_write_version: AtomicU64,
 
-	// A store-internal runtime used for setup, connection driver tasks, and sync store access.
-	internal_runtime: Option<tokio::runtime::Runtime>,
+	// A store-internal runtime that drives PostgreSQL I/O independently from the node runtime.
+	internal_runtime: Option<Arc<StoreRuntime>>,
 }
 
 // tokio::sync::Mutex (used for the DB client) contains UnsafeCell which opts out of
 // RefUnwindSafe. std::sync::Mutex (used by SqliteStore) doesn't have this issue because
 // it poisons on panic. This impl is needed for do_read_write_remove_list_persist which
-// requires K: KVStoreSync + RefUnwindSafe.
+// requires K: KVStore + RefUnwindSafe.
 #[cfg(test)]
 impl std::panic::RefUnwindSafe for PostgresStore {}
 
@@ -148,30 +146,18 @@ impl PostgresStore {
 		connection_string: String, db_name: Option<String>, kv_table_name: Option<String>,
 		certificate_pem: Option<String>, logger: Option<Arc<Logger>>,
 	) -> io::Result<Self> {
-		let internal_runtime = tokio::runtime::Builder::new_multi_thread()
-			.enable_all()
-			.thread_name_fn(|| {
-				static ATOMIC_ID: AtomicUsize = AtomicUsize::new(0);
-				let id = ATOMIC_ID.fetch_add(1, Ordering::SeqCst);
-				format!("ldk-node-postgres-runtime-{}", id)
-			})
-			.worker_threads(INTERNAL_RUNTIME_WORKERS)
-			.max_blocking_threads(INTERNAL_RUNTIME_WORKERS)
-			.build()
-			.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("Failed to build PostgreSQL runtime: {e}"),
-				)
-			})?;
+		let internal_runtime = Arc::new(StoreRuntime::new(
+			"ldk-node-postgres-runtime",
+			INTERNAL_RUNTIME_WORKERS,
+			"PostgreSQL",
+		)?);
 		let tls = Self::build_tls_connector(certificate_pem)?;
-		let runtime_handle = internal_runtime.handle();
-		let inner = tokio::task::block_in_place(|| {
-			runtime_handle.block_on(async {
-				PostgresStoreInner::new(connection_string, db_name, kv_table_name, tls, logger)
-					.await
-			})
-		})?;
+		let task = internal_runtime.spawn(async move {
+			PostgresStoreInner::new(connection_string, db_name, kv_table_name, tls, logger).await
+		});
+		let inner = task.await.map_err(|e| {
+			io::Error::new(io::ErrorKind::Other, format!("PostgreSQL runtime task failed: {}", e))
+		})??;
 		let inner = Arc::new(inner);
 		let next_write_version = AtomicU64::new(1);
 		Ok(Self { inner, next_write_version, internal_runtime: Some(internal_runtime) })
@@ -217,12 +203,18 @@ impl PostgresStore {
 
 		(inner_lock_ref, version)
 	}
+
+	fn internal_runtime(&self) -> Arc<StoreRuntime> {
+		Arc::clone(self.internal_runtime.as_ref().expect("PostgreSQL runtime must be available"))
+	}
 }
 
 impl Drop for PostgresStore {
 	fn drop(&mut self) {
 		if let Some(internal_runtime) = self.internal_runtime.take() {
-			internal_runtime.shutdown_background();
+			if let Ok(internal_runtime) = Arc::try_unwrap(internal_runtime) {
+				internal_runtime.shutdown_background();
+			}
 		}
 	}
 }
@@ -235,7 +227,18 @@ impl KVStore for PostgresStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
-		async move { inner.read_internal(&primary_namespace, &secondary_namespace, &key).await }
+		let runtime = self.internal_runtime();
+		async move {
+			let task = runtime.spawn(async move {
+				inner.read_internal(&primary_namespace, &secondary_namespace, &key).await
+			});
+			task.await.map_err(|e| {
+				io::Error::new(
+					io::ErrorKind::Other,
+					format!("PostgreSQL runtime task failed: {}", e),
+				)
+			})?
+		}
 	}
 
 	fn write(
@@ -247,18 +250,27 @@ impl KVStore for PostgresStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
+		let runtime = self.internal_runtime();
 		async move {
-			inner
-				.write_internal(
-					inner_lock_ref,
-					locking_key,
-					version,
-					&primary_namespace,
-					&secondary_namespace,
-					&key,
-					buf,
+			let task = runtime.spawn(async move {
+				inner
+					.write_internal(
+						inner_lock_ref,
+						locking_key,
+						version,
+						&primary_namespace,
+						&secondary_namespace,
+						&key,
+						buf,
+					)
+					.await
+			});
+			task.await.map_err(|e| {
+				io::Error::new(
+					io::ErrorKind::Other,
+					format!("PostgreSQL runtime task failed: {}", e),
 				)
-				.await
+			})?
 		}
 	}
 
@@ -271,17 +283,26 @@ impl KVStore for PostgresStore {
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
 		let inner = Arc::clone(&self.inner);
+		let runtime = self.internal_runtime();
 		async move {
-			inner
-				.remove_internal(
-					inner_lock_ref,
-					locking_key,
-					version,
-					&primary_namespace,
-					&secondary_namespace,
-					&key,
+			let task = runtime.spawn(async move {
+				inner
+					.remove_internal(
+						inner_lock_ref,
+						locking_key,
+						version,
+						&primary_namespace,
+						&secondary_namespace,
+						&key,
+					)
+					.await
+			});
+			task.await.map_err(|e| {
+				io::Error::new(
+					io::ErrorKind::Other,
+					format!("PostgreSQL runtime task failed: {}", e),
 				)
-				.await
+			})?
 		}
 	}
 
@@ -291,58 +312,18 @@ impl KVStore for PostgresStore {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
-		async move { inner.list_internal(&primary_namespace, &secondary_namespace).await }
-	}
-}
-
-impl PostgresStore {
-	fn internal_runtime(&self) -> io::Result<&tokio::runtime::Runtime> {
-		self.internal_runtime.as_ref().ok_or_else(|| {
-			debug_assert!(false, "Failed to access internal PostgreSQL runtime");
-			io::Error::new(io::ErrorKind::Other, "Failed to access internal PostgreSQL runtime")
-		})
-	}
-
-	fn block_on<F: Future>(&self, fut: F) -> io::Result<F::Output> {
-		let internal_runtime = self.internal_runtime()?;
-		Ok(tokio::task::block_in_place(move || internal_runtime.block_on(fut)))
-	}
-}
-
-impl KVStoreSync for PostgresStore {
-	fn read(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> io::Result<Vec<u8>> {
-		self.block_on(KVStore::read(self, primary_namespace, secondary_namespace, key))?
-	}
-
-	fn write(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-	) -> io::Result<()> {
-		self.block_on(KVStore::write(self, primary_namespace, secondary_namespace, key, buf))?
-	}
-
-	fn remove(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-	) -> io::Result<()> {
-		self.block_on(KVStore::remove(self, primary_namespace, secondary_namespace, key, lazy))?
-	}
-
-	fn list(&self, primary_namespace: &str, secondary_namespace: &str) -> io::Result<Vec<String>> {
-		self.block_on(KVStore::list(self, primary_namespace, secondary_namespace))?
-	}
-}
-
-impl PaginatedKVStoreSync for PostgresStore {
-	fn list_paginated(
-		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
-	) -> io::Result<PaginatedListResponse> {
-		self.block_on(PaginatedKVStore::list_paginated(
-			self,
-			primary_namespace,
-			secondary_namespace,
-			page_token,
-		))?
+		let runtime = self.internal_runtime();
+		async move {
+			let task = runtime.spawn(async move {
+				inner.list_internal(&primary_namespace, &secondary_namespace).await
+			});
+			task.await.map_err(|e| {
+				io::Error::new(
+					io::ErrorKind::Other,
+					format!("PostgreSQL runtime task failed: {}", e),
+				)
+			})?
+		}
 	}
 }
 
@@ -353,10 +334,19 @@ impl PaginatedKVStore for PostgresStore {
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let inner = Arc::clone(&self.inner);
+		let runtime = self.internal_runtime();
 		async move {
-			inner
-				.list_paginated_internal(&primary_namespace, &secondary_namespace, page_token)
-				.await
+			let task = runtime.spawn(async move {
+				inner
+					.list_paginated_internal(&primary_namespace, &secondary_namespace, page_token)
+					.await
+			});
+			task.await.map_err(|e| {
+				io::Error::new(
+					io::ErrorKind::Other,
+					format!("PostgreSQL runtime task failed: {}", e),
+				)
+			})?
 		}
 	}
 }
@@ -901,7 +891,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_write_remove_list_persist() {
 		let store = create_test_store("test_rwrl").await;
-		do_read_write_remove_list_persist(&store);
+		do_read_write_remove_list_persist(&store).await;
 		cleanup_store(&store).await;
 	}
 
@@ -931,17 +921,17 @@ mod tests {
 		let sub = "test_sub";
 
 		// Write a value before disconnecting.
-		KVStoreSync::write(&store, ns, sub, "key_a", vec![1u8; 8]).unwrap();
+		KVStore::write(&store, ns, sub, "key_a", vec![1u8; 8]).await.unwrap();
 
 		// Read should auto-reconnect and return the previously written value.
 		kill_connection(&store).await;
-		let data = KVStoreSync::read(&store, ns, sub, "key_a").unwrap();
+		let data = KVStore::read(&store, ns, sub, "key_a").await.unwrap();
 		assert_eq!(data, vec![1u8; 8]);
 
 		// Write should auto-reconnect without a preceding read.
 		kill_connection(&store).await;
-		KVStoreSync::write(&store, ns, sub, "key_b", vec![2u8; 8]).unwrap();
-		let data = KVStoreSync::read(&store, ns, sub, "key_b").unwrap();
+		KVStore::write(&store, ns, sub, "key_b", vec![2u8; 8]).await.unwrap();
+		let data = KVStore::read(&store, ns, sub, "key_b").await.unwrap();
 		assert_eq!(data, vec![2u8; 8]);
 
 		cleanup_store(&store).await;
@@ -958,7 +948,9 @@ mod tests {
 		for i in 0..num_entries {
 			let key = format!("key_{:04}", i);
 			let data = vec![i as u8; 32];
-			KVStoreSync::write(&store, primary_namespace, secondary_namespace, &key, data).unwrap();
+			KVStore::write(&store, primary_namespace, secondary_namespace, &key, data)
+				.await
+				.unwrap();
 		}
 
 		// Paginate through all entries and collect them
@@ -967,12 +959,13 @@ mod tests {
 		let mut page_count = 0;
 
 		loop {
-			let response = PaginatedKVStoreSync::list_paginated(
+			let response = PaginatedKVStore::list_paginated(
 				&store,
 				primary_namespace,
 				secondary_namespace,
 				page_token,
 			)
+			.await
 			.unwrap();
 
 			all_keys.extend(response.keys.clone());
@@ -1010,32 +1003,33 @@ mod tests {
 		let primary_namespace = "test_ns";
 		let secondary_namespace = "test_sub";
 
-		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "first", vec![1u8; 8])
+		KVStore::write(&store, primary_namespace, secondary_namespace, "first", vec![1u8; 8])
+			.await
 			.unwrap();
-		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "second", vec![2u8; 8])
+		KVStore::write(&store, primary_namespace, secondary_namespace, "second", vec![2u8; 8])
+			.await
 			.unwrap();
-		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "third", vec![3u8; 8])
+		KVStore::write(&store, primary_namespace, secondary_namespace, "third", vec![3u8; 8])
+			.await
 			.unwrap();
 
 		// Update the first entry
-		KVStoreSync::write(&store, primary_namespace, secondary_namespace, "first", vec![99u8; 8])
+		KVStore::write(&store, primary_namespace, secondary_namespace, "first", vec![99u8; 8])
+			.await
 			.unwrap();
 
 		// Paginated listing should still show "first" with its original creation order
-		let response = PaginatedKVStoreSync::list_paginated(
-			&store,
-			primary_namespace,
-			secondary_namespace,
-			None,
-		)
-		.unwrap();
+		let response =
+			PaginatedKVStore::list_paginated(&store, primary_namespace, secondary_namespace, None)
+				.await
+				.unwrap();
 
 		// Newest first: third, second, first
 		assert_eq!(response.keys, vec!["third", "second", "first"]);
 
 		// Verify the updated value was persisted
 		let data =
-			KVStoreSync::read(&store, primary_namespace, secondary_namespace, "first").unwrap();
+			KVStore::read(&store, primary_namespace, secondary_namespace, "first").await.unwrap();
 		assert_eq!(data, vec![99u8; 8]);
 
 		cleanup_store(&store).await;
@@ -1047,7 +1041,7 @@ mod tests {
 
 		// Paginating an empty or unknown namespace returns an empty result with no token.
 		let response =
-			PaginatedKVStoreSync::list_paginated(&store, "nonexistent", "ns", None).unwrap();
+			PaginatedKVStore::list_paginated(&store, "nonexistent", "ns", None).await.unwrap();
 		assert!(response.keys.is_empty());
 		assert!(response.next_page_token.is_none());
 
@@ -1058,22 +1052,23 @@ mod tests {
 	async fn test_postgres_store_paginated_namespace_isolation() {
 		let store = create_test_store("test_pg_paginated_isolation").await;
 
-		KVStoreSync::write(&store, "ns_a", "sub", "key_1", vec![1u8; 8]).unwrap();
-		KVStoreSync::write(&store, "ns_a", "sub", "key_2", vec![2u8; 8]).unwrap();
-		KVStoreSync::write(&store, "ns_b", "sub", "key_3", vec![3u8; 8]).unwrap();
-		KVStoreSync::write(&store, "ns_a", "other", "key_4", vec![4u8; 8]).unwrap();
+		KVStore::write(&store, "ns_a", "sub", "key_1", vec![1u8; 8]).await.unwrap();
+		KVStore::write(&store, "ns_a", "sub", "key_2", vec![2u8; 8]).await.unwrap();
+		KVStore::write(&store, "ns_b", "sub", "key_3", vec![3u8; 8]).await.unwrap();
+		KVStore::write(&store, "ns_a", "other", "key_4", vec![4u8; 8]).await.unwrap();
 
 		// ns_a/sub should only contain key_1 and key_2 (newest first).
-		let response = PaginatedKVStoreSync::list_paginated(&store, "ns_a", "sub", None).unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, "ns_a", "sub", None).await.unwrap();
 		assert_eq!(response.keys, vec!["key_2", "key_1"]);
 		assert!(response.next_page_token.is_none());
 
 		// ns_b/sub should only contain key_3.
-		let response = PaginatedKVStoreSync::list_paginated(&store, "ns_b", "sub", None).unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, "ns_b", "sub", None).await.unwrap();
 		assert_eq!(response.keys, vec!["key_3"]);
 
 		// ns_a/other should only contain key_4.
-		let response = PaginatedKVStoreSync::list_paginated(&store, "ns_a", "other", None).unwrap();
+		let response =
+			PaginatedKVStore::list_paginated(&store, "ns_a", "other", None).await.unwrap();
 		assert_eq!(response.keys, vec!["key_4"]);
 
 		cleanup_store(&store).await;
@@ -1086,13 +1081,13 @@ mod tests {
 		let ns = "test_ns";
 		let sub = "test_sub";
 
-		KVStoreSync::write(&store, ns, sub, "a", vec![1u8; 8]).unwrap();
-		KVStoreSync::write(&store, ns, sub, "b", vec![2u8; 8]).unwrap();
-		KVStoreSync::write(&store, ns, sub, "c", vec![3u8; 8]).unwrap();
+		KVStore::write(&store, ns, sub, "a", vec![1u8; 8]).await.unwrap();
+		KVStore::write(&store, ns, sub, "b", vec![2u8; 8]).await.unwrap();
+		KVStore::write(&store, ns, sub, "c", vec![3u8; 8]).await.unwrap();
 
-		KVStoreSync::remove(&store, ns, sub, "b", false).unwrap();
+		KVStore::remove(&store, ns, sub, "b", false).await.unwrap();
 
-		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
 		assert_eq!(response.keys, vec!["c", "a"]);
 		assert!(response.next_page_token.is_none());
 
@@ -1109,24 +1104,24 @@ mod tests {
 		// Write exactly PAGE_SIZE entries (50).
 		for i in 0..PAGE_SIZE {
 			let key = format!("key_{:04}", i);
-			KVStoreSync::write(&store, ns, sub, &key, vec![i as u8; 8]).unwrap();
+			KVStore::write(&store, ns, sub, &key, vec![i as u8; 8]).await.unwrap();
 		}
 
 		// Exactly PAGE_SIZE entries: all returned in one page with no next-page token.
-		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
 		assert_eq!(response.keys.len(), PAGE_SIZE);
 		assert!(response.next_page_token.is_none());
 
 		// Add one more entry (PAGE_SIZE + 1 total). First page should now have a token.
-		KVStoreSync::write(&store, ns, sub, "key_extra", vec![0u8; 8]).unwrap();
-		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		KVStore::write(&store, ns, sub, "key_extra", vec![0u8; 8]).await.unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
 		assert_eq!(response.keys.len(), PAGE_SIZE);
 		assert!(response.next_page_token.is_some());
 
 		// Second page should have exactly 1 entry and no token.
-		let response =
-			PaginatedKVStoreSync::list_paginated(&store, ns, sub, response.next_page_token)
-				.unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, response.next_page_token)
+			.await
+			.unwrap();
 		assert_eq!(response.keys.len(), 1);
 		assert!(response.next_page_token.is_none());
 
@@ -1143,10 +1138,10 @@ mod tests {
 		// Write fewer entries than PAGE_SIZE.
 		for i in 0..5 {
 			let key = format!("key_{i}");
-			KVStoreSync::write(&store, ns, sub, &key, vec![i as u8; 8]).unwrap();
+			KVStore::write(&store, ns, sub, &key, vec![i as u8; 8]).await.unwrap();
 		}
 
-		let response = PaginatedKVStoreSync::list_paginated(&store, ns, sub, None).unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
 		assert_eq!(response.keys.len(), 5);
 		// Fewer than PAGE_SIZE means no next page.
 		assert!(response.next_page_token.is_none());
@@ -1165,22 +1160,12 @@ mod tests {
 		{
 			let store = create_test_store(table_name).await;
 
-			KVStoreSync::write(
-				&store,
-				primary_namespace,
-				secondary_namespace,
-				"key_a",
-				vec![1u8; 8],
-			)
-			.unwrap();
-			KVStoreSync::write(
-				&store,
-				primary_namespace,
-				secondary_namespace,
-				"key_b",
-				vec![2u8; 8],
-			)
-			.unwrap();
+			KVStore::write(&store, primary_namespace, secondary_namespace, "key_a", vec![1u8; 8])
+				.await
+				.unwrap();
+			KVStore::write(&store, primary_namespace, secondary_namespace, "key_b", vec![2u8; 8])
+				.await
+				.unwrap();
 
 			// Don't clean up since we want to reopen
 		}
@@ -1189,22 +1174,18 @@ mod tests {
 		{
 			let store = create_test_store(table_name).await;
 
-			KVStoreSync::write(
-				&store,
-				primary_namespace,
-				secondary_namespace,
-				"key_c",
-				vec![3u8; 8],
-			)
-			.unwrap();
+			KVStore::write(&store, primary_namespace, secondary_namespace, "key_c", vec![3u8; 8])
+				.await
+				.unwrap();
 
 			// Paginated listing should show newest first: key_c, key_b, key_a
-			let response = PaginatedKVStoreSync::list_paginated(
+			let response = PaginatedKVStore::list_paginated(
 				&store,
 				primary_namespace,
 				secondary_namespace,
 				None,
 			)
+			.await
 			.unwrap();
 
 			assert_eq!(response.keys, vec!["key_c", "key_b", "key_a"]);
