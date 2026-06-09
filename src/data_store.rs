@@ -218,7 +218,7 @@ where
 
 #[cfg(test)]
 mod tests {
-	use lightning::impl_writeable_tlv_based;
+	use lightning::impl_ser_tlv_based;
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
@@ -236,7 +236,7 @@ mod tests {
 			hex_utils::to_string(&self.id)
 		}
 	}
-	impl_writeable_tlv_based!(TestObjectId, { (0, id, required) });
+	impl_ser_tlv_based!(TestObjectId, { (0, id, required) });
 
 	struct TestObjectUpdate {
 		id: TestObjectId,
@@ -276,7 +276,7 @@ mod tests {
 		}
 	}
 
-	impl_writeable_tlv_based!(TestObject, {
+	impl_ser_tlv_based!(TestObject, {
 		(0, id, required),
 		(2, data, required),
 	});

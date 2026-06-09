@@ -378,7 +378,7 @@ where
 			src_node_id: lsps2_node.node_id,
 			short_channel_id: buy_response.intercept_scid,
 			fees: RoutingFees { base_msat: 0, proportional_millionths: 0 },
-			cltv_expiry_delta: buy_response.cltv_expiry_delta as u16,
+			cltv_expiry_delta: buy_response.cltv_expiry_delta,
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]);
@@ -549,5 +549,5 @@ pub(crate) struct LSPS2FeeResponse {
 #[derive(Debug, Clone)]
 pub(crate) struct LSPS2BuyResponse {
 	intercept_scid: u64,
-	cltv_expiry_delta: u32,
+	cltv_expiry_delta: u16,
 }
