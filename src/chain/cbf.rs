@@ -6,9 +6,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bip157::chain::ChainState;
 use bip157::{
 	chain::BlockHeaderChanges, error::FetchBlockError, Builder as KyotoBuilder, Client, Event,
-	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Requester, TrustedPeer, Warning,
+	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Package, Requester, TrustedPeer,
+	Warning,
 };
-use bitcoin::{BlockHash, FeeRate, Network, Script, ScriptBuf, Txid};
+use bitcoin::{BlockHash, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder};
 use lightning::chain::{BlockLocator, Listen, WatchedOutput};
 
@@ -149,6 +150,11 @@ const CBF_MIN_FEERATE_SAT_PER_KWU: u64 = 250;
 /// Per-block timeout when downloading a block to derive its coinbase fee rate. Kept short so a
 /// slow peer only delays a single sample rather than the whole fee update.
 const CBF_FEE_BLOCK_FETCH_TIMEOUT_SECS: u64 = 10;
+
+/// Upper bound on how long we wait for a peer to request a broadcast transaction. Kyoto resolves
+/// `submit_package` only once a peer asks for the transaction, so it never resolves if peer
+/// already has it.
+const CBF_BROADCAST_TIMEOUT_SECS: u64 = 5;
 
 /// Recent per-block coinbase-derived fee rates, keyed by height so we can window on the tip, evict
 /// stale entries, and detect reorged-out blocks (a height whose cached hash no longer matches the
@@ -621,7 +627,10 @@ impl CbfChainSource {
 				.await?
 			},
 			FeeSource::Cbf { block_fee_cache } => {
-				let requester = self.requester()?;
+				let requester = match &*self.cbf_runtime_status.lock().expect("lock") {
+					CbfRuntimeStatus::Started { requester } => requester.clone(),
+					CbfRuntimeStatus::Stopped => return Err(Error::FeerateEstimationUpdateFailed),
+				};
 				let mut samples_sat_per_kwu: Vec<u64> = self
 					.refresh_block_fee_window(&requester, block_fee_cache)
 					.await
@@ -665,16 +674,55 @@ impl CbfChainSource {
 		Ok(())
 	}
 
-	/// Returns a clone of the live kyoto requester, or an error if the node isn't running.
-	fn requester(&self) -> Result<Requester, Error> {
-		match &*self.cbf_runtime_status.lock().expect("lock") {
-			CbfRuntimeStatus::Started { requester } => Ok(requester.clone()),
+	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
+		let requester = match &*self.cbf_runtime_status.lock().expect("lock") {
+			CbfRuntimeStatus::Started { requester } => requester.clone(),
 			CbfRuntimeStatus::Stopped => {
-				debug_assert!(
-					false,
-					"We should have started the chain source before updating fees"
-				);
-				Err(Error::FeerateEstimationUpdateFailed)
+				debug_assert!(false, "We should have started the chain source before broadcasting");
+				return;
+			},
+		};
+
+		let timeout = Duration::from_secs(CBF_BROADCAST_TIMEOUT_SECS);
+		match Package::from_vec(package.clone()) {
+			Ok(package) => {
+				match tokio::time::timeout(timeout, requester.submit_package(package)).await {
+					Ok(Err(e)) => {
+						log_error!(self.logger, "Failed to broadcast transaction package: {:?}", e);
+					},
+					Err(_) => {
+						log_debug!(
+						self.logger,
+						"No peer requested the transaction package within {}s, it may already be known",
+						CBF_BROADCAST_TIMEOUT_SECS
+					);
+					},
+					Ok(Ok(_)) => {},
+				}
+			},
+			Err(_) => {
+				for tx in package {
+					let txid = tx.compute_txid();
+					match tokio::time::timeout(timeout, requester.submit_package(tx)).await {
+						Ok(Err(e)) => {
+							log_error!(
+								self.logger,
+								"Failed to broadcast transaction {}: {:?}",
+								txid,
+								e
+							);
+						},
+						Err(_) => {
+							log_debug!(
+								self.logger,
+								"No peer requested transaction {} within {}s, it may already be known",
+								txid,
+								CBF_BROADCAST_TIMEOUT_SECS
+							);
+						},
+						Ok(Ok(_)) => {},
+					}
+				}
 			},
 		}
 	}
