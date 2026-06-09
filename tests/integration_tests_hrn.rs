@@ -24,9 +24,9 @@ async fn unified_send_to_hrn() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false).await;
 
-	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_a = node_a.onchain_payment().new_address().await.unwrap();
 	let premined_sats = 5_000_000;
 
 	premine_and_distribute_funds(
@@ -37,25 +37,26 @@ async fn unified_send_to_hrn() {
 	)
 	.await;
 
-	node_a.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
 	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
-	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
+	node_a.sync_wallets().await.unwrap();
+	node_b.sync_wallets().await.unwrap();
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	// Wait until node_b broadcasts a node announcement
-	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none() {
+	while node_b.status().await.latest_node_announcement_broadcast_timestamp.is_none() {
 		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 	}
 
 	// Sleep to make sure the node announcement propagates
 	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-	let test_offer = node_b.bolt12_payment().receive(1000000, "test offer", None, None).unwrap();
+	let test_offer =
+		node_b.bolt12_payment().receive(1000000, "test offer", None, None).await.unwrap();
 
 	let hrn_str = "matt@mattcorallo.com";
 

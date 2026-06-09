@@ -7,12 +7,13 @@
 
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::impl_writeable_tlv_based;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use tokio::sync::RwLock;
 
 use crate::io::{
 	PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -27,7 +28,6 @@ where
 	L::Target: LdkLogger,
 {
 	peers: RwLock<HashMap<PublicKey, PeerInfo>>,
-	mutation_lock: tokio::sync::Mutex<()>,
 	kv_store: Arc<DynStore>,
 	logger: L,
 }
@@ -38,52 +38,37 @@ where
 {
 	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let peers = RwLock::new(HashMap::new());
-		let mutation_lock = tokio::sync::Mutex::new(());
-		Self { peers, mutation_lock, kv_store, logger }
+		Self { peers, kv_store, logger }
 	}
 
 	pub(crate) async fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
-		let _guard = self.mutation_lock.lock().await;
-		let data = {
-			let mut locked_peers = self.peers.write().expect("lock");
-			if locked_peers.contains_key(&peer_info.node_id) {
-				return Ok(());
-			}
-			locked_peers.insert(peer_info.node_id, peer_info);
-			PeerStoreSerWrapper(&locked_peers).encode()
-		};
-		self.persist_peers(data).await
+		let mut locked_peers = self.peers.write().await;
+		if locked_peers.contains_key(&peer_info.node_id) {
+			return Ok(());
+		}
+
+		locked_peers.insert(peer_info.node_id, peer_info);
+		self.persist_peers(&*locked_peers).await
 	}
 
 	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
-		let _guard = self.mutation_lock.lock().await;
-		let data = {
-			let mut locked_peers = self.peers.write().expect("lock");
-			locked_peers.remove(node_id);
-			PeerStoreSerWrapper(&locked_peers).encode()
-		};
-		self.persist_peers(data).await
+		let mut locked_peers = self.peers.write().await;
+		locked_peers.remove(node_id);
+		self.persist_peers(&*locked_peers).await
 	}
 
-	/// Returns the current in-memory peer set.
-	///
-	/// The async mutation lock serializes `add_peer` and `remove_peer`, but this synchronous
-	/// reader cannot wait on it. Until peer-store reads are async, callers may observe peer
-	/// changes that are still being persisted.
-	pub(crate) fn list_peers(&self) -> Vec<PeerInfo> {
-		self.peers.read().expect("lock").values().cloned().collect()
+	pub(crate) async fn list_peers(&self) -> Vec<PeerInfo> {
+		self.peers.read().await.values().cloned().collect()
 	}
 
-	/// Returns the current in-memory peer info for `node_id`.
-	///
-	/// The async mutation lock serializes `add_peer` and `remove_peer`, but this synchronous
-	/// reader cannot wait on it. Until peer-store reads are async, callers may observe peer
-	/// changes that are still being persisted.
-	pub(crate) fn get_peer(&self, node_id: &PublicKey) -> Option<PeerInfo> {
-		self.peers.read().expect("lock").get(node_id).cloned()
+	pub(crate) async fn get_peer(&self, node_id: &PublicKey) -> Option<PeerInfo> {
+		self.peers.read().await.get(node_id).cloned()
 	}
 
-	async fn persist_peers(&self, data: Vec<u8>) -> Result<(), Error> {
+	async fn persist_peers(
+		&self, locked_peers: &HashMap<PublicKey, PeerInfo>,
+	) -> Result<(), Error> {
+		let data = PeerStoreSerWrapper(&*locked_peers).encode();
 		KVStore::write(
 			&*self.kv_store,
 			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -118,8 +103,7 @@ where
 		let (kv_store, logger) = args;
 		let read_peers: PeerStoreDeserWrapper = Readable::read(reader)?;
 		let peers: RwLock<HashMap<PublicKey, PeerInfo>> = RwLock::new(read_peers.0);
-		let mutation_lock = tokio::sync::Mutex::new(());
-		Ok(Self { peers, mutation_lock, kv_store, logger })
+		Ok(Self { peers, kv_store, logger })
 	}
 }
 
@@ -210,9 +194,9 @@ mod tests {
 		let deser_peer_store =
 			PeerStore::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
 
-		let peers = deser_peer_store.list_peers();
+		let peers = deser_peer_store.list_peers().await;
 		assert_eq!(peers.len(), 1);
 		assert_eq!(peers[0], expected_peer_info);
-		assert_eq!(deser_peer_store.get_peer(&node_id), Some(expected_peer_info));
+		assert_eq!(deser_peer_store.get_peer(&node_id).await, Some(expected_peer_info));
 	}
 }

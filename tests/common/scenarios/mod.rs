@@ -130,7 +130,7 @@ pub(crate) async fn setup_interop_test<E: ElectrumApi>(
 
 	let ext_node_id = peer.get_node_id().await.unwrap();
 	let ext_addr = peer.get_listening_address().await.unwrap();
-	node.connect(ext_node_id, ext_addr, true).unwrap();
+	node.connect(ext_node_id, ext_addr, true).await.unwrap();
 }
 
 /// Drive a scenario end-to-end: fund LDK + peer, run the scenario, stop the node.
@@ -239,7 +239,7 @@ pub(crate) async fn splice_in_scenario<E: ElectrumApi>(
 	)
 	.await;
 	let ext_node_id = peer.get_node_id().await.unwrap();
-	node.splice_in(&user_ch, ext_node_id, 500_000).unwrap();
+	node.splice_in(&user_ch, ext_node_id, 500_000).await.unwrap();
 	expect_splice_negotiated_event!(node, ext_node_id);
 	generate_blocks_and_wait(bitcoind, electrs, 6).await;
 	sync_wallets_with_retry(node).await;

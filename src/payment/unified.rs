@@ -126,10 +126,10 @@ impl UnifiedPayment {
 	///
 	/// [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
-	pub fn receive(
+	pub async fn receive(
 		&self, amount_sats: u64, description: &str, expiry_sec: u32,
 	) -> Result<String, Error> {
-		let onchain_address = self.onchain_payment.new_address()?;
+		let onchain_address = self.onchain_payment.new_address().await?;
 
 		let amount_msats = amount_sats * 1_000;
 
@@ -145,12 +145,11 @@ impl UnifiedPayment {
 		let invoice_description = Bolt11InvoiceDescription::Direct(
 			Description::new(description.to_string()).map_err(|_| Error::InvoiceCreationFailed)?,
 		);
-		let bolt11_invoice = match self.bolt11_invoice.receive_inner(
-			Some(amount_msats),
-			&invoice_description,
-			expiry_sec,
-			None,
-		) {
+		let bolt11_invoice = match self
+			.bolt11_invoice
+			.receive_inner(Some(amount_msats), &invoice_description, expiry_sec, None)
+			.await
+		{
 			Ok(invoice) => Some(invoice),
 			Err(e) => {
 				log_error!(self.logger, "Failed to create invoice {}", e);
@@ -286,15 +285,15 @@ impl UnifiedPayment {
 					};
 
 					let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
-						let hrn = maybe_wrap(hrn.clone());
-						self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn))
-					} else if let Some(amount_msat) = amount_msat {
-						self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, route_parameters)
-					} else {
-						self.bolt12_payment.send(&offer, None, None, route_parameters)
-					}
-					.map_err(|e| {
-						log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
+							let hrn = maybe_wrap(hrn.clone());
+							self.bolt12_payment.send_using_amount_inner(&offer, amount_msat.unwrap_or(0), None, None, route_parameters, Some(hrn)).await
+						} else if let Some(amount_msat) = amount_msat {
+							self.bolt12_payment.send_using_amount(&offer, amount_msat, None, None, route_parameters).await
+						} else {
+							self.bolt12_payment.send(&offer, None, None, route_parameters).await
+						}
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
 						e
 					});
 
@@ -304,11 +303,11 @@ impl UnifiedPayment {
 				},
 				PaymentMethod::LightningBolt11(invoice) => {
 					let invoice = maybe_wrap(invoice.clone());
-					let payment_result = self.bolt11_invoice.send(&invoice, route_parameters)
-						.map_err(|e| {
-							log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified payment. Falling back to the on-chain transaction.", e);
-							e
-						});
+					let payment_result =
+							self.bolt11_invoice.send(&invoice, route_parameters).await.map_err(|e| {
+								log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified payment. Falling back to the on-chain transaction.", e);
+								e
+							});
 
 					if let Ok(payment_id) = payment_result {
 						return Ok(UnifiedPaymentResult::Bolt11 { payment_id });
@@ -328,7 +327,8 @@ impl UnifiedPayment {
 						Error::InvalidAmount
 					})?;
 
-					let txid = self.onchain_payment.send_to_address(&address, amt_sats, None)?;
+					let txid =
+						self.onchain_payment.send_to_address(&address, amt_sats, None).await?;
 					return Ok(UnifiedPaymentResult::Onchain { txid });
 				},
 			}

@@ -17,11 +17,12 @@ proptest! {
 	#![proptest_config(proptest::test_runner::Config::with_cases(5))]
 	#[test]
 	fn reorg_test(reorg_depth in 1..=6usize, force_close in prop::bool::ANY) {
-		let rt = tokio::runtime::Builder::new_multi_thread()
-			.enable_all()
-			.build()
-			.unwrap();
-		rt.block_on(async {
+			let rt = tokio::runtime::Builder::new_multi_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let (test_done, test_result) = std::sync::mpsc::channel();
+			rt.spawn(async move {
 			let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 
 			let chain_source_a = random_chain_source(&bitcoind, &electrsd);
@@ -31,7 +32,7 @@ proptest! {
 			macro_rules! config_node {
 				($chain_source: expr, $anchor_channels: expr) => {{
 					let config_a = random_config($anchor_channels);
-					let node = setup_node(&$chain_source, config_a);
+					let node = setup_node(&$chain_source, config_a).await;
 					node
 				}};
 			}
@@ -50,15 +51,17 @@ proptest! {
 				}};
 			}
 
-			let amount_sat = 2_100_000;
-			let addr_nodes =
-				nodes.iter().map(|node| node.onchain_payment().new_address().unwrap()).collect::<Vec<_>>();
-			premine_and_distribute_funds(bitcoind, electrs, addr_nodes, Amount::from_sat(amount_sat)).await;
+				let amount_sat = 2_100_000;
+				let mut addr_nodes = Vec::with_capacity(nodes.len());
+				for node in &nodes {
+					addr_nodes.push(node.onchain_payment().new_address().await.unwrap());
+				}
+				premine_and_distribute_funds(bitcoind, electrs, addr_nodes, Amount::from_sat(amount_sat)).await;
 
 			macro_rules! sync_wallets {
 				() => {
 					for node in &nodes {
-						node.sync_wallets().unwrap();
+						node.sync_wallets().await.unwrap();
 					}
 				};
 			}
@@ -88,7 +91,7 @@ proptest! {
 					for _ in 0..$expected {
 						match $node.next_event_async().await {
 							Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
-								$node.event_handled().unwrap();
+								$node.event_handled().await.unwrap();
 								user_channels.insert(counterparty_node_id, user_channel_id);
 							},
 							other => panic!("Unexpected event: {:?}", other),
@@ -104,6 +107,7 @@ proptest! {
 					node
 						.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
 							&& matches!(p.kind, PaymentKind::Onchain { .. }))
+						.await
 						.len(),
 					1
 				);
@@ -126,9 +130,9 @@ proptest! {
 				let funding = nodes_funding_tx.get(&node.node_id()).expect("Funding tx not exist");
 
 				if force_close {
-					node.force_close_channel(&user_channel_id, next_node.node_id(), None).unwrap();
+					node.force_close_channel(&user_channel_id, next_node.node_id(), None).await.unwrap();
 				} else {
-					node.close_channel(&user_channel_id, next_node.node_id()).unwrap();
+					node.close_channel(&user_channel_id, next_node.node_id()).await.unwrap();
 				}
 
 				expect_event!(node, ChannelClosed);
@@ -145,20 +149,21 @@ proptest! {
 
 			if force_close {
 				for node in &nodes {
-					node.sync_wallets().unwrap();
-					// If there is no more balance, there is nothing to process here.
-					if node.list_balances().lightning_balances.len() < 1 {
-						return;
-					}
+						node.sync_wallets().await.unwrap();
+						// If there is no more balance, there is nothing to process here.
+						if node.list_balances().lightning_balances.len() < 1 {
+							test_done.send(()).unwrap();
+							return;
+						}
 					match node.list_balances().lightning_balances[0] {
 						LightningBalance::ClaimableAwaitingConfirmations {
 							confirmation_height,
 							..
 						} => {
-							let cur_height = node.status().current_best_block.height;
+							let cur_height = node.status().await.current_best_block.height;
 							let blocks_to_go = confirmation_height - cur_height;
 							generate_blocks_and_wait(bitcoind, electrs, blocks_to_go as usize).await;
-							node.sync_wallets().unwrap();
+							node.sync_wallets().await.unwrap();
 						},
 						_ => panic!("Unexpected balance state for node_hub!"),
 					}
@@ -171,7 +176,7 @@ proptest! {
 					}
 
 					generate_blocks_and_wait(&bitcoind, electrs, 1).await;
-					node.sync_wallets().unwrap();
+					node.sync_wallets().await.unwrap();
 					assert!(node.list_balances().lightning_balances.len() < 2);
 					assert!(node.list_balances().pending_balances_from_channel_closures.len() > 0);
 					match node.list_balances().pending_balances_from_channel_closures[0] {
@@ -198,6 +203,8 @@ proptest! {
 
 				assert_eq!(node.next_event(), None);
 			});
-		})
+				test_done.send(()).unwrap();
+			});
+			test_result.recv().unwrap();
 	}
 }

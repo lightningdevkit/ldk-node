@@ -19,7 +19,7 @@ pub(crate) async fn send_bolt11_to_peer(
 ) {
 	let invoice_str = peer.create_invoice(amount_msat, label).await.unwrap();
 	let parsed = Bolt11Invoice::from_str(&invoice_str).unwrap();
-	node.bolt11_payment().send(&parsed, None).unwrap();
+	node.bolt11_payment().send(&parsed, None).await.unwrap();
 	expect_event!(node, PaymentSuccessful);
 }
 
@@ -37,6 +37,7 @@ pub(crate) async fn receive_bolt11_payment(
 			),
 			3600,
 		)
+		.await
 		.unwrap();
 	let invoice_str = invoice.to_string();
 	retry_until_ok(10, "receive_bolt11_payment", || peer.pay_invoice(&invoice_str)).await;
@@ -48,7 +49,7 @@ pub(crate) async fn send_keysend_to_peer(
 	node: &Node, peer: &(impl ExternalNode + ?Sized), amount_msat: u64,
 ) {
 	let peer_id = peer.get_node_id().await.unwrap();
-	node.spontaneous_payment().send(amount_msat, peer_id, None).unwrap();
+	node.spontaneous_payment().send(amount_msat, peer_id, None).await.unwrap();
 	expect_event!(node, PaymentSuccessful);
 }
 

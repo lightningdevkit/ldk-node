@@ -8,7 +8,7 @@
 use std::future::Future;
 use std::panic::RefUnwindSafe;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::Mutex;
 
 use lightning::chain::channelmonitor::{ChannelMonitor, ChannelMonitorUpdate};
 use lightning::chain::{chainmonitor, BlockLocator, ChannelMonitorUpdateStatus};
@@ -35,71 +35,128 @@ use rand::{rng, Rng};
 #[path = "in_memory_store.rs"]
 mod in_memory_store;
 
-use crate::logger::Logger;
-use crate::runtime::Runtime;
+enum PendingMonitorPersistence {
+	Write { monitor_name: MonitorName, monitor: Vec<u8> },
+	Archive { monitor_name: MonitorName },
+}
 
 pub(crate) struct TestMonitorUpdatePersister<'a, K> {
 	store: &'a K,
-	runtime: Runtime,
+	pending_updates: Mutex<Vec<PendingMonitorPersistence>>,
 	entropy_source: &'a test_utils::TestKeysInterface,
 	signer_provider: &'a test_utils::TestKeysInterface,
 }
 
 impl<K: KVStore + Sync> TestMonitorUpdatePersister<'_, K> {
-	pub(crate) fn read_all_channel_monitors_with_updates(
-		&self,
-	) -> Result<Vec<(BlockLocator, ChannelMonitor<TestChannelSigner>)>, io::Error> {
-		self.runtime.block_on(async {
-			let stored_keys = KVStore::list(
-				self.store,
-				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-			)
-			.await?;
+	async fn flush_pending_monitor_updates(&self) -> Result<(), io::Error> {
+		loop {
+			let pending_updates = {
+				let mut pending_updates = self.pending_updates.lock().unwrap();
+				if pending_updates.is_empty() {
+					return Ok(());
+				}
+				std::mem::take(&mut *pending_updates)
+			};
 
-			let mut res = Vec::with_capacity(stored_keys.len());
-			for stored_key in stored_keys {
-				let data = KVStore::read(
-					self.store,
-					CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-					CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-					&stored_key,
-				)
-				.await?;
-				match <Option<(BlockLocator, ChannelMonitor<TestChannelSigner>)>>::read(
-					&mut io::Cursor::new(data),
-					(self.entropy_source, self.signer_provider),
-				) {
-					Ok(Some((best_block, channel_monitor))) => {
-						res.push((best_block, channel_monitor));
+			for update in pending_updates {
+				match update {
+					PendingMonitorPersistence::Write { monitor_name, monitor } => {
+						KVStore::write(
+							self.store,
+							CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+							CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+							&monitor_name.to_string(),
+							monitor,
+						)
+						.await?;
 					},
-					Ok(None) => {},
-					Err(_) => {
-						return Err(io::Error::new(
-							io::ErrorKind::InvalidData,
-							"Failed to read ChannelMonitor",
-						));
+					PendingMonitorPersistence::Archive { monitor_name } => {
+						let key = monitor_name.to_string();
+						let monitor = match KVStore::read(
+							self.store,
+							CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+							CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+							&key,
+						)
+						.await
+						{
+							Ok(monitor) => monitor,
+							Err(_) => continue,
+						};
+
+						if KVStore::write(
+							self.store,
+							ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+							ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+							&key,
+							monitor,
+						)
+						.await
+						.is_ok()
+						{
+							let _ = KVStore::remove(
+								self.store,
+								CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+								CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+								&key,
+								true,
+							)
+							.await;
+						}
 					},
 				}
 			}
-			Ok(res)
-		})
+		}
+	}
+
+	pub(crate) async fn read_all_channel_monitors_with_updates(
+		&self,
+	) -> Result<Vec<(BlockLocator, ChannelMonitor<TestChannelSigner>)>, io::Error> {
+		self.flush_pending_monitor_updates().await?;
+
+		let stored_keys = KVStore::list(
+			self.store,
+			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+		)
+		.await?;
+
+		let mut res = Vec::with_capacity(stored_keys.len());
+		for stored_key in stored_keys {
+			let data = KVStore::read(
+				self.store,
+				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+				&stored_key,
+			)
+			.await?;
+			match <Option<(BlockLocator, ChannelMonitor<TestChannelSigner>)>>::read(
+				&mut io::Cursor::new(data),
+				(self.entropy_source, self.signer_provider),
+			) {
+				Ok(Some((best_block, channel_monitor))) => {
+					res.push((best_block, channel_monitor));
+				},
+				Ok(None) => {},
+				Err(_) => {
+					return Err(io::Error::new(
+						io::ErrorKind::InvalidData,
+						"Failed to read ChannelMonitor",
+					));
+				},
+			}
+		}
+		Ok(res)
 	}
 
 	fn write_monitor(
 		&self, monitor_name: MonitorName, monitor: &ChannelMonitor<TestChannelSigner>,
 	) -> ChannelMonitorUpdateStatus {
-		let write_res = self.runtime.block_on(KVStore::write(
-			self.store,
-			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-			&monitor_name.to_string(),
-			monitor.encode(),
-		));
-		match write_res {
-			Ok(()) => ChannelMonitorUpdateStatus::Completed,
-			Err(_) => ChannelMonitorUpdateStatus::UnrecoverableError,
-		}
+		self.pending_updates
+			.lock()
+			.unwrap()
+			.push(PendingMonitorPersistence::Write { monitor_name, monitor: monitor.encode() });
+		ChannelMonitorUpdateStatus::Completed
 	}
 }
 
@@ -120,40 +177,10 @@ impl<K: KVStore + Sync> chainmonitor::Persist<TestChannelSigner>
 	}
 
 	fn archive_persisted_channel(&self, monitor_name: MonitorName) {
-		let key = monitor_name.to_string();
-		self.runtime.block_on(async {
-			let monitor = match KVStore::read(
-				self.store,
-				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-				&key,
-			)
-			.await
-			{
-				Ok(monitor) => monitor,
-				Err(_) => return,
-			};
-
-			if KVStore::write(
-				self.store,
-				ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-				ARCHIVED_CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-				&key,
-				monitor,
-			)
-			.await
-			.is_ok()
-			{
-				let _ = KVStore::remove(
-					self.store,
-					CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
-					CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
-					&key,
-					true,
-				)
-				.await;
-			}
-		});
+		self.pending_updates
+			.lock()
+			.unwrap()
+			.push(PendingMonitorPersistence::Archive { monitor_name });
 	}
 }
 
@@ -248,11 +275,9 @@ pub(crate) async fn do_read_write_remove_list_persist<K: KVStore + RefUnwindSafe
 pub(crate) fn create_persister<'a, K: KVStore + Sync>(
 	store: &'a K, chanmon_cfg: &'a TestChanMonCfg, _max_pending_updates: u64,
 ) -> TestMonitorUpdatePersister<'a, K> {
-	let runtime =
-		Runtime::new(Arc::new(Logger::new_log_facade())).expect("Failed to setup runtime");
 	TestMonitorUpdatePersister {
 		store,
-		runtime,
+		pending_updates: Mutex::new(Vec::new()),
 		entropy_source: &chanmon_cfg.keys_manager,
 		signer_provider: &chanmon_cfg.keys_manager,
 	}
@@ -273,7 +298,7 @@ pub(crate) fn create_chain_monitor<'a, K: KVStore + Sync>(
 
 // Integration-test the given KVStore implementation. Test relaying a few payments and check that
 // the persisted data is updated the appropriate number of times.
-pub(crate) fn do_test_store<K: KVStore + Sync>(store_0: &K, store_1: &K) {
+pub(crate) async fn do_test_store<K: KVStore + Sync>(store_0: &K, store_1: &K) {
 	// This value is used later to limit how many iterations we perform.
 	let persister_0_max_pending_updates = 7;
 	// Intentionally set this to a smaller value to test a different alignment.
@@ -297,20 +322,24 @@ pub(crate) fn do_test_store<K: KVStore + Sync>(store_0: &K, store_1: &K) {
 
 	// Check that the persisted channel data is empty before any channels are
 	// open.
-	let mut persisted_chan_data_0 = persister_0.read_all_channel_monitors_with_updates().unwrap();
+	let mut persisted_chan_data_0 =
+		persister_0.read_all_channel_monitors_with_updates().await.unwrap();
 	assert_eq!(persisted_chan_data_0.len(), 0);
-	let mut persisted_chan_data_1 = persister_1.read_all_channel_monitors_with_updates().unwrap();
+	let mut persisted_chan_data_1 =
+		persister_1.read_all_channel_monitors_with_updates().await.unwrap();
 	assert_eq!(persisted_chan_data_1.len(), 0);
 
 	// Helper to make sure the channel is on the expected update ID.
 	macro_rules! check_persisted_data {
 		($expected_update_id:expr) => {
-			persisted_chan_data_0 = persister_0.read_all_channel_monitors_with_updates().unwrap();
+			persisted_chan_data_0 =
+				persister_0.read_all_channel_monitors_with_updates().await.unwrap();
 			assert_eq!(persisted_chan_data_0.len(), 1);
 			for (_, mon) in persisted_chan_data_0.iter() {
 				assert_eq!(mon.get_latest_update_id(), $expected_update_id);
 			}
-			persisted_chan_data_1 = persister_1.read_all_channel_monitors_with_updates().unwrap();
+			persisted_chan_data_1 =
+				persister_1.read_all_channel_monitors_with_updates().await.unwrap();
 			assert_eq!(persisted_chan_data_1.len(), 1);
 			for (_, mon) in persisted_chan_data_1.iter() {
 				assert_eq!(mon.get_latest_update_id(), $expected_update_id);

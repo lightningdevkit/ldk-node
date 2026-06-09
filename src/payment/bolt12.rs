@@ -29,7 +29,6 @@ use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
-use crate::runtime::Runtime;
 use crate::types::{ChannelManager, KeysManager, PaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
@@ -60,7 +59,6 @@ type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 /// [`Node::bolt12_payment`]: crate::Node::bolt12_payment
 #[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct Bolt12Payment {
-	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore>,
@@ -72,13 +70,12 @@ pub struct Bolt12Payment {
 
 impl Bolt12Payment {
 	pub(crate) fn new(
-		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
+		_runtime: Arc<crate::runtime::Runtime>, channel_manager: Arc<ChannelManager>,
 		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore>, config: Arc<Config>,
 		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 		async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
 		Self {
-			runtime,
 			channel_manager,
 			keys_manager,
 			payment_store,
@@ -89,7 +86,7 @@ impl Bolt12Payment {
 		}
 	}
 
-	pub(crate) fn send_using_amount_inner(
+	pub(crate) async fn send_using_amount_inner(
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>, hrn: Option<HumanReadableName>,
 	) -> Result<PaymentId, Error> {
@@ -167,7 +164,7 @@ impl Bolt12Payment {
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
-				self.runtime.block_on(self.payment_store.insert(payment))?;
+				self.payment_store.insert(payment).await?;
 
 				Ok(payment_id)
 			},
@@ -192,7 +189,7 @@ impl Bolt12Payment {
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
-						self.runtime.block_on(self.payment_store.insert(payment))?;
+						self.payment_store.insert(payment).await?;
 						Err(Error::PaymentSendingFailed)
 					},
 				}
@@ -264,7 +261,7 @@ impl Bolt12Payment {
 	///
 	/// If `route_parameters` are provided they will override the default as well as the
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
-	pub fn send(
+	pub async fn send(
 		&self, offer: &Offer, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
@@ -329,7 +326,7 @@ impl Bolt12Payment {
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
 				);
-				self.runtime.block_on(self.payment_store.insert(payment))?;
+				self.payment_store.insert(payment).await?;
 
 				Ok(payment_id)
 			},
@@ -354,7 +351,7 @@ impl Bolt12Payment {
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
 						);
-						self.runtime.block_on(self.payment_store.insert(payment))?;
+						self.payment_store.insert(payment).await?;
 						Err(Error::InvoiceRequestCreationFailed)
 					},
 				}
@@ -374,18 +371,20 @@ impl Bolt12Payment {
 	///
 	/// If `route_parameters` are provided they will override the default as well as the
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
-	pub fn send_using_amount(
+	pub async fn send_using_amount(
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		let payment_id = self.send_using_amount_inner(
-			offer,
-			amount_msat,
-			quantity,
-			payer_note,
-			route_parameters,
-			None,
-		)?;
+		let payment_id = self
+			.send_using_amount_inner(
+				offer,
+				amount_msat,
+				quantity,
+				payer_note,
+				route_parameters,
+				None,
+			)
+			.await?;
 		Ok(payment_id)
 	}
 
@@ -430,7 +429,7 @@ impl Bolt12Payment {
 	///
 	/// [`Refund`]: lightning::offers::refund::Refund
 	/// [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
-	pub fn request_refund_payment(&self, refund: &Refund) -> Result<Bolt12Invoice, Error> {
+	pub async fn request_refund_payment(&self, refund: &Refund) -> Result<Bolt12Invoice, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
@@ -461,7 +460,7 @@ impl Bolt12Payment {
 			PaymentStatus::Pending,
 		);
 
-		self.runtime.block_on(self.payment_store.insert(payment))?;
+		self.payment_store.insert(payment).await?;
 
 		Ok(maybe_wrap(invoice))
 	}
@@ -472,7 +471,7 @@ impl Bolt12Payment {
 	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
 	///
 	/// [`Refund`]: lightning::offers::refund::Refund
-	pub fn initiate_refund(
+	pub async fn initiate_refund(
 		&self, amount_msat: u64, expiry_secs: u32, quantity: Option<u64>,
 		payer_note: Option<String>, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<Refund, Error> {
@@ -530,7 +529,7 @@ impl Bolt12Payment {
 			PaymentStatus::Pending,
 		);
 
-		self.runtime.block_on(self.payment_store.insert(payment))?;
+		self.payment_store.insert(payment).await?;
 
 		Ok(maybe_wrap(refund))
 	}

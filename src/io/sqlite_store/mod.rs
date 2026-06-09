@@ -676,7 +676,7 @@ mod tests {
 			Some("test_table".to_string()),
 		)
 		.unwrap();
-		do_test_store(&store_0, &store_1)
+		do_test_store(&store_0, &store_1).await
 	}
 
 	#[tokio::test]

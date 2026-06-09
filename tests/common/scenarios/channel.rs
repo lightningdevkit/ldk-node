@@ -53,7 +53,7 @@ pub(crate) async fn cooperative_close<E: ElectrumApi>(
 	match initiator {
 		Side::Ldk => {
 			let ext_node_id = peer.get_node_id().await.unwrap();
-			node.close_channel(user_channel_id, ext_node_id).unwrap();
+			node.close_channel(user_channel_id, ext_node_id).await.unwrap();
 		},
 		Side::External => {
 			peer.close_channel(ext_channel_id).await.unwrap();
@@ -75,7 +75,7 @@ pub(crate) async fn force_close<E: ElectrumApi>(
 	match initiator {
 		Side::Ldk => {
 			let ext_node_id = peer.get_node_id().await.unwrap();
-			node.force_close_channel(user_channel_id, ext_node_id, None).unwrap();
+			node.force_close_channel(user_channel_id, ext_node_id, None).await.unwrap();
 			expect_event!(node, ChannelClosed);
 			generate_blocks_and_wait(bitcoind, electrs, 6).await;
 			super::sync_wallets_with_retry(node).await;

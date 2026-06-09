@@ -53,17 +53,19 @@ async fn vss_v0_schema_backwards_compatibility() {
 			bitcoin::Amount::from_sat(100_000),
 		)
 		.await;
-		node_old.sync_wallets().unwrap();
+		node_old.sync_wallets().await.unwrap();
 
 		let balance = node_old.list_balances().spendable_onchain_balance_sats;
 		assert!(balance > 0);
 		let node_id = node_old.node_id();
 
 		// Workaround necessary as v0.6.2's VSS runtime wasn't dropsafe in a tokio context.
-		tokio::task::block_in_place(move || {
+		tokio::task::spawn_blocking(move || {
 			node_old.stop().unwrap();
 			drop(node_old);
-		});
+		})
+		.await
+		.unwrap();
 
 		(balance, node_id)
 	};
@@ -81,10 +83,11 @@ async fn vss_v0_schema_backwards_compatibility() {
 			store_id,
 			HashMap::new(),
 		)
+		.await
 		.unwrap();
 
-	node_new.start().unwrap();
-	node_new.sync_wallets().unwrap();
+	node_new.start().await.unwrap();
+	node_new.sync_wallets().await.unwrap();
 
 	let new_balance = node_new.list_balances().spendable_onchain_balance_sats;
 	let new_node_id = node_new.node_id();
@@ -92,5 +95,5 @@ async fn vss_v0_schema_backwards_compatibility() {
 	assert_eq!(old_node_id, new_node_id);
 	assert_eq!(old_balance, new_balance);
 
-	node_new.stop().unwrap();
+	node_new.stop().await.unwrap();
 }

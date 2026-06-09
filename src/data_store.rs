@@ -7,10 +7,11 @@
 
 use std::collections::{hash_map, HashMap};
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable};
+use tokio::sync::RwLock;
 
 use crate::logger::{log_error, LdkLogger};
 use crate::types::DynStore;
@@ -44,8 +45,7 @@ pub(crate) struct DataStore<SO: StorableObject, L: Deref>
 where
 	L::Target: LdkLogger,
 {
-	objects: Mutex<HashMap<SO::Id, SO>>,
-	mutation_lock: tokio::sync::Mutex<()>,
+	objects: RwLock<HashMap<SO::Id, SO>>,
 	primary_namespace: String,
 	secondary_namespace: String,
 	kv_store: Arc<DynStore>,
@@ -61,55 +61,42 @@ where
 		kv_store: Arc<DynStore>, logger: L,
 	) -> Self {
 		let objects =
-			Mutex::new(HashMap::from_iter(objects.into_iter().map(|obj| (obj.id(), obj))));
-		Self {
-			objects,
-			mutation_lock: tokio::sync::Mutex::new(()),
-			primary_namespace,
-			secondary_namespace,
-			kv_store,
-			logger,
-		}
+			RwLock::new(HashMap::from_iter(objects.into_iter().map(|obj| (obj.id(), obj))));
+		Self { objects, primary_namespace, secondary_namespace, kv_store, logger }
 	}
 
 	pub(crate) async fn insert(&self, object: SO) -> Result<bool, Error> {
-		let _guard = self.mutation_lock.lock().await;
-
+		let mut locked_objects = self.objects.write().await;
 		self.persist(&object).await?;
-		let mut locked_objects = self.objects.lock().expect("lock");
 		let updated = locked_objects.insert(object.id(), object).is_some();
 		Ok(updated)
 	}
 
 	pub(crate) async fn insert_or_update(&self, object: SO) -> Result<bool, Error> {
-		let _guard = self.mutation_lock.lock().await;
-		let (updated, data_to_persist) = {
-			let mut locked_objects = self.objects.lock().expect("lock");
-			match locked_objects.entry(object.id()) {
-				hash_map::Entry::Occupied(mut e) => {
-					let update = object.to_update();
-					let updated = e.get_mut().update(update);
-					let data_to_persist =
-						if updated { Some(Self::encode_object(e.get())) } else { None };
-					(updated, data_to_persist)
-				},
-				hash_map::Entry::Vacant(e) => {
-					let data_to_persist = Self::encode_object(&object);
-					e.insert(object);
-					(true, Some(data_to_persist))
-				},
-			}
-		};
+		let mut locked_objects = self.objects.write().await;
 
-		if let Some((store_key, data)) = data_to_persist {
-			self.persist_encoded(store_key, data).await?;
+		let updated;
+		match locked_objects.entry(object.id()) {
+			hash_map::Entry::Occupied(mut e) => {
+				let update = object.to_update();
+				updated = e.get_mut().update(update);
+				if updated {
+					self.persist(&e.get()).await?;
+				}
+			},
+			hash_map::Entry::Vacant(e) => {
+				e.insert(object.clone());
+				self.persist(&object).await?;
+				updated = true;
+			},
 		}
+
 		Ok(updated)
 	}
 
 	pub(crate) async fn remove(&self, id: &SO::Id) -> Result<(), Error> {
-		let _guard = self.mutation_lock.lock().await;
-		let removed = { self.objects.lock().expect("lock").remove(id).is_some() };
+		let mut locked_objects = self.objects.write().await;
+		let removed = locked_objects.remove(id).is_some();
 		if removed {
 			let store_key = id.encode_to_hex_str();
 			KVStore::remove(
@@ -135,43 +122,28 @@ where
 		Ok(())
 	}
 
-	/// Returns the current in-memory object for `id`.
-	///
-	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
-	/// Until store reads are async, callers may temporarily see in-memory state that is either
-	/// still being persisted or has not yet caught up to a write in progress.
-	pub(crate) fn get(&self, id: &SO::Id) -> Option<SO> {
-		self.objects.lock().expect("lock").get(id).cloned()
+	pub(crate) async fn get(&self, id: &SO::Id) -> Option<SO> {
+		self.objects.read().await.get(id).cloned()
 	}
 
 	pub(crate) async fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
-		let _guard = self.mutation_lock.lock().await;
-		let (res, data_to_persist) = {
-			let mut locked_objects = self.objects.lock().expect("lock");
-			if let Some(object) = locked_objects.get_mut(&update.id()) {
-				let updated = object.update(update);
-				if updated {
-					(DataStoreUpdateResult::Updated, Some(Self::encode_object(object)))
-				} else {
-					(DataStoreUpdateResult::Unchanged, None)
-				}
+		let mut locked_objects = self.objects.write().await;
+
+		if let Some(object) = locked_objects.get_mut(&update.id()) {
+			let updated = object.update(update);
+			if updated {
+				self.persist(&object).await?;
+				Ok(DataStoreUpdateResult::Updated)
 			} else {
-				(DataStoreUpdateResult::NotFound, None)
+				Ok(DataStoreUpdateResult::Unchanged)
 			}
-		};
-		if let Some((store_key, data)) = data_to_persist {
-			self.persist_encoded(store_key, data).await?;
+		} else {
+			Ok(DataStoreUpdateResult::NotFound)
 		}
-		Ok(res)
 	}
 
-	/// Returns in-memory objects matching `f`.
-	///
-	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
-	/// Until store reads are async, callers may temporarily see in-memory state that is either
-	/// still being persisted or has not yet caught up to a write in progress.
-	pub(crate) fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
-		self.objects.lock().expect("lock").values().filter(f).cloned().collect::<Vec<SO>>()
+	pub(crate) async fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
+		self.objects.read().await.values().filter(f).cloned().collect::<Vec<SO>>()
 	}
 
 	async fn persist(&self, object: &SO) -> Result<(), Error> {
@@ -206,13 +178,8 @@ where
 		Ok(())
 	}
 
-	/// Returns whether the in-memory store contains `id`.
-	///
-	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
-	/// Until store reads are async, callers may temporarily see in-memory state that is either
-	/// still being persisted or has not yet caught up to a write in progress.
-	pub(crate) fn contains_key(&self, id: &SO::Id) -> bool {
-		self.objects.lock().expect("lock").contains_key(id)
+	pub(crate) async fn contains_key(&self, id: &SO::Id) -> bool {
+		self.objects.read().await.contains_key(id)
 	}
 }
 
@@ -296,7 +263,7 @@ mod tests {
 		);
 
 		let id = TestObjectId { id: [42u8; 4] };
-		assert!(data_store.get(&id).is_none());
+		assert!(data_store.get(&id).await.is_none());
 
 		let store_key = id.encode_to_hex_str();
 
@@ -308,7 +275,7 @@ mod tests {
 		// Check we successfully store an object and return `false`
 		let object = TestObject { id, data: [23u8; 3] };
 		assert_eq!(Ok(false), data_store.insert(object.clone()).await);
-		assert_eq!(Some(object), data_store.get(&id));
+		assert_eq!(Some(object), data_store.get(&id).await);
 		assert!(KVStore::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
 			.await
 			.is_ok());
@@ -317,12 +284,12 @@ mod tests {
 		let mut override_object = object.clone();
 		override_object.data = [24u8; 3];
 		assert_eq!(Ok(true), data_store.insert(override_object).await);
-		assert_eq!(Some(override_object), data_store.get(&id));
+		assert_eq!(Some(override_object), data_store.get(&id).await);
 
 		// Check update returns `Updated`
 		let update = TestObjectUpdate { id, data: [25u8; 3] };
 		assert_eq!(Ok(DataStoreUpdateResult::Updated), data_store.update(update).await);
-		assert_eq!(data_store.get(&id).unwrap().data, [25u8; 3]);
+		assert_eq!(data_store.get(&id).await.unwrap().data, [25u8; 3]);
 
 		// Check no-op update yields `Unchanged`
 		let update = TestObjectUpdate { id, data: [25u8; 3] };

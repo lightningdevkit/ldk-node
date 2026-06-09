@@ -4,6 +4,7 @@ use std::time::SystemTime;
 use lightning::routing::scoring::ChannelLiquidities;
 use lightning::util::ser::Readable;
 use lightning::{log_error, log_info, log_trace};
+use tokio::sync::RwLock as AsyncRwLock;
 
 use crate::config::{
 	EXTERNAL_PATHFINDING_SCORES_MAX_SIZE, EXTERNAL_PATHFINDING_SCORES_SYNC_INTERVAL,
@@ -13,14 +14,14 @@ use crate::io::utils::write_external_pathfinding_scores_to_cache;
 use crate::logger::LdkLogger;
 use crate::runtime::Runtime;
 use crate::types::DynStore;
-use crate::{update_and_persist_node_metrics, Logger, PersistedNodeMetrics, Scorer};
+use crate::{update_and_persist_node_metrics, Logger, NodeMetrics, Scorer};
 
 /// Start a background task that periodically downloads scores via an external url and merges them into the local
 /// pathfinding scores.
 pub fn setup_background_pathfinding_scores_sync(
-	url: String, scorer: Arc<Mutex<crate::types::Scorer>>, node_metrics: Arc<PersistedNodeMetrics>,
-	kv_store: Arc<DynStore>, logger: Arc<Logger>, runtime: Arc<Runtime>,
-	mut stop_receiver: tokio::sync::watch::Receiver<()>,
+	url: String, scorer: Arc<Mutex<crate::types::Scorer>>,
+	node_metrics: Arc<AsyncRwLock<NodeMetrics>>, kv_store: Arc<DynStore>, logger: Arc<Logger>,
+	runtime: Arc<Runtime>, mut stop_receiver: tokio::sync::watch::Receiver<()>,
 ) {
 	log_info!(logger, "External scores background syncing enabled from {}", url);
 
@@ -51,7 +52,7 @@ pub fn setup_background_pathfinding_scores_sync(
 }
 
 async fn sync_external_scores(
-	logger: &Logger, scorer: &Mutex<Scorer>, node_metrics: &PersistedNodeMetrics,
+	logger: &Logger, scorer: &Mutex<Scorer>, node_metrics: &AsyncRwLock<NodeMetrics>,
 	kv_store: Arc<DynStore>, url: &String,
 ) -> () {
 	let request = bitreq::get(url)

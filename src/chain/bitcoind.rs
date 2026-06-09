@@ -29,6 +29,7 @@ use lightning_block_sync::{
 	SpvClient,
 };
 use serde::Serialize;
+use tokio::sync::RwLock as AsyncRwLock;
 
 use super::WalletSyncStatus;
 use crate::config::{
@@ -42,7 +43,7 @@ use crate::fee_estimator::{
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, PersistedNodeMetrics};
+use crate::{Error, NodeMetrics};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
 const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
@@ -55,14 +56,14 @@ pub(super) struct BitcoindChainSource {
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
-	node_metrics: Arc<PersistedNodeMetrics>,
+	node_metrics: Arc<AsyncRwLock<NodeMetrics>>,
 }
 
 impl BitcoindChainSource {
 	pub(crate) fn new_rpc(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
+		logger: Arc<Logger>, node_metrics: Arc<AsyncRwLock<NodeMetrics>>,
 	) -> Self {
 		let api_client = Arc::new(BitcoindClient::new_rpc(
 			rpc_host.clone(),
@@ -89,7 +90,7 @@ impl BitcoindChainSource {
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
 		rest_client_config: BitcoindRestClientConfig, logger: Arc<Logger>,
-		node_metrics: Arc<PersistedNodeMetrics>,
+		node_metrics: Arc<AsyncRwLock<NodeMetrics>>,
 	) -> Self {
 		let api_client = Arc::new(BitcoindClient::new_rest(
 			rest_client_config.rest_host,
@@ -435,11 +436,12 @@ impl BitcoindChainSource {
 					evicted_txids.len(),
 					elapsed_ms,
 				);
-				onchain_wallet.apply_mempool_txs(unconfirmed_txs, evicted_txids).unwrap_or_else(
-					|e| {
+				onchain_wallet
+					.apply_mempool_txs(unconfirmed_txs, evicted_txids)
+					.await
+					.unwrap_or_else(|e| {
 						log_error!(self.logger, "Failed to apply mempool transactions: {:?}", e);
-					},
-				);
+					});
 			},
 			Err(e) => {
 				log_error!(self.logger, "Failed to poll for mempool transactions: {:?}", e);

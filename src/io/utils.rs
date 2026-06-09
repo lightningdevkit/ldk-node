@@ -37,6 +37,7 @@ use lightning::util::ser::{Readable, ReadableArgs, Writeable};
 use lightning_persister::fs_store::v1::FilesystemStore;
 use lightning_persister::fs_store::v2::{FilesystemStoreV2, FilesystemStoreV2Error};
 use lightning_types::string::PrintableString;
+use tokio::sync::RwLock;
 
 use super::*;
 use crate::chain::ChainSource;
@@ -49,7 +50,7 @@ use crate::logger::{log_error, LdkLogger, Logger};
 use crate::peer_store::PeerStore;
 use crate::types::{Broadcaster, DynStore, KeysManager, Sweeper};
 use crate::wallet::ser::{ChangeSetDeserWrapper, ChangeSetSerWrapper};
-use crate::{BuildError, Error, EventQueue, NodeMetrics, PersistedNodeMetrics};
+use crate::{BuildError, Error, EventQueue, NodeMetrics};
 
 pub const EXTERNAL_PATHFINDING_SCORES_CACHE_KEY: &str = "external_pathfinding_scores_cache";
 
@@ -337,18 +338,15 @@ where
 
 /// Take a write lock on `node_metrics`, apply `update`, and persist the result to `kv_store`.
 pub(crate) async fn update_and_persist_node_metrics<L: Deref>(
-	node_metrics: &PersistedNodeMetrics, kv_store: &DynStore, logger: L,
+	node_metrics: &RwLock<NodeMetrics>, kv_store: &DynStore, logger: L,
 	update: impl FnOnce(&mut NodeMetrics),
 ) -> Result<(), Error>
 where
 	L::Target: LdkLogger,
 {
-	let _guard = node_metrics.lock_mutation().await;
-	let data = {
-		let mut locked_node_metrics = node_metrics.write().expect("lock");
-		update(&mut *locked_node_metrics);
-		locked_node_metrics.encode()
-	};
+	let mut locked_node_metrics = node_metrics.write().await;
+	update(&mut *locked_node_metrics);
+	let data = locked_node_metrics.encode();
 	KVStore::write(
 		&*kv_store,
 		NODE_METRICS_PRIMARY_NAMESPACE,
