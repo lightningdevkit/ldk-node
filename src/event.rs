@@ -1609,10 +1609,49 @@ where
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
 
+				// `counterparty_node_id` has been set on every `ChannelClosed` since LDK 0.0.117.
+				let counterparty_node_id = counterparty_node_id
+					.expect("counterparty_node_id is always set since LDK 0.0.117");
+
+				// Drop the peer once their last channel with us has reached a terminal
+				// state reconnection cannot recover. `CommitmentTxConfirmed` is included
+				// because LDK reports a remote (or our own) commitment confirming on-chain
+				// via this variant, leaving nothing for `channel_reestablish` to recover.
+				// `HolderForceClosed` is deliberately excluded so reconnection can still
+				// drive recovery (see `Node::close_channel_internal`).
+				// We exclude `channel_id` from the count because LDK emits `ChannelClosed`
+				// before removing it from its internal list.
+				let reconnect_unneeded = matches!(
+					reason,
+					ClosureReason::CounterpartyForceClosed { .. }
+						| ClosureReason::CounterpartyInitiatedCooperativeClosure
+						| ClosureReason::CommitmentTxConfirmed
+				);
+
+				if reconnect_unneeded {
+					let has_other_channels = self
+						.channel_manager
+						.list_channels_with_counterparty(&counterparty_node_id)
+						.iter()
+						.any(|c| c.channel_id != channel_id);
+
+					if !has_other_channels {
+						if let Err(e) = self.peer_store.remove_peer(&counterparty_node_id) {
+							log_error!(
+								self.logger,
+								"Failed to remove peer {} from peer store: {}",
+								counterparty_node_id,
+								e
+							);
+							return Err(ReplayEvent());
+						}
+					}
+				}
+
 				let event = Event::ChannelClosed {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
-					counterparty_node_id,
+					counterparty_node_id: Some(counterparty_node_id),
 					reason: Some(reason),
 				};
 
