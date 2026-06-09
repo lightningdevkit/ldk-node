@@ -43,6 +43,7 @@ use lightning::util::persist::{
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
 use lightning_dns_resolver::OMDomainResolver;
+use lightning_liquidity::lsps2::router::LSPS2BOLT12Router;
 use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
@@ -75,13 +76,14 @@ use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::payment::LdkNodeLSPS2Bolt12PaymentMetadataDecoder;
 use crate::peer_store::PeerStore;
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
-	PeerManager, PendingPaymentStore,
+	GossipSync, Graph, HRNResolver, InnerMessageRouter, KeysManager, MessageRouter, OnionMessenger,
+	PaymentStore, PeerManager, PendingPaymentStore,
 };
 use crate::wallet::persist::KVStoreWalletPersister;
 use crate::wallet::Wallet;
@@ -1778,12 +1780,19 @@ fn build_with_store_internal(
 	}
 
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
-	let router = Arc::new(DefaultRouter::new(
+	let inner_router = DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
 		Arc::clone(&keys_manager),
 		Arc::clone(&scorer),
 		scoring_fee_params,
+	);
+	let inner_message_router =
+		InnerMessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager));
+	let router = Arc::new(LSPS2BOLT12Router::new_with_payment_metadata_decoder(
+		inner_router,
+		Arc::clone(&keys_manager),
+		LdkNodeLSPS2Bolt12PaymentMetadataDecoder,
 	));
 
 	let mut user_config = default_user_config(&config);
@@ -1807,8 +1816,7 @@ fn build_with_store_internal(
 		}
 	}
 
-	let message_router =
-		Arc::new(MessageRouter::new(Arc::clone(&network_graph), Arc::clone(&keys_manager)));
+	let message_router: Arc<MessageRouter> = Arc::new(inner_message_router);
 
 	// Initialize the ChannelManager
 	let channel_manager = {
@@ -1927,7 +1935,7 @@ fn build_with_store_internal(
 				Arc::clone(&keys_manager),
 				Arc::clone(&logger),
 				Arc::clone(&channel_manager),
-				message_router,
+				Arc::clone(&message_router),
 				Arc::clone(&channel_manager),
 				Arc::clone(&channel_manager),
 				Arc::clone(&om_resolver),
@@ -1940,7 +1948,7 @@ fn build_with_store_internal(
 				Arc::clone(&keys_manager),
 				Arc::clone(&logger),
 				Arc::clone(&channel_manager),
-				message_router,
+				Arc::clone(&message_router),
 				Arc::clone(&channel_manager),
 				Arc::clone(&channel_manager),
 				Arc::clone(&om_resolver),
@@ -2168,6 +2176,7 @@ fn build_with_store_internal(
 		output_sweeper,
 		peer_manager,
 		onion_messenger,
+		message_router,
 		connection_manager,
 		keys_manager,
 		network_graph,
