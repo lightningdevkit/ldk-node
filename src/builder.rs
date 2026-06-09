@@ -1932,6 +1932,7 @@ fn build_with_store_internal(
 				Arc::clone(&channel_manager),
 				Arc::clone(&om_resolver),
 				IgnoringMessageHandler {},
+				false,
 			))
 		} else {
 			Arc::new(OnionMessenger::new(

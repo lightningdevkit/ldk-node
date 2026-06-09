@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, OptionalBolt11PaymentParams, PaymentId,
 };
@@ -55,7 +55,7 @@ pub(crate) struct PaymentMetadata {
 	pub(crate) lsps2_parameters: Option<LSPS2Parameters>,
 }
 
-impl_writeable_tlv_based!(PaymentMetadata, {
+impl_ser_tlv_based!(PaymentMetadata, {
 	(0, lsps2_parameters, option),
 });
 

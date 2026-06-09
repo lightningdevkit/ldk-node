@@ -53,7 +53,7 @@ use crate::{total_anchor_channels_reserve_sats, Config, Error};
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 const LSPS2_GETINFO_REQUEST_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
-const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u32 = 72;
+const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u16 = 72;
 
 struct LSPS1Client {
 	lsp_node_id: PublicKey,
@@ -1493,7 +1493,7 @@ pub(crate) struct LSPS2FeeResponse {
 #[derive(Debug, Clone)]
 pub(crate) struct LSPS2BuyResponse {
 	intercept_scid: u64,
-	cltv_expiry_delta: u32,
+	cltv_expiry_delta: u16,
 }
 
 /// A liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
