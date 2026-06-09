@@ -730,6 +730,14 @@ impl ChainSource {
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				bitcoind_chain_source.validate_zero_fee_commitments_support().await
 			},
+			#[cfg(feature = "chain-cbf")]
+			ChainSourceKind::Cbf(_) => {
+				log_error!(
+					self.logger,
+					"CBF chain sources cannot verify zero-fee commitment package relay support"
+				);
+				Err(Error::ChainSourceNotSupported)
+			},
 		}
 	}
 
@@ -777,9 +785,11 @@ impl ChainSource {
 							bitcoind_chain_source.process_transaction_broadcast(package).await
 						},
 						#[cfg(feature = "chain-cbf")]
-						ChainSourceKind::Cbf { ..} => {
-							todo!();
-						}
+						ChainSourceKind::Cbf(cbf_chain_source) => {
+							cbf_chain_source
+								.process_broadcast_package(package.into_inner())
+								.await
+						},
 					}
 				}
 			}
