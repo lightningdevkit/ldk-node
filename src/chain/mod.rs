@@ -41,7 +41,7 @@ use crate::config::ElectrumSyncConfig;
 use crate::config::EsploraSyncConfig;
 use crate::config::{BackgroundSyncConfig, Config, WALLET_SYNC_INTERVAL_MINIMUM_SECS};
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::BroadcastPackage;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
@@ -800,8 +800,12 @@ impl ChainSource {
 				bitcoind_chain_source.validate_zero_fee_commitments_support().await
 			},
 			#[cfg(feature = "chain-cbf")]
-			ChainSourceKind::Cbf { .. } => {
-				todo!();
+			ChainSourceKind::Cbf(_) => {
+				log_error!(
+					self.logger,
+					"CBF chain sources cannot verify zero-fee commitment package relay support"
+				);
+				Err(Error::ChainSourceNotSupported)
 			},
 		}
 	}
@@ -824,8 +828,8 @@ impl ChainSource {
 				bitcoind_chain_source.process_transaction_broadcast(package).await
 			},
 			#[cfg(feature = "chain-cbf")]
-			ChainSourceKind::Cbf { .. } => {
-				todo!();
+			ChainSourceKind::Cbf(cbf_chain_source) => {
+				cbf_chain_source.process_broadcast_package(package.into_inner()).await
 			},
 		}
 	}
