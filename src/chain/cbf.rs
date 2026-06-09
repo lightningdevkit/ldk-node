@@ -6,9 +6,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bip157::chain::ChainState;
 use bip157::{
 	chain::BlockHeaderChanges, error::FetchBlockError, Builder as KyotoBuilder, Client, Event,
-	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Requester, TrustedPeer, Warning,
+	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Package, Requester, TrustedPeer,
+	Warning,
 };
-use bitcoin::{BlockHash, FeeRate, Network, Script, ScriptBuf, Txid};
+use bitcoin::{BlockHash, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder};
 use lightning::chain::{BlockLocator, Listen, WatchedOutput};
 
@@ -618,7 +619,10 @@ impl CbfChainSource {
 				.await?
 			},
 			FeeSource::Cbf { block_fee_cache } => {
-				let requester = self.requester()?;
+				let requester = match &*self.cbf_runtime_status.lock().expect("lock") {
+					CbfRuntimeStatus::Started { requester } => requester.clone(),
+					CbfRuntimeStatus::Stopped => return Err(Error::FeerateEstimationUpdateFailed),
+				};
 				let mut samples_sat_per_kwu: Vec<u64> = self
 					.refresh_block_fee_window(&requester, block_fee_cache)
 					.await
@@ -662,16 +666,33 @@ impl CbfChainSource {
 		Ok(())
 	}
 
-	/// Returns a clone of the live kyoto requester, or an error if the node isn't running.
-	fn requester(&self) -> Result<Requester, Error> {
-		match &*self.cbf_runtime_status.lock().expect("lock") {
-			CbfRuntimeStatus::Started { requester } => Ok(requester.clone()),
+	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
+		let requester = match &*self.cbf_runtime_status.lock().expect("lock") {
+			CbfRuntimeStatus::Started { requester } => requester.clone(),
 			CbfRuntimeStatus::Stopped => {
-				debug_assert!(
-					false,
-					"We should have started the chain source before updating fees"
-				);
-				Err(Error::FeerateEstimationUpdateFailed)
+				debug_assert!(false, "We should have started the chain source before broadcasting");
+				return;
+			},
+		};
+
+		match Package::from_vec(package.clone()) {
+			Ok(package) => {
+				if let Err(e) = requester.submit_package(package).await {
+					log_error!(self.logger, "Failed to broadcast transaction package: {:?}", e);
+				}
+			},
+			Err(_) => {
+				for tx in package {
+					let txid = tx.compute_txid();
+					if let Err(e) = requester.submit_package(tx).await {
+						log_error!(
+							self.logger,
+							"Failed to broadcast transaction {}: {:?}",
+							txid,
+							e
+						);
+					}
+				}
 			},
 		}
 	}
