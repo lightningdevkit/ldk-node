@@ -30,6 +30,7 @@ use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::ElectrsD;
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
+#[cfg(not(feature = "uniffi"))]
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
@@ -40,6 +41,7 @@ use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+#[cfg(not(feature = "uniffi"))]
 use lightning::util::persist::KVStore;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -3036,6 +3038,7 @@ async fn splice_in_with_all_balance() {
 	node_b.stop().unwrap();
 }
 
+#[cfg(not(feature = "uniffi"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn lsps2_multi_lsp_picks_cheapest() {
 	do_lsps2_multi_lsp_picks_cheapest(false).await;
@@ -3140,9 +3143,20 @@ async fn builder_configures_sqlite_backup_store() {
 	config_a.store_type = TestStoreType::Sqlite;
 	let primary_dir = config_a.node_config.storage_dir_path.clone();
 	let backup_dir = common::random_storage_path();
-	let node_a = common::setup_node_with_builder(&chain_source, config_a.clone(), |builder| {
-		builder.set_backup_storage_dir_path(backup_dir.to_str().unwrap().to_owned());
-	});
+
+	// Build node_a with backup storage configured
+	setup_builder!(builder_a, config_a.node_config.clone());
+	builder_a.set_chain_source_esplora(
+		format!("http://{}", electrsd.esplora_url.as_ref().unwrap()),
+		None,
+	);
+	builder_a.set_filesystem_logger(None, None);
+	builder_a.set_backup_storage_dir_path(backup_dir.to_str().unwrap().to_owned());
+
+	let node_a = builder_a.build(config_a.node_entropy.into()).unwrap();
+	node_a.start().unwrap();
+	assert!(node_a.status().is_running);
+	assert!(node_a.status().latest_fee_rate_cache_update_timestamp.is_some());
 
 	let config_b = random_config(true);
 	let node_b = setup_node(&chain_source, config_b);
@@ -3188,6 +3202,7 @@ async fn builder_configures_sqlite_backup_store() {
 	}
 }
 
+#[cfg(not(feature = "uniffi"))]
 #[test]
 fn sqlite_backup_rejects_primary_storage_path() {
 	let mut config = random_config(false);
@@ -3195,7 +3210,7 @@ fn sqlite_backup_rejects_primary_storage_path() {
 
 	let primary_dir = config.node_config.storage_dir_path.clone();
 
-	setup_builder!(builder, config.node_config);
+	setup_builder!(builder, config.node_config.clone());
 	builder.set_backup_storage_dir_path(primary_dir);
 
 	let res = builder.build(config.node_entropy.into());

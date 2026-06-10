@@ -461,7 +461,9 @@ impl Default for TestConfig {
 
 macro_rules! setup_builder {
 	($builder:ident, $config:expr) => {
-		#[allow(unused_mut)]
+		#[cfg(feature = "uniffi")]
+		let $builder = Builder::from_config($config.clone());
+		#[cfg(not(feature = "uniffi"))]
 		let mut $builder = Builder::from_config($config.clone());
 	};
 }
@@ -529,15 +531,6 @@ pub(crate) fn setup_two_nodes_with_store(
 }
 
 pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
-	setup_node_with_builder(chain_source, config, |_| {})
-}
-
-pub(crate) fn setup_node_with_builder<F>(
-	chain_source: &TestChainSource, config: TestConfig, configure_builder: F,
-) -> TestNode
-where
-	F: FnOnce(&mut Builder),
-{
 	setup_builder!(builder, config.node_config);
 
 	match chain_source {
@@ -597,8 +590,6 @@ where
 	if config.recovery_mode {
 		builder.set_wallet_recovery_mode();
 	}
-
-	configure_builder(&mut builder);
 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
