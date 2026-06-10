@@ -277,15 +277,21 @@ impl TierStoreInner {
 			"read",
 		)?;
 
-		if let Some(eph_store) =
-			self.ephemeral_store(&primary_namespace, &secondary_namespace, &key)
-		{
-			// We don't retry ephemeral-store reads here. Local failures are treated as
-			// terminal for this access path rather than falling back to another store.
-			KVStore::read(eph_store.as_ref(), &primary_namespace, &secondary_namespace, &key).await
-		} else {
-			self.read_primary(&primary_namespace, &secondary_namespace, &key).await
+		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
+			if let Some(eph_store) = self.ephemeral_store.as_ref() {
+				// We don't retry ephemeral-store reads here. Local failures are treated as
+				// terminal for this access path rather than falling back to another store.
+				return KVStore::read(
+					eph_store.as_ref(),
+					&primary_namespace,
+					&secondary_namespace,
+					&key,
+				)
+				.await;
+			}
 		}
+
+		self.read_primary(&primary_namespace, &secondary_namespace, &key).await
 	}
 
 	async fn write_internal(
@@ -298,26 +304,26 @@ impl TierStoreInner {
 			"write",
 		)?;
 
-		if let Some(eph_store) =
-			self.ephemeral_store(&primary_namespace, &secondary_namespace, &key)
-		{
-			KVStore::write(
-				eph_store.as_ref(),
-				primary_namespace.as_str(),
-				secondary_namespace.as_str(),
-				key.as_str(),
-				buf,
-			)
-			.await
-		} else {
-			self.write_primary_backup_async(
-				primary_namespace.as_str(),
-				secondary_namespace.as_str(),
-				key.as_str(),
-				buf,
-			)
-			.await
+		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
+			if let Some(eph_store) = self.ephemeral_store.as_ref() {
+				return KVStore::write(
+					eph_store.as_ref(),
+					primary_namespace.as_str(),
+					secondary_namespace.as_str(),
+					key.as_str(),
+					buf,
+				)
+				.await;
+			}
 		}
+
+		self.write_primary_backup_async(
+			primary_namespace.as_str(),
+			secondary_namespace.as_str(),
+			key.as_str(),
+			buf,
+		)
+		.await
 	}
 
 	async fn remove_internal(
@@ -330,26 +336,26 @@ impl TierStoreInner {
 			"remove",
 		)?;
 
-		if let Some(eph_store) =
-			self.ephemeral_store(&primary_namespace, &secondary_namespace, &key)
-		{
-			KVStore::remove(
-				eph_store.as_ref(),
-				primary_namespace.as_str(),
-				secondary_namespace.as_str(),
-				key.as_str(),
-				lazy,
-			)
-			.await
-		} else {
-			self.remove_primary_backup_async(
-				primary_namespace.as_str(),
-				secondary_namespace.as_str(),
-				key.as_str(),
-				lazy,
-			)
-			.await
+		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
+			if let Some(eph_store) = self.ephemeral_store.as_ref() {
+				return KVStore::remove(
+					eph_store.as_ref(),
+					primary_namespace.as_str(),
+					secondary_namespace.as_str(),
+					key.as_str(),
+					lazy,
+				)
+				.await;
+			}
 		}
+
+		self.remove_primary_backup_async(
+			primary_namespace.as_str(),
+			secondary_namespace.as_str(),
+			key.as_str(),
+			lazy,
+		)
+		.await
 	}
 
 	async fn list_internal(
@@ -379,14 +385,6 @@ impl TierStoreInner {
 			},
 			_ => self.list_primary(&primary_namespace, &secondary_namespace).await,
 		}
-	}
-
-	fn ephemeral_store(
-		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-	) -> Option<&Arc<DynStore>> {
-		self.ephemeral_store
-			.as_ref()
-			.filter(|_s| is_ephemeral_cached_key(primary_namespace, secondary_namespace, key))
 	}
 
 	fn handle_primary_backup_results(
