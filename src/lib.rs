@@ -83,6 +83,7 @@
 mod balance;
 mod builder;
 mod chain;
+mod channel;
 pub mod config;
 mod connection;
 mod data_store;
@@ -128,6 +129,8 @@ pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
+use channel::store::{ChannelRecord, SpliceIntent, SpliceKind};
+use channel::SpliceRetrier;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
 	LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
@@ -151,6 +154,7 @@ use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 pub use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::FundingContribution;
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
@@ -175,9 +179,9 @@ use peer_store::{PeerInfo, PeerStore};
 use runtime::Runtime;
 pub use tokio;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
-	Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, ChannelRecordStore,
+	DynStore, Graph, HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router,
+	Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 pub use vss_client;
@@ -242,6 +246,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	channel_record_store: Arc<ChannelRecordStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
@@ -593,6 +598,15 @@ impl Node {
 			None
 		};
 
+		let splice_retrier = Arc::new(SpliceRetrier::new(
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.fee_estimator),
+			Arc::clone(&self.channel_record_store),
+			Arc::clone(&self.event_queue),
+			Arc::clone(&self.logger),
+		));
+
 		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.wallet),
@@ -608,10 +622,16 @@ impl Node {
 			static_invoice_store,
 			Arc::clone(&self.onion_messenger),
 			self.om_mailbox.clone(),
+			Arc::clone(&splice_retrier),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
 		));
+
+		// Resubmit any persisted splice intents that LDK dropped before durably recording them.
+		self.runtime.spawn_background_task(async move {
+			splice_retrier.reconcile().await;
+		});
 
 		// Setup background processing
 		let background_persister = Arc::clone(&self.kv_store);
@@ -1567,6 +1587,46 @@ impl Node {
 		)
 	}
 
+	/// Persists a splice intent so that the splice can be resubmitted if LDK drops it before
+	/// durably recording it (e.g., when restarting or disconnecting mid-negotiation). Must be
+	/// called before handing the contribution to [`ChannelManager::funding_contributed`] so that
+	/// a crash in between is also covered.
+	///
+	/// [`ChannelManager::funding_contributed`]: lightning::ln::channelmanager::ChannelManager::funding_contributed
+	fn persist_splice_intent(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		channel_details: &LdkChannelDetails, contribution: FundingContribution, kind: SpliceKind,
+	) -> Result<(), Error> {
+		let pre_splice_funding_txo = channel_details.funding_txo.ok_or_else(|| {
+			log_error!(self.logger, "Failed to splice channel: channel not yet ready");
+			Error::ChannelSplicingFailed
+		})?;
+		let record = ChannelRecord::Funded {
+			user_channel_id: *user_channel_id,
+			counterparty_node_id,
+			channel_id: channel_details.channel_id,
+			pending_splice: Some(SpliceIntent {
+				pre_splice_funding_txo,
+				contribution,
+				kind,
+				attempts: 0,
+			}),
+		};
+		self.runtime.block_on(self.channel_record_store.insert(record)).map(|_| ())
+	}
+
+	/// Removes a splice intent if it still holds the given contribution. The guard ensures an
+	/// intent persisted by a newer call is left alone.
+	fn clear_splice_intent(
+		&self, user_channel_id: &UserChannelId, contribution: &FundingContribution,
+	) {
+		if let Some(record) = self.channel_record_store.get(user_channel_id) {
+			if record.pending_splice().map(|intent| &intent.contribution) == Some(contribution) {
+				let _ = self.runtime.block_on(self.channel_record_store.remove(user_channel_id));
+			}
+		}
+	}
+
 	fn splice_in_inner(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: FundingAmount,
@@ -1665,6 +1725,15 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			self.persist_splice_intent(
+				user_channel_id,
+				counterparty_node_id,
+				channel_details,
+				contribution.clone(),
+				SpliceKind::In { amount_sats: splice_amount_sats },
+			)?;
+
+			let intent_contribution = contribution.clone();
 			self.channel_manager
 				.funding_contributed(
 					&channel_details.channel_id,
@@ -1674,6 +1743,7 @@ impl Node {
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					self.clear_splice_intent(user_channel_id, &intent_contribution);
 					Error::ChannelSplicingFailed
 				})
 		} else {
@@ -1692,6 +1762,10 @@ impl Node {
 	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
+	///
+	/// The splice is retried automatically, including across restarts, until it either completes
+	/// or fails for a reason retrying cannot address, at which point
+	/// [`Event::SpliceNegotiationFailed`] is emitted.
 	///
 	/// # Experimental API
 	///
@@ -1732,6 +1806,10 @@ impl Node {
 	/// This provides for decreasing a channel's outbound liquidity without re-balancing or closing
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
+	///
+	/// The splice is retried automatically, including across restarts, until it either completes
+	/// or fails for a reason retrying cannot address, at which point
+	/// [`Event::SpliceNegotiationFailed`] is emitted.
 	///
 	/// # Experimental API
 	///
@@ -1779,12 +1857,22 @@ impl Node {
 				value: Amount::from_sat(splice_amount_sats),
 				script_pubkey: address.script_pubkey(),
 			}];
-			let contribution =
-				funding_template.splice_out(outputs, min_feerate, max_feerate).map_err(|e| {
+			let contribution = funding_template
+				.splice_out(outputs.clone(), min_feerate, max_feerate)
+				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
 
+			self.persist_splice_intent(
+				user_channel_id,
+				counterparty_node_id,
+				channel_details,
+				contribution.clone(),
+				SpliceKind::Out { outputs },
+			)?;
+
+			let intent_contribution = contribution.clone();
 			self.channel_manager
 				.funding_contributed(
 					&channel_details.channel_id,
@@ -1794,6 +1882,7 @@ impl Node {
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					self.clear_splice_intent(user_channel_id, &intent_contribution);
 					Error::ChannelSplicingFailed
 				})
 		} else {
@@ -1811,6 +1900,10 @@ impl Node {
 	///
 	/// If a prior splice negotiation is pending, this bumps its feerate via RBF. The prior
 	/// contribution is reused when possible; otherwise, coin selection is re-run.
+	///
+	/// The fee bump is retried automatically, including across restarts, until it either
+	/// completes or fails for a reason retrying cannot address, at which point
+	/// [`Event::SpliceNegotiationFailed`] is emitted.
 	///
 	/// # Experimental API
 	///
@@ -1852,6 +1945,15 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			self.persist_splice_intent(
+				user_channel_id,
+				counterparty_node_id,
+				channel_details,
+				contribution.clone(),
+				SpliceKind::Rbf {},
+			)?;
+
+			let intent_contribution = contribution.clone();
 			self.channel_manager
 				.funding_contributed(
 					&channel_details.channel_id,
@@ -1861,6 +1963,7 @@ impl Node {
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to RBF channel: {:?}", e);
+					self.clear_splice_intent(user_channel_id, &intent_contribution);
 					Error::ChannelSplicingFailed
 				})
 		} else {
