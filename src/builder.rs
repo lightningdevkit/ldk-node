@@ -78,7 +78,8 @@ use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
 use crate::probing::{
-	HighDegreeStrategy, Prober, ProbingConfig, ProbingStrategy, ProbingStrategyKind, RandomWalkStrategy,
+	HighDegreeStrategy, Prober, ProbingConfig, ProbingStrategy, ProbingStrategyKind,
+	RandomWalkStrategy,
 };
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
@@ -1821,10 +1822,7 @@ fn build_with_store_internal(
 		},
 	}
 
-	let mut scoring_fee_params = ProbabilisticScoringFeeParameters::default();
-	if let Some(penalty) = probing_config.and_then(|c| c.diversity_penalty_msat) {
-		scoring_fee_params.probing_diversity_penalty_msat = penalty;
-	}
+	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
 	let router = Arc::new(DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
@@ -2202,10 +2200,23 @@ fn build_with_store_internal(
 	let prober = probing_config.map(|probing_cfg| {
 		let strategy: Arc<dyn ProbingStrategy> = match &probing_cfg.kind {
 			ProbingStrategyKind::HighDegree { top_node_count } => {
+				// Dedicated router for probing so the diversity penalty doesn't interfere
+				// with real payments; shares the scorer so probe results still train it.
+				let mut probing_fee_params = ProbabilisticScoringFeeParameters::default();
+				if let Some(penalty) = probing_cfg.diversity_penalty_msat {
+					probing_fee_params.probing_diversity_penalty_msat = penalty;
+				}
+				let probing_router = Arc::new(DefaultRouter::new(
+					Arc::clone(&network_graph),
+					Arc::clone(&logger),
+					Arc::clone(&keys_manager),
+					Arc::clone(&scorer),
+					probing_fee_params,
+				));
 				Arc::new(HighDegreeStrategy::new(
 					Arc::clone(&network_graph),
 					Arc::clone(&channel_manager),
-					Arc::clone(&router),
+					probing_router,
 					*top_node_count,
 					DEFAULT_MIN_PROBE_AMOUNT_MSAT,
 					DEFAULT_MAX_PROBE_AMOUNT_MSAT,

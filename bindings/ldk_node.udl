@@ -15,8 +15,6 @@ typedef interface NodeEntropy;
 
 typedef interface ProbingConfig;
 
-typedef interface ProbingConfigBuilder;
-
 typedef enum WordCount;
 
 [Remote]
@@ -34,6 +32,18 @@ typedef dictionary LogRecord;
 [Trait, WithForeign]
 interface LogWriter {
 	void log(LogRecord record);
+};
+
+interface ProbingConfigBuilder {
+	[Name=high_degree]
+	constructor(u64 top_node_count);
+	[Name=random_walk]
+	constructor(u64 max_hops);
+	void set_interval(u64 secs);
+	void set_max_locked_msat(u64 max_msat);
+	void set_diversity_penalty_msat(u64 penalty_msat);
+	void set_cooldown(u64 secs);
+	ProbingConfig build();
 };
 
 interface Builder {

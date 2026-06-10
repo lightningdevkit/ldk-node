@@ -266,42 +266,35 @@ impl ProbingConfigBuilder {
 	}
 }
 
-/// A UniFFI-compatible wrapper around [`ProbingConfigBuilder`] that uses interior mutability
-/// so it can be shared behind an `Arc` as required by the FFI object model.
+/// Builder for [`ProbingConfig`].
 ///
-/// Instances are produced by the constructors [`new_high_degree`] and [`new_random_walk`].
-/// The `set_*` methods override the defaults, and [`build`] yields the resulting
-/// [`ProbingConfig`].
+/// A new instance starts from one of two strategy constructors — [`high_degree`] or
+/// [`random_walk`] — and is finalized through [`build`]. Optional setters in between
+/// override the timing and liquidity defaults.
 ///
-/// [`new_high_degree`]: Self::new_high_degree
-/// [`new_random_walk`]: Self::new_random_walk
+/// [`high_degree`]: Self::high_degree
+/// [`random_walk`]: Self::random_walk
 /// [`build`]: Self::build
 #[cfg(feature = "uniffi")]
-#[derive(uniffi::Object)]
 pub struct ArcedProbingConfigBuilder {
 	inner: RwLock<ProbingConfigBuilder>,
 }
 
 #[cfg(feature = "uniffi")]
-#[uniffi::export]
 impl ArcedProbingConfigBuilder {
 	/// Start building a config that probes toward the highest-degree nodes in the graph.
 	///
 	/// `top_node_count` controls how many of the most-connected nodes are cycled through.
-	#[uniffi::constructor]
-	pub fn new_high_degree(top_node_count: u64) -> Arc<Self> {
-		Arc::new(Self {
-			inner: RwLock::new(ProbingConfigBuilder::high_degree(top_node_count as usize)),
-		})
+	pub fn high_degree(top_node_count: u64) -> Self {
+		Self { inner: RwLock::new(ProbingConfigBuilder::high_degree(top_node_count as usize)) }
 	}
 
 	/// Start building a config that probes via random graph walks.
 	///
 	/// `max_hops` is the upper bound on the number of hops in a randomly constructed path.
 	/// Values below `2` are clamped to `2`.
-	#[uniffi::constructor]
-	pub fn new_random_walk(max_hops: u64) -> Arc<Self> {
-		Arc::new(Self { inner: RwLock::new(ProbingConfigBuilder::random_walk(max_hops as usize)) })
+	pub fn random_walk(max_hops: u64) -> Self {
+		Self { inner: RwLock::new(ProbingConfigBuilder::random_walk(max_hops as usize)) }
 	}
 
 	/// Overrides the interval between probe attempts.
@@ -759,9 +752,12 @@ impl Prober {
 			.list_recent_payments()
 			.into_iter()
 			.filter_map(|p| match p {
-				RecentPaymentDetails::Pending { is_probe: true, total_msat, .. } => {
-					Some(total_msat)
-				},
+				RecentPaymentDetails::Pending {
+					is_probe: true,
+					total_msat,
+					pending_fee_msat,
+					..
+				} => Some(total_msat + pending_fee_msat.unwrap_or(0)),
 				_ => None,
 			})
 			.sum();

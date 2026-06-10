@@ -6,6 +6,10 @@
 //      Verifies locked_msat rises when a probe is dispatched and returns
 //      to zero once the probe resolves.
 //
+//   locked_msat_accounts_for_routing_fees
+//      Asserts the exact locked_msat (delivered amount + per-hop fee) for a single
+//      in-flight probe, proving fees are tracked and not just the delivered amount.
+//
 //   exhausted_probe_budget_blocks_new_probes
 //      Samples locked_msat across multiple probe cycles and asserts it never
 //      exceeds the configured max_locked_msat budget cap.
@@ -195,6 +199,93 @@ async fn probe_budget_increments_and_decrements() {
 	.is_ok();
 	assert!(cleared, "locked_msat never returned to zero after probe resolved");
 
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+	node_c.stop().unwrap();
+}
+
+/// Verifies that `locked_msat` accounts for routing fees, not just the delivered amount:
+/// a probe along A→B→C locks `delivered amount + per-hop fee` on the first-hop channel.
+///
+/// The budget is sized to exactly one probe's worth, so at most one probe is in flight and
+/// the observed `locked_msat` is deterministic. The existing budget test only checks that it
+/// is non-zero; this asserts the precise value, which a fees-excluded accounting would miss.
+#[tokio::test(flavor = "multi_thread")]
+async fn locked_msat_accounts_for_routing_fees() {
+	// First hop carries the delivered amount plus this per-hop fee (see `build_probe_path`).
+	const FIRST_HOP_FEE_MSAT: u64 = 1000;
+	const LOCKED_PER_PROBE_MSAT: u64 = PROBE_AMOUNT_MSAT + FIRST_HOP_FEE_MSAT;
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let node_b = setup_node(&chain_source, random_config(false));
+	let node_c = setup_node(&chain_source, random_config(false));
+
+	let mut config_a = random_config(false);
+	let strategy = FixedPathStrategy::new();
+	config_a.probing = Some(
+		ProbingConfigBuilder::custom(strategy.clone())
+			.interval(Duration::from_millis(PROBING_INTERVAL_MILLISECONDS))
+			// Budget for exactly one in-flight probe so locked_msat is deterministic.
+			.max_locked_msat(LOCKED_PER_PROBE_MSAT)
+			.build(),
+	);
+	let node_a = setup_node(&chain_source, config_a);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(2_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 1_000_000, true, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	node_b.sync_wallets().unwrap();
+	open_channel(&node_b, &node_c, 1_000_000, true, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	node_c.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_event!(node_b, ChannelReady);
+	expect_event!(node_b, ChannelReady);
+	expect_event!(node_c, ChannelReady);
+
+	strategy.set_path(build_probe_path(&node_a, &node_b, &node_c, PROBE_AMOUNT_MSAT));
+	wait_for_channel_ready_to_send(&node_a, &node_b, LOCKED_PER_PROBE_MSAT).await;
+	wait_for_channel_ready_to_send(&node_b, &node_c, PROBE_AMOUNT_MSAT).await;
+	strategy.start_probing();
+
+	// Capture locked_msat the moment the first probe goes in flight. With a single-probe
+	// budget the value is only ever 0 or exactly one probe's worth, so the first non-zero
+	// reading is the full first-hop HTLC.
+	let locked = tokio::time::timeout(Duration::from_secs(30), async {
+		loop {
+			let locked = node_a.prober().unwrap().locked_msat();
+			if locked > 0 {
+				break locked;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+	})
+	.await
+	.expect("locked_msat never increased — no probe was dispatched");
+
+	assert_eq!(
+		locked, LOCKED_PER_PROBE_MSAT,
+		"locked_msat must equal the delivered amount plus routing fees, not just the delivered amount"
+	);
+
+	strategy.stop_probing();
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
 	node_c.stop().unwrap();
