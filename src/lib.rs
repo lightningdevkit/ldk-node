@@ -274,6 +274,8 @@ impl Node {
 			self.config.network
 		);
 
+		self.runtime.allow_cancellable_background_task_spawns();
+
 		// Start up any runtime-dependant chain sources (e.g. Electrum)
 		self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
 			log_error!(self.logger, "Failed to start chain syncing: {}", e);
