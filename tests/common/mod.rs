@@ -1364,7 +1364,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nB splices out to pay A");
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
-	let splice_out_sat = funding_amount_sat / 2;
+	let available_splice_out_sat = node_b.list_channels()[0].outbound_capacity_msat / 1000;
+	let splice_out_sat = available_splice_out_sat / 2;
+	assert!(splice_out_sat > 500_000);
 	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
 
 	expect_splice_negotiated_event!(node_a, node_b.node_id());
