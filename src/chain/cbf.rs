@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bip157::chain::ChainState;
 use bip157::{
-	chain::BlockHeaderChanges, error::FetchBlockError, Builder as KyotoBuilder, Client, Event,
+	chain::BlockHeaderChanges, Builder as KyotoBuilder, Client, Event as KyotoEvent,
 	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Package, Requester, TrustedPeer,
 	Warning,
 };
@@ -13,7 +13,7 @@ use bitcoin::{BlockHash, FeeRate, Network, Script, ScriptBuf, Transaction, Txid}
 use electrum_client::{Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder};
 use lightning::chain::{BlockLocator, Listen, WatchedOutput};
 
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 
 use crate::chain::electrum::get_electrum_fee_rate_cache_update;
 use crate::chain::{CbfFeeSourceConfig, ChainListener};
@@ -49,6 +49,9 @@ const MAX_RESTART_RETRIES: u32 = 5;
 /// Initial backoff delay between restart attempts; doubles each failure.
 const INITIAL_BACKOFF_MS: u64 = 500;
 
+/// Retry matched block downloads before surfacing a CBF sync failure.
+const CBF_BLOCK_FETCH_RETRIES: u8 = 3;
+
 const ESPLORA_TIMEOUT: u64 = 2;
 
 /// Retries and per-request timeout for the fresh Electrum connection opened each fee cycle.
@@ -61,6 +64,40 @@ enum CbfRuntimeStatus {
 	Stopped,
 }
 
+#[derive(Clone, Copy)]
+enum CbfSyncState {
+	Active {
+		/// Highest tip whose preceding chain updates have been applied to all listeners.
+		applied_tip: Option<u32>,
+		/// Whether kyoto has reported catching up to the network tip (via `FiltersSynced`) and
+		/// the resulting blocks have been applied. `wait_until_synced` blocks until this is set.
+		///
+		/// This must not be derived from a locally-sampled chain tip: kyoto does not persist, so a
+		/// freshly (re)started node's local header chain sits at genesis until it syncs from peers.
+		/// Comparing against that would make `wait_until_synced` return before any sync happens.
+		synced_to_tip: bool,
+	},
+	Failed(Error),
+}
+
+/// Marks that we are applying a block past the last `FiltersSynced` tip, so a `sync_wallets` call
+/// issued after new blocks are mined waits for the next `FiltersSynced` rather than returning on a
+/// stale `synced_to_tip`. Only flips (and notifies waiters) when currently set.
+///
+/// Called both when a new block's filter is received (before it is fetched and applied) and after
+/// it is applied, so `synced_to_tip` reflects "behind by an unapplied block" as soon as we learn
+/// that block exists, not only once we've finished catching up to it.
+fn mark_syncing(sync_state_tx: &watch::Sender<CbfSyncState>) {
+	// Copy the current state out and drop the `watch` read guard before calling `send_replace`:
+	// `borrow()` holds a read lock for the lifetime of its temporary, and `send_replace` takes
+	// the write lock, so holding the borrow across it deadlocks. `CbfSyncState` is `Copy`, so the
+	// deref copies and the guard is released at the end of this statement.
+	let current = *sync_state_tx.borrow();
+	if let CbfSyncState::Active { applied_tip, synced_to_tip: true } = current {
+		sync_state_tx.send_replace(CbfSyncState::Active { applied_tip, synced_to_tip: false });
+	}
+}
+
 /// Struct for holding cbf chain source
 pub struct CbfChainSource {
 	/// Trusted peer addresses for kyoto's `Builder::add_peers`.
@@ -70,6 +107,8 @@ pub struct CbfChainSource {
 	fee_source: FeeSource,
 	/// Tracks whether the kyoto node is running and holds the live requester.
 	cbf_runtime_status: Arc<Mutex<CbfRuntimeStatus>>,
+	/// Highest CBF sync tip whose preceding chain updates have been applied to all listeners.
+	sync_state_tx: watch::Sender<CbfSyncState>,
 	/// Handle used to spawn the background tasks and offload blocking work.
 	runtime: Arc<Runtime>,
 	/// Node configuration (network, storage path).
@@ -80,29 +119,25 @@ pub struct CbfChainSource {
 	logger: Arc<Logger>,
 }
 
+#[derive(Debug)]
 enum ChainOp {
-	ConnectFull {
-		block_rx: oneshot::Receiver<Result<IndexedBlock, FetchBlockError>>,
-	},
-	ConnectFiltered {
-		header: Header,
-		height: u32,
-	},
-	Disconnect {
-		fork_point: BlockLocator,
-	},
-	/// Marks reaching the chain tip.
-	Synced {
-		tip_height: u32,
-	},
+	ConnectFull { block: IndexedBlock },
+	ConnectFiltered { header: Header, height: u32 },
+	Disconnect { fork_point: BlockLocator },
+	Synced { tip_height: u32 },
+	Failed { error: Error },
 }
 
 struct BlockApplicator {
 	chain_listener: ChainListener,
 	ops_rx: mpsc::UnboundedReceiver<ChainOp>,
+	next_height: u32,
+	sync_state_tx: watch::Sender<CbfSyncState>,
 	/// Present only for the native CBF fee source: lets us cache the fee rate of blocks we download
 	/// here, so the fee estimator doesn't have to re-download them.
 	block_fee_cache: Option<BlockFeeCache>,
+	kv_store: Arc<DynStore>,
+	node_metrics: Arc<PersistedNodeMetrics>,
 	logger: Arc<Logger>,
 }
 
@@ -110,32 +145,106 @@ impl BlockApplicator {
 	async fn run(mut self) {
 		while let Some(op) = self.ops_rx.recv().await {
 			match op {
-				ChainOp::ConnectFull { block_rx } => match block_rx.await {
-					Ok(Ok(ib)) => {
-						self.chain_listener.block_connected(&ib.block, ib.height);
-						if let Some(cache) = &self.block_fee_cache {
-							let fee_rate = coinbase_fee_rate(&ib.block, ib.height);
-							cache
-								.lock()
-								.expect("lock")
-								.insert(ib.height, (ib.block.block_hash(), fee_rate));
-						}
-					},
-					Ok(Err(e)) => log_error!(self.logger, "block fetch failed: {:?}", e),
-					Err(_) => log_error!(self.logger, "block oneshot dropped"),
+				ChainOp::ConnectFull { block: ib } => {
+					if ib.height != self.next_height {
+						log_debug!(
+							self.logger,
+							"CBF skipping out-of-sequence block at height {} (expected {})",
+							ib.height,
+							self.next_height
+						);
+						continue;
+					}
+					self.chain_listener.block_connected(&ib.block, ib.height);
+					self.next_height += 1;
+					mark_syncing(&self.sync_state_tx);
+					if let Some(cache) = &self.block_fee_cache {
+						let fee_rate = coinbase_fee_rate(&ib.block, ib.height);
+						cache
+							.lock()
+							.expect("lock")
+							.insert(ib.height, (ib.block.block_hash(), fee_rate));
+					}
 				},
 				ChainOp::ConnectFiltered { header, height } => {
+					if height != self.next_height {
+						log_debug!(
+							self.logger,
+							"CBF skipping out-of-sequence block at height {} (expected {})",
+							height,
+							self.next_height
+						);
+						continue;
+					}
 					self.chain_listener.filtered_block_connected(&header, &[], height);
+					self.next_height += 1;
+					mark_syncing(&self.sync_state_tx);
 				},
 				ChainOp::Disconnect { fork_point } => {
 					self.chain_listener.blocks_disconnected(fork_point);
+					self.next_height = fork_point.height + 1;
+					self.sync_state_tx.send_replace(CbfSyncState::Active {
+						applied_tip: Some(fork_point.height),
+						synced_to_tip: false,
+					});
 				},
 				ChainOp::Synced { tip_height } => {
 					log_info!(self.logger, "CBF caught up to tip {}", tip_height);
-					// TODO: notify sync-completion waiters (start()/sync_wallets()/tests) once
-					// a notification primitive is plumbed through.
+					if self.next_height > tip_height {
+						self.publish_synced_tip(tip_height).await;
+					} else {
+						log_debug!(
+							self.logger,
+							"CBF waiting to apply blocks through tip {} (next height {})",
+							tip_height,
+							self.next_height
+						);
+					}
+					log_info!(self.logger, "we set new tip and published at {}", tip_height);
+				},
+				ChainOp::Failed { error } => {
+					log_info!(self.logger, "we received error chain op {}", error);
+					self.sync_state_tx.send_replace(CbfSyncState::Failed(error));
 				},
 			}
+		}
+	}
+
+	async fn publish_synced_tip(&self, tip_height: u32) {
+		let already_published = {
+			let sync_state = *self.sync_state_tx.borrow();
+			match sync_state {
+				CbfSyncState::Active { applied_tip, .. } => applied_tip,
+				CbfSyncState::Failed(_) => None,
+			}
+		};
+		if already_published.map_or(false, |published_height| published_height >= tip_height) {
+			// Even if the applied tip is unchanged, we have now confirmed we are caught up to the
+			// network tip, so ensure the synced flag is set for any `wait_until_synced` waiter.
+			self.sync_state_tx.send_replace(CbfSyncState::Active {
+				applied_tip: already_published,
+				synced_to_tip: true,
+			});
+			return;
+		}
+		self.sync_state_tx.send_replace(CbfSyncState::Active {
+			applied_tip: Some(tip_height),
+			synced_to_tip: true,
+		});
+		let unix_time_secs_opt =
+			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+		if let Err(e) = update_and_persist_node_metrics(
+			&self.node_metrics,
+			&*self.kv_store,
+			&*self.logger,
+			|m| {
+				m.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
+				m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
+			},
+		)
+		.await
+		{
+			log_error!(self.logger, "Failed to persist CBF sync metrics: {:?}", e);
 		}
 	}
 }
@@ -147,9 +256,12 @@ const FEE_WINDOW_BLOCKS: u32 = BLOCK_FEE_CACHE_CAPACITY as u32;
 /// Electrum fee sources. Coinbase-derived rates are frequently zero on regtest/signet.
 const CBF_MIN_FEERATE_SAT_PER_KWU: u64 = 250;
 
-/// Per-block timeout when downloading a block to derive its coinbase fee rate. Kept short so a
-/// slow peer only delays a single sample rather than the whole fee update.
-const CBF_FEE_BLOCK_FETCH_TIMEOUT_SECS: u64 = 10;
+/// Per-attempt timeout when downloading a block from a peer — used both for matched blocks we apply
+/// to the listeners and for the coinbase-fee-rate samples. Kyoto queues the request and awaits a
+/// peer response with no timeout of its own, so a slow or unresponsive peer would otherwise park the
+/// fetch forever. Kept short so a single request is bounded and can be retried (or, for fees, only
+/// delays one sample) rather than stalling.
+const CBF_BLOCK_FETCH_TIMEOUT_SECS: u64 = 10;
 
 /// Upper bound on how long we wait for a peer to request a broadcast transaction. Kyoto resolves
 /// `submit_package` only once a peer asks for the transaction, so it never resolves if peer
@@ -205,11 +317,14 @@ impl CbfChainSource {
 		};
 		let registered_scripts = Arc::new(Mutex::new(HashSet::new()));
 		let cbf_runtime_status = Arc::new(Mutex::new(CbfRuntimeStatus::Stopped));
+		let (sync_state_tx, _) =
+			watch::channel(CbfSyncState::Active { applied_tip: None, synced_to_tip: false });
 		Ok(Self {
 			trusted_peers,
 			fee_source,
 			registered_scripts,
 			cbf_runtime_status,
+			sync_state_tx,
 			runtime,
 			config,
 			fee_estimator,
@@ -269,10 +384,19 @@ impl CbfChainSource {
 			FeeSource::Cbf { block_fee_cache } => Some(Arc::clone(block_fee_cache)),
 			_ => None,
 		};
+		let best_block_height = chain_listener.get_best_block().height;
+		self.sync_state_tx.send_replace(CbfSyncState::Active {
+			applied_tip: Some(best_block_height),
+			synced_to_tip: false,
+		});
 		let block_applicator = BlockApplicator {
+			next_height: best_block_height + 1,
+			sync_state_tx: self.sync_state_tx.clone(),
 			chain_listener: chain_listener.clone(),
 			ops_rx,
 			block_fee_cache,
+			kv_store: Arc::clone(&self.kv_store),
+			node_metrics: Arc::clone(&self.node_metrics),
 			logger: Arc::clone(&self.logger),
 		};
 		self.runtime.spawn_background_task(block_applicator.run());
@@ -286,7 +410,7 @@ impl CbfChainSource {
 		let restart_listener = chain_listener;
 		let restart_registered_scripts = Arc::clone(&self.registered_scripts);
 		let restart_cbf_runtime_status = Arc::clone(&self.cbf_runtime_status);
-		// let restart_block_applicator =
+		let restart_sync_state_tx = self.sync_state_tx.clone();
 
 		self.runtime.spawn_background_task(async move {
 			let mut current_node = node;
@@ -313,12 +437,14 @@ impl CbfChainSource {
 					Arc::clone(&restart_cbf_runtime_status),
 					ops_tx.clone(),
 					restart_listener.onchain_wallet.clone(),
+					restart_sync_state_tx.clone(),
 				));
 
 				match current_node.run().await {
 					Ok(()) => {
 						log_info!(restart_logger, "CBF node shut down cleanly.");
 						*restart_status.lock().expect("lock") = CbfRuntimeStatus::Stopped;
+						restart_sync_state_tx.send_replace(CbfSyncState::Failed(Error::NotRunning));
 						break;
 					},
 					Err(e) => {
@@ -331,6 +457,8 @@ impl CbfChainSource {
 								e,
 							);
 							*restart_status.lock().expect("lock") = CbfRuntimeStatus::Stopped;
+							restart_sync_state_tx
+								.send_replace(CbfSyncState::Failed(Error::TxSyncFailed));
 							break;
 						}
 						log_error!(
@@ -342,14 +470,13 @@ impl CbfChainSource {
 							backoff_ms,
 						);
 
-						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-						backoff_ms = backoff_ms.saturating_mul(2);
-
 						// Abort the old log consumers before rebuilding.
 						info_handle.abort();
 						warn_handle.abort();
 						event_handle.abort();
 
+						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+						backoff_ms = backoff_ms.saturating_mul(2);
 						let (new_node, new_client) = Self::build_kyoto(
 							&restart_peers,
 							&restart_config,
@@ -367,6 +494,8 @@ impl CbfChainSource {
 							let mut status = restart_status.lock().expect("lock");
 							if matches!(*status, CbfRuntimeStatus::Stopped) {
 								let _ = new_requester.shutdown();
+								restart_sync_state_tx
+									.send_replace(CbfSyncState::Failed(Error::NotRunning));
 								log_info!(
 									restart_logger,
 									"CBF restart aborted: stop() called during backoff."
@@ -374,6 +503,10 @@ impl CbfChainSource {
 								break;
 							}
 							*status = CbfRuntimeStatus::Started { requester: new_requester };
+							restart_sync_state_tx.send_replace(CbfSyncState::Active {
+								applied_tip: Some(restart_listener.get_best_block().height),
+								synced_to_tip: false,
+							});
 						}
 
 						current_node = new_node;
@@ -404,6 +537,36 @@ impl CbfChainSource {
 				log_error!(self.logger, "Failed to shut down CBF node: {:?}", e);
 			}
 		}
+		self.sync_state_tx.send_replace(CbfSyncState::Failed(Error::NotRunning));
+	}
+
+	pub(crate) async fn wait_until_synced(&self) -> Result<(), Error> {
+		if matches!(&*self.cbf_runtime_status.lock().expect("lock"), CbfRuntimeStatus::Stopped) {
+			return Err(Error::NotRunning);
+		}
+		let mut sync_state_rx = self.sync_state_tx.subscribe();
+
+		// Wait for kyoto to report catching up to the network tip (a `FiltersSynced`-driven
+		// `synced_to_tip`) and for the resulting blocks to be applied. We must not target a
+		// locally-sampled `chain_tip()`: kyoto does not persist, so a freshly (re)started node's
+		// local header chain sits at genesis until it syncs from peers, which would let this return
+		// before any sync happens.
+		loop {
+			match *sync_state_rx.borrow() {
+				CbfSyncState::Active { synced_to_tip, .. } => {
+					if synced_to_tip {
+						return Ok(());
+					}
+				},
+				CbfSyncState::Failed(error) => return Err(error),
+			}
+
+			if let Err(e) = sync_state_rx.changed().await {
+				debug_assert!(false, "Failed to receive CBF sync result: {:?}", e);
+				log_error!(self.logger, "Failed to receive CBF sync result: {:?}", e);
+				return Err(Error::TxSyncFailed);
+			}
+		}
 	}
 
 	async fn process_info_messages(mut info_rx: mpsc::Receiver<Info>, logger: Arc<Logger>) {
@@ -421,23 +584,29 @@ impl CbfChainSource {
 	}
 
 	async fn process_kyoto_events(
-		logger: Arc<Logger>, mut event_rx: mpsc::UnboundedReceiver<Event>,
+		logger: Arc<Logger>, mut event_rx: mpsc::UnboundedReceiver<KyotoEvent>,
 		registered_scripts: Arc<Mutex<HashSet<ScriptBuf>>>,
 		cbf_runtime_status: Arc<Mutex<CbfRuntimeStatus>>, ops_tx: mpsc::UnboundedSender<ChainOp>,
-		onchain_wallet: std::sync::Weak<Wallet>,
+		onchain_wallet: std::sync::Weak<Wallet>, sync_state_tx: watch::Sender<CbfSyncState>,
 	) {
 		while let Some(event) = event_rx.recv().await {
 			match event {
-				Event::IndexedFilter(indexed_filter) => {
+				KyotoEvent::IndexedFilter(indexed_filter) => {
 					let Some(onchain_wallet) = onchain_wallet.upgrade() else {
 						log_debug!(logger, "Onchain wallet dropped; stopping CBF event processing");
 						break;
 					};
+					// A new block's filter arrived, so we're behind by at least this block until it
+					// is fetched (if matched) and applied. Flip this before the fetch, not after,
+					// so a `sync_wallets` call issued in between doesn't return on a stale
+					// `synced_to_tip` that predates this block.
+					mark_syncing(&sync_state_tx);
+
 					let requester = match &*cbf_runtime_status.lock().expect("lock") {
 						CbfRuntimeStatus::Started { requester } => requester.clone(),
 						CbfRuntimeStatus::Stopped => {
-							//TODO should we panic here? what do we do if we have no requester?
-							continue;
+							let _ = ops_tx.send(ChainOp::Failed { error: Error::NotRunning });
+							return;
 						},
 					};
 					//registered_scripts contains only LDK scripts, not onchain wallet's scripts,
@@ -445,72 +614,95 @@ impl CbfChainSource {
 					//each time we receive an IndexedFilter event, we ask bdk to give us all
 					//revealed scripts. We create all_scripts starting from onchain wallet's
 					//scripts and extend them with LDK's ones
-					let mut all_scripts = onchain_wallet.list_revealed_scripts();
+					let mut all_scripts = onchain_wallet.list_watched_scripts();
 					all_scripts.extend(registered_scripts.lock().expect("lock").iter().cloned());
 
 					let block_hash = indexed_filter.block_hash();
 					let matched = indexed_filter.contains_any(all_scripts.iter());
 
 					let chop: ChainOp = if matched {
-						let block_rx =
-							requester.request_block(block_hash).expect("cannot request block");
-						ChainOp::ConnectFull { block_rx }
-					} else {
-						let height = indexed_filter.height();
-						//TODO we need to recheck that a particular height has not been
-						//reorganized, and we retrieve indeed the same block header that we
-						//received `IndexedFilter` event of.  right now this would block
-						//the further sync, as we cannot apply blocks in order.
-						//Future solution would use something like `get_header_by_hash`.
-						match requester.get_header(height).await {
-							Ok(Some(indexed_header)) => {
-								if indexed_header.block_hash() != block_hash {
-									log_debug!(
+						let mut attempt = 0;
+						let block = loop {
+							attempt += 1;
+							let handle = match requester.request_block(block_hash) {
+								Ok(handle) => handle,
+								Err(_) => {
+									log_error!(
 										logger,
-										"Filter for {} reorged; skipping",
+										"Failed to obtain receiver for matched CBF block {}; node is stopped",
 										block_hash
 									);
-									continue;
-								}
-								ChainOp::ConnectFiltered {
-									header: indexed_header.header,
-									height: indexed_header.height,
-								}
-							},
-							Ok(None) => {
-								log_error!(logger, "No header at height {}", height,);
-								continue;
-							},
-							Err(e) => {
-								log_error!(
-									logger,
-									"Failed to fetch header at height {}: {:?}",
-									height,
-									e,
-								);
-								continue;
-							},
+									let _ =
+										ops_tx.send(ChainOp::Failed { error: Error::NotRunning });
+									return;
+								},
+							};
+
+							// Bound the download so an unresponsive peer can't park the fetch forever,
+							// then flatten the three error layers (timeout / receiver dropped / fetch
+							// error) into a single reason so the retry-or-fail decision is written once.
+							let fetched = tokio::time::timeout(
+								Duration::from_secs(CBF_BLOCK_FETCH_TIMEOUT_SECS),
+								handle,
+							)
+							.await
+							.map_err(|_| {
+								format!("timed out after {}s", CBF_BLOCK_FETCH_TIMEOUT_SECS)
+							})
+							.and_then(|recv| recv.map_err(|_| "receiver was dropped".to_string()))
+							.and_then(|fetch| fetch.map_err(|e| format!("failed: {:?}", e)));
+
+							match fetched {
+								Ok(block) => break block,
+								Err(reason) if attempt < CBF_BLOCK_FETCH_RETRIES => {
+									log_debug!(
+										logger,
+										"CBF block fetch for {} {} on attempt {}; retrying",
+										block_hash,
+										reason,
+										attempt
+									);
+								},
+								Err(reason) => {
+									log_error!(
+										logger,
+										"CBF block fetch for {} {} after {} attempts; giving up",
+										block_hash,
+										reason,
+										CBF_BLOCK_FETCH_RETRIES
+									);
+									let _ =
+										ops_tx.send(ChainOp::Failed { error: Error::TxSyncFailed });
+									return;
+								},
+							}
+						};
+						ChainOp::ConnectFull { block }
+					} else {
+						ChainOp::ConnectFiltered {
+							header: indexed_filter.header(),
+							height: indexed_filter.height(),
 						}
 					};
 					if let Err(e) = ops_tx.send(chop) {
 						log_debug!(logger, "ops_rx gone: {}", e);
 					}
 				},
-				Event::FiltersSynced(sync_update) => {
+				KyotoEvent::FiltersSynced(sync_update) => {
 					//Because application of blocks is async, the fact that kyoto synced up to the
 					//tip does NOT mean that we caught everything up, that's why we send a ChainOp,
 					//only processing of which means we processed all blocks up to the tip.
 					log_info!(logger, "Kyoto synced up to the tip {}", sync_update.tip().height);
 					let _ = ops_tx.send(ChainOp::Synced { tip_height: sync_update.tip().height });
 				},
-				Event::ChainUpdate(BlockHeaderChanges::Connected(indexed_header)) => {
+				KyotoEvent::ChainUpdate(BlockHeaderChanges::Connected(indexed_header)) => {
 					log_debug!(
 						logger,
 						"Kyoto connected header at height {}",
 						indexed_header.height
 					);
 				},
-				Event::ChainUpdate(BlockHeaderChanges::Reorganized {
+				KyotoEvent::ChainUpdate(BlockHeaderChanges::Reorganized {
 					reorganized,
 					accepted: _,
 				}) => {
@@ -523,7 +715,7 @@ impl CbfChainSource {
 						let _ = ops_tx.send(ChainOp::Disconnect { fork_point });
 					}
 				},
-				Event::ChainUpdate(BlockHeaderChanges::ForkAdded(fork)) => {
+				KyotoEvent::ChainUpdate(BlockHeaderChanges::ForkAdded(fork)) => {
 					log_debug!(logger, "Kyoto added fork header at height {}", fork.height);
 				},
 			}
@@ -537,10 +729,6 @@ impl CbfChainSource {
 	pub(crate) fn register_output(&self, output: WatchedOutput) {
 		self.registered_scripts.lock().expect("lock").insert(output.script_pubkey);
 	}
-
-	// pub(crate) fn register_script(&self, script: ScriptBuf) {
-	// 	self.registered_scripts.lock().expect("lock").insert(script);
-	// }
 
 	pub(crate) async fn continuously_update_fee_rate_estimates(
 		&self, mut stop_sync_receiver: watch::Receiver<()>,
@@ -782,7 +970,7 @@ impl CbfChainSource {
 			}
 
 			match tokio::time::timeout(
-				Duration::from_secs(CBF_FEE_BLOCK_FETCH_TIMEOUT_SECS),
+				Duration::from_secs(CBF_BLOCK_FETCH_TIMEOUT_SECS),
 				requester.average_fee_rate(canonical_hash),
 			)
 			.await
