@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bitcoin::{Script, ScriptBuf, Transaction, Txid};
+use bitcoin::{Script, Txid};
 use lightning::chain::{BlockLocator, Filter};
 #[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
 use lightning::chain::Listen;
@@ -684,6 +684,7 @@ impl ChainSource {
 			},
 			#[cfg(feature = "chain-cbf")]
 			ChainSourceKind::Cbf { .. } => {
+				return Ok(());
 				todo!();
 			},
 		}
