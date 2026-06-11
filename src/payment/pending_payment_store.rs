@@ -26,11 +26,6 @@ impl PendingPaymentDetails {
 	pub(crate) fn new(details: PaymentDetails, conflicting_txids: Vec<Txid>) -> Self {
 		Self { details, conflicting_txids }
 	}
-
-	/// Convert to finalized payment for the main payment store
-	pub fn into_payment_details(self) -> PaymentDetails {
-		self.details
-	}
 }
 
 impl_writeable_tlv_based!(PendingPaymentDetails, {
