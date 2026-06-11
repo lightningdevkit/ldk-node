@@ -3202,18 +3202,4 @@ async fn builder_configures_sqlite_backup_store() {
 	}
 }
 
-#[cfg(not(feature = "uniffi"))]
-#[test]
-fn sqlite_backup_rejects_primary_storage_path() {
-	let mut config = random_config(false);
-	config.store_type = TestStoreType::Sqlite;
 
-	let primary_dir = config.node_config.storage_dir_path.clone();
-
-	setup_builder!(builder, config.node_config.clone());
-	builder.set_backup_storage_dir_path(primary_dir);
-
-	let res = builder.build(config.node_entropy.into());
-
-	assert!(matches!(res, Err(ldk_node::BuildError::BackupStorePathConflict)));
-}

@@ -151,19 +151,10 @@ impl std::fmt::Debug for LogWriterConfig {
 	}
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 struct TierStoreConfig {
-	ephemeral: Option<Arc<DynStore>>,
+	ephemeral_storage_dir_path: Option<PathBuf>,
 	backup_storage_dir_path: Option<PathBuf>,
-}
-
-impl std::fmt::Debug for TierStoreConfig {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("TierStoreConfig")
-			.field("ephemeral", &self.ephemeral.as_ref().map(|_| "Arc<DynStore>"))
-			.field("backup_storage_dir_path", &self.backup_storage_dir_path)
-			.finish()
-	}
 }
 
 /// An error encountered during building a [`Node`].
@@ -212,11 +203,7 @@ pub enum BuildError {
 	AsyncPaymentsConfigMismatch,
 	/// An attempt to setup a DNS Resolver failed.
 	DNSResolverSetupFailed,
-	/// The configured backup storage path conflicts with the primary storage path.
-	///
-	/// Backup storage must use a distinct local directory so that the primary and
-	/// backup stores do not point to the same SQLite database.
-	BackupStorePathConflict,
+
 }
 
 impl fmt::Display for BuildError {
@@ -254,12 +241,7 @@ impl fmt::Display for BuildError {
 			Self::DNSResolverSetupFailed => {
 				write!(f, "An attempt to setup a DNS resolver has failed.")
 			},
-			Self::BackupStorePathConflict => {
-				write!(
-					f,
-					"The configured backup storage path conflicts with the primary storage path."
-				)
-			},
+
 		}
 	}
 }
@@ -652,10 +634,6 @@ impl NodeBuilder {
 	/// Writes and removals for primary-backed data only succeed once both the
 	/// primary and backup SQLite stores complete successfully.
 	///
-	/// The configured path must point to a distinct local directory from the
-	/// primary storage path. If the backup path equals the primary storage path,
-	/// building will fail with [`BuildError::BackupStorePathConflict`].
-	///
 	/// If not set, durable data will be stored only in the primary store.
 	///
 	/// [`SQLITE_BACKUP_DB_FILE_NAME`]: crate::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME
@@ -665,16 +643,17 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Configures the ephemeral store for non-critical, frequently-accessed data.
+	/// Configures the ephemeral storage directory path for non-critical, frequently-accessed data.
 	///
-	/// When building with tiered storage, this store is used for ephemeral data like
-	/// the network graph and scorer data to reduce latency for reads. Data stored here
-	/// can be rebuilt if lost.
+	/// When set, a local SQLite store is created at this path for ephemeral data like
+	/// the network graph and scorer. Data stored here can be rebuilt if lost.
 	///
 	/// If not set, non-critical data will be stored in the primary store.
-	pub fn set_ephemeral_store(&mut self, ephemeral_store: Arc<DynStore>) -> &mut Self {
+	pub fn set_ephemeral_storage_dir_path(
+		&mut self, ephemeral_storage_dir_path: String,
+	) -> &mut Self {
 		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
-		tier_store_config.ephemeral = Some(ephemeral_store);
+		tier_store_config.ephemeral_storage_dir_path = Some(ephemeral_storage_dir_path.into());
 		self
 	}
 
@@ -883,9 +862,9 @@ impl NodeBuilder {
 	/// The provided `kv_store` will be used as the primary storage backend. Optionally,
 	/// an ephemeral store for frequently-accessed non-critical data (e.g., network graph, scorer)
 	/// and a local SQLite backup store for disaster recovery can be configured via
-	/// [`set_ephemeral_store`] and [`set_backup_storage_dir_path`].
+	/// [`set_ephemeral_storage_dir_path`] and [`set_backup_storage_dir_path`].
 	///
-	/// [`set_ephemeral_store`]: Self::set_ephemeral_store
+	/// [`set_ephemeral_storage_dir_path`]: Self::set_ephemeral_storage_dir_path
 	/// [`set_backup_storage_dir_path`]: Self::set_backup_storage_dir_path
 	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
@@ -919,18 +898,21 @@ impl NodeBuilder {
 		let primary_store = Arc::new(DynStoreWrapper(kv_store));
 		let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
 		if let Some(config) = ts_config {
-			config.ephemeral.as_ref().map(|s| tier_store.set_ephemeral_store(Arc::clone(s)));
-			if let Some(backup_storage_dir_path) = config.backup_storage_dir_path.as_ref() {
-				let primary_storage_dir_path = PathBuf::from(&self.config.storage_dir_path);
-				if primary_storage_dir_path == *backup_storage_dir_path {
-					log_error!(
-						logger,
-						"Backup storage path must differ from primary storage path: {}",
-						backup_storage_dir_path.display()
-					);
-					return Err(BuildError::BackupStorePathConflict);
-				}
+			if let Some(ephemeral_storage_dir_path) = config.ephemeral_storage_dir_path.as_ref() {
+				let ephemeral_store = SqliteStore::new(
+					ephemeral_storage_dir_path.clone(),
+					Some(io::sqlite_store::SQLITE_EPHEMERAL_DB_FILE_NAME.to_string()),
+					Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+				)
+				.map_err(|e| {
+					log_error!(logger, "Failed to setup ephemeral SQLite store: {}", e);
+					BuildError::KVStoreSetupFailed
+				})?;
+				let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(ephemeral_store));
+				tier_store.set_ephemeral_store(ephemeral_store);
+			}
 
+			if let Some(backup_storage_dir_path) = config.backup_storage_dir_path.as_ref() {
 				let backup_store = SqliteStore::new(
 					backup_storage_dir_path.clone(),
 					Some(io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME.to_string()),
