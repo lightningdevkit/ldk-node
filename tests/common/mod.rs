@@ -314,6 +314,10 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	bitcoind_conf.args.push("-rest");
+	// Enable P2P and compact block filters so the CBF (BIP157) chain source can connect and sync.
+	bitcoind_conf.p2p = corepc_node::P2P::Yes;
+	bitcoind_conf.args.push("-blockfilterindex=1");
+	bitcoind_conf.args.push("-peerblockfilters=1");
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = env::var("ELECTRS_EXE")
@@ -330,7 +334,14 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 pub(crate) fn random_chain_source<'a>(
 	bitcoind: &'a BitcoinD, electrsd: &'a ElectrsD,
 ) -> TestChainSource<'a> {
-	let r = rand::random_range(0..3);
+	let r = match std::env::var("LDK_TEST_CHAIN_SOURCE").ok().as_deref() {
+		Some("esplora") => 0,
+		Some("electrum") => 1,
+		Some("bitcoind-rpc") => 2,
+		Some("bitcoind-rest") => 3,
+		Some("cbf") => 4,
+		_ => rand::random_range(0..3),
+	};
 	match r {
 		0 => {
 			println!("Randomly setting up Esplora chain syncing...");
@@ -347,6 +358,10 @@ pub(crate) fn random_chain_source<'a>(
 		3 => {
 			println!("Randomly setting up Bitcoind REST chain syncing...");
 			TestChainSource::BitcoindRestSync(bitcoind)
+		},
+		4 => {
+			println!("Randomly setting up CBF compact block filter syncing...");
+			TestChainSource::Cbf(bitcoind)
 		},
 		_ => unreachable!(),
 	}
@@ -535,6 +550,7 @@ pub(crate) enum TestChainSource<'a> {
 	Electrum(&'a ElectrsD),
 	BitcoindRpcSync(&'a BitcoinD),
 	BitcoindRestSync(&'a BitcoinD),
+	Cbf(&'a BitcoinD),
 }
 
 #[derive(Clone, Copy)]
@@ -706,6 +722,11 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 				rpc_password,
 				config.wallet_rescan_from_height,
 			);
+		},
+		TestChainSource::Cbf(bitcoind) => {
+			let p2p_socket = bitcoind.params.p2p_socket.expect("P2P must be enabled for CBF");
+			let peer_addr = format!("{}", p2p_socket);
+			builder.set_chain_source_cbf(vec![peer_addr], None);
 		},
 	}
 
@@ -1562,6 +1583,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
+	tokio::time::sleep(Duration::from_secs(2)).await;
+
 	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	wait_for_node_tip(&node_a, new_height).await;
 	wait_for_node_tip(&node_b, new_height).await;
@@ -1586,6 +1609,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
+	tokio::time::sleep(Duration::from_secs(5)).await;
 	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	wait_for_node_tip(&node_a, new_height).await;
 	wait_for_node_tip(&node_b, new_height).await;
@@ -1638,8 +1662,10 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	tokio::time::sleep(Duration::from_secs(1)).await;
 	if force_close {
 		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
+		tokio::time::sleep(Duration::from_secs(2)).await;
 	} else {
 		node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
+		tokio::time::sleep(Duration::from_secs(2)).await;
 		// The cooperative shutdown may complete before we get to check, but if the channel
 		// is still visible it must already be in a shutdown state.
 		if let Some(channel) =

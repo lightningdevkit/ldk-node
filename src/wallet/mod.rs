@@ -1856,13 +1856,14 @@ fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
 
 impl Listen for Wallet {
 	fn filtered_block_connected(
-		&self, _header: &bitcoin::block::Header,
-		_txdata: &lightning::chain::transaction::TransactionData, _height: u32,
+		&self, header: &bitcoin::block::Header,
+		_txdata: &lightning::chain::transaction::TransactionData, height: u32,
 	) {
-		debug_assert!(false, "Syncing filtered blocks is currently not supported");
-		// As far as we can tell this would be a no-op anyways as we don't have to tell BDK about
-		// the header chain of intermediate blocks. According to the BDK team, it's sufficient to
-		// only connect full blocks starting from the last point of disagreement.
+		// A non-matching filter means none of this block's transactions are relevant to us, so there
+		// is nothing but the header to apply. We still connect an empty block built from the header
+		// to keep the on-chain wallet's chain contiguous with the listeners.
+		let block = bitcoin::Block { header: *header, txdata: Vec::new() };
+		self.block_connected(&block, height);
 	}
 
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {

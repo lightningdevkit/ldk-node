@@ -101,6 +101,7 @@ enum ChainOp {
 struct BlockApplicator {
 	chain_listener: ChainListener,
 	ops_rx: mpsc::UnboundedReceiver<ChainOp>,
+	next_height: u32,
 	/// Present only for the native CBF fee source: lets us cache the fee rate of blocks we download
 	/// here, so the fee estimator doesn't have to re-download them.
 	block_fee_cache: Option<BlockFeeCache>,
@@ -113,7 +114,17 @@ impl BlockApplicator {
 			match op {
 				ChainOp::ConnectFull { block_rx } => match block_rx.await {
 					Ok(Ok(ib)) => {
+						if ib.height != self.next_height {
+							log_debug!(
+								self.logger,
+								"CBF skipping out-of-sequence block at height {} (expected {})",
+								ib.height,
+								self.next_height
+							);
+							continue;
+						}
 						self.chain_listener.block_connected(&ib.block, ib.height);
+						self.next_height += 1;
 						if let Some(cache) = &self.block_fee_cache {
 							let fee_rate = coinbase_fee_rate(&ib.block, ib.height);
 							cache
@@ -126,10 +137,21 @@ impl BlockApplicator {
 					Err(_) => log_error!(self.logger, "block oneshot dropped"),
 				},
 				ChainOp::ConnectFiltered { header, height } => {
+					if height != self.next_height {
+						log_debug!(
+							self.logger,
+							"CBF skipping out-of-sequence block at height {} (expected {})",
+							height,
+							self.next_height
+						);
+						continue;
+					}
 					self.chain_listener.filtered_block_connected(&header, &[], height);
+					self.next_height += 1;
 				},
 				ChainOp::Disconnect { fork_point } => {
 					self.chain_listener.blocks_disconnected(fork_point);
+					self.next_height = fork_point.height + 1;
 				},
 				ChainOp::Synced { tip_height } => {
 					log_info!(self.logger, "CBF caught up to tip {}", tip_height);
@@ -264,6 +286,7 @@ impl CbfChainSource {
 			_ => None,
 		};
 		let block_applicator = BlockApplicator {
+			next_height: chain_listener.get_best_block().height + 1,
 			chain_listener: chain_listener.clone(),
 			ops_rx,
 			block_fee_cache,
@@ -336,14 +359,13 @@ impl CbfChainSource {
 							backoff_ms,
 						);
 
-						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
-						backoff_ms = backoff_ms.saturating_mul(2);
-
 						// Abort the old log consumers before rebuilding.
 						info_handle.abort();
 						warn_handle.abort();
 						event_handle.abort();
 
+						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+						backoff_ms = backoff_ms.saturating_mul(2);
 						let (new_node, new_client) = Self::build_kyoto(
 							&restart_peers,
 							&restart_config,
@@ -442,9 +464,11 @@ impl CbfChainSource {
 					let matched = indexed_filter.contains_any(all_scripts.iter());
 
 					let chop: ChainOp = if matched {
-						let block_rx =
-							requester.request_block(block_hash).expect("cannot request block");
-						ChainOp::ConnectFull { block_rx }
+						if let Ok(handle) = requester.request_block(block_hash) {
+							ChainOp::ConnectFull { block_rx: handle }
+						} else {
+							break;
+						}
 					} else {
 						let height = indexed_filter.height();
 						//TODO we need to recheck that a particular height has not been
@@ -468,6 +492,8 @@ impl CbfChainSource {
 								}
 							},
 							Ok(None) => {
+								//TODO what do we do?
+								todo!();
 								log_error!(logger, "No header at height {}", height,);
 								continue;
 							},
@@ -478,7 +504,8 @@ impl CbfChainSource {
 									height,
 									e,
 								);
-								continue;
+								break;
+								// continue;
 							},
 						}
 					};

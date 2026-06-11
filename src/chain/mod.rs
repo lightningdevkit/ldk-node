@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bitcoin::{Script, ScriptBuf, Transaction, Txid};
+use bitcoin::{Script, Txid};
 use lightning::chain::{BlockLocator, Filter};
 
 use crate::chain::bitcoind::{BitcoindChainSource, ChainListener, UtxoSourceClient};
@@ -517,6 +517,7 @@ impl ChainSource {
 					.await
 			},
 			ChainSourceKind::Cbf { .. } => {
+				return Ok(());
 				todo!();
 			},
 		}

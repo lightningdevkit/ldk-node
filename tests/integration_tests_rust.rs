@@ -3001,6 +3001,8 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let new_height = generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 	service_node.sync_wallets().unwrap();
 	payer_node.sync_wallets().unwrap();
+	wait_for_node_tip(&service_node, new_height).await;
+	wait_for_node_tip(&payer_node, new_height).await;
 	expect_channel_ready_event!(payer_node, service_node.node_id());
 	expect_channel_ready_event!(service_node, payer_node.node_id());
 
