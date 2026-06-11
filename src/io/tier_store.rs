@@ -140,13 +140,45 @@ struct TierStoreInner {
 	ephemeral_store: Option<Arc<DynStore>>,
 	/// An optional second durable store for primary-backed data.
 	backup_store: Option<Arc<DynStore>>,
+	/// Per-key locks for serializing primary+backup operations.
+	locks: Mutex<HashMap<String, Arc<TokioMutex<()>>>>,
 	logger: Arc<Logger>,
 }
 
 impl TierStoreInner {
 	/// Creates a tier store with the primary data store.
 	pub fn new(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> Self {
-		Self { primary_store, ephemeral_store: None, backup_store: None, logger }
+		Self {
+			primary_store,
+			ephemeral_store: None,
+			backup_store: None,
+			locks: Mutex::new(HashMap::new()),
+			logger,
+		}
+	}
+
+	fn get_key_lock(&self, locking_key: String) -> Arc<TokioMutex<()>> {
+		let mut locks = self.locks.lock().expect("lock");
+		Arc::clone(locks.entry(locking_key).or_default())
+	}
+
+	fn clean_locks(&self, lock_ref: &Arc<TokioMutex<()>>, locking_key: String) {
+		let mut locks = self.locks.lock().expect("lock");
+		let strong_count = Arc::strong_count(lock_ref);
+		debug_assert!(strong_count >= 2, "Unexpected TierStore lock strong count");
+		if strong_count == 2 {
+			locks.remove(&locking_key);
+		}
+	}
+
+	fn build_locking_key(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> String {
+		if primary_namespace.is_empty() {
+			key.to_owned()
+		} else {
+			format!("{}#{}#{}", primary_namespace, secondary_namespace, key)
+		}
 	}
 
 	/// Reads from the primary data store.
@@ -317,13 +349,26 @@ impl TierStoreInner {
 			}
 		}
 
-		self.write_primary_backup_async(
+		let locking_key = self.build_locking_key(
 			primary_namespace.as_str(),
 			secondary_namespace.as_str(),
 			key.as_str(),
-			buf,
-		)
-		.await
+		);
+		let key_lock = self.get_key_lock(locking_key.clone());
+
+		let res = {
+			let _guard = key_lock.lock().await;
+			self.write_primary_backup_async(
+				primary_namespace.as_str(),
+				secondary_namespace.as_str(),
+				key.as_str(),
+				buf,
+			)
+			.await
+		};
+
+		self.clean_locks(&key_lock, locking_key);
+		res
 	}
 
 	async fn remove_internal(
@@ -349,13 +394,26 @@ impl TierStoreInner {
 			}
 		}
 
-		self.remove_primary_backup_async(
+		let locking_key = self.build_locking_key(
 			primary_namespace.as_str(),
 			secondary_namespace.as_str(),
 			key.as_str(),
-			lazy,
-		)
-		.await
+		);
+		let key_lock = self.get_key_lock(locking_key.clone());
+
+		let res = {
+			let _guard = key_lock.lock().await;
+			self.remove_primary_backup_async(
+				primary_namespace.as_str(),
+				secondary_namespace.as_str(),
+				key.as_str(),
+				lazy,
+			)
+			.await
+		};
+
+		self.clean_locks(&key_lock, locking_key);
+		res
 	}
 
 	async fn list_internal(
