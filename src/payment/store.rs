@@ -589,28 +589,31 @@ impl StorableObjectUpdate<PaymentDetails> for PaymentDetailsUpdate {
 /// Represents a pending payment
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PendingPaymentDetails {
-	/// The full payment details
-	pub details: PaymentDetails,
+	/// The payment id tracked in the main payment store.
+	pub payment_id: PaymentId,
+	/// The canonical transaction id currently associated with the payment.
+	pub txid: Txid,
 	/// Transaction IDs that have replaced or conflict with this payment.
 	pub conflicting_txids: Vec<Txid>,
 }
 
 impl PendingPaymentDetails {
-	pub(crate) fn new(details: PaymentDetails, conflicting_txids: Vec<Txid>) -> Self {
-		Self { details, conflicting_txids }
+	pub(crate) fn new(payment_id: PaymentId, txid: Txid, conflicting_txids: Vec<Txid>) -> Self {
+		Self { payment_id, txid, conflicting_txids }
 	}
 }
 
 impl_writeable_tlv_based!(PendingPaymentDetails, {
-	(0, details, required),
-	(2, conflicting_txids, optional_vec),
+	(0, payment_id, required),
+	(2, txid, required),
+	(4, conflicting_txids, optional_vec),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PendingPaymentDetailsUpdate {
-	pub id: PaymentId,
-	pub payment_update: Option<PaymentDetailsUpdate>,
-	pub conflicting_txids: Option<Vec<Txid>>,
+	pub payment_id: PaymentId,
+	pub txid: Txid,
+	pub conflicting_txids: Vec<Txid>,
 }
 
 impl StorableObject for PendingPaymentDetails {
@@ -618,20 +621,24 @@ impl StorableObject for PendingPaymentDetails {
 	type Update = PendingPaymentDetailsUpdate;
 
 	fn id(&self) -> Self::Id {
-		self.details.id
+		self.payment_id
 	}
 
 	fn update(&mut self, update: Self::Update) -> bool {
 		let mut updated = false;
 
-		// Update the underlying payment details if present
-		if let Some(payment_update) = update.payment_update {
-			updated |= self.details.update(payment_update);
+		if self.txid != update.txid {
+			let old_txid = self.txid;
+			self.txid = update.txid;
+			if old_txid != self.txid && !self.conflicting_txids.contains(&old_txid) {
+				self.conflicting_txids.push(old_txid);
+			}
+			updated = true;
 		}
 
-		if let Some(new_conflicting_txids) = update.conflicting_txids {
-			if self.conflicting_txids != new_conflicting_txids {
-				self.conflicting_txids = new_conflicting_txids;
+		for txid in update.conflicting_txids {
+			if txid != self.txid && !self.conflicting_txids.contains(&txid) {
+				self.conflicting_txids.push(txid);
 				updated = true;
 			}
 		}
@@ -646,18 +653,17 @@ impl StorableObject for PendingPaymentDetails {
 
 impl StorableObjectUpdate<PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 	fn id(&self) -> <PendingPaymentDetails as StorableObject>::Id {
-		self.id
+		self.payment_id
 	}
 }
 
 impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 	fn from(value: &PendingPaymentDetails) -> Self {
-		let conflicting_txids = if value.conflicting_txids.is_empty() {
-			None
-		} else {
-			Some(value.conflicting_txids.clone())
-		};
-		Self { id: value.id(), payment_update: Some(value.details.to_update()), conflicting_txids }
+		Self {
+			payment_id: value.id(),
+			txid: value.txid,
+			conflicting_txids: value.conflicting_txids.clone(),
+		}
 	}
 }
 

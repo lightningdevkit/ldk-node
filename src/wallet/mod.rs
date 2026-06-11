@@ -270,48 +270,62 @@ impl Wallet {
 
 					if payment_status == PaymentStatus::Pending {
 						let pending_payment =
-							self.create_pending_payment_from_tx(payment, Vec::new());
+							self.create_pending_payment_from_tx(payment_id, txid, Vec::new());
 
 						self.runtime.block_on(
 							self.pending_payment_store.insert_or_update(pending_payment),
 						)?;
+					} else {
+						self.runtime.block_on(self.pending_payment_store.remove(&payment_id))?;
 					}
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
 					let pending_payments: Vec<PendingPaymentDetails> =
-						self.pending_payment_store.list_filter(|p| {
-							debug_assert!(
-								p.details.status == PaymentStatus::Pending,
-								"Non-pending payment {:?} found in pending store",
-								p.details.id,
-							);
-							p.details.status == PaymentStatus::Pending
-								&& matches!(p.details.kind, PaymentKind::Onchain { .. })
-						});
+						self.pending_payment_store.list_filter(|_| true);
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
 
-					for mut payment in pending_payments {
-						match payment.details.kind {
+					for pending_payment in pending_payments {
+						let Some(mut payment) = self.payment_store.get(&pending_payment.payment_id)
+						else {
+							self.runtime.block_on(
+								self.pending_payment_store.remove(&pending_payment.payment_id),
+							)?;
+							continue;
+						};
+
+						debug_assert!(
+							payment.status == PaymentStatus::Pending,
+							"Non-pending payment {:?} found in pending store",
+							payment.id,
+						);
+						if payment.status != PaymentStatus::Pending {
+							self.runtime.block_on(
+								self.pending_payment_store.remove(&pending_payment.payment_id),
+							)?;
+							continue;
+						}
+
+						match &payment.kind {
 							PaymentKind::Onchain {
 								status: ConfirmationStatus::Confirmed { height, .. },
 								..
 							} => {
-								let payment_id = payment.details.id;
-								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
-									payment.details.status = PaymentStatus::Succeeded;
-									self.runtime.block_on(
-										self.payment_store.insert_or_update(payment.details),
-									)?;
+								if new_tip.height >= *height + ANTI_REORG_DELAY - 1 {
+									payment.status = PaymentStatus::Succeeded;
 									self.runtime
-										.block_on(self.pending_payment_store.remove(&payment_id))?;
+										.block_on(self.payment_store.insert_or_update(payment))?;
+									self.runtime.block_on(
+										self.pending_payment_store
+											.remove(&pending_payment.payment_id),
+									)?;
 								}
 							},
 							PaymentKind::Onchain {
 								txid,
 								status: ConfirmationStatus::Unconfirmed,
-							} if payment.details.direction == PaymentDirection::Outbound => {
-								unconfirmed_outbound_txids.push(txid);
+							} if payment.direction == PaymentDirection::Outbound => {
+								unconfirmed_outbound_txids.push(*txid);
 							},
 							_ => {},
 						}
@@ -359,7 +373,7 @@ impl Wallet {
 						ConfirmationStatus::Unconfirmed,
 					);
 					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
+						self.create_pending_payment_from_tx(payment_id, txid, Vec::new());
 					self.runtime.block_on(self.payment_store.insert_or_update(payment))?;
 					self.runtime
 						.block_on(self.pending_payment_store.insert_or_update(pending_payment))?;
@@ -389,8 +403,22 @@ impl Wallet {
 					);
 					let payment =
 						self.payment_store.get(&payment_id).ok_or(Error::InvalidPaymentId)?;
-					let pending_payment_details =
-						self.create_pending_payment_from_tx(payment, conflict_txids.clone());
+					let payment_txid = match &payment.kind {
+						PaymentKind::Onchain { txid, .. } => *txid,
+						_ => {
+							log_error!(
+								self.logger,
+								"Payment {:?} is not on-chain during WalletEvent::TxReplaced",
+								payment_id,
+							);
+							continue;
+						},
+					};
+					let pending_payment_details = self.create_pending_payment_from_tx(
+						payment_id,
+						payment_txid,
+						conflict_txids,
+					);
 
 					self.runtime.block_on(
 						self.pending_payment_store.insert_or_update(pending_payment_details),
@@ -409,7 +437,7 @@ impl Wallet {
 						ConfirmationStatus::Unconfirmed,
 					);
 					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
+						self.create_pending_payment_from_tx(payment_id, txid, Vec::new());
 					self.runtime.block_on(self.payment_store.insert_or_update(payment))?;
 					self.runtime
 						.block_on(self.pending_payment_store.insert_or_update(pending_payment))?;
@@ -1207,9 +1235,9 @@ impl Wallet {
 	}
 
 	fn create_pending_payment_from_tx(
-		&self, payment: PaymentDetails, conflicting_txids: Vec<Txid>,
+		&self, payment_id: PaymentId, txid: Txid, conflicting_txids: Vec<Txid>,
 	) -> PendingPaymentDetails {
-		PendingPaymentDetails::new(payment, conflicting_txids)
+		PendingPaymentDetails::new(payment_id, txid, conflicting_txids)
 	}
 
 	fn find_payment_by_txid(&self, target_txid: Txid) -> Option<PaymentId> {
@@ -1220,13 +1248,10 @@ impl Wallet {
 
 		if let Some(replaced_details) = self
 			.pending_payment_store
-			.list_filter(|p| {
-				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
-					|| p.conflicting_txids.contains(&target_txid)
-			})
+			.list_filter(|p| p.txid == target_txid || p.conflicting_txids.contains(&target_txid))
 			.first()
 		{
-			return Some(replaced_details.details.id);
+			return Some(replaced_details.payment_id);
 		}
 
 		None
@@ -1428,11 +1453,11 @@ impl Wallet {
 		);
 
 		let pending_payment_store =
-			self.create_pending_payment_from_tx(new_payment.clone(), Vec::new());
+			self.create_pending_payment_from_tx(new_payment.id, new_txid, vec![txid]);
 
+		self.runtime.block_on(self.payment_store.insert_or_update(new_payment))?;
 		self.runtime
 			.block_on(self.pending_payment_store.insert_or_update(pending_payment_store))?;
-		self.runtime.block_on(self.payment_store.insert_or_update(new_payment))?;
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
 
