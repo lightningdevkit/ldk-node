@@ -33,6 +33,7 @@ use lightning_liquidity::lsps1::msgs::{
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
 use lightning_liquidity::lsps2::event::{LSPS2ClientEvent, LSPS2ServiceEvent};
 use lightning_liquidity::lsps2::msgs::{LSPS2OpeningFeeParams, LSPS2RawOpeningFeeParams};
+use lightning_liquidity::lsps2::router::LSPS2Bolt12InvoiceParameters;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
@@ -53,7 +54,7 @@ use crate::{total_anchor_channels_reserve_sats, Config, Error};
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 
 const LSPS2_GETINFO_REQUEST_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
-const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u32 = 72;
+const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u16 = 72;
 
 struct LSPS1Client {
 	lsp_node_id: PublicKey,
@@ -1232,6 +1233,114 @@ where
 		Ok(invoice)
 	}
 
+	pub(crate) async fn lsps2_bolt12_payment_metadata(
+		&self, amount_msat: u64, max_total_lsp_fee_limit_msat: Option<u64>,
+	) -> Result<(u64, PaymentMetadata), Error> {
+		let fee_response = self.lsps2_request_opening_fee_params().await?;
+
+		let (min_total_fee_msat, min_opening_params) = fee_response
+			.opening_fee_params_menu
+			.into_iter()
+			.filter_map(|params| {
+				if amount_msat < params.min_payment_size_msat
+					|| amount_msat > params.max_payment_size_msat
+				{
+					log_debug!(self.logger,
+						"Skipping LSP-offered JIT parameters as the payment of {}msat doesn't meet LSP limits (min: {}msat, max: {}msat)",
+						amount_msat,
+						params.min_payment_size_msat,
+						params.max_payment_size_msat
+					);
+					None
+				} else {
+					compute_opening_fee(amount_msat, params.min_fee_msat, params.proportional as u64)
+						.map(|fee| (fee, params))
+				}
+			})
+			.min_by_key(|p| p.0)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Failed to handle response from liquidity service",);
+				Error::LiquidityRequestFailed
+			})?;
+
+		if let Some(max_total_lsp_fee_limit_msat) = max_total_lsp_fee_limit_msat {
+			if min_total_fee_msat > max_total_lsp_fee_limit_msat {
+				log_error!(self.logger,
+					"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our fee limit of {}msat",
+					min_total_fee_msat, max_total_lsp_fee_limit_msat
+				);
+				return Err(Error::LiquidityFeeTooHigh);
+			}
+		}
+
+		let buy_response =
+			self.lsps2_send_buy_request(Some(amount_msat), min_opening_params).await?;
+		let metadata = self.lsps2_bolt12_metadata_from_buy_response(
+			buy_response,
+			LSPS2Parameters {
+				max_total_opening_fee_msat: Some(min_total_fee_msat),
+				max_proportional_opening_fee_ppm_msat: None,
+			},
+		)?;
+
+		Ok((min_total_fee_msat, metadata))
+	}
+
+	pub(crate) async fn lsps2_variable_amount_bolt12_payment_metadata(
+		&self, max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<(u64, PaymentMetadata), Error> {
+		let fee_response = self.lsps2_request_opening_fee_params().await?;
+
+		let (min_prop_fee_ppm_msat, min_opening_params) = fee_response
+			.opening_fee_params_menu
+			.into_iter()
+			.map(|params| (params.proportional as u64, params))
+			.min_by_key(|p| p.0)
+			.ok_or_else(|| {
+				log_error!(self.logger, "Failed to handle response from liquidity service",);
+				Error::LiquidityRequestFailed
+			})?;
+
+		if let Some(max_proportional_lsp_fee_limit_ppm_msat) =
+			max_proportional_lsp_fee_limit_ppm_msat
+		{
+			if min_prop_fee_ppm_msat > max_proportional_lsp_fee_limit_ppm_msat {
+				log_error!(self.logger,
+					"Failed to request inbound JIT channel as LSP's requested proportional opening fee of {} ppm msat exceeds our fee limit of {} ppm msat",
+					min_prop_fee_ppm_msat,
+					max_proportional_lsp_fee_limit_ppm_msat
+				);
+				return Err(Error::LiquidityFeeTooHigh);
+			}
+		}
+
+		let buy_response = self.lsps2_send_buy_request(None, min_opening_params).await?;
+		let metadata = self.lsps2_bolt12_metadata_from_buy_response(
+			buy_response,
+			LSPS2Parameters {
+				max_total_opening_fee_msat: None,
+				max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
+			},
+		)?;
+
+		Ok((min_prop_fee_ppm_msat, metadata))
+	}
+
+	fn lsps2_bolt12_metadata_from_buy_response(
+		&self, buy_response: LSPS2BuyResponse, lsps2_parameters: LSPS2Parameters,
+	) -> Result<PaymentMetadata, Error> {
+		let lsps2_client = self.lsps2_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
+
+		Ok(PaymentMetadata {
+			lsps2_parameters: Some(lsps2_parameters),
+			lsps2_bolt12_invoice_parameters: Some(LSPS2Bolt12InvoiceParameters {
+				counterparty_node_id: lsps2_client.lsp_node_id,
+				intercept_scid: buy_response.intercept_scid,
+				cltv_expiry_delta: buy_response.cltv_expiry_delta,
+			}),
+		})
+	}
+
 	async fn lsps2_request_opening_fee_params(&self) -> Result<LSPS2FeeResponse, Error> {
 		let lsps2_client = self.lsps2_client.as_ref().ok_or(Error::LiquiditySourceUnavailable)?;
 
@@ -1317,8 +1426,11 @@ where
 
 		// LSPS2 requires min_final_cltv_expiry_delta to be at least 2 more than usual.
 		let min_final_cltv_expiry_delta = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
-		let encoded_payment_metadata =
-			PaymentMetadata { lsps2_parameters: Some(lsps2_parameters) }.encode();
+		let encoded_payment_metadata = PaymentMetadata {
+			lsps2_parameters: Some(lsps2_parameters),
+			lsps2_bolt12_invoice_parameters: None,
+		}
+		.encode();
 		let (payment_hash, payment_secret, payment_metadata) = match payment_hash {
 			Some(payment_hash) => {
 				let (payment_secret, payment_metadata) = self
@@ -1354,7 +1466,7 @@ where
 			src_node_id: lsps2_client.lsp_node_id,
 			short_channel_id: buy_response.intercept_scid,
 			fees: RoutingFees { base_msat: 0, proportional_millionths: 0 },
-			cltv_expiry_delta: buy_response.cltv_expiry_delta as u16,
+			cltv_expiry_delta: buy_response.cltv_expiry_delta,
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]);
@@ -1493,7 +1605,7 @@ pub(crate) struct LSPS2FeeResponse {
 #[derive(Debug, Clone)]
 pub(crate) struct LSPS2BuyResponse {
 	intercept_scid: u64,
-	cltv_expiry_delta: u32,
+	cltv_expiry_delta: u16,
 }
 
 /// A liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.

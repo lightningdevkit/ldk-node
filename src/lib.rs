@@ -146,7 +146,7 @@ use graph::NetworkGraph;
 use io::utils::update_and_persist_node_metrics;
 pub use lightning;
 use lightning::chain::BlockLocator;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based;
 use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 pub use lightning::ln::channel_state::ChannelShutdownState;
@@ -176,8 +176,8 @@ use runtime::Runtime;
 pub use tokio;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
-	Wallet,
+	HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager, Router,
+	Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 pub use vss_client;
@@ -229,6 +229,7 @@ pub struct Node {
 	output_sweeper: Arc<Sweeper>,
 	peer_manager: Arc<PeerManager>,
 	onion_messenger: Arc<OnionMessenger>,
+	message_router: Arc<MessageRouter>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
@@ -930,8 +931,12 @@ impl Node {
 		Bolt12Payment::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.message_router),
+			Arc::clone(&self.connection_manager),
+			self.liquidity_source.clone(),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
@@ -947,8 +952,12 @@ impl Node {
 		Arc::new(Bolt12Payment::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.message_router),
+			Arc::clone(&self.connection_manager),
+			self.liquidity_source.clone(),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
@@ -2227,7 +2236,7 @@ impl PersistedNodeMetrics {
 	}
 }
 
-impl_writeable_tlv_based!(NodeMetrics, {
+impl_ser_tlv_based!(NodeMetrics, {
 	(0, latest_lightning_wallet_sync_timestamp, option),
 	(1, latest_pathfinding_scores_sync_timestamp, option),
 	(2, latest_onchain_wallet_sync_timestamp, option),
@@ -2297,7 +2306,7 @@ mod tests {
 			latest_pathfinding_scores_sync_timestamp: Option<u64>,
 			latest_node_announcement_broadcast_timestamp: Option<u64>,
 		}
-		impl_writeable_tlv_based!(OldNodeMetrics, {
+		impl_ser_tlv_based!(OldNodeMetrics, {
 			(0, latest_lightning_wallet_sync_timestamp, option),
 			(1, latest_pathfinding_scores_sync_timestamp, option),
 			(2, latest_onchain_wallet_sync_timestamp, option),

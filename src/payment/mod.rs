@@ -10,6 +10,7 @@
 pub(crate) mod asynchronous;
 mod bolt11;
 mod bolt12;
+mod metadata;
 mod onchain;
 pub(crate) mod pending_payment_store;
 mod spontaneous;
@@ -17,8 +18,10 @@ pub(crate) mod store;
 mod unified;
 
 pub use bolt11::Bolt11Payment;
-pub(crate) use bolt11::PaymentMetadata;
 pub use bolt12::Bolt12Payment;
+pub(crate) use metadata::{
+	LdkNodeLSPS2Bolt12PaymentMetadataDecoder, PaymentMetadata, LDK_NODE_BOLT12_PAYMENT_METADATA_KEY,
+};
 pub use onchain::OnchainPayment;
 pub use pending_payment_store::PendingPaymentDetails;
 pub use spontaneous::SpontaneousPayment;

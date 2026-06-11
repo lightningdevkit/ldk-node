@@ -7,7 +7,7 @@
 
 use core::future::Future;
 use core::task::{Poll, Waker};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
@@ -29,7 +29,7 @@ use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
-use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
+use lightning::{impl_ser_tlv_based, impl_ser_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
@@ -50,7 +50,7 @@ use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
-use crate::payment::PaymentMetadata;
+use crate::payment::{PaymentMetadata, LDK_NODE_BOLT12_PAYMENT_METADATA_KEY};
 use crate::runtime::Runtime;
 use crate::types::{
 	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
@@ -78,7 +78,7 @@ pub struct HTLCLocator {
 	pub node_id: Option<PublicKey>,
 }
 
-impl_writeable_tlv_based!(HTLCLocator, {
+impl_ser_tlv_based!(HTLCLocator, {
 	(1, channel_id, required),
 	(3, user_channel_id, option),
 	(5, node_id, option),
@@ -294,7 +294,7 @@ pub enum Event {
 	},
 }
 
-impl_writeable_tlv_based_enum!(Event,
+impl_ser_tlv_based_enum!(Event,
 	(0, PaymentSuccessful) => {
 		(0, payment_hash, required),
 		(1, fee_paid_msat, option),
@@ -600,8 +600,9 @@ where
 		}
 	}
 
-	fn lsps2_max_total_opening_fee_msat(payment_metadata: &[u8], amount_msat: u64) -> Option<u64> {
-		let metadata = PaymentMetadata::read(&mut &payment_metadata[..]).ok()?;
+	fn lsps2_max_total_opening_fee_msat_from_metadata(
+		metadata: PaymentMetadata, amount_msat: u64,
+	) -> Option<u64> {
 		let lsps2_parameters = metadata.lsps2_parameters?;
 		lsps2_parameters.max_total_opening_fee_msat.or_else(|| {
 			lsps2_parameters.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
@@ -609,6 +610,19 @@ where
 				compute_opening_fee(amount_msat, 0, max_prop_fee)
 			})
 		})
+	}
+
+	fn lsps2_max_total_opening_fee_msat(payment_metadata: &[u8], amount_msat: u64) -> Option<u64> {
+		let metadata = PaymentMetadata::read(&mut &payment_metadata[..]).ok()?;
+		Self::lsps2_max_total_opening_fee_msat_from_metadata(metadata, amount_msat)
+	}
+
+	fn lsps2_max_total_opening_fee_msat_from_bolt12_metadata(
+		payment_metadata: Option<&BTreeMap<u64, Vec<u8>>>, amount_msat: u64,
+	) -> Option<u64> {
+		let encoded_metadata = payment_metadata?.get(&LDK_NODE_BOLT12_PAYMENT_METADATA_KEY)?;
+		let metadata = PaymentMetadata::read(&mut &encoded_metadata[..]).ok()?;
+		Self::lsps2_max_total_opening_fee_msat_from_metadata(metadata, amount_msat)
 	}
 
 	pub async fn handle_event(&self, event: LdkEvent) -> Result<(), ReplayEvent> {
@@ -799,13 +813,19 @@ where
 							.and_then(|metadata| {
 								Self::lsps2_max_total_opening_fee_msat(metadata, amount_msat)
 							}),
+						PaymentPurpose::Bolt12OfferPayment { payment_context, .. } => {
+							Self::lsps2_max_total_opening_fee_msat_from_bolt12_metadata(
+								payment_context.payment_metadata.as_ref(),
+								amount_msat,
+							)
+						},
 						_ => None,
 					};
 
 					let Some(max_total_opening_fee_msat) = max_total_opening_fee_msat else {
 						log_info!(
 							self.logger,
-							"Refusing inbound payment with hash {} as the counterparty withheld {}msat without valid BOLT11 LSPS2 payment metadata",
+							"Refusing inbound payment with hash {} as the counterparty withheld {}msat without valid LSPS2 payment metadata",
 							hex_utils::to_string(&payment_hash.0),
 							counterparty_skimmed_fee_msat,
 						);
@@ -829,18 +849,24 @@ where
 						match &info.kind {
 							PaymentKind::Bolt11 { .. } => {
 								let update = PaymentDetailsUpdate {
-									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
+									counterparty_skimmed_fee_msat: Some(Some(
+										counterparty_skimmed_fee_msat,
+									)),
 									..PaymentDetailsUpdate::new(payment_id)
 								};
 								match self.payment_store.update(update).await {
 									Ok(_) => (),
 									Err(e) => {
-										log_error!(self.logger, "Failed to access payment store: {}", e);
+										log_error!(
+											self.logger,
+											"Failed to access payment store: {}",
+											e
+										);
 										return Err(ReplayEvent());
 									},
 								};
 							},
-							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for BOLT11 payments."),
+							_ => {},
 						}
 					}
 				}
@@ -1724,15 +1750,24 @@ where
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
 			},
-			LdkEvent::OnionMessageIntercepted { peer_node_id, message } => {
-				if let Some(om_mailbox) = self.om_mailbox.as_ref() {
-					om_mailbox.onion_message_intercepted(peer_node_id, message);
-				} else {
+			LdkEvent::OnionMessageIntercepted { next_hop, message } => match next_hop {
+				lightning::blinded_path::message::NextMessageHop::NodeId(peer_node_id) => {
+					if let Some(om_mailbox) = self.om_mailbox.as_ref() {
+						om_mailbox.onion_message_intercepted(peer_node_id, message);
+					} else {
+						log_trace!(
+							self.logger,
+							"Onion message intercepted, but no onion message mailbox available"
+						);
+					}
+				},
+				lightning::blinded_path::message::NextMessageHop::ShortChannelId(scid) => {
 					log_trace!(
 						self.logger,
-						"Onion message intercepted, but no onion message mailbox available"
+						"Onion message intercepted for unknown SCID {}, ignoring",
+						scid
 					);
-				}
+				},
 			},
 			LdkEvent::OnionMessagePeerConnected { peer_node_id } => {
 				if let Some(om_mailbox) = self.om_mailbox.as_ref() {
@@ -1927,6 +1962,7 @@ mod tests {
 				max_total_opening_fee_msat: Some(42_000),
 				max_proportional_opening_fee_ppm_msat: None,
 			}),
+			lsps2_bolt12_invoice_parameters: None,
 		};
 
 		assert_eq!(
@@ -1939,13 +1975,36 @@ mod tests {
 	}
 
 	#[test]
+	fn lsps2_bolt12_payment_metadata_decodes_total_fee_limit() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: None,
+				max_proportional_opening_fee_ppm_msat: Some(10_000),
+			}),
+			lsps2_bolt12_invoice_parameters: None,
+		}
+		.encode_as_bolt12_payment_metadata();
+
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat_from_bolt12_metadata(
+				Some(&metadata),
+				100_000
+			),
+			Some(1_000)
+		);
+	}
+
+	#[test]
 	fn lsps2_payment_metadata_missing_or_malformed_limit_is_rejected() {
-		let empty_metadata = PaymentMetadata { lsps2_parameters: None }.encode();
+		let empty_metadata =
+			PaymentMetadata { lsps2_parameters: None, lsps2_bolt12_invoice_parameters: None }
+				.encode();
 		let metadata_without_fee_limit = PaymentMetadata {
 			lsps2_parameters: Some(LSPS2Parameters {
 				max_total_opening_fee_msat: None,
 				max_proportional_opening_fee_ppm_msat: None,
 			}),
+			lsps2_bolt12_invoice_parameters: None,
 		}
 		.encode();
 
