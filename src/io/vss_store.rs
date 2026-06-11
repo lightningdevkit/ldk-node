@@ -647,6 +647,12 @@ async fn determine_and_write_schema_version(
 			// The value is not set.
 			None
 		},
+		Err(VssError::VSSVersionMismatchError { version_served, version_expected }) => {
+			let msg = format!(
+				"VSS versiion mismatch, expected: {version_expected}, got: {version_served:?}"
+			);
+			return Err(Error::new(ErrorKind::Other, msg));
+		},
 		Err(e) => {
 			let msg = format!("Failed to read schema version: {}", e);
 			return Err(Error::new(ErrorKind::Other, msg));

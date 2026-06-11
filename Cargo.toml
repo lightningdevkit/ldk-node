@@ -82,7 +82,7 @@ async-trait = { version = "0.1", default-features = false }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"], optional = true }
 native-tls = { version = "0.2", default-features = false, optional = true }
 postgres-native-tls = { version = "0.5", default-features = false, features = ["runtime"], optional = true }
-vss-client = { package = "vss-client-ng", version = "0.5" }
+vss-client = { package = "vss-client-ng", version = "0.6" }
 prost = { version = "0.11.6", default-features = false}
 #bitcoin-payment-instructions = { version = "0.6" }
 bitcoin-payment-instructions = { git = "https://github.com/tnull/bitcoin-payment-instructions", rev = "ff09ce9401afa448549a8f101172700bcd14d7bb" }
