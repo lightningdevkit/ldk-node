@@ -586,6 +586,81 @@ impl StorableObjectUpdate<PaymentDetails> for PaymentDetailsUpdate {
 	}
 }
 
+/// Represents a pending payment
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingPaymentDetails {
+	/// The full payment details
+	pub details: PaymentDetails,
+	/// Transaction IDs that have replaced or conflict with this payment.
+	pub conflicting_txids: Vec<Txid>,
+}
+
+impl PendingPaymentDetails {
+	pub(crate) fn new(details: PaymentDetails, conflicting_txids: Vec<Txid>) -> Self {
+		Self { details, conflicting_txids }
+	}
+}
+
+impl_writeable_tlv_based!(PendingPaymentDetails, {
+	(0, details, required),
+	(2, conflicting_txids, optional_vec),
+});
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingPaymentDetailsUpdate {
+	pub id: PaymentId,
+	pub payment_update: Option<PaymentDetailsUpdate>,
+	pub conflicting_txids: Option<Vec<Txid>>,
+}
+
+impl StorableObject for PendingPaymentDetails {
+	type Id = PaymentId;
+	type Update = PendingPaymentDetailsUpdate;
+
+	fn id(&self) -> Self::Id {
+		self.details.id
+	}
+
+	fn update(&mut self, update: Self::Update) -> bool {
+		let mut updated = false;
+
+		// Update the underlying payment details if present
+		if let Some(payment_update) = update.payment_update {
+			updated |= self.details.update(payment_update);
+		}
+
+		if let Some(new_conflicting_txids) = update.conflicting_txids {
+			if self.conflicting_txids != new_conflicting_txids {
+				self.conflicting_txids = new_conflicting_txids;
+				updated = true;
+			}
+		}
+
+		updated
+	}
+
+	fn to_update(&self) -> Self::Update {
+		self.into()
+	}
+}
+
+impl StorableObjectUpdate<PendingPaymentDetails> for PendingPaymentDetailsUpdate {
+	fn id(&self) -> <PendingPaymentDetails as StorableObject>::Id {
+		self.id
+	}
+}
+
+impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
+	fn from(value: &PendingPaymentDetails) -> Self {
+		let conflicting_txids = if value.conflicting_txids.is_empty() {
+			None
+		} else {
+			Some(value.conflicting_txids.clone())
+		};
+		Self { id: value.id(), payment_update: Some(value.details.to_update()), conflicting_txids }
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use lightning::util::ser::{Readable, Writeable};
