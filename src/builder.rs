@@ -203,7 +203,6 @@ pub enum BuildError {
 	AsyncPaymentsConfigMismatch,
 	/// An attempt to setup a DNS Resolver failed.
 	DNSResolverSetupFailed,
-
 }
 
 impl fmt::Display for BuildError {
@@ -241,7 +240,6 @@ impl fmt::Display for BuildError {
 			Self::DNSResolverSetupFailed => {
 				write!(f, "An attempt to setup a DNS resolver has failed.")
 			},
-
 		}
 	}
 }

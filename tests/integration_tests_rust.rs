@@ -3201,5 +3201,3 @@ async fn builder_configures_sqlite_backup_store() {
 		assert_eq!(backup, primary, "backup mismatch for {pn}/{sn}/{key}");
 	}
 }
-
-
