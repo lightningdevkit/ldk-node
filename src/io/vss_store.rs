@@ -626,6 +626,7 @@ fn retry_policy() -> CustomRetryPolicy {
 				VssError::NoSuchKeyError(..)
 					| VssError::InvalidRequestError(..)
 					| VssError::ConflictError(..)
+					| VssError::VSSVersionMismatchError { .. }
 			)
 		}) as _)
 }
@@ -646,6 +647,12 @@ async fn determine_and_write_schema_version(
 		Err(VssError::NoSuchKeyError(..)) => {
 			// The value is not set.
 			None
+		},
+		Err(VssError::VSSVersionMismatchError { version_served, version_expected }) => {
+			let msg = format!(
+				"VSS version mismatch, expected: {version_expected}, got: {version_served:?}"
+			);
+			return Err(Error::new(ErrorKind::Other, msg));
 		},
 		Err(e) => {
 			let msg = format!("Failed to read schema version: {}", e);
