@@ -66,6 +66,10 @@ LDK Node currently comes with a decidedly opinionated set of design choices:
 - Gossip data may be sourced via Lightning's peer-to-peer network or the [Rapid Gossip Sync](https://docs.rs/lightning-rapid-gossip-sync/*/lightning_rapid_gossip_sync/) protocol.
 - Entropy for the Lightning and on-chain wallets may be sourced from raw bytes or a [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki) mnemonic. In addition, LDK Node offers the means to generate and persist the entropy bytes to disk.
 
+## Compatibility
+
+LDK Node does not provide a stable public API until v1.0. Persisted node state is backwards compatible: newer releases are guaranteed to load state written by older releases. Downgrades are not supported, so state written by a newer release may not load with an older release.
+
 ## Language Support
 LDK Node itself is written in [Rust][rust] and may therefore be natively added as a library dependency to any `std` Rust program. However, beyond its Rust API it also offers language bindings for [Swift][swift], [Kotlin][kotlin], and [Python][python] based on the [UniFFI](https://github.com/mozilla/uniffi-rs/).
 
