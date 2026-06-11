@@ -345,7 +345,7 @@ impl Wallet {
 						}
 					}
 				},
-				WalletEvent::TxUnconfirmed { txid, tx, old_block_time: None } => {
+				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
 					let payment_id = self
 						.find_payment_by_txid(txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
