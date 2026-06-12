@@ -1681,6 +1681,18 @@ async fn generate_bip21_uri() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn unified_receive_rejects_msat_overflow() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let node = setup_node(&chain_source, random_config(true));
+
+	assert_eq!(
+		Err(NodeError::InvalidAmount),
+		node.unified_payment().receive(u64::MAX, "asdf", 4_000)
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn unified_send_receive_bip21_uri() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
