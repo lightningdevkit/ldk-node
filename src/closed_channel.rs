@@ -77,6 +77,48 @@ impl_writeable_tlv_based!(ClosedChannelDetails, {
 	(18, is_announced, required),
 });
 
+/// Channel flags persisted at channel-pending time so they remain accessible when the channel
+/// closes, even after a restart or when `handle_event` returns [`ReplayEvent`].
+///
+/// [`ReplayEvent`]: lightning::events::ReplayEvent
+#[derive(Clone, Debug)]
+pub(crate) struct PendingChannelInfo {
+	pub user_channel_id: UserChannelId,
+	pub is_outbound: bool,
+	pub is_announced: bool,
+}
+
+impl_writeable_tlv_based!(PendingChannelInfo, {
+	(0, user_channel_id, required),
+	(2, is_outbound, required),
+	(4, is_announced, required),
+});
+
+pub(crate) struct PendingChannelInfoUpdate(pub UserChannelId);
+
+impl StorableObjectUpdate<PendingChannelInfo> for PendingChannelInfoUpdate {
+	fn id(&self) -> UserChannelId {
+		self.0
+	}
+}
+
+impl StorableObject for PendingChannelInfo {
+	type Id = UserChannelId;
+	type Update = PendingChannelInfoUpdate;
+
+	fn id(&self) -> UserChannelId {
+		self.user_channel_id
+	}
+
+	fn update(&mut self, _update: Self::Update) -> bool {
+		false
+	}
+
+	fn to_update(&self) -> Self::Update {
+		PendingChannelInfoUpdate(self.user_channel_id)
+	}
+}
+
 pub(crate) struct ClosedChannelDetailsUpdate(pub UserChannelId);
 
 impl StorableObjectUpdate<ClosedChannelDetails> for ClosedChannelDetailsUpdate {

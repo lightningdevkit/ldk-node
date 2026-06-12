@@ -178,8 +178,8 @@ use runtime::Runtime;
 pub use tokio;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, ClosedChannelStore,
-	DynStore, Graph, HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router,
-	Scorer, Sweeper, Wallet,
+	DynStore, Graph, HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager,
+	PendingChannelStore, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 pub use vss_client;
@@ -245,6 +245,7 @@ pub struct Node {
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
 	closed_channel_store: Arc<ClosedChannelStore>,
+	pending_channel_store: Arc<PendingChannelStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
@@ -608,6 +609,7 @@ impl Node {
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.closed_channel_store),
+			Arc::clone(&self.pending_channel_store),
 			Arc::clone(&self.keys_manager),
 			static_invoice_store,
 			Arc::clone(&self.onion_messenger),
