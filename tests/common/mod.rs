@@ -219,10 +219,30 @@ macro_rules! expect_payment_received_event {
 			panic!("{} timed out waiting for PaymentReceived event after 60s", $node.node_id())
 		});
 		match event {
-			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
+			ref e @ Event::PaymentReceived { payment_id, amount_msat: rec_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
-				assert_eq!(amount_msat, $amount_msat);
+
 				let payment = $node.payment(&payment_id.unwrap()).unwrap();
+
+				match payment.kind {
+					ldk_node::payment::PaymentKind::Bolt12Offer { .. } => {
+						// BOLT12: Blinded paths can lead to minor overpayments (e.g., routing path fees)
+						assert!(
+							rec_msat >= $amount_msat,
+							"BOLT12: Received amount ({}) is less than expected ({})",
+							rec_msat,
+							$amount_msat
+						);
+					},
+					_ => {
+						assert_eq!(
+							rec_msat, $amount_msat,
+							"BOLT11/Keysend: Received amount ({}) does not match expected ({})",
+							rec_msat, $amount_msat
+						);
+					},
+				}
+
 				if !matches!(payment.kind, ldk_node::payment::PaymentKind::Onchain { .. }) {
 					assert_eq!(payment.fee_paid_msat, None);
 				}
