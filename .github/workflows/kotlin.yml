@@ -8,7 +8,8 @@ concurrency:
 
 jobs:
   check-kotlin:
-    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    runs-on: self-hosted
 
     env:
       LDK_NODE_JVM_DIR: bindings/kotlin/ldk-node-jvm

@@ -6,13 +6,14 @@ on:
 
 jobs:
   audit:
+    timeout-minutes: 60
     permissions:
       issues: write
       checks: write
     strategy:
       matrix:
         platform: [
-          ubuntu-latest,
+          self-hosted,
           macos-latest,
           windows-latest,
           ]
