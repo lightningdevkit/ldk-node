@@ -117,19 +117,20 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 ///
 /// ### Defaults
 ///
-/// | Parameter                              | Value              |
-/// |----------------------------------------|--------------------------------------|
-/// | `storage_dir_path`                     | /tmp/ldk_node/                       |
-/// | `network`                              | Bitcoin                              |
-/// | `listening_addresses`                  | None                                 |
-/// | `announcement_addresses`               | None                                 |
-/// | `node_alias`                           | None                                 |
-/// | `trusted_peers_0conf`                  | []                                   |
-/// | `probing_liquidity_limit_multiplier`   | 3                                    |
-/// | `anchor_channels_config`               | Some(..)                             |
-/// | `route_parameters`                     | None                                 |
-/// | `tor_config`                           | None                                 |
-/// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
+/// | Parameter                              | Value                                      |
+/// |----------------------------------------|--------------------------------------------|
+/// | `storage_dir_path`                     | /tmp/ldk_node/                             |
+/// | `network`                              | Bitcoin                                    |
+/// | `listening_addresses`                  | None                                       |
+/// | `announcement_addresses`               | None                                       |
+/// | `node_alias`                           | None                                       |
+/// | `node_color`                           | NodeColor { red: 0, green: 0, blue: 0 }    |
+/// | `trusted_peers_0conf`                  | []                                         |
+/// | `probing_liquidity_limit_multiplier`   | 3                                          |
+/// | `anchor_channels_config`               | Some(..)                                   |
+/// | `route_parameters`                     | None                                       |
+/// | `tor_config`                           | None                                       |
+/// | `hrn_config`                           | HumanReadableNamesConfig::default()        |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -158,6 +159,8 @@ pub struct Config {
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
 	/// `listening_addresses` are set.
 	pub node_alias: Option<NodeAlias>,
+	/// The RGB color that will be used when broadcasting announcements to the gossip network.
+	pub node_color: NodeColor,
 	/// A list of peers that we allow to establish zero confirmation channels to us.
 	///
 	/// **Note:** Allowing payments via zero-confirmation channels is potentially insecure if the
@@ -220,8 +223,27 @@ impl Default for Config {
 			tor_config: None,
 			route_parameters: None,
 			node_alias: None,
+			node_color: NodeColor::default(),
 			hrn_config: HumanReadableNamesConfig::default(),
 		}
+	}
+}
+
+/// The RGB color that will be used when broadcasting node announcements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct NodeColor {
+	/// The red color component.
+	pub red: u8,
+	/// The green color component.
+	pub green: u8,
+	/// The blue color component.
+	pub blue: u8,
+}
+
+impl NodeColor {
+	pub(crate) fn as_rgb(&self) -> [u8; 3] {
+		[self.red, self.green, self.blue]
 	}
 }
 

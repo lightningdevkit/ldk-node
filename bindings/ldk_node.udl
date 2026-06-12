@@ -5,6 +5,8 @@ namespace ldk_node {
 
 typedef dictionary Config;
 
+typedef dictionary NodeColor;
+
 typedef dictionary EsploraSyncConfig;
 
 typedef dictionary ElectrumSyncConfig;
@@ -57,6 +59,7 @@ interface Builder {
 	void set_tor_config(TorConfig tor_config);
 	[Throws=BuildError]
 	void set_node_alias(string node_alias);
+	void set_node_color(u8 red, u8 green, u8 blue);
 	[Throws=BuildError]
 	void set_async_payments_role(AsyncPaymentsRole? role);
 	void set_wallet_recovery_mode();
@@ -93,6 +96,7 @@ interface Node {
 	sequence<SocketAddress>? listening_addresses();
 	sequence<SocketAddress>? announcement_addresses();
 	NodeAlias? node_alias();
+	NodeColor node_color();
 	Bolt11Payment bolt11_payment();
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
