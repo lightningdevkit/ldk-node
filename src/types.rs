@@ -46,7 +46,7 @@ use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::{PaymentDetails, PendingPaymentDetails};
 use crate::runtime::RuntimeSpawner;
 
-pub(crate) trait DynStoreTrait: Send + Sync {
+pub trait DynStoreTrait: Send + Sync {
 	fn read_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>>;
@@ -87,7 +87,7 @@ impl<'a> KVStore for dyn DynStoreTrait + 'a {
 	}
 }
 
-pub(crate) type DynStore = dyn DynStoreTrait;
+pub type DynStore = dyn DynStoreTrait;
 
 // Newtype wrapper that implements `KVStore` for `Arc<DynStore>`. This is needed because `KVStore`
 // methods return `impl Future`, which is not object-safe. `DynStoreTrait` works around this by

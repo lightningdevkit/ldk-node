@@ -1,0 +1,702 @@
+// This file is Copyright its original authors, visible in version control history.
+//
+// This file is licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license <LICENSE-MIT or
+// http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
+// accordance with one or both of these licenses.
+
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+
+use lightning::util::persist::{
+	KVStore, NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+	NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+	SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+};
+use lightning::{io, log_error};
+use tokio::sync::Mutex as TokioMutex;
+
+use crate::io::utils::check_namespace_key_validity;
+use crate::logger::{LdkLogger, Logger};
+use crate::types::DynStore;
+
+/// A 3-tiered [`KVStore`] implementation that routes data across
+/// storage backends that may be local or remote:
+/// - a primary store for durable, authoritative persistence,
+/// - an optional backup store that maintains an additional durable copy of
+///   primary-backed data, and
+/// - an optional ephemeral store for non-critical, rebuildable cached data.
+///
+/// When a backup store is configured, writes and removals for primary-backed data
+/// are issued to the primary and backup stores concurrently and only succeed once
+/// both stores complete successfully.
+///
+/// Reads and lists do not consult the backup store during normal operation.
+/// Ephemeral data is read from and written to the ephemeral store when configured.
+///
+/// Note that dual-store writes and removals are not atomic across the primary and
+/// backup stores. If one store succeeds and the other fails, the operation
+/// returns an error even though one store may already reflect the change.
+pub(crate) struct TierStore {
+	inner: Arc<TierStoreInner>,
+}
+
+impl TierStore {
+	pub fn new(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> Self {
+		let inner = Arc::new(TierStoreInner::new(primary_store, Arc::clone(&logger)));
+
+		Self { inner }
+	}
+
+	/// Configures a backup store for primary-backed data.
+	///
+	/// Once set, writes and removals targeting the primary tier succeed only if both
+	/// the primary and backup stores succeed. The two operations are issued
+	/// concurrently, and any failure is returned to the caller.
+	///
+	/// Note: dual-store writes/removals are not atomic. An error may be returned
+	/// after the primary store has already been updated if the backup store fails.
+	///
+	/// The backup store is not consulted for normal reads or lists.
+	pub fn set_backup_store(&mut self, backup: Arc<DynStore>) {
+		debug_assert_eq!(Arc::strong_count(&self.inner), 1);
+
+		let inner = Arc::get_mut(&mut self.inner).expect(
+			"TierStore should not be shared during configuration. No other references should exist",
+		);
+
+		inner.backup_store = Some(backup);
+	}
+
+	/// Configures the ephemeral store for non-critical, rebuildable data.
+	///
+	/// When configured, selected cache-like data is routed to this store instead of
+	/// the primary store.
+	pub fn set_ephemeral_store(&mut self, ephemeral: Arc<DynStore>) {
+		debug_assert_eq!(Arc::strong_count(&self.inner), 1);
+
+		let inner = Arc::get_mut(&mut self.inner).expect(
+			"TierStore should not be shared during configuration. No other references should exist",
+		);
+
+		inner.ephemeral_store = Some(ephemeral);
+	}
+}
+
+impl KVStore for TierStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		async move { inner.read_internal(primary_namespace, secondary_namespace, key).await }
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		async move { inner.write_internal(primary_namespace, secondary_namespace, key, buf).await }
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+
+		async move { inner.remove_internal(primary_namespace, secondary_namespace, key, lazy).await }
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+
+		async move { inner.list_internal(primary_namespace, secondary_namespace).await }
+	}
+}
+
+struct TierStoreInner {
+	/// The authoritative store for durable data.
+	primary_store: Arc<DynStore>,
+	/// The store used for non-critical, rebuildable cached data.
+	ephemeral_store: Option<Arc<DynStore>>,
+	/// An optional second durable store for primary-backed data.
+	backup_store: Option<Arc<DynStore>>,
+	/// Per-key locks for serializing primary+backup operations.
+	locks: Mutex<HashMap<String, Arc<TokioMutex<()>>>>,
+	logger: Arc<Logger>,
+}
+
+impl TierStoreInner {
+	/// Creates a tier store with the primary data store.
+	pub fn new(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> Self {
+		Self {
+			primary_store,
+			ephemeral_store: None,
+			backup_store: None,
+			locks: Mutex::new(HashMap::new()),
+			logger,
+		}
+	}
+
+	fn get_key_lock(&self, locking_key: String) -> Arc<TokioMutex<()>> {
+		let mut locks = self.locks.lock().expect("lock");
+		Arc::clone(locks.entry(locking_key).or_default())
+	}
+
+	fn clean_locks(&self, lock_ref: &Arc<TokioMutex<()>>, locking_key: String) {
+		let mut locks = self.locks.lock().expect("lock");
+		let strong_count = Arc::strong_count(lock_ref);
+		debug_assert!(strong_count >= 2, "Unexpected TierStore lock strong count");
+		if strong_count == 2 {
+			locks.remove(&locking_key);
+		}
+	}
+
+	fn build_locking_key(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> String {
+		if primary_namespace.is_empty() {
+			key.to_owned()
+		} else {
+			format!("{}#{}#{}", primary_namespace, secondary_namespace, key)
+		}
+	}
+
+	/// Reads from the primary data store.
+	async fn read_primary(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> io::Result<Vec<u8>> {
+		match KVStore::read(
+			self.primary_store.as_ref(),
+			primary_namespace,
+			secondary_namespace,
+			key,
+		)
+		.await
+		{
+			Ok(data) => Ok(data),
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to read from primary store for key {}/{}/{}: {}.",
+					primary_namespace,
+					secondary_namespace,
+					key,
+					e
+				);
+				Err(e)
+			},
+		}
+	}
+
+	/// Lists keys from the primary data store.
+	async fn list_primary(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> io::Result<Vec<String>> {
+		match KVStore::list(self.primary_store.as_ref(), primary_namespace, secondary_namespace)
+			.await
+		{
+			Ok(keys) => Ok(keys),
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to list from primary store for namespace {}/{}: {}.",
+					primary_namespace,
+					secondary_namespace,
+					e
+				);
+				Err(e)
+			},
+		}
+	}
+
+	async fn write_primary_backup_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> io::Result<()> {
+		let primary_fut = KVStore::write(
+			self.primary_store.as_ref(),
+			primary_namespace,
+			secondary_namespace,
+			key,
+			buf.clone(),
+		);
+
+		if let Some(backup_store) = self.backup_store.as_ref() {
+			let backup_fut = KVStore::write(
+				backup_store.as_ref(),
+				primary_namespace,
+				secondary_namespace,
+				key,
+				buf,
+			);
+
+			let (primary_res, backup_res) = tokio::join!(primary_fut, backup_fut);
+
+			self.handle_primary_backup_results(
+				"write",
+				primary_namespace,
+				secondary_namespace,
+				key,
+				primary_res,
+				backup_res,
+			)
+		} else {
+			primary_fut.await
+		}
+	}
+
+	async fn remove_primary_backup_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> io::Result<()> {
+		let primary_fut = KVStore::remove(
+			self.primary_store.as_ref(),
+			primary_namespace,
+			secondary_namespace,
+			key,
+			lazy,
+		);
+
+		if let Some(backup_store) = self.backup_store.as_ref() {
+			let backup_fut = KVStore::remove(
+				backup_store.as_ref(),
+				primary_namespace,
+				secondary_namespace,
+				key,
+				lazy,
+			);
+
+			let (primary_res, backup_res) = tokio::join!(primary_fut, backup_fut);
+
+			self.handle_primary_backup_results(
+				"removal",
+				primary_namespace,
+				secondary_namespace,
+				key,
+				primary_res,
+				backup_res,
+			)
+		} else {
+			primary_fut.await
+		}
+	}
+
+	async fn read_internal(
+		&self, primary_namespace: String, secondary_namespace: String, key: String,
+	) -> io::Result<Vec<u8>> {
+		check_namespace_key_validity(
+			primary_namespace.as_str(),
+			secondary_namespace.as_str(),
+			Some(key.as_str()),
+			"read",
+		)?;
+
+		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
+			if let Some(eph_store) = self.ephemeral_store.as_ref() {
+				// We don't retry ephemeral-store reads here. Local failures are treated as
+				// terminal for this access path rather than falling back to another store.
+				return KVStore::read(
+					eph_store.as_ref(),
+					&primary_namespace,
+					&secondary_namespace,
+					&key,
+				)
+				.await;
+			}
+		}
+
+		self.read_primary(&primary_namespace, &secondary_namespace, &key).await
+	}
+
+	async fn write_internal(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, buf: Vec<u8>,
+	) -> io::Result<()> {
+		check_namespace_key_validity(
+			primary_namespace.as_str(),
+			secondary_namespace.as_str(),
+			Some(key.as_str()),
+			"write",
+		)?;
+
+		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
+			if let Some(eph_store) = self.ephemeral_store.as_ref() {
+				return KVStore::write(
+					eph_store.as_ref(),
+					primary_namespace.as_str(),
+					secondary_namespace.as_str(),
+					key.as_str(),
+					buf,
+				)
+				.await;
+			}
+		}
+
+		let locking_key = self.build_locking_key(
+			primary_namespace.as_str(),
+			secondary_namespace.as_str(),
+			key.as_str(),
+		);
+		let key_lock = self.get_key_lock(locking_key.clone());
+
+		let res = {
+			let _guard = key_lock.lock().await;
+			self.write_primary_backup_async(
+				primary_namespace.as_str(),
+				secondary_namespace.as_str(),
+				key.as_str(),
+				buf,
+			)
+			.await
+		};
+
+		self.clean_locks(&key_lock, locking_key);
+		res
+	}
+
+	async fn remove_internal(
+		&self, primary_namespace: String, secondary_namespace: String, key: String, lazy: bool,
+	) -> io::Result<()> {
+		check_namespace_key_validity(
+			primary_namespace.as_str(),
+			secondary_namespace.as_str(),
+			Some(key.as_str()),
+			"remove",
+		)?;
+
+		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
+			if let Some(eph_store) = self.ephemeral_store.as_ref() {
+				return KVStore::remove(
+					eph_store.as_ref(),
+					primary_namespace.as_str(),
+					secondary_namespace.as_str(),
+					key.as_str(),
+					lazy,
+				)
+				.await;
+			}
+		}
+
+		let locking_key = self.build_locking_key(
+			primary_namespace.as_str(),
+			secondary_namespace.as_str(),
+			key.as_str(),
+		);
+		let key_lock = self.get_key_lock(locking_key.clone());
+
+		let res = {
+			let _guard = key_lock.lock().await;
+			self.remove_primary_backup_async(
+				primary_namespace.as_str(),
+				secondary_namespace.as_str(),
+				key.as_str(),
+				lazy,
+			)
+			.await
+		};
+
+		self.clean_locks(&key_lock, locking_key);
+		res
+	}
+
+	async fn list_internal(
+		&self, primary_namespace: String, secondary_namespace: String,
+	) -> io::Result<Vec<String>> {
+		check_namespace_key_validity(
+			primary_namespace.as_str(),
+			secondary_namespace.as_str(),
+			None,
+			"list",
+		)?;
+
+		match (primary_namespace.as_str(), secondary_namespace.as_str()) {
+			(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			)
+			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _) => {
+				if let Some(eph_store) = self.ephemeral_store.as_ref() {
+					// We don't retry ephemeral-store lists here. Local failures are treated as
+					// terminal for this access path rather than falling back to another store.
+					KVStore::list(eph_store.as_ref(), &primary_namespace, &secondary_namespace)
+						.await
+				} else {
+					self.list_primary(&primary_namespace, &secondary_namespace).await
+				}
+			},
+			_ => self.list_primary(&primary_namespace, &secondary_namespace).await,
+		}
+	}
+
+	fn handle_primary_backup_results(
+		&self, op: &str, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		primary_res: io::Result<()>, backup_res: io::Result<()>,
+	) -> io::Result<()> {
+		match (primary_res, backup_res) {
+			(Ok(()), Ok(())) => Ok(()),
+			(Err(primary_err), Ok(())) => Err(primary_err),
+			(Ok(()), Err(backup_err)) => Err(backup_err),
+			(Err(primary_err), Err(backup_err)) => {
+				log_error!(
+					self.logger,
+					"Primary and backup {}s both failed for key {}/{}/{}: primary={}, backup={}",
+					op,
+					primary_namespace,
+					secondary_namespace,
+					key,
+					primary_err,
+					backup_err
+				);
+				Err(primary_err)
+			},
+		}
+	}
+}
+
+fn is_ephemeral_cached_key(pn: &str, sn: &str, key: &str) -> bool {
+	matches!(
+		(pn, sn, key),
+		(NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, _, NETWORK_GRAPH_PERSISTENCE_KEY)
+			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _, SCORER_PERSISTENCE_KEY)
+	)
+}
+
+#[cfg(test)]
+mod tests {
+	use std::panic::RefUnwindSafe;
+	use std::path::PathBuf;
+	use std::sync::Arc;
+
+	use lightning::util::logger::Level;
+	use lightning::util::persist::{
+		CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+	};
+	use lightning_persister::fs_store::v1::FilesystemStore;
+
+	use super::*;
+	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
+	use crate::io::tier_store::TierStore;
+	use crate::logger::Logger;
+	use crate::types::{DynStore, DynStoreWrapper};
+
+	impl RefUnwindSafe for TierStore {}
+
+	struct CleanupDir(PathBuf);
+	impl Drop for CleanupDir {
+		fn drop(&mut self) {
+			let _ = std::fs::remove_dir_all(&self.0);
+		}
+	}
+
+	fn setup_tier_store(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> TierStore {
+		TierStore::new(primary_store, logger)
+	}
+
+	#[tokio::test]
+	async fn write_read_list_remove() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
+		let tier = setup_tier_store(primary_store, logger);
+
+		do_read_write_remove_list_persist(&tier).await;
+	}
+
+	#[tokio::test]
+	async fn ephemeral_routing() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+
+		let ephemeral_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("ephemeral"))));
+		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+
+		let data = vec![42u8; 32];
+
+		tier.write(
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+			data.clone(),
+		)
+		.await
+		.unwrap();
+
+		tier.write(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			data.clone(),
+		)
+		.await
+		.unwrap();
+
+		let primary_read_ng = primary_store
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await;
+		let ephemeral_read_ng = ephemeral_store
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await;
+
+		let primary_read_cm = primary_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			)
+			.await;
+		let ephemeral_read_cm = ephemeral_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			)
+			.await;
+
+		assert!(primary_read_ng.is_err());
+		assert_eq!(ephemeral_read_ng.unwrap(), data);
+
+		assert!(ephemeral_read_cm.is_err());
+		assert_eq!(primary_read_cm.unwrap(), data);
+	}
+
+	#[tokio::test]
+	async fn backup_write_is_part_of_success_path() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+
+		let backup_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup"))));
+		tier.set_backup_store(Arc::clone(&backup_store));
+
+		let data = vec![42u8; 32];
+
+		tier.write(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			data.clone(),
+		)
+		.await
+		.unwrap();
+
+		let primary_read = primary_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			)
+			.await;
+		let backup_read = backup_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			)
+			.await;
+
+		assert_eq!(primary_read.unwrap(), data);
+		assert_eq!(backup_read.unwrap(), data);
+	}
+
+	#[tokio::test]
+	async fn backup_remove_is_part_of_success_path() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("primary"))));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+
+		let backup_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStore::new(base_dir.join("backup"))));
+		tier.set_backup_store(Arc::clone(&backup_store));
+
+		let data = vec![42u8; 32];
+		let key = CHANNEL_MANAGER_PERSISTENCE_KEY;
+
+		tier.write(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+			data,
+		)
+		.await
+		.unwrap();
+
+		tier.remove(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			key,
+			true,
+		)
+		.await
+		.unwrap();
+
+		let primary_read = primary_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				key,
+			)
+			.await;
+		let backup_read = backup_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				key,
+			)
+			.await;
+
+		assert!(primary_read.is_err());
+		assert!(backup_read.is_err());
+	}
+}

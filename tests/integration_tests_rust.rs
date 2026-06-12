@@ -30,6 +30,8 @@ use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::ElectrsD;
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
+#[cfg(not(feature = "uniffi"))]
+use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
@@ -39,6 +41,8 @@ use ldk_node::{Builder, Event, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+#[cfg(not(feature = "uniffi"))]
+use lightning::util::persist::KVStore;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
@@ -3034,6 +3038,7 @@ async fn splice_in_with_all_balance() {
 	node_b.stop().unwrap();
 }
 
+#[cfg(not(feature = "uniffi"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn lsps2_multi_lsp_picks_cheapest() {
 	do_lsps2_multi_lsp_picks_cheapest(false).await;
@@ -3127,4 +3132,72 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	client.stop().unwrap();
 	cheap.stop().unwrap();
 	expensive.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn builder_configures_sqlite_backup_store() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let mut config_a = random_config(true);
+	config_a.store_type = TestStoreType::Sqlite;
+	let primary_dir = config_a.node_config.storage_dir_path.clone();
+	let backup_dir = common::random_storage_path();
+
+	// Build node_a with backup storage configured
+	setup_builder!(builder_a, config_a.node_config.clone());
+	builder_a.set_chain_source_esplora(
+		format!("http://{}", electrsd.esplora_url.as_ref().unwrap()),
+		None,
+	);
+	builder_a.set_filesystem_logger(None, None);
+	builder_a.set_backup_storage_dir_path(backup_dir.to_str().unwrap().to_owned());
+
+	let node_a = builder_a.build(config_a.node_entropy.into()).unwrap();
+	node_a.start().unwrap();
+	assert!(node_a.status().is_running);
+	assert!(node_a.status().latest_fee_rate_cache_update_timestamp.is_some());
+
+	let config_b = random_config(true);
+	let node_b = setup_node(&chain_source, config_b);
+
+	do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		false,
+		true,
+		true,
+		false,
+	)
+	.await;
+
+	let primary_store = SqliteStore::new(
+		primary_dir.into(),
+		Some(ldk_node::io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
+		Some(ldk_node::io::sqlite_store::KV_TABLE_NAME.to_string()),
+	)
+	.unwrap();
+
+	let backup_store = SqliteStore::new(
+		backup_dir,
+		Some(ldk_node::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME.to_string()),
+		Some(ldk_node::io::sqlite_store::KV_TABLE_NAME.to_string()),
+	)
+	.unwrap();
+
+	for (pn, sn, key) in [
+		("bdk_wallet", "", "descriptor"),
+		("bdk_wallet", "", "change_descriptor"),
+		("bdk_wallet", "", "network"),
+		("", "", "node_metrics"),
+		("", "", "events"),
+		("", "", "peers"),
+	] {
+		let primary = primary_store.read(pn, sn, key).await.unwrap();
+		let backup = backup_store.read(pn, sn, key).await.unwrap();
+
+		assert_eq!(backup, primary, "backup mismatch for {pn}/{sn}/{key}");
+	}
 }
