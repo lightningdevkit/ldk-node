@@ -53,7 +53,7 @@ chain-electrum = [
 	"lightning-transaction-sync/electrum-rustls-ring",
 ]
 chain-bitcoind = ["dep:lightning-block-sync"]
-chain-cbf = ["dep:bip157"]
+chain-cbf = ["dep:bip157", "chain-esplora", "chain-electrum"]
 storage-sqlite = ["dep:rusqlite"]
 storage-filesystem = ["dep:lightning-persister"]
 storage-vss = ["dep:vss-client", "dep:prost"]
