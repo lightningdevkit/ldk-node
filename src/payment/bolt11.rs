@@ -539,7 +539,7 @@ impl Bolt11Payment {
 				_ => 0,
 			};
 			if let Some(invoice_amount_msat) = details.amount_msat {
-				if claimable_amount_msat < invoice_amount_msat - skimmed_fee_msat {
+				if claimable_amount_msat < invoice_amount_msat.saturating_sub(skimmed_fee_msat) {
 					log_error!(
 						self.logger,
 						"Failed to manually claim payment {} as the claimable amount is less than expected",
