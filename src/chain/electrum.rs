@@ -426,10 +426,11 @@ impl ElectrumRuntimeClient {
 		);
 		let bdk_electrum_client = Arc::new(BdkElectrumClient::new(Arc::clone(&electrum_client)));
 		let tx_sync = Arc::new(
-			ElectrumSyncClient::new(server_url.clone(), Arc::clone(&logger)).map_err(|e| {
-				log_error!(logger, "Failed to connect to electrum server: {}", e);
-				Error::ConnectionFailed
-			})?,
+			ElectrumSyncClient::from_client(Arc::clone(&electrum_client), Arc::clone(&logger))
+				.map_err(|e| {
+					log_error!(logger, "Failed to connect to electrum server: {}", e);
+					Error::ConnectionFailed
+				})?,
 		);
 		Ok(Self {
 			electrum_client,
