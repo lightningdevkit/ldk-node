@@ -1175,15 +1175,13 @@ async fn splice_channel() {
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	let expected_splice_in_fee_sat = 251;
-	let expected_splice_in_onchain_cost_sat = 254;
+	let expected_splice_in_onchain_cost_sat = 253;
 
-	// LDK's fee calculation differs from BDK wallet's, which over pays on fees. Rather than giving
-	// the extra fees to the miner, LDK sends it to the channel balance since there may not be a
-	// change output.
-	//
-	// TODO: Some of the discrepancy is addressed upstream, so this number should be adjusted when
-	// updating the BDK wallet dependency. See: https://github.com/bitcoindevkit/bdk_wallet/pull/479
-	let expected_splice_in_lightning_balance_sat = 4_000_003;
+	// BDK 3.1.0 avoids the previous per-UTXO fee rounding during coin selection. Keep the
+	// remaining 2-sat LDK/BDK fee-accounting drift explicit so a dependency change cannot silently
+	// reintroduce the larger surplus. Rather than giving the extra sats to the miner, LDK sends
+	// them to the channel balance since there may not be a change output.
+	let expected_splice_in_lightning_balance_sat = 4_000_002;
 
 	let payments = node_b.list_payments();
 	let payment =

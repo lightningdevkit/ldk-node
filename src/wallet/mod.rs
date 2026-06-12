@@ -13,10 +13,9 @@ use std::sync::{Arc, Mutex};
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
-use bdk_wallet::event::WalletEvent;
 #[allow(deprecated)]
 use bdk_wallet::SignOptions;
-use bdk_wallet::{Balance, KeychainKind, PersistedWallet, Update};
+use bdk_wallet::{Balance, KeychainKind, PersistedWallet, Update, WalletEvent};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -513,17 +512,28 @@ impl Wallet {
 		Ok(address_info.address)
 	}
 
-	pub(crate) fn cancel_tx(&self, tx: &Transaction) -> Result<(), Error> {
+	pub(crate) fn cancel_tx(&self, tx: Transaction) -> Result<(), Error> {
 		let mut locked_wallet = self.inner.lock().expect("lock");
 		let mut locked_persister = self.persister.lock().expect("lock");
 
-		locked_wallet.cancel_tx(tx);
+		Self::cancel_tx_inner(&mut locked_wallet, tx);
 		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
 
 		Ok(())
+	}
+
+	fn cancel_tx_inner(
+		locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>, tx: Transaction,
+	) {
+		for txout in tx.output {
+			if let Some((keychain, index)) = locked_wallet.derivation_of_spk(txout.script_pubkey) {
+				// This mirrors the removed BDK helper: it only frees superficial usage marks.
+				locked_wallet.unmark_used(keychain, index);
+			}
+		}
 	}
 
 	pub(crate) fn get_balances(
@@ -678,7 +688,7 @@ impl Wallet {
 			None,
 		)?;
 
-		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+		Self::cancel_tx_inner(&mut locked_wallet, tmp_psbt.unsigned_tx);
 
 		Ok(max_amount)
 	}
@@ -708,7 +718,7 @@ impl Wallet {
 			Some(&shared_input),
 		)?;
 
-		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+		Self::cancel_tx_inner(&mut locked_wallet, tmp_psbt.unsigned_tx);
 
 		Ok(splice_amount)
 	}
@@ -764,7 +774,7 @@ impl Wallet {
 							e
 						})?;
 
-					locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+					Self::cancel_tx_inner(&mut locked_wallet, tmp_psbt.unsigned_tx);
 
 					let mut tx_builder = locked_wallet.build_tx();
 					tx_builder
