@@ -13,10 +13,9 @@ use std::sync::{Arc, Mutex};
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
-use bdk_wallet::event::WalletEvent;
 #[allow(deprecated)]
 use bdk_wallet::SignOptions;
-use bdk_wallet::{Balance, KeychainKind, PersistedWallet, Update};
+use bdk_wallet::{Balance, KeychainKind, PersistedWallet, Update, WalletEvent};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -186,29 +185,13 @@ impl Wallet {
 
 		let mut locked_wallet = self.inner.lock().expect("lock");
 
-		let chain_tip1 = locked_wallet.latest_checkpoint().block_id();
-		let wallet_txs1 = locked_wallet
-			.transactions()
-			.map(|wtx| (wtx.tx_node.txid, (wtx.tx_node.tx.clone(), wtx.chain_position)))
-			.collect::<std::collections::BTreeMap<
-				Txid,
-				(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
-			>>();
-
-		locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
-		locked_wallet.apply_evicted_txs(evicted_txids);
-
-		let chain_tip2 = locked_wallet.latest_checkpoint().block_id();
-		let wallet_txs2 = locked_wallet
-			.transactions()
-			.map(|wtx| (wtx.tx_node.txid, (wtx.tx_node.tx.clone(), wtx.chain_position)))
-			.collect::<std::collections::BTreeMap<
-				Txid,
-				(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
-			>>();
-
-		let events =
-			wallet_events(&mut *locked_wallet, chain_tip1, chain_tip2, wallet_txs1, wallet_txs2);
+		let events = locked_wallet
+			.events_helper(|wallet| -> Result<(), std::convert::Infallible> {
+				wallet.apply_unconfirmed_txs(unconfirmed_txs);
+				wallet.apply_evicted_txs(evicted_txids);
+				Ok(())
+			})
+			.expect("applying mempool updates cannot fail");
 
 		self.update_payment_store(&mut *locked_wallet, events).map_err(|e| {
 			log_error!(self.logger, "Failed to update payment store: {}", e);
@@ -287,48 +270,62 @@ impl Wallet {
 
 					if payment_status == PaymentStatus::Pending {
 						let pending_payment =
-							self.create_pending_payment_from_tx(payment, Vec::new());
+							self.create_pending_payment_from_tx(payment_id, txid, Vec::new());
 
 						self.runtime.block_on(
 							self.pending_payment_store.insert_or_update(pending_payment),
 						)?;
+					} else {
+						self.runtime.block_on(self.pending_payment_store.remove(&payment_id))?;
 					}
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
 					let pending_payments: Vec<PendingPaymentDetails> =
-						self.pending_payment_store.list_filter(|p| {
-							debug_assert!(
-								p.details.status == PaymentStatus::Pending,
-								"Non-pending payment {:?} found in pending store",
-								p.details.id,
-							);
-							p.details.status == PaymentStatus::Pending
-								&& matches!(p.details.kind, PaymentKind::Onchain { .. })
-						});
+						self.pending_payment_store.list_filter(|_| true);
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
 
-					for mut payment in pending_payments {
-						match payment.details.kind {
+					for pending_payment in pending_payments {
+						let Some(mut payment) = self.payment_store.get(&pending_payment.payment_id)
+						else {
+							self.runtime.block_on(
+								self.pending_payment_store.remove(&pending_payment.payment_id),
+							)?;
+							continue;
+						};
+
+						debug_assert!(
+							payment.status == PaymentStatus::Pending,
+							"Non-pending payment {:?} found in pending store",
+							payment.id,
+						);
+						if payment.status != PaymentStatus::Pending {
+							self.runtime.block_on(
+								self.pending_payment_store.remove(&pending_payment.payment_id),
+							)?;
+							continue;
+						}
+
+						match &payment.kind {
 							PaymentKind::Onchain {
 								status: ConfirmationStatus::Confirmed { height, .. },
 								..
 							} => {
-								let payment_id = payment.details.id;
-								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
-									payment.details.status = PaymentStatus::Succeeded;
-									self.runtime.block_on(
-										self.payment_store.insert_or_update(payment.details),
-									)?;
+								if new_tip.height >= *height + ANTI_REORG_DELAY - 1 {
+									payment.status = PaymentStatus::Succeeded;
 									self.runtime
-										.block_on(self.pending_payment_store.remove(&payment_id))?;
+										.block_on(self.payment_store.insert_or_update(payment))?;
+									self.runtime.block_on(
+										self.pending_payment_store
+											.remove(&pending_payment.payment_id),
+									)?;
 								}
 							},
 							PaymentKind::Onchain {
 								txid,
 								status: ConfirmationStatus::Unconfirmed,
-							} if payment.details.direction == PaymentDirection::Outbound => {
-								unconfirmed_outbound_txids.push(txid);
+							} if payment.direction == PaymentDirection::Outbound => {
+								unconfirmed_outbound_txids.push(*txid);
 							},
 							_ => {},
 						}
@@ -362,7 +359,7 @@ impl Wallet {
 						}
 					}
 				},
-				WalletEvent::TxUnconfirmed { txid, tx, old_block_time: None } => {
+				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
 					let payment_id = self
 						.find_payment_by_txid(txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
@@ -376,7 +373,7 @@ impl Wallet {
 						ConfirmationStatus::Unconfirmed,
 					);
 					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
+						self.create_pending_payment_from_tx(payment_id, txid, Vec::new());
 					self.runtime.block_on(self.payment_store.insert_or_update(payment))?;
 					self.runtime
 						.block_on(self.pending_payment_store.insert_or_update(pending_payment))?;
@@ -406,8 +403,22 @@ impl Wallet {
 					);
 					let payment =
 						self.payment_store.get(&payment_id).ok_or(Error::InvalidPaymentId)?;
-					let pending_payment_details =
-						self.create_pending_payment_from_tx(payment, conflict_txids.clone());
+					let payment_txid = match &payment.kind {
+						PaymentKind::Onchain { txid, .. } => *txid,
+						_ => {
+							log_error!(
+								self.logger,
+								"Payment {:?} is not on-chain during WalletEvent::TxReplaced",
+								payment_id,
+							);
+							continue;
+						},
+					};
+					let pending_payment_details = self.create_pending_payment_from_tx(
+						payment_id,
+						payment_txid,
+						conflict_txids,
+					);
 
 					self.runtime.block_on(
 						self.pending_payment_store.insert_or_update(pending_payment_details),
@@ -426,7 +437,7 @@ impl Wallet {
 						ConfirmationStatus::Unconfirmed,
 					);
 					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
+						self.create_pending_payment_from_tx(payment_id, txid, Vec::new());
 					self.runtime.block_on(self.payment_store.insert_or_update(payment))?;
 					self.runtime
 						.block_on(self.pending_payment_store.insert_or_update(pending_payment))?;
@@ -517,13 +528,26 @@ impl Wallet {
 		let mut locked_wallet = self.inner.lock().expect("lock");
 		let mut locked_persister = self.persister.lock().expect("lock");
 
-		locked_wallet.cancel_tx(tx);
+		Self::cancel_tx_inner(&mut locked_wallet, tx);
 		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
 
 		Ok(())
+	}
+
+	fn cancel_tx_inner(
+		locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>, tx: &Transaction,
+	) {
+		for txout in &tx.output {
+			if let Some((keychain, index)) =
+				locked_wallet.derivation_of_spk(txout.script_pubkey.clone())
+			{
+				// This mirrors the removed BDK helper: it only frees superficial usage marks.
+				locked_wallet.unmark_used(keychain, index);
+			}
+		}
 	}
 
 	pub(crate) fn get_balances(
@@ -678,7 +702,7 @@ impl Wallet {
 			None,
 		)?;
 
-		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+		Self::cancel_tx_inner(&mut locked_wallet, &tmp_psbt.unsigned_tx);
 
 		Ok(max_amount)
 	}
@@ -708,7 +732,7 @@ impl Wallet {
 			Some(&shared_input),
 		)?;
 
-		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+		Self::cancel_tx_inner(&mut locked_wallet, &tmp_psbt.unsigned_tx);
 
 		Ok(splice_amount)
 	}
@@ -764,7 +788,7 @@ impl Wallet {
 							e
 						})?;
 
-					locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+					Self::cancel_tx_inner(&mut locked_wallet, &tmp_psbt.unsigned_tx);
 
 					let mut tx_builder = locked_wallet.build_tx();
 					tx_builder
@@ -1211,9 +1235,9 @@ impl Wallet {
 	}
 
 	fn create_pending_payment_from_tx(
-		&self, payment: PaymentDetails, conflicting_txids: Vec<Txid>,
+		&self, payment_id: PaymentId, txid: Txid, conflicting_txids: Vec<Txid>,
 	) -> PendingPaymentDetails {
-		PendingPaymentDetails::new(payment, conflicting_txids)
+		PendingPaymentDetails::new(payment_id, txid, conflicting_txids)
 	}
 
 	fn find_payment_by_txid(&self, target_txid: Txid) -> Option<PaymentId> {
@@ -1224,13 +1248,10 @@ impl Wallet {
 
 		if let Some(replaced_details) = self
 			.pending_payment_store
-			.list_filter(|p| {
-				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
-					|| p.conflicting_txids.contains(&target_txid)
-			})
+			.list_filter(|p| p.txid == target_txid || p.conflicting_txids.contains(&target_txid))
 			.first()
 		{
-			return Some(replaced_details.details.id);
+			return Some(replaced_details.payment_id);
 		}
 
 		None
@@ -1432,11 +1453,11 @@ impl Wallet {
 		);
 
 		let pending_payment_store =
-			self.create_pending_payment_from_tx(new_payment.clone(), Vec::new());
+			self.create_pending_payment_from_tx(new_payment.id, new_txid, vec![txid]);
 
+		self.runtime.block_on(self.payment_store.insert_or_update(new_payment))?;
 		self.runtime
 			.block_on(self.pending_payment_store.insert_or_update(pending_payment_store))?;
-		self.runtime.block_on(self.payment_store.insert_or_update(new_payment))?;
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
 
@@ -1754,106 +1775,4 @@ fn ldk_to_bdk_satisfaction_weight(ldk_satisfaction_weight: u64) -> Weight {
 		ldk_satisfaction_weight
 			.saturating_sub(EMPTY_SCRIPT_SIG_WEIGHT + EMPTY_WITNESS_COUNT_WEIGHT),
 	)
-}
-
-// FIXME/TODO: This is copied-over from bdk_wallet and only used to generate `WalletEvent`s after
-// applying mempool transactions. We should drop this when BDK offers to generate events for
-// mempool transactions natively.
-pub(crate) fn wallet_events(
-	wallet: &mut bdk_wallet::Wallet, chain_tip1: bdk_chain::BlockId,
-	chain_tip2: bdk_chain::BlockId,
-	wallet_txs1: std::collections::BTreeMap<
-		Txid,
-		(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
-	>,
-	wallet_txs2: std::collections::BTreeMap<
-		Txid,
-		(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
-	>,
-) -> Vec<WalletEvent> {
-	let mut events: Vec<WalletEvent> = Vec::new();
-
-	if chain_tip1 != chain_tip2 {
-		events.push(WalletEvent::ChainTipChanged { old_tip: chain_tip1, new_tip: chain_tip2 });
-	}
-
-	wallet_txs2.iter().for_each(|(txid2, (tx2, cp2))| {
-		if let Some((tx1, cp1)) = wallet_txs1.get(txid2) {
-			assert_eq!(tx1.compute_txid(), *txid2);
-			match (cp1, cp2) {
-				(
-					bdk_chain::ChainPosition::Unconfirmed { .. },
-					bdk_chain::ChainPosition::Confirmed { anchor, .. },
-				) => {
-					events.push(WalletEvent::TxConfirmed {
-						txid: *txid2,
-						tx: tx2.clone(),
-						block_time: *anchor,
-						old_block_time: None,
-					});
-				},
-				(
-					bdk_chain::ChainPosition::Confirmed { anchor, .. },
-					bdk_chain::ChainPosition::Unconfirmed { .. },
-				) => {
-					events.push(WalletEvent::TxUnconfirmed {
-						txid: *txid2,
-						tx: tx2.clone(),
-						old_block_time: Some(*anchor),
-					});
-				},
-				(
-					bdk_chain::ChainPosition::Confirmed { anchor: anchor1, .. },
-					bdk_chain::ChainPosition::Confirmed { anchor: anchor2, .. },
-				) => {
-					if *anchor1 != *anchor2 {
-						events.push(WalletEvent::TxConfirmed {
-							txid: *txid2,
-							tx: tx2.clone(),
-							block_time: *anchor2,
-							old_block_time: Some(*anchor1),
-						});
-					}
-				},
-				(
-					bdk_chain::ChainPosition::Unconfirmed { .. },
-					bdk_chain::ChainPosition::Unconfirmed { .. },
-				) => {
-					// do nothing if still unconfirmed
-				},
-			}
-		} else {
-			match cp2 {
-				bdk_chain::ChainPosition::Confirmed { anchor, .. } => {
-					events.push(WalletEvent::TxConfirmed {
-						txid: *txid2,
-						tx: tx2.clone(),
-						block_time: *anchor,
-						old_block_time: None,
-					});
-				},
-				bdk_chain::ChainPosition::Unconfirmed { .. } => {
-					events.push(WalletEvent::TxUnconfirmed {
-						txid: *txid2,
-						tx: tx2.clone(),
-						old_block_time: None,
-					});
-				},
-			}
-		}
-	});
-
-	// find tx that are no longer canonical
-	wallet_txs1.iter().for_each(|(txid1, (tx1, _))| {
-		if !wallet_txs2.contains_key(txid1) {
-			let conflicts = wallet.tx_graph().direct_conflicts(tx1).collect::<Vec<_>>();
-			if !conflicts.is_empty() {
-				events.push(WalletEvent::TxReplaced { txid: *txid1, tx: tx1.clone(), conflicts });
-			} else {
-				events.push(WalletEvent::TxDropped { txid: *txid1, tx: tx1.clone() });
-			}
-		}
-	});
-
-	events
 }

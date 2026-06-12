@@ -586,6 +586,87 @@ impl StorableObjectUpdate<PaymentDetails> for PaymentDetailsUpdate {
 	}
 }
 
+/// Represents a pending payment
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingPaymentDetails {
+	/// The payment id tracked in the main payment store.
+	pub payment_id: PaymentId,
+	/// The canonical transaction id currently associated with the payment.
+	pub txid: Txid,
+	/// Transaction IDs that have replaced or conflict with this payment.
+	pub conflicting_txids: Vec<Txid>,
+}
+
+impl PendingPaymentDetails {
+	pub(crate) fn new(payment_id: PaymentId, txid: Txid, conflicting_txids: Vec<Txid>) -> Self {
+		Self { payment_id, txid, conflicting_txids }
+	}
+}
+
+impl_writeable_tlv_based!(PendingPaymentDetails, {
+	(0, payment_id, required),
+	(2, txid, required),
+	(4, conflicting_txids, optional_vec),
+});
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingPaymentDetailsUpdate {
+	pub payment_id: PaymentId,
+	pub txid: Txid,
+	pub conflicting_txids: Vec<Txid>,
+}
+
+impl StorableObject for PendingPaymentDetails {
+	type Id = PaymentId;
+	type Update = PendingPaymentDetailsUpdate;
+
+	fn id(&self) -> Self::Id {
+		self.payment_id
+	}
+
+	fn update(&mut self, update: Self::Update) -> bool {
+		let mut updated = false;
+
+		if self.txid != update.txid {
+			let old_txid = self.txid;
+			self.txid = update.txid;
+			if old_txid != self.txid && !self.conflicting_txids.contains(&old_txid) {
+				self.conflicting_txids.push(old_txid);
+			}
+			updated = true;
+		}
+
+		for txid in update.conflicting_txids {
+			if txid != self.txid && !self.conflicting_txids.contains(&txid) {
+				self.conflicting_txids.push(txid);
+				updated = true;
+			}
+		}
+
+		updated
+	}
+
+	fn to_update(&self) -> Self::Update {
+		self.into()
+	}
+}
+
+impl StorableObjectUpdate<PendingPaymentDetails> for PendingPaymentDetailsUpdate {
+	fn id(&self) -> <PendingPaymentDetails as StorableObject>::Id {
+		self.payment_id
+	}
+}
+
+impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
+	fn from(value: &PendingPaymentDetails) -> Self {
+		Self {
+			payment_id: value.id(),
+			txid: value.txid,
+			conflicting_txids: value.conflicting_txids.clone(),
+		}
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use lightning::util::ser::{Readable, Writeable};
