@@ -9,7 +9,7 @@ pub(crate) mod bitcoind;
 mod electrum;
 mod esplora;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -84,7 +84,7 @@ impl WalletSyncStatus {
 
 pub(crate) struct ChainSource {
 	kind: ChainSourceKind,
-	registered_txids: Mutex<Vec<Txid>>,
+	registered_txids: Mutex<HashSet<Txid>>,
 	tx_broadcaster: Arc<Broadcaster>,
 	logger: Arc<Logger>,
 }
@@ -113,7 +113,7 @@ impl ChainSource {
 			node_metrics,
 		)?;
 		let kind = ChainSourceKind::Esplora(esplora_chain_source);
-		let registered_txids = Mutex::new(Vec::new());
+		let registered_txids = Mutex::new(HashSet::new());
 		Ok((Self { kind, registered_txids, tx_broadcaster, logger }, None))
 	}
 
@@ -133,7 +133,7 @@ impl ChainSource {
 			node_metrics,
 		);
 		let kind = ChainSourceKind::Electrum(electrum_chain_source);
-		let registered_txids = Mutex::new(Vec::new());
+		let registered_txids = Mutex::new(HashSet::new());
 		(Self { kind, registered_txids, tx_broadcaster, logger }, None)
 	}
 
@@ -156,7 +156,7 @@ impl ChainSource {
 		);
 		let best_block = bitcoind_chain_source.poll_best_block().await.ok();
 		let kind = ChainSourceKind::Bitcoind(bitcoind_chain_source);
-		let registered_txids = Mutex::new(Vec::new());
+		let registered_txids = Mutex::new(HashSet::new());
 		(Self { kind, registered_txids, tx_broadcaster, logger }, best_block)
 	}
 
@@ -180,7 +180,7 @@ impl ChainSource {
 		);
 		let best_block = bitcoind_chain_source.poll_best_block().await.ok();
 		let kind = ChainSourceKind::Bitcoind(bitcoind_chain_source);
-		let registered_txids = Mutex::new(Vec::new());
+		let registered_txids = Mutex::new(HashSet::new());
 		(Self { kind, registered_txids, tx_broadcaster, logger }, best_block)
 	}
 
@@ -214,7 +214,7 @@ impl ChainSource {
 		}
 	}
 
-	pub(crate) fn registered_txids(&self) -> Vec<Txid> {
+	pub(crate) fn registered_txids(&self) -> HashSet<Txid> {
 		self.registered_txids.lock().expect("lock").clone()
 	}
 
@@ -472,7 +472,7 @@ impl ChainSource {
 
 impl Filter for ChainSource {
 	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
-		self.registered_txids.lock().expect("lock").push(*txid);
+		self.registered_txids.lock().expect("lock").insert(*txid);
 		match &self.kind {
 			ChainSourceKind::Esplora(esplora_chain_source) => {
 				esplora_chain_source.register_tx(txid, script_pubkey)
