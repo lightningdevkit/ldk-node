@@ -305,6 +305,101 @@ async fn multi_hop_sending() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn split_underpaid_bolt11_payment() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+	let node_c = setup_node(&chain_source, random_config(true));
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let addr_c = node_c.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b, addr_c],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	for node in [&node_a, &node_b, &node_c] {
+		node.sync_wallets().unwrap();
+		assert_eq!(node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	}
+
+	// The receiver opens both channels and pushes liquidity to both payers so each payer can send
+	// half of the invoice back.
+	let channel_amount_sat = 1_000_000;
+	let push_amount_msat = Some(500_000_000);
+	for payer in [&node_a, &node_b] {
+		node_c
+			.open_channel(
+				payer.node_id(),
+				payer.listening_addresses().unwrap().first().unwrap().clone(),
+				channel_amount_sat,
+				push_amount_msat,
+				None,
+			)
+			.unwrap();
+
+		let funding_txo_c = expect_channel_pending_event!(node_c, payer.node_id());
+		let funding_txo_payer = expect_channel_pending_event!(payer, node_c.node_id());
+		assert_eq!(funding_txo_c, funding_txo_payer);
+		wait_for_tx(&electrsd.client, funding_txo_c.txid).await;
+
+		node_c.sync_wallets().unwrap();
+	}
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	for node in [&node_a, &node_b, &node_c] {
+		node.sync_wallets().unwrap();
+	}
+
+	expect_channel_ready_events!(node_c, node_a.node_id(), node_b.node_id());
+	expect_channel_ready_event!(node_a, node_c.node_id());
+	expect_channel_ready_event!(node_b, node_c.node_id());
+
+	let amount_msat = 100_000_000;
+	let half_amount_msat = amount_msat / 2;
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("split")).unwrap());
+	let invoice =
+		node_c.bolt11_payment().receive(amount_msat, &invoice_description.into(), 3600).unwrap();
+
+	// Each payer sends only half the invoice amount, while declaring the full invoice amount as
+	// the total MPP value. The receiver should claim only once both HTLCs arrive.
+	let payment_id_a = node_a
+		.bolt11_payment()
+		.send_using_amount_underpaying(&invoice, half_amount_msat, None)
+		.unwrap();
+	let payment_id_b = node_b
+		.bolt11_payment()
+		.send_using_amount_underpaying(&invoice, half_amount_msat, None)
+		.unwrap();
+
+	let receiver_payment_id = expect_payment_received_event!(node_c, amount_msat);
+	assert_eq!(receiver_payment_id, Some(PaymentId(invoice.payment_hash().0)));
+	expect_payment_successful_event!(node_a, Some(payment_id_a), None);
+	expect_payment_successful_event!(node_b, Some(payment_id_b), None);
+
+	// The receiver records the full invoice amount; each payer records only its own half.
+	let receiver_payments =
+		node_c.list_payments_with_filter(|p| p.id == receiver_payment_id.unwrap());
+	assert_eq!(receiver_payments.len(), 1);
+	assert_eq!(receiver_payments.first().unwrap().amount_msat, Some(amount_msat));
+
+	let node_a_payments = node_a.list_payments_with_filter(|p| p.id == payment_id_a);
+	assert_eq!(node_a_payments.len(), 1);
+	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(half_amount_msat));
+
+	let node_b_payments = node_b.list_payments_with_filter(|p| p.id == payment_id_b);
+	assert_eq!(node_b_payments.len(), 1);
+	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(half_amount_msat));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let config = random_config(true);

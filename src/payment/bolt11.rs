@@ -282,7 +282,8 @@ mod tests {
 impl Bolt11Payment {
 	fn send_internal(
 		&self, invoice: &LdkBolt11Invoice, amount_msat: Option<u64>,
-		route_parameters: Option<RouteParametersConfig>, invalid_amount_log: &'static str,
+		route_parameters: Option<RouteParametersConfig>,
+		declared_total_mpp_value_msat_override: Option<u64>, invalid_amount_log: &'static str,
 	) -> Result<PaymentId, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
@@ -314,6 +315,7 @@ impl Bolt11Payment {
 		let optional_params = OptionalBolt11PaymentParams {
 			retry_strategy,
 			route_params_config,
+			declared_total_mpp_value_msat_override,
 			..Default::default()
 		};
 		match self.channel_manager.pay_for_bolt11_invoice(
@@ -401,6 +403,7 @@ impl Bolt11Payment {
 			invoice,
 			None,
 			route_parameters,
+			None,
 			"Failed to send payment due to the given invoice being \"zero-amount\". Please use send_using_amount instead.",
 		)
 	}
@@ -436,6 +439,52 @@ impl Bolt11Payment {
 			invoice,
 			Some(amount_msat),
 			route_parameters,
+			None,
+			"Failed to send payment due to amount given being insufficient.",
+		)
+	}
+
+	/// Send a payment given an invoice and an amount lower than the invoice amount.
+	///
+	/// This uses LDK's partial MPP support by declaring the invoice amount as the total MPP value
+	/// while only sending `amount_msat` from this node. The receiving node must be willing to
+	/// accept underpaying HTLCs for the payment to complete.
+	///
+	/// This will fail if the invoice is a zero-amount invoice, or if the amount given is greater
+	/// than or equal to the value required by the invoice. Use [`Self::send_using_amount`] instead
+	/// when paying a zero-amount invoice or paying at least the invoice amount.
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	pub fn send_using_amount_underpaying(
+		&self, invoice: &Bolt11Invoice, amount_msat: u64,
+		route_parameters: Option<RouteParametersConfig>,
+	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let invoice = maybe_deref(invoice);
+		let invoice_amount_msat = invoice.amount_milli_satoshis().ok_or_else(|| {
+			log_error!(self.logger, "Failed to underpay as the given invoice is \"zero-amount\".");
+			Error::InvalidInvoice
+		})?;
+
+		if amount_msat >= invoice_amount_msat {
+			log_error!(
+				self.logger,
+				"Failed to underpay as the given amount needs to be less than the invoice amount: required less than {}msat, gave {}msat.",
+				invoice_amount_msat,
+				amount_msat
+			);
+			return Err(Error::InvalidAmount);
+		}
+
+		self.send_internal(
+			invoice,
+			Some(amount_msat),
+			route_parameters,
+			Some(invoice_amount_msat),
 			"Failed to send payment due to amount given being insufficient.",
 		)
 	}
