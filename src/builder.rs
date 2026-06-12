@@ -45,7 +45,7 @@ use lightning::util::sweep::OutputSweeper;
 use lightning_dns_resolver::OMDomainResolver;
 use vss_client::headers::VssHeaderProvider;
 
-use crate::chain::ChainSource;
+use crate::chain::{CbfFeeSourceConfig, ChainSource};
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
@@ -111,6 +111,10 @@ enum ChainDataSourceConfig {
 		rpc_password: String,
 		rest_client_config: Option<BitcoindRestClientConfig>,
 		wallet_rescan_from_height: Option<u32>,
+	},
+	Cbf {
+		peers: Vec<String>,
+		fee_source_config: Option<CbfFeeSourceConfig>,
 	},
 }
 
@@ -393,6 +397,19 @@ impl NodeBuilder {
 	) -> &mut Self {
 		self.chain_data_source_config =
 			Some(ChainDataSourceConfig::Electrum { server_url, sync_config });
+		self
+	}
+
+	/// Configures the [`Node`] instance to source chain data via compact block filters
+	/// (BIP157/BIP158), connecting to the given peers (`ip:port`).
+	///
+	/// `fee_source_config` optionally delegates fee estimation to an Esplora or Electrum server;
+	/// if `None`, fee rates are derived from recent blocks.
+	pub fn set_chain_source_cbf(
+		&mut self, peers: Vec<String>, fee_source_config: Option<CbfFeeSourceConfig>,
+	) -> &mut Self {
+		self.chain_data_source_config =
+			Some(ChainDataSourceConfig::Cbf { peers, fee_source_config });
 		self
 	}
 
@@ -1514,8 +1531,18 @@ fn build_with_store_internal(
 				Arc::clone(&node_metrics),
 			)
 		},
-		//TODO add here an arm
-		// Some(ChainDataSoucrConfig::Cbf)
+		Some(ChainDataSourceConfig::Cbf { peers, fee_source_config }) => ChainSource::new_cbf(
+			peers.clone(),
+			fee_source_config.clone(),
+			Arc::clone(&runtime),
+			Arc::clone(&fee_estimator),
+			Arc::clone(&tx_broadcaster),
+			Arc::clone(&kv_store),
+			Arc::clone(&config),
+			Arc::clone(&logger),
+			Arc::clone(&node_metrics),
+		)
+		.map_err(|_| BuildError::ChainSourceSetupFailed)?,
 		Some(ChainDataSourceConfig::Bitcoind {
 			rpc_host,
 			rpc_port,

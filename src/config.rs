@@ -26,7 +26,7 @@ use crate::logger::LogLevel;
 const DEFAULT_NETWORK: Network = Network::Bitcoin;
 const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
-const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
+pub(crate) const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
 pub(crate) const DEFAULT_PROBING_INTERVAL_SECS: u64 = 10;
 pub(crate) const MIN_PROBING_INTERVAL: Duration = Duration::from_millis(100);
