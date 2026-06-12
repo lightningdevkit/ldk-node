@@ -118,8 +118,59 @@ def expect_event(node, expected_event_type):
     assert isinstance(event, expected_event_type)
     print("EVENT:", event)
     node.event_handled()
-    return event 
+    return event
 
+def setup_two_nodes(esplora_endpoint):
+    tmp_dir_1 = tempfile.TemporaryDirectory("_ldk_node_1")
+    listening_addresses_1 = ["127.0.0.1:2323"]
+    node_1 = setup_node(tmp_dir_1.name, esplora_endpoint, listening_addresses_1)
+    node_1.start()
+    node_id_1 = node_1.node_id()
+
+    tmp_dir_2 = tempfile.TemporaryDirectory("_ldk_node_2")
+    listening_addresses_2 = ["127.0.0.1:2324"]
+    node_2 = setup_node(tmp_dir_2.name, esplora_endpoint, listening_addresses_2)
+    node_2.start()
+    node_id_2 = node_2.node_id()
+
+    return node_1, node_2, tmp_dir_1, tmp_dir_2, node_id_1, node_id_2, listening_addresses_2
+
+def fund_nodes(node_1, node_2, esplora_endpoint, amount_sats=100000):
+    address_1 = node_1.onchain_payment().new_address()
+    txid_1 = send_to_address(address_1, amount_sats)
+    address_2 = node_2.onchain_payment().new_address()
+    txid_2 = send_to_address(address_2, amount_sats)
+
+    wait_for_tx(esplora_endpoint, txid_1)
+    wait_for_tx(esplora_endpoint, txid_2)
+    mine_and_wait(esplora_endpoint, 6)
+
+    node_1.sync_wallets()
+    node_2.sync_wallets()
+
+def open_channel_and_wait_ready(node_1, node_2, node_id_2, listening_address_2, esplora_endpoint, channel_amount_sats=50000):
+    node_1.open_channel(node_id_2, listening_address_2, channel_amount_sats, None, None)
+
+    channel_pending_event_1 = expect_event(node_1, Event.CHANNEL_PENDING)
+    expect_event(node_2, Event.CHANNEL_PENDING)
+
+    funding_txid = channel_pending_event_1.funding_txo.txid
+    wait_for_tx(esplora_endpoint, funding_txid)
+    mine_and_wait(esplora_endpoint, 6)
+
+    node_1.sync_wallets()
+    node_2.sync_wallets()
+
+    channel_ready_event_1 = expect_event(node_1, Event.CHANNEL_READY)
+    channel_ready_event_2 = expect_event(node_2, Event.CHANNEL_READY)
+    return channel_ready_event_1, channel_ready_event_2, funding_txid
+
+def stop_and_cleanup(node_1, node_2, tmp_dir_1, tmp_dir_2):
+    node_1.stop()
+    node_2.stop()
+    time.sleep(1)
+    tmp_dir_1.cleanup()
+    tmp_dir_2.cleanup()
 
 
 class TestLdkNode(unittest.TestCase):
@@ -129,6 +180,43 @@ class TestLdkNode(unittest.TestCase):
         time.sleep(3)
         esplora_endpoint = get_esplora_endpoint()
         mine_and_wait(esplora_endpoint, 1)
+
+    def test_spontaneous_payment(self):
+        """Spontaneous payment test in python: keysend after channel ready."""
+        esplora_endpoint = get_esplora_endpoint()
+
+        node_1, node_2, tmp_dir_1, tmp_dir_2, node_id_1, node_id_2, listening_addresses_2 = setup_two_nodes(esplora_endpoint)
+        fund_nodes(node_1, node_2, esplora_endpoint)
+        open_channel_and_wait_ready(node_1, node_2, node_id_2, listening_addresses_2[0], esplora_endpoint)
+
+        keysend_amount_msat = 2_500_000
+        custom_tlvs = [CustomTlvRecord(type_num=13377331, value=bytes([1, 2, 3]))]
+        keysend_payment_id = node_1.spontaneous_payment().send_with_custom_tlvs(
+            keysend_amount_msat, node_id_2, None, custom_tlvs
+        )
+
+        expect_event(node_1, Event.PAYMENT_SUCCESSFUL)
+        received_event = expect_event(node_2, Event.PAYMENT_RECEIVED)
+
+        self.assertEqual(received_event.amount_msat, keysend_amount_msat)
+        self.assertEqual(received_event.custom_records, custom_tlvs)
+
+        sender_payment = node_1.payment(keysend_payment_id)
+        receiver_payment = node_2.payment(keysend_payment_id)
+
+        self.assertIsNotNone(sender_payment)
+        self.assertIsNotNone(receiver_payment)
+        self.assertEqual(sender_payment.status, PaymentStatus.SUCCEEDED)
+        self.assertEqual(sender_payment.direction, PaymentDirection.OUTBOUND)
+        self.assertEqual(sender_payment.amount_msat, keysend_amount_msat)
+        self.assertTrue(sender_payment.kind.is_spontaneous())
+
+        self.assertEqual(receiver_payment.status, PaymentStatus.SUCCEEDED)
+        self.assertEqual(receiver_payment.direction, PaymentDirection.INBOUND)
+        self.assertEqual(receiver_payment.amount_msat, keysend_amount_msat)
+        self.assertTrue(receiver_payment.kind.is_spontaneous())
+
+        stop_and_cleanup(node_1, node_2, tmp_dir_1, tmp_dir_2)
 
     def test_channel_full_cycle(self):
         esplora_endpoint = get_esplora_endpoint()
