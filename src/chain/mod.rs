@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use bitcoin::{Script, Txid};
 use lightning::chain::{BlockLocator, Filter};
+use lightning_block_sync::gossip::UtxoSource;
 
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
 use crate::chain::electrum::ElectrumChainSource;
@@ -211,6 +212,29 @@ impl ChainSource {
 				Some(bitcoind_chain_source.as_utxo_source())
 			},
 			_ => None,
+		}
+	}
+
+	/// Fetches the block hash at the given height from the chain source.
+	pub(crate) async fn get_block_hash_by_height(
+		&self, height: u32,
+	) -> Result<bitcoin::BlockHash, Error> {
+		match &self.kind {
+			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+				let utxo_source = bitcoind_chain_source.as_utxo_source();
+				utxo_source
+					.get_block_hash_by_height(height)
+					.await
+					.map_err(|_| Error::ChainAccessFailed)
+			},
+			ChainSourceKind::Esplora(esplora_chain_source) => esplora_chain_source
+				.get_block_hash_by_height(height)
+				.await
+				.map_err(|_| Error::ChainAccessFailed),
+			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source
+				.get_block_hash_by_height(height)
+				.await
+				.map_err(|_| Error::ChainAccessFailed),
 		}
 	}
 
