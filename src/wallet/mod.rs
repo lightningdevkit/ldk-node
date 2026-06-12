@@ -39,7 +39,7 @@ use lightning::chain::chaininterface::{
 };
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::transaction::OutPoint as LdkOutPoint;
-use lightning::chain::{BlockLocator, ClaimId, Filter, Listen};
+use lightning::chain::{BlockLocator, ClaimId, Listen};
 use lightning::ln::channel_state::{SpliceCandidateDetails, SpliceCandidateStatus, SpliceDetails};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::inbound_payment::ExpandedKey;
@@ -577,14 +577,6 @@ impl Wallet {
 			.revealed_spks(..)
 			.map(|((_keychain, _index), spk)| spk)
 			.collect()
-	}
-
-	/// Register scripts that BDK revealed at index time (e.g. change outputs, which `create_tx`
-	/// only peeks) with the chain source's watch set. No-op for non-CBF backends.
-	fn register_revealed_scripts(&self, _locked_wallet: &PersistedWallet<KVStoreWalletPersister>) {
-		// TODO(cbf): diff `last_revealed_index(keychain)` against a per-keychain cursor and
-		// `chain_source.register_script(spk)` the delta for both keychains.
-		todo!()
 	}
 
 	async fn update_payment_store(&self, mut events: Vec<WalletEvent>) -> Result<(), Error> {
@@ -1935,7 +1927,6 @@ impl Wallet {
 				.saturating_sub(locked_pool.available.len() + locked_pool.unpublished.len());
 			for _ in 0..needed {
 				let address_info = locked_wallet.reveal_next_address(KeychainKind::External);
-				self.chain_source.register_script(address_info.script_pubkey());
 				locked_pool.unpublished.push((address_info.index, address_info.address));
 			}
 			// Hand the reveals straight to the persister: this refill may run as a task the
@@ -2034,7 +2025,6 @@ impl Wallet {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
-		self.chain_source.register_script(address_info.script_pubkey());
 		Ok(address_info.address)
 	}
 
@@ -2636,7 +2626,6 @@ impl Wallet {
 		locked_persister.persist_changeset(change_set).await.map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 		})?;
-		self.chain_source.register_script(address_info.script_pubkey());
 		Ok(address_info.address.script_pubkey())
 	}
 
