@@ -1581,6 +1581,18 @@ async fn generate_bip21_uri() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn unified_receive_rejects_msat_overflow() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let node = setup_node(&chain_source, random_config(true), None);
+
+	assert_eq!(
+		Err(NodeError::InvalidAmount),
+		node.unified_qr_payment().receive(u64::MAX, "asdf", 4_000)
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn unified_qr_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
