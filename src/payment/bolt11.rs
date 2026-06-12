@@ -279,20 +279,20 @@ mod tests {
 	}
 }
 
-#[cfg_attr(feature = "uniffi", uniffi::export)]
 impl Bolt11Payment {
-	/// Send a payment given an invoice.
-	///
-	/// If `route_parameters` are provided they will override the default as well as the
-	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
-	pub fn send(
-		&self, invoice: &Bolt11Invoice, route_parameters: Option<RouteParametersConfig>,
-	) -> Result<PaymentId, Error> {
+	fn ensure_running(&self) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
+		Ok(())
+	}
 
-		let invoice = maybe_deref(invoice);
+	fn send_internal(
+		&self, invoice: &LdkBolt11Invoice, amount_msat: Option<u64>,
+		route_parameters: Option<RouteParametersConfig>, invalid_amount_log: &'static str,
+	) -> Result<PaymentId, Error> {
+		self.ensure_running()?;
+
 		let payment_hash = invoice.payment_hash();
 		let payment_id = PaymentId(invoice.payment_hash().0);
 		if let Some(payment) = self.payment_store.get(&payment_id) {
@@ -308,6 +308,7 @@ impl Bolt11Payment {
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let payment_secret = Some(*invoice.payment_secret());
+		let payment_amount_msat = amount_msat.or_else(|| invoice.amount_milli_satoshis());
 
 		let optional_params = OptionalBolt11PaymentParams {
 			retry_strategy,
@@ -317,14 +318,19 @@ impl Bolt11Payment {
 		match self.channel_manager.pay_for_bolt11_invoice(
 			invoice,
 			payment_id,
-			None,
+			amount_msat,
 			optional_params,
 		) {
 			Ok(()) => {
 				let payee_pubkey = invoice.recover_payee_pub_key();
-				let amt_msat =
-					invoice.amount_milli_satoshis().expect("invoice amount should be set");
-				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
+				let payment_amount_msat =
+					payment_amount_msat.expect("payment amount should be set");
+				log_info!(
+					self.logger,
+					"Initiated sending {} msat to {}",
+					payment_amount_msat,
+					payee_pubkey
+				);
 
 				let kind = PaymentKind::Bolt11 {
 					hash: payment_hash,
@@ -335,7 +341,7 @@ impl Bolt11Payment {
 				let payment = PaymentDetails::new(
 					payment_id,
 					kind,
-					invoice.amount_milli_satoshis(),
+					Some(payment_amount_msat),
 					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
@@ -346,9 +352,7 @@ impl Bolt11Payment {
 				Ok(payment_id)
 			},
 			Err(Bolt11PaymentError::InvalidAmount) => {
-				log_error!(self.logger,
-					"Failed to send payment due to the given invoice being \"zero-amount\". Please use send_using_amount instead."
-				);
+				log_error!(self.logger, "{}", invalid_amount_log);
 				return Err(Error::InvalidInvoice);
 			},
 			Err(Bolt11PaymentError::SendingFailed(e)) => {
@@ -365,7 +369,7 @@ impl Bolt11Payment {
 						let payment = PaymentDetails::new(
 							payment_id,
 							kind,
-							invoice.amount_milli_satoshis(),
+							payment_amount_msat,
 							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
@@ -377,6 +381,27 @@ impl Bolt11Payment {
 				}
 			},
 		}
+	}
+}
+
+#[cfg_attr(feature = "uniffi", uniffi::export)]
+impl Bolt11Payment {
+	/// Send a payment given an invoice.
+	///
+	/// If `route_parameters` are provided they will override the default as well as the
+	/// node-wide parameters configured via [`Config::route_parameters`] on a per-field basis.
+	pub fn send(
+		&self, invoice: &Bolt11Invoice, route_parameters: Option<RouteParametersConfig>,
+	) -> Result<PaymentId, Error> {
+		self.ensure_running()?;
+
+		let invoice = maybe_deref(invoice);
+		self.send_internal(
+			invoice,
+			None,
+			route_parameters,
+			"Failed to send payment due to the given invoice being \"zero-amount\". Please use send_using_amount instead.",
+		)
 	}
 
 	/// Send a payment given an invoice and an amount in millisatoshis.
@@ -392,9 +417,7 @@ impl Bolt11Payment {
 		&self, invoice: &Bolt11Invoice, amount_msat: u64,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().expect("lock") {
-			return Err(Error::NotRunning);
-		}
+		self.ensure_running()?;
 
 		let invoice = maybe_deref(invoice);
 		if let Some(invoice_amount_msat) = invoice.amount_milli_satoshis() {
@@ -406,94 +429,12 @@ impl Bolt11Payment {
 			}
 		}
 
-		let payment_hash = invoice.payment_hash();
-		let payment_id = PaymentId(invoice.payment_hash().0);
-		if let Some(payment) = self.payment_store.get(&payment_id) {
-			if payment.status == PaymentStatus::Pending
-				|| payment.status == PaymentStatus::Succeeded
-			{
-				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
-				return Err(Error::DuplicatePayment);
-			}
-		}
-
-		let route_params_config =
-			route_parameters.or(self.config.route_parameters).unwrap_or_default();
-		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
-		let payment_secret = Some(*invoice.payment_secret());
-
-		let optional_params = OptionalBolt11PaymentParams {
-			retry_strategy,
-			route_params_config,
-			..Default::default()
-		};
-		match self.channel_manager.pay_for_bolt11_invoice(
+		self.send_internal(
 			invoice,
-			payment_id,
 			Some(amount_msat),
-			optional_params,
-		) {
-			Ok(()) => {
-				let payee_pubkey = invoice.recover_payee_pub_key();
-				log_info!(
-					self.logger,
-					"Initiated sending {} msat to {}",
-					amount_msat,
-					payee_pubkey
-				);
-
-				let kind = PaymentKind::Bolt11 {
-					hash: payment_hash,
-					preimage: None,
-					secret: payment_secret,
-					counterparty_skimmed_fee_msat: None,
-				};
-
-				let payment = PaymentDetails::new(
-					payment_id,
-					kind,
-					Some(amount_msat),
-					None,
-					PaymentDirection::Outbound,
-					PaymentStatus::Pending,
-				);
-				self.runtime.block_on(self.payment_store.insert(payment))?;
-
-				Ok(payment_id)
-			},
-			Err(Bolt11PaymentError::InvalidAmount) => {
-				log_error!(
-					self.logger,
-					"Failed to send payment due to amount given being insufficient."
-				);
-				return Err(Error::InvalidInvoice);
-			},
-			Err(Bolt11PaymentError::SendingFailed(e)) => {
-				log_error!(self.logger, "Failed to send payment: {:?}", e);
-				match e {
-					RetryableSendFailure::DuplicatePayment => Err(Error::DuplicatePayment),
-					_ => {
-						let kind = PaymentKind::Bolt11 {
-							hash: payment_hash,
-							preimage: None,
-							secret: payment_secret,
-							counterparty_skimmed_fee_msat: None,
-						};
-						let payment = PaymentDetails::new(
-							payment_id,
-							kind,
-							Some(amount_msat),
-							None,
-							PaymentDirection::Outbound,
-							PaymentStatus::Failed,
-						);
-
-						self.runtime.block_on(self.payment_store.insert(payment))?;
-						Err(Error::PaymentSendingFailed)
-					},
-				}
-			},
-		}
+			route_parameters,
+			"Failed to send payment due to amount given being insufficient.",
+		)
 	}
 
 	/// Allows to attempt manually claiming payments with the given preimage that have previously
