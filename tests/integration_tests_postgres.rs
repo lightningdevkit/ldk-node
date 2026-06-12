@@ -10,11 +10,13 @@
 mod common;
 
 use ldk_node::entropy::NodeEntropy;
+use ldk_node::io::postgres_store::POSTGRES_TEST_URL_ENV_VAR;
 use ldk_node::Builder;
 use rand::RngCore;
 
 fn test_connection_string() -> String {
-	std::env::var("TEST_POSTGRES_URL")
+	dotenvy::dotenv().ok();
+	std::env::var(POSTGRES_TEST_URL_ENV_VAR)
 		.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string())
 }
 

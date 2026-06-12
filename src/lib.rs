@@ -81,6 +81,10 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod balance;
+#[allow(missing_docs)]
+#[cfg(feature = "bench")]
+#[doc(hidden)]
+pub mod bench;
 mod builder;
 mod chain;
 pub mod config;
