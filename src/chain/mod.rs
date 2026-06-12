@@ -9,11 +9,11 @@ pub(crate) mod bitcoind;
 mod electrum;
 mod esplora;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bitcoin::{Script, Txid};
+use bitcoin::{Script, Transaction, Txid};
 use lightning::chain::{BlockLocator, Filter};
 
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
@@ -453,6 +453,9 @@ impl ChainSource {
 					return;
 				}
 				Some(next_package) = receiver.recv() => {
+					// `BroadcasterInterface` implementations must not assume package ordering, so
+					// normalize once before dispatching to any concrete chain source.
+					let next_package = sort_broadcast_package_topologically(next_package);
 					match &self.kind {
 						ChainSourceKind::Esplora(esplora_chain_source) => {
 							esplora_chain_source.process_broadcast_package(next_package).await
@@ -468,6 +471,64 @@ impl ChainSource {
 			}
 		}
 	}
+}
+
+fn sort_broadcast_package_topologically(package: Vec<Transaction>) -> Vec<Transaction> {
+	if package.len() <= 1 {
+		return package;
+	}
+
+	let mut txid_to_idx = HashMap::with_capacity(package.len());
+	let txids: Vec<Txid> = package.iter().map(|tx| tx.compute_txid()).collect();
+	for (idx, txid) in txids.iter().enumerate() {
+		if txid_to_idx.insert(*txid, idx).is_some() {
+			return package;
+		}
+	}
+
+	let mut children = vec![Vec::new(); package.len()];
+	let mut indegree = vec![0usize; package.len()];
+	for (child_idx, tx) in package.iter().enumerate() {
+		for input in &tx.input {
+			if let Some(parent_idx) = txid_to_idx.get(&input.previous_output.txid).copied() {
+				if parent_idx == child_idx {
+					return package;
+				}
+				if !children[parent_idx].contains(&child_idx) {
+					children[parent_idx].push(child_idx);
+					indegree[child_idx] += 1;
+				}
+			}
+		}
+	}
+
+	let mut ready = VecDeque::new();
+	for (idx, degree) in indegree.iter().enumerate() {
+		if *degree == 0 {
+			ready.push_back(idx);
+		}
+	}
+
+	let mut sorted_indices = Vec::with_capacity(package.len());
+	while let Some(idx) = ready.pop_front() {
+		sorted_indices.push(idx);
+		for child_idx in &children[idx] {
+			indegree[*child_idx] -= 1;
+			if indegree[*child_idx] == 0 {
+				ready.push_back(*child_idx);
+			}
+		}
+	}
+
+	if sorted_indices.len() != package.len() {
+		return package;
+	}
+
+	let mut package_by_idx: Vec<Option<Transaction>> = package.into_iter().map(Some).collect();
+	sorted_indices
+		.into_iter()
+		.map(|idx| package_by_idx[idx].take().expect("transaction must be present"))
+		.collect()
 }
 
 impl Filter for ChainSource {
@@ -493,5 +554,47 @@ impl Filter for ChainSource {
 			},
 			ChainSourceKind::Bitcoind { .. } => (),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::sort_broadcast_package_topologically;
+
+	use bitcoin::hashes::Hash;
+	use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
+
+	fn tx_with_input(seed: u8, previous_output: OutPoint) -> Transaction {
+		Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: bitcoin::absolute::LockTime::ZERO,
+			input: vec![TxIn {
+				previous_output,
+				script_sig: ScriptBuf::from_bytes(vec![seed]),
+				sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+				witness: Witness::new(),
+			}],
+			output: vec![TxOut {
+				value: Amount::from_sat(seed as u64 + 1),
+				script_pubkey: ScriptBuf::new(),
+			}],
+		}
+	}
+
+	fn external_outpoint(seed: u8) -> OutPoint {
+		OutPoint { txid: Txid::from_byte_array([seed; 32]), vout: 0 }
+	}
+
+	#[test]
+	fn sort_broadcast_package_orders_child_first_package() {
+		let parent = tx_with_input(1, external_outpoint(1));
+		let child = tx_with_input(2, OutPoint { txid: parent.compute_txid(), vout: 0 });
+		let parent_txid = parent.compute_txid();
+		let child_txid = child.compute_txid();
+
+		let sorted = sort_broadcast_package_topologically(vec![child, parent]);
+
+		assert_eq!(sorted[0].compute_txid(), parent_txid);
+		assert_eq!(sorted[1].compute_txid(), child_txid);
 	}
 }
