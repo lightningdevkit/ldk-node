@@ -533,7 +533,7 @@ where
 	connection_manager: Arc<ConnectionManager<L>>,
 	output_sweeper: Arc<Sweeper>,
 	network_graph: Arc<Graph>,
-	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
@@ -554,11 +554,11 @@ where
 		bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
-		liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
-		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
-		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
-		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
+		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
+		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
+		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
+		config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -637,22 +637,21 @@ where
 					locktime,
 				) {
 					Ok(final_tx) => {
-						let needs_manual_broadcast =
-							self.liquidity_source.as_ref().map_or(false, |ls| {
-								ls.as_ref().lsps2_channel_needs_manual_broadcast(
-									counterparty_node_id,
-									user_channel_id,
-								)
-							});
+						let needs_manual_broadcast = self
+							.liquidity_source
+							.lsps2_service()
+							.lsps2_channel_needs_manual_broadcast(
+								counterparty_node_id,
+								user_channel_id,
+							);
 
 						let result = if needs_manual_broadcast {
-							self.liquidity_source.as_ref().map(|ls| {
-								ls.lsps2_store_funding_transaction(
-									user_channel_id,
-									counterparty_node_id,
-									final_tx.clone(),
-								);
-							});
+							self.liquidity_source.lsps2_service().lsps2_store_funding_transaction(
+								user_channel_id,
+								counterparty_node_id,
+								final_tx.clone(),
+							);
+
 							self.channel_manager.funding_transaction_generated_manual_broadcast(
 								temporary_channel_id,
 								counterparty_node_id,
@@ -710,9 +709,9 @@ where
 				}
 			},
 			LdkEvent::FundingTxBroadcastSafe { user_channel_id, counterparty_node_id, .. } => {
-				self.liquidity_source.as_ref().map(|ls| {
-					ls.lsps2_funding_tx_broadcast_safe(user_channel_id, counterparty_node_id);
-				});
+				self.liquidity_source
+					.lsps2_service()
+					.lsps2_funding_tx_broadcast_safe(user_channel_id, counterparty_node_id);
 			},
 			LdkEvent::PaymentClaimable {
 				payment_hash,
@@ -1213,9 +1212,10 @@ where
 			LdkEvent::ProbeSuccessful { .. } => {},
 			LdkEvent::ProbeFailed { .. } => {},
 			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {
-				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source.handle_htlc_handling_failed(failure_type).await;
-				}
+				self.liquidity_source
+					.lsps2_service()
+					.handle_htlc_handling_failed(failure_type)
+					.await;
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id, counterparty_node_id } => {
 				match self
@@ -1315,35 +1315,36 @@ where
 						.try_into()
 						.expect("slice is exactly 16 bytes"),
 				);
-				let allow_0conf = self.config.trusted_peers_0conf.contains(&counterparty_node_id);
+				let mut allow_0conf =
+					self.config.trusted_peers_0conf.contains(&counterparty_node_id);
 				let mut channel_override_config = None;
-				if let Some((lsp_node_id, _)) = self
-					.liquidity_source
-					.as_ref()
-					.and_then(|ls| ls.as_ref().get_lsps2_lsp_details())
-				{
-					if lsp_node_id == counterparty_node_id {
-						// When we're an LSPS2 client, allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
-						// check that they don't take too much before claiming.
-						channel_override_config = Some(ChannelConfigOverrides {
-							update_overrides: Some(ChannelConfigUpdate {
-								accept_underpaying_htlcs: Some(true),
-								..Default::default()
-							}),
-							..Default::default()
-						});
 
-						// LSPS2 channels are unannounced; rely on LDK's default of 100%
-						// inbound HTLC value-in-flight so the LSP can forward the initial
-						// payment in full.
-						debug_assert_eq!(
-							self.channel_manager
-								.get_current_config()
-								.channel_handshake_config
-								.unannounced_channel_max_inbound_htlc_value_in_flight_percentage,
-							100
-						);
-					}
+				// If the peer is a configured LSP node, additionally honor its trust_peer_0conf flag.
+				if let Some(lsp) =
+					self.liquidity_source.get_lsp_config(&counterparty_node_id, 2).await
+				{
+					allow_0conf = allow_0conf || lsp.trust_peer_0conf;
+
+					// When we're an LSPS2 client, allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
+					// check that they don't take too much before claiming.
+					channel_override_config = Some(ChannelConfigOverrides {
+						update_overrides: Some(ChannelConfigUpdate {
+							accept_underpaying_htlcs: Some(true),
+							..Default::default()
+						}),
+						..Default::default()
+					});
+
+					// LSPS2 channels are unannounced; rely on LDK's default of 100%
+					// inbound HTLC value-in-flight so the LSP can forward the initial
+					// payment in full.
+					debug_assert_eq!(
+						self.channel_manager
+							.get_current_config()
+							.channel_handshake_config
+							.unannounced_channel_max_inbound_htlc_value_in_flight_percentage,
+						100
+					);
 				}
 				let res = if allow_0conf {
 					self.channel_manager.accept_inbound_channel_from_trusted_peer(
@@ -1468,13 +1469,15 @@ where
 						"unexpected skimmed fee for trampoline forward, fee may be double counted"
 					);
 				}
-				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					let skimmed_fee_msat = skimmed_fee_msat.unwrap_or(0);
-					for next_htlc in next_htlcs.iter() {
-						liquidity_source
-							.handle_payment_forwarded(Some(next_htlc.channel_id), skimmed_fee_msat)
-							.await;
-					}
+
+				for next_htlc in next_htlcs.iter() {
+					self.liquidity_source
+						.lsps2_service()
+						.handle_payment_forwarded(
+							Some(next_htlc.channel_id),
+							skimmed_fee_msat.unwrap_or(0),
+						)
+						.await;
 				}
 
 				let event = Event::PaymentForwarded {
@@ -1582,11 +1585,10 @@ where
 					);
 				}
 
-				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source
-						.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
-						.await;
-				}
+				self.liquidity_source
+					.lsps2_service()
+					.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
+					.await;
 
 				let event = Event::ChannelReady {
 					channel_id,
@@ -1659,16 +1661,15 @@ where
 				payment_hash,
 				..
 			} => {
-				if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-					liquidity_source
-						.handle_htlc_intercepted(
-							requested_next_hop_scid,
-							intercept_id,
-							expected_outbound_amount_msat,
-							payment_hash,
-						)
-						.await;
-				}
+				self.liquidity_source
+					.lsps2_service()
+					.handle_htlc_intercepted(
+						requested_next_hop_scid,
+						intercept_id,
+						expected_outbound_amount_msat,
+						payment_hash,
+					)
+					.await;
 			},
 			LdkEvent::InvoiceReceived { .. } => {
 				debug_assert!(false, "We currently don't handle BOLT12 invoices manually, so this event should never be emitted.");

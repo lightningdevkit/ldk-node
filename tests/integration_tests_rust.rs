@@ -1825,7 +1825,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let service_config = random_config(true);
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
+	service_builder.enable_liquidity_provider(lsps2_service_config);
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 
@@ -1835,7 +1835,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let client_config = random_config(true);
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr, None);
+	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
 	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client_node.start().unwrap();
 
@@ -2144,7 +2144,7 @@ async fn lsps2_client_trusts_lsp() {
 	let service_config = random_config(true);
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
+	service_builder.enable_liquidity_provider(lsps2_service_config);
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 	let service_node_id = service_node.node_id();
@@ -2153,7 +2153,7 @@ async fn lsps2_client_trusts_lsp() {
 	let client_config = random_config(true);
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr.clone(), None);
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
 	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client_node.start().unwrap();
 	let client_node_id = client_node.node_id();
@@ -2319,7 +2319,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let service_config = random_config(true);
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.set_liquidity_provider_lsps2(lsps2_service_config);
+	service_builder.enable_liquidity_provider(lsps2_service_config);
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 
@@ -2329,7 +2329,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let client_config = random_config(true);
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr.clone(), None);
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
 	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client_node.start().unwrap();
 
@@ -3032,4 +3032,99 @@ async fn splice_in_with_all_balance() {
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_multi_lsp_picks_cheapest() {
+	do_lsps2_multi_lsp_picks_cheapest(false).await;
+	do_lsps2_multi_lsp_picks_cheapest(true).await;
+}
+
+async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	// Cheap LSP: 10_000 ppm.
+	let cheap_cfg = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm: 10_000,
+		channel_over_provisioning_ppm: 100_000,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 10,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: true,
+		disable_client_reserve: false,
+	};
+	let cheap_node_config = random_config(true);
+	setup_builder!(cheap_builder, cheap_node_config.node_config);
+	cheap_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	cheap_builder.enable_liquidity_provider(cheap_cfg);
+	let cheap = cheap_builder.build(cheap_node_config.node_entropy.into()).unwrap();
+	cheap.start().unwrap();
+	let cheap_id = cheap.node_id();
+	let cheap_addr = cheap.listening_addresses().unwrap().first().unwrap().clone();
+
+	// Expensive LSP: 20_000 ppm.
+	let expensive_cfg = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm: 20_000,
+		channel_over_provisioning_ppm: 200_000,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 5,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: true,
+		disable_client_reserve: false,
+	};
+	let expensive_node_config = random_config(true);
+	setup_builder!(expensive_builder, expensive_node_config.node_config);
+	expensive_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	expensive_builder.enable_liquidity_provider(expensive_cfg);
+	let expensive = expensive_builder.build(expensive_node_config.node_entropy.into()).unwrap();
+	expensive.start().unwrap();
+	let expensive_id = expensive.node_id();
+	let expensive_addr = expensive.listening_addresses().unwrap().first().unwrap().clone();
+
+	// Client knows both LSPs. Registration order is varied to confirm selection isn't order-based.
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	if reverse_order {
+		client_builder.add_liquidity_source(expensive_id, expensive_addr, None, true);
+		client_builder.add_liquidity_source(cheap_id, cheap_addr, None, true);
+	} else {
+		client_builder.add_liquidity_source(cheap_id, cheap_addr, None, true);
+		client_builder.add_liquidity_source(expensive_id, expensive_addr, None, true);
+	}
+	let client = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client.start().unwrap();
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap()).into();
+	let jit_invoice = client
+		.bolt11_payment()
+		.receive_via_jit_channel(100_000_000, &invoice_description, 1024, None)
+		.unwrap();
+
+	// The route hint's src_node_id is the LSP the client picked.
+	let route_hints = jit_invoice.route_hints();
+	let first_hint = route_hints.first().expect("JIT invoice should have a route hint");
+	#[cfg(feature = "uniffi")]
+	let first_hop = first_hint.first();
+	#[cfg(not(feature = "uniffi"))]
+	let first_hop = first_hint.0.first();
+	let route_hint_src = first_hop.expect("route hint should have at least one hop").src_node_id;
+	assert_eq!(route_hint_src, cheap_id, "expected cheaper LSP to be selected.");
+
+	client.stop().unwrap();
+	cheap.stop().unwrap();
+	expensive.stop().unwrap();
 }

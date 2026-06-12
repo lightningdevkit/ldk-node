@@ -162,7 +162,7 @@ pub use lightning_invoice;
 pub use lightning_liquidity;
 pub use lightning_types;
 use lightning_types::features::NodeFeatures as LdkNodeFeatures;
-use liquidity::{LSPS1Liquidity, LiquiditySource};
+use liquidity::LiquiditySource;
 use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
@@ -183,6 +183,7 @@ pub use types::{ChannelDetails, CustomTlvRecord, PeerDetails, UserChannelId};
 pub use vss_client;
 
 use crate::ffi::maybe_wrap;
+use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
 
@@ -234,7 +235,7 @@ pub struct Node {
 	network_graph: Arc<Graph>,
 	gossip_source: Arc<GossipSource>,
 	pathfinding_scores_sync_url: Option<String>,
-	liquidity_source: Option<Arc<LiquiditySource<Arc<Logger>>>>,
+	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	kv_store: Arc<DynStore>,
 	logger: Arc<Logger>,
 	_router: Arc<Router>,
@@ -600,7 +601,7 @@ impl Node {
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.output_sweeper),
 			Arc::clone(&self.network_graph),
-			self.liquidity_source.clone(),
+			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.keys_manager),
@@ -619,8 +620,7 @@ impl Node {
 		let background_chan_man = Arc::clone(&self.channel_manager);
 		let background_gossip_sync = self.gossip_source.as_gossip_sync();
 		let background_peer_man = Arc::clone(&self.peer_manager);
-		let background_liquidity_man_opt =
-			self.liquidity_source.as_ref().map(|ls| ls.liquidity_manager());
+		let background_liquidity_man = self.liquidity_source.liquidity_manager();
 		let background_sweeper = Arc::clone(&self.output_sweeper);
 		let background_onion_messenger = Arc::clone(&self.onion_messenger);
 		let background_logger = Arc::clone(&self.logger);
@@ -656,7 +656,7 @@ impl Node {
 				Some(background_onion_messenger),
 				background_gossip_sync,
 				background_peer_man,
-				background_liquidity_man_opt,
+				Some(background_liquidity_man),
 				Some(background_sweeper),
 				background_logger,
 				Some(background_scorer),
@@ -677,25 +677,74 @@ impl Node {
 			});
 		});
 
-		if let Some(liquidity_source) = self.liquidity_source.as_ref() {
-			let mut stop_liquidity_handler = self.stop_sender.subscribe();
-			let liquidity_handler = Arc::clone(&liquidity_source);
-			let liquidity_logger = Arc::clone(&self.logger);
-			self.runtime.spawn_background_task(async move {
-				loop {
-					tokio::select! {
-						_ = stop_liquidity_handler.changed() => {
-							log_debug!(
-								liquidity_logger,
-								"Stopping processing liquidity events.",
+		let mut stop_liquidity_handler = self.stop_sender.subscribe();
+		let liquidity_handler = Arc::clone(&self.liquidity_source);
+		let liquidity_logger = Arc::clone(&self.logger);
+		let discovery_cm = Arc::clone(&self.connection_manager);
+		self.runtime.spawn_background_task(async move {
+			// Spawn discovery for configured LSPs in parallel.
+			let discovery_logger = Arc::clone(&liquidity_logger);
+			let mut discovery_set = tokio::task::JoinSet::new();
+			for (node_id, address) in liquidity_handler.get_all_lsp_details() {
+				let cm = Arc::clone(&discovery_cm);
+				let logger = Arc::clone(&discovery_logger);
+				let ls = Arc::clone(&liquidity_handler);
+				discovery_set.spawn(async move {
+					if let Err(e) = cm.connect_peer_if_necessary(node_id, address.clone()).await {
+						log_error!(
+							logger,
+							"Failed to connect to LSP {} for protocol discovery: {}",
+							node_id,
+							e
+						);
+						return;
+					}
+					match ls.discover_lsp_protocols(&node_id).await {
+						Ok(protocols) => {
+							log_info!(
+								logger,
+								"Discovered protocols for LSP {}: {:?}",
+								node_id,
+								protocols
 							);
-							return;
+						},
+						Err(e) => {
+							log_error!(
+								logger,
+								"Failed to discover protocols for LSP {}: {:?}",
+								node_id,
+								e
+							);
+						},
+					}
+				});
+			}
+
+			let mut discovery_done = false;
+			loop {
+				tokio::select! {
+					  _ = stop_liquidity_handler.changed() => {
+						  log_debug!(
+							  liquidity_logger,
+							  "Stopping processing liquidity events.",
+						  );
+						   discovery_set.shutdown().await;
+						  return;
+					  }
+					  _ = liquidity_handler.handle_next_event() => {}
+					  res = discovery_set.join_next(), if !discovery_done => {
+						if res.is_none() {
+							liquidity_handler.mark_discovery_done();
+							discovery_done = true;
+							log_info!(
+								liquidity_logger,
+								"LSP protocols discovery complete.",
+							);
 						}
-						_ = liquidity_handler.handle_next_event() => {}
 					}
 				}
-			});
-		}
+			}
+		});
 
 		log_info!(self.logger, "Startup complete.");
 		*is_running_lock = true;
@@ -895,7 +944,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.connection_manager),
-			self.liquidity_source.clone(),
+			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
@@ -913,7 +962,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.connection_manager),
-			self.liquidity_source.clone(),
+			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.config),
@@ -1070,30 +1119,26 @@ impl Node {
 		})
 	}
 
-	/// Returns a liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
-	///
-	/// [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
+	/// Returns a liquidity handler allowing to manage LSP connections and request channels.
 	#[cfg(not(feature = "uniffi"))]
-	pub fn lsps1_liquidity(&self) -> LSPS1Liquidity {
-		LSPS1Liquidity::new(
+	pub fn liquidity(&self) -> Liquidity {
+		Liquidity::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
-			self.liquidity_source.clone(),
+			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.logger),
 		)
 	}
 
-	/// Returns a liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
-	///
-	/// [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
+	/// Returns a liquidity handler allowing to manage LSP connections and request channels.
 	#[cfg(feature = "uniffi")]
-	pub fn lsps1_liquidity(&self) -> Arc<LSPS1Liquidity> {
-		Arc::new(LSPS1Liquidity::new(
+	pub fn liquidity(&self) -> Arc<Liquidity> {
+		Arc::new(Liquidity::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
-			self.liquidity_source.clone(),
+			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -2098,11 +2143,7 @@ impl Node {
 			| self.chain_monitor.provided_node_features()
 			| self.onion_messenger.provided_node_features()
 			| gossip_features
-			| self
-				.liquidity_source
-				.as_ref()
-				.map(|ls| ls.liquidity_manager().provided_node_features())
-				.unwrap_or_else(LdkNodeFeatures::empty)
+			| self.liquidity_source.liquidity_manager().provided_node_features()
 	}
 }
 
