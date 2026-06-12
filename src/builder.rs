@@ -635,6 +635,7 @@ impl NodeBuilder {
 	/// If not set, durable data will be stored only in the primary store.
 	///
 	/// [`SQLITE_BACKUP_DB_FILE_NAME`]: crate::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME
+	#[allow(dead_code)] // Temporal allowance for dead code. Will be dropped in #871
 	pub fn set_backup_storage_dir_path(&mut self, backup_storage_dir_path: String) -> &mut Self {
 		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
 		tier_store_config.backup_storage_dir_path = Some(backup_storage_dir_path.into());
@@ -647,6 +648,7 @@ impl NodeBuilder {
 	/// the network graph and scorer. Data stored here can be rebuilt if lost.
 	///
 	/// If not set, non-critical data will be stored in the primary store.
+	#[allow(dead_code)] // Temporal allowance for dead code. Will be dropped in #871
 	pub fn set_ephemeral_storage_dir_path(
 		&mut self, ephemeral_storage_dir_path: String,
 	) -> &mut Self {
