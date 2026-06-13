@@ -190,6 +190,8 @@ pub enum BuildError {
 	LoggerSetupFailed,
 	/// We failed to setup the configured chain source.
 	ChainSourceSetupFailed,
+	/// The configured chain source is not supported.
+	ChainSourceNotSupported,
 	/// The given network does not match the node's previously configured network.
 	NetworkMismatch,
 	/// The role of the node in an asynchronous payments context is not compatible with the current configuration.
@@ -232,6 +234,9 @@ impl fmt::Display for BuildError {
 			},
 			Self::DNSResolverSetupFailed => {
 				write!(f, "An attempt to setup a DNS resolver has failed.")
+			},
+			Self::ChainSourceNotSupported => {
+				write!(f, "The configured chain source is not supported.")
 			},
 		}
 	}
@@ -1428,18 +1433,20 @@ fn build_with_store_internal(
 	let (chain_source, chain_tip_opt) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
-			ChainSource::new_esplora(
-				server_url.clone(),
-				headers.clone(),
-				sync_config,
-				Arc::clone(&fee_estimator),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&kv_store),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-				Arc::clone(&node_metrics),
-			)
-			.map_err(|()| BuildError::ChainSourceSetupFailed)?
+			runtime.block_on(async {
+				ChainSource::new_esplora(
+					server_url.clone(),
+					headers.clone(),
+					sync_config,
+					Arc::clone(&fee_estimator),
+					Arc::clone(&tx_broadcaster),
+					Arc::clone(&kv_store),
+					Arc::clone(&config),
+					Arc::clone(&logger),
+					Arc::clone(&node_metrics),
+				)
+				.await
+			})?
 		},
 		Some(ChainDataSourceConfig::Electrum { server_url, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(ElectrumSyncConfig::default());
@@ -1476,7 +1483,7 @@ fn build_with_store_internal(
 					Arc::clone(&node_metrics),
 				)
 				.await
-			}),
+			})?,
 			None => runtime.block_on(async {
 				ChainSource::new_bitcoind_rpc(
 					rpc_host.clone(),
@@ -1491,25 +1498,27 @@ fn build_with_store_internal(
 					Arc::clone(&node_metrics),
 				)
 				.await
-			}),
+			})?,
 		},
 
 		None => {
 			// Default to Esplora client.
 			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
 			let sync_config = EsploraSyncConfig::default();
-			ChainSource::new_esplora(
-				server_url.clone(),
-				HashMap::new(),
-				sync_config,
-				Arc::clone(&fee_estimator),
-				Arc::clone(&tx_broadcaster),
-				Arc::clone(&kv_store),
-				Arc::clone(&config),
-				Arc::clone(&logger),
-				Arc::clone(&node_metrics),
-			)
-			.map_err(|()| BuildError::ChainSourceSetupFailed)?
+			runtime.block_on(async {
+				ChainSource::new_esplora(
+					server_url.clone(),
+					HashMap::new(),
+					sync_config,
+					Arc::clone(&fee_estimator),
+					Arc::clone(&tx_broadcaster),
+					Arc::clone(&kv_store),
+					Arc::clone(&config),
+					Arc::clone(&logger),
+					Arc::clone(&node_metrics),
+				)
+				.await
+			})?
 		},
 	};
 	let chain_source = Arc::new(chain_source);

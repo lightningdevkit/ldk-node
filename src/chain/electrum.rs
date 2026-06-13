@@ -294,7 +294,7 @@ impl ElectrumChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
+	pub(crate) async fn process_broadcast_package(&self, mut package: Vec<Transaction>) {
 		let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
 			self.electrum_runtime_status.read().expect("lock").client().as_ref()
 		{
@@ -304,8 +304,10 @@ impl ElectrumChainSource {
 			return;
 		};
 
-		for tx in package {
-			electrum_client.broadcast(tx).await;
+		if package.len() == 1 {
+			electrum_client.broadcast(package.pop().expect("Package length is 1")).await
+		} else if package.len() > 1 {
+			electrum_client.submit_package(package).await
 		}
 	}
 }
@@ -424,6 +426,14 @@ impl ElectrumRuntimeClient {
 				Error::ConnectionFailed
 			})?,
 		);
+		if config.anchor_channels_config.is_some() {
+			electrum_client.transaction_broadcast_package(&super::dummy_package()).map_err(
+				|e| {
+					log_error!(logger, "Electrum server does not support submit package: {:?}", e);
+					Error::ChainSourceNotSupported
+				},
+			)?;
+		}
 		let bdk_electrum_client = Arc::new(BdkElectrumClient::new(Arc::clone(&electrum_client)));
 		let tx_sync = Arc::new(
 			ElectrumSyncClient::new(server_url.clone(), Arc::clone(&logger)).map_err(|e| {
@@ -562,8 +572,16 @@ impl ElectrumRuntimeClient {
 
 		match timeout_fut.await {
 			Ok(res) => match res {
-				Ok(_) => {
+				Ok(Ok(txid)) => {
 					log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
+				},
+				Ok(Err(e)) => {
+					log_error!(self.logger, "Failed to broadcast transaction {}: {}", txid, e);
+					log_trace!(
+						self.logger,
+						"Failed broadcast transaction bytes: {}",
+						log_bytes!(tx_bytes)
+					);
 				},
 				Err(e) => {
 					log_error!(self.logger, "Failed to broadcast transaction {}: {}", txid, e);
@@ -586,6 +604,65 @@ impl ElectrumRuntimeClient {
 					"Failed broadcast transaction bytes: {}",
 					log_bytes!(tx_bytes)
 				);
+			},
+		}
+	}
+
+	async fn submit_package(&self, package: Vec<Transaction>) {
+		let electrum_client = Arc::clone(&self.electrum_client);
+
+		let txids: Vec<_> = package.iter().map(|tx| tx.compute_txid()).collect();
+		let cloned_package = package.clone();
+
+		let spawn_fut = self
+			.runtime
+			.spawn_blocking(move || electrum_client.transaction_broadcast_package(&cloned_package));
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
+			spawn_fut,
+		);
+
+		match timeout_fut.await {
+			Ok(res) => match res {
+				Ok(Ok(result)) => {
+					if result.success {
+						log_trace!(self.logger, "Successfully broadcast package {:?}", txids);
+						log_trace!(self.logger, "Successfully broadcast package {:?}", result);
+					} else {
+						log_error!(self.logger, "Failed to broadcast package {:?}", txids);
+						log_trace!(self.logger, "Failed to broadcast package {:?}", result);
+						log_trace!(self.logger, "Failed broadcast package bytes:");
+						for tx in package {
+							log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+						}
+					}
+				},
+				Ok(Err(e)) => {
+					log_error!(self.logger, "Failed to broadcast package {:?}: {}", txids, e);
+					log_trace!(self.logger, "Failed broadcast package bytes:",);
+					for tx in package {
+						log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+					}
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to broadcast package {:?}: {}", txids, e);
+					log_trace!(self.logger, "Failed broadcast package bytes:",);
+					for tx in package {
+						log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+					}
+				},
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to broadcast package due to timeout {:?}: {}",
+					txids,
+					e
+				);
+				log_trace!(self.logger, "Failed broadcast transaction bytes:");
+				for tx in package {
+					log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+				}
 			},
 		}
 	}
