@@ -19,7 +19,7 @@ use lightning::ln::types::ChannelId;
 use lightning::types::payment::PaymentHash;
 pub use lightning::util::logger::Level as LogLevel;
 pub(crate) use lightning::util::logger::{Logger as LdkLogger, Record as LdkRecord};
-pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace};
+pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace, log_warn};
 use log::{Level as LogFacadeLevel, Record as LogFacadeRecord};
 
 /// A unit of logging output with metadata to enable filtering `module_path`,

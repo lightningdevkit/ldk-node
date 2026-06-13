@@ -31,13 +31,55 @@ use crate::fee_estimator::{
 	ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::update_and_persist_node_metrics;
-use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
+use crate::logger::{log_bytes, log_debug, log_error, log_trace, log_warn, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::PersistedNodeMetrics;
 
 const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
+
+// Electrum returns fee estimates in BTC/kvB. Values below this fall back to 1 sat/vB.
+const ELECTRUM_MIN_FEE_RATE_BTC_PER_KVB: f64 = 0.00001;
+// Convert BTC/kvB to sat/kwu: 100_000_000 sats per BTC divided by 4 weight units per vbyte.
+const ELECTRUM_BTC_PER_KVB_TO_SAT_PER_KWU: f64 = 25_000_000.0;
+// Cap estimates from the Electrum server at 10,000 sat/vB.
+const ELECTRUM_MAX_FEE_RATE_SAT_PER_KWU: u64 = 2_500_000;
+
+fn fee_rate_from_electrum_estimate(
+	raw_fee_rate_btc_per_kvb: &serde_json::Value, target: ConfirmationTarget, logger: &Logger,
+) -> FeeRate {
+	// Parse the retrieved serde_json::Value and fall back to 1 sat/vb (10^3 / 10^8 = 10^-5
+	// = 0.00001 btc/kvb) if we fail or it yields less than that. This is mostly necessary
+	// to continue on `signet`/`regtest` where we might not get estimates (or bogus values).
+	let fee_rate_btc_per_kvb = raw_fee_rate_btc_per_kvb
+		.as_f64()
+		.filter(|converted| converted.is_finite())
+		.map_or(ELECTRUM_MIN_FEE_RATE_BTC_PER_KVB, |converted| {
+			converted.max(ELECTRUM_MIN_FEE_RATE_BTC_PER_KVB)
+		});
+
+	// Electrum, just like Bitcoin Core, gives us a feerate in BTC/KvB. Thus, we multiply by
+	// 25_000_000 (10^8 / 4) to get satoshis/kwu.
+	let rounded_fee_rate_sat_per_kwu =
+		(fee_rate_btc_per_kvb * ELECTRUM_BTC_PER_KVB_TO_SAT_PER_KWU).round();
+	let fee_rate_was_clamped =
+		rounded_fee_rate_sat_per_kwu > ELECTRUM_MAX_FEE_RATE_SAT_PER_KWU as f64;
+	let clamped_fee_rate_sat_per_kwu =
+		rounded_fee_rate_sat_per_kwu.min(ELECTRUM_MAX_FEE_RATE_SAT_PER_KWU as f64) as u64;
+	if fee_rate_was_clamped {
+		log_warn!(
+			logger,
+			"Clamped Electrum fee rate estimate for {target:?} to {ELECTRUM_MAX_FEE_RATE_SAT_PER_KWU} sats/kwu"
+		);
+	}
+
+	FeeRate::from_sat_per_kwu(clamped_fee_rate_sat_per_kwu)
+}
+
+fn clamp_electrum_fee_rate(fee_rate: FeeRate) -> FeeRate {
+	FeeRate::from_sat_per_kwu(fee_rate.to_sat_per_kwu().min(ELECTRUM_MAX_FEE_RATE_SAT_PER_KWU))
+}
 
 pub(super) struct ElectrumChainSource {
 	server_url: String,
@@ -644,24 +686,21 @@ impl ElectrumRuntimeClient {
 		for (target, raw_fee_rate_btc_per_kvb) in
 			confirmation_targets.into_iter().zip(raw_estimates_btc_kvb.into_iter())
 		{
-			// Parse the retrieved serde_json::Value and fall back to 1 sat/vb (10^3 / 10^8 = 10^-5
-			// = 0.00001 btc/kvb) if we fail or it yields less than that. This is mostly necessary
-			// to continue on `signet`/`regtest` where we might not get estimates (or bogus
-			// values).
-			let fee_rate_btc_per_kvb = raw_fee_rate_btc_per_kvb
-				.as_f64()
-				.map_or(0.00001, |converted| converted.max(0.00001));
-
-			// Electrum, just like Bitcoin Core, gives us a feerate in BTC/KvB.
-			// Thus, we multiply by 25_000_000 (10^8 / 4) to get satoshis/kwu.
-			let fee_rate = {
-				let fee_rate_sat_per_kwu = (fee_rate_btc_per_kvb * 25_000_000.0).round() as u64;
-				FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu)
-			};
+			let fee_rate =
+				fee_rate_from_electrum_estimate(&raw_fee_rate_btc_per_kvb, target, &self.logger);
 
 			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
 			// require some post-estimation adjustments to the fee rates, which we do here.
-			let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
+			let unclamped_adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
+			let adjusted_fee_rate = clamp_electrum_fee_rate(unclamped_adjusted_fee_rate);
+			if adjusted_fee_rate != unclamped_adjusted_fee_rate {
+				log_warn!(
+					self.logger,
+					"Clamped adjusted Electrum fee rate estimate for {:?} to {} sats/kwu",
+					target,
+					ELECTRUM_MAX_FEE_RATE_SAT_PER_KWU
+				);
+			}
 
 			new_fee_rate_cache.insert(target, adjusted_fee_rate);
 
@@ -683,5 +722,50 @@ impl Filter for ElectrumRuntimeClient {
 	}
 	fn register_output(&self, output: WatchedOutput) {
 		self.tx_sync.register_output(output)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
+	use serde_json::json;
+
+	#[test]
+	fn electrum_fee_rate_estimate_clamps_excessive_values() {
+		let logger = Logger::new_log_facade();
+		let fee_rate = fee_rate_from_electrum_estimate(
+			&json!(1.0e20),
+			ConfirmationTarget::OnchainPayment,
+			&logger,
+		);
+
+		assert_eq!(fee_rate.to_sat_per_kwu(), ELECTRUM_MAX_FEE_RATE_SAT_PER_KWU);
+	}
+
+	#[test]
+	fn electrum_fee_rate_estimate_rejects_invalid_values() {
+		let logger = Logger::new_log_facade();
+		let fee_rate = fee_rate_from_electrum_estimate(
+			&json!(null),
+			ConfirmationTarget::OnchainPayment,
+			&logger,
+		);
+
+		assert_eq!(fee_rate.to_sat_per_kwu(), 250);
+	}
+
+	#[test]
+	fn electrum_fee_rate_adjustment_preserves_ceiling() {
+		let fee_rate = FeeRate::from_sat_per_kwu(ELECTRUM_MAX_FEE_RATE_SAT_PER_KWU);
+		let adjusted_fee_rate = apply_post_estimation_adjustments(
+			LdkConfirmationTarget::MaximumFeeEstimate.into(),
+			fee_rate,
+		);
+
+		assert_eq!(
+			clamp_electrum_fee_rate(adjusted_fee_rate).to_sat_per_kwu(),
+			ELECTRUM_MAX_FEE_RATE_SAT_PER_KWU
+		);
 	}
 }
