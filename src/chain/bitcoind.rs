@@ -71,7 +71,14 @@ impl BitcoindChainSource {
 			rpc_password.clone(),
 		));
 
-		let node_version = api_client.get_node_version().await.map_err(|e| {
+		let node_version_result = tokio::time::timeout(
+			Duration::from_secs(CHAIN_POLLING_TIMEOUT_SECS),
+			api_client.get_node_version(),
+		)
+		.await
+		.map_err(|e| log_error!(logger, "Failed to get node version: {:?}", e))?;
+
+		let node_version = node_version_result.map_err(|e| {
 			log_error!(logger, "Failed to get node version: {:?}", e);
 		})?;
 
@@ -113,7 +120,14 @@ impl BitcoindChainSource {
 			rpc_password,
 		));
 
-		let node_version = api_client.get_node_version().await.map_err(|e| {
+		let node_version_result = tokio::time::timeout(
+			Duration::from_secs(CHAIN_POLLING_TIMEOUT_SECS),
+			api_client.get_node_version(),
+		)
+		.await
+		.map_err(|e| log_error!(logger, "Failed to get node version: {:?}", e))?;
+
+		let node_version = node_version_result.map_err(|e| {
 			log_error!(logger, "Failed to get node version: {:?}", e);
 		})?;
 
