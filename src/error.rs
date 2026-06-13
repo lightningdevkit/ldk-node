@@ -137,6 +137,8 @@ pub enum Error {
 	LnurlAuthTimeout,
 	/// The provided lnurl is invalid.
 	InvalidLnurl,
+	/// The configured chain source is not supported.
+	ChainSourceNotSupported,
 }
 
 impl fmt::Display for Error {
@@ -222,6 +224,9 @@ impl fmt::Display for Error {
 			Self::LnurlAuthFailed => write!(f, "LNURL-auth authentication failed."),
 			Self::LnurlAuthTimeout => write!(f, "LNURL-auth authentication timed out."),
 			Self::InvalidLnurl => write!(f, "The provided lnurl is invalid."),
+			Self::ChainSourceNotSupported => {
+				write!(f, "The configured chain source is not supported.")
+			},
 		}
 	}
 }

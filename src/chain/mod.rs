@@ -27,7 +27,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, PersistedNodeMetrics};
+use crate::{BuildError, Error, PersistedNodeMetrics};
 
 /// We use this parent-child TRUC package to make sure the configured chain source supports
 /// broadcasting packages via the `submitpackage` Bitcoin Core RPC.
@@ -132,7 +132,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<PersistedNodeMetrics>,
-	) -> Result<(Self, Option<BlockLocator>), ()> {
+	) -> Result<(Self, Option<BlockLocator>), BuildError> {
 		let esplora_chain_source = EsploraChainSource::new(
 			server_url,
 			headers,
@@ -174,7 +174,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
 		node_metrics: Arc<PersistedNodeMetrics>,
-	) -> Result<(Self, Option<BlockLocator>), ()> {
+	) -> Result<(Self, Option<BlockLocator>), BuildError> {
 		let bitcoind_chain_source = BitcoindChainSource::new_rpc(
 			rpc_host,
 			rpc_port,
@@ -198,7 +198,7 @@ impl ChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
 		kv_store: Arc<DynStore>, config: Arc<Config>, rest_client_config: BitcoindRestClientConfig,
 		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
-	) -> Result<(Self, Option<BlockLocator>), ()> {
+	) -> Result<(Self, Option<BlockLocator>), BuildError> {
 		let bitcoind_chain_source = BitcoindChainSource::new_rest(
 			rpc_host,
 			rpc_port,

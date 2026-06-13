@@ -25,7 +25,7 @@ use crate::fee_estimator::{
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, PersistedNodeMetrics};
+use crate::{BuildError, Error, PersistedNodeMetrics};
 
 pub(super) struct EsploraChainSource {
 	pub(super) sync_config: EsploraSyncConfig,
@@ -45,7 +45,7 @@ impl EsploraChainSource {
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
 		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
-	) -> Result<Self, ()> {
+	) -> Result<Self, BuildError> {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder =
 			client_builder.timeout(sync_config.timeouts_config.per_request_timeout_secs as u64);
@@ -56,12 +56,14 @@ impl EsploraChainSource {
 
 		let esplora_client = client_builder.build_async().map_err(|e| {
 			log_error!(logger, "Failed to build Esplora client: {}", e);
+			BuildError::ChainSourceSetupFailed
 		})?;
 
 		if config.anchor_channels_config.is_some() {
 			esplora_client.submit_package(&super::dummy_package(), None, None).await.map_err(
 				|e| {
 					log_error!(logger, "Esplora server does not support submit package: {:?}", e);
+					BuildError::ChainSourceNotSupported
 				},
 			)?;
 		}

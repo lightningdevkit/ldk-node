@@ -42,7 +42,7 @@ use crate::fee_estimator::{
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
-use crate::{Error, PersistedNodeMetrics};
+use crate::{BuildError, Error, PersistedNodeMetrics};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
 const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
@@ -63,7 +63,7 @@ impl BitcoindChainSource {
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
 		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
-	) -> Result<Self, ()> {
+	) -> Result<Self, BuildError> {
 		let api_client = Arc::new(BitcoindClient::new_rpc(
 			rpc_host.clone(),
 			rpc_port.clone(),
@@ -76,10 +76,14 @@ impl BitcoindChainSource {
 			api_client.get_node_version(),
 		)
 		.await
-		.map_err(|e| log_error!(logger, "Failed to get node version: {:?}", e))?;
+		.map_err(|e| {
+			log_error!(logger, "Failed to get node version: {:?}", e);
+			BuildError::ChainSourceSetupFailed
+		})?;
 
 		let node_version = node_version_result.map_err(|e| {
 			log_error!(logger, "Failed to get node version: {:?}", e);
+			BuildError::ChainSourceSetupFailed
 		})?;
 
 		if config.anchor_channels_config.is_some() {
@@ -87,7 +91,7 @@ impl BitcoindChainSource {
 			// dust
 			if node_version < 290000 {
 				log_error!(logger, "Bitcoin backend MUST be greater than or equal to v29");
-				return Err(());
+				return Err(BuildError::ChainSourceNotSupported);
 			}
 		}
 
@@ -110,7 +114,7 @@ impl BitcoindChainSource {
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
 		rest_client_config: BitcoindRestClientConfig, logger: Arc<Logger>,
 		node_metrics: Arc<PersistedNodeMetrics>,
-	) -> Result<Self, ()> {
+	) -> Result<Self, BuildError> {
 		let api_client = Arc::new(BitcoindClient::new_rest(
 			rest_client_config.rest_host,
 			rest_client_config.rest_port,
@@ -125,10 +129,14 @@ impl BitcoindChainSource {
 			api_client.get_node_version(),
 		)
 		.await
-		.map_err(|e| log_error!(logger, "Failed to get node version: {:?}", e))?;
+		.map_err(|e| {
+			log_error!(logger, "Failed to get node version: {:?}", e);
+			BuildError::ChainSourceSetupFailed
+		})?;
 
 		let node_version = node_version_result.map_err(|e| {
 			log_error!(logger, "Failed to get node version: {:?}", e);
+			BuildError::ChainSourceSetupFailed
 		})?;
 
 		if config.anchor_channels_config.is_some() {
@@ -136,7 +144,7 @@ impl BitcoindChainSource {
 			// dust
 			if node_version < 290000 {
 				log_error!(logger, "Bitcoin backend MUST be greater than or equal to v29");
-				return Err(());
+				return Err(BuildError::ChainSourceNotSupported);
 			}
 		}
 

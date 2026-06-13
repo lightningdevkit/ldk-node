@@ -430,7 +430,7 @@ impl ElectrumRuntimeClient {
 			electrum_client.transaction_broadcast_package(&super::dummy_package()).map_err(
 				|e| {
 					log_error!(logger, "Electrum server does not support submit package: {:?}", e);
-					Error::ConnectionFailed
+					Error::ChainSourceNotSupported
 				},
 			)?;
 		}
