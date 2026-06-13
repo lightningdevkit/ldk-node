@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bitcoin::{Script, Txid};
+use bitcoin::{Script, Transaction, Txid};
 use lightning::chain::{BlockLocator, Filter};
 
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
@@ -453,6 +453,9 @@ impl ChainSource {
 					return;
 				}
 				Some(next_package) = receiver.recv() => {
+					// `BroadcasterInterface` implementations must not assume package ordering, so
+					// normalize once before dispatching to any concrete chain source.
+					let next_package = sort_broadcast_package_topologically(next_package);
 					match &self.kind {
 						ChainSourceKind::Esplora(esplora_chain_source) => {
 							esplora_chain_source.process_broadcast_package(next_package).await
@@ -468,6 +471,29 @@ impl ChainSource {
 			}
 		}
 	}
+}
+
+fn sort_broadcast_package_topologically(package: Vec<Transaction>) -> Vec<Transaction> {
+	if package.len() <= 1 {
+		return package;
+	}
+
+	let mut remaining = package.into_iter().map(|tx| (tx.compute_txid(), tx)).collect::<Vec<_>>();
+	let package_txids = remaining.iter().map(|(txid, _)| *txid).collect::<Vec<_>>();
+	let mut sorted = Vec::with_capacity(remaining.len());
+
+	while let Some(next_idx) = remaining.iter().position(|(_, tx)| {
+		tx.input.iter().all(|input| {
+			let input_txid = input.previous_output.txid;
+			!package_txids.contains(&input_txid)
+				|| sorted.iter().any(|(txid, _)| *txid == input_txid)
+		})
+	}) {
+		sorted.push(remaining.remove(next_idx));
+	}
+
+	sorted.extend(remaining);
+	sorted.into_iter().map(|(_, tx)| tx).collect()
 }
 
 impl Filter for ChainSource {
