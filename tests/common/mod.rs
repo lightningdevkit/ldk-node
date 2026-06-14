@@ -436,6 +436,7 @@ pub(crate) struct TestConfig {
 	pub node_entropy: NodeEntropy,
 	pub async_payments_role: Option<AsyncPaymentsRole>,
 	pub recovery_mode: bool,
+	pub wallet_birthday_height: Option<u32>,
 }
 
 impl Default for TestConfig {
@@ -448,6 +449,7 @@ impl Default for TestConfig {
 		let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 		let async_payments_role = None;
 		let recovery_mode = false;
+		let wallet_birthday_height = None;
 		TestConfig {
 			node_config,
 			log_writer,
@@ -455,6 +457,7 @@ impl Default for TestConfig {
 			node_entropy,
 			async_payments_role,
 			recovery_mode,
+			wallet_birthday_height,
 		}
 	}
 }
@@ -588,6 +591,10 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 
 	if config.recovery_mode {
 		builder.set_wallet_recovery_mode();
+	}
+
+	if let Some(birthday_height) = config.wallet_birthday_height {
+		builder.set_wallet_birthday_height(birthday_height);
 	}
 
 	let node = match config.store_type {

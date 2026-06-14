@@ -744,6 +744,48 @@ async fn onchain_wallet_recovery() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_wallet_recovery_with_birthday() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let original_config = random_config(true);
+	let original_node_entropy = original_config.node_entropy;
+	let original_node = setup_node(&chain_source, original_config);
+
+	let premine_amount_sat = 100_000;
+
+	// Record the tip before funding. The restored node uses this as its wallet
+	// birthday, so the deposit lands in a block above the birthday checkpoint.
+	let birthday_height = bitcoind.client.get_blockchain_info().unwrap().blocks as u32;
+
+	let addr = original_node.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	original_node.sync_wallets().unwrap();
+	assert_eq!(original_node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+
+	original_node.stop().unwrap();
+	drop(original_node);
+
+	// Restore from the same seed using a wallet birthday instead of recovery
+	// mode: the wallet checkpoints at the birthday block and syncs forward,
+	// recovering the funds without scanning from genesis.
+	let mut recovered_config = random_config(true);
+	recovered_config.node_entropy = original_node_entropy;
+	recovered_config.wallet_birthday_height = Some(birthday_height);
+	let recovered_node = setup_node(&chain_source, recovered_config);
+
+	recovered_node.sync_wallets().unwrap();
+	assert_eq!(recovered_node.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_rbf_via_mempool() {
 	run_rbf_test(false).await;
 }
