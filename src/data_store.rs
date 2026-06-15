@@ -95,8 +95,8 @@ where
 	}
 
 	pub(crate) fn remove(&self, id: &SO::Id) -> Result<(), Error> {
-		let removed = self.objects.lock().unwrap().remove(id).is_some();
-		if removed {
+		let mut locked_objects = self.objects.lock().unwrap();
+		if locked_objects.contains_key(id) {
 			let store_key = id.encode_to_hex_str();
 			KVStoreSync::remove(
 				&*self.kv_store,
@@ -116,6 +116,8 @@ where
 				);
 				Error::PersistenceFailed
 			})?;
+			// Only drop the object from memory once the backing store removal succeeded.
+			locked_objects.remove(id);
 		}
 		Ok(())
 	}
@@ -394,6 +396,16 @@ mod tests {
 
 		let update = TestObjectUpdate { id, data: [24u8; 3] };
 		assert_eq!(Err(Error::PersistenceFailed), data_store.update(&update));
+		assert_eq!(Some(object), data_store.get(&id));
+	}
+
+	#[test]
+	fn remove_does_not_mutate_memory_if_persist_fails() {
+		let id = TestObjectId { id: [42u8; 4] };
+		let object = TestObject { id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![object]);
+
+		assert_eq!(Err(Error::PersistenceFailed), data_store.remove(&id));
 		assert_eq!(Some(object), data_store.get(&id));
 	}
 }
