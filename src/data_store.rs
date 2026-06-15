@@ -150,23 +150,23 @@ where
 
 	pub(crate) async fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
 		let _guard = self.mutation_lock.lock().await;
-		let (res, data_to_persist) = {
-			let mut locked_objects = self.objects.lock().expect("lock");
-			if let Some(object) = locked_objects.get_mut(&update.id()) {
-				let updated = object.update(update);
-				if updated {
-					(DataStoreUpdateResult::Updated, Some(Self::encode_object(object)))
-				} else {
-					(DataStoreUpdateResult::Unchanged, None)
-				}
-			} else {
-				(DataStoreUpdateResult::NotFound, None)
+		let id = update.id();
+		let updated_object = {
+			let locked_objects = self.objects.lock().expect("lock");
+			let Some(object) = locked_objects.get(&id) else {
+				return Ok(DataStoreUpdateResult::NotFound);
+			};
+			let mut updated_object = object.clone();
+			if !updated_object.update(update) {
+				return Ok(DataStoreUpdateResult::Unchanged);
 			}
+			updated_object
 		};
-		if let Some((store_key, data)) = data_to_persist {
-			self.persist_encoded(store_key, data).await?;
-		}
-		Ok(res)
+
+		self.persist(&updated_object).await?;
+		let mut locked_objects = self.objects.lock().expect("lock");
+		locked_objects.insert(id, updated_object);
+		Ok(DataStoreUpdateResult::Updated)
 	}
 
 	/// Returns in-memory objects matching `f`.
@@ -409,5 +409,16 @@ mod tests {
 		let new_object = TestObject { id: new_id, data: [34u8; 3] };
 		assert_eq!(Err(Error::PersistenceFailed), data_store.insert_or_update(new_object).await);
 		assert!(data_store.get(&new_id).is_none());
+	}
+
+	#[tokio::test]
+	async fn update_does_not_mutate_memory_if_persist_fails() {
+		let id = TestObjectId { id: [42u8; 4] };
+		let object = TestObject { id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![object]);
+
+		let update = TestObjectUpdate { id, data: [24u8; 3] };
+		assert_eq!(Err(Error::PersistenceFailed), data_store.update(update).await);
+		assert_eq!(Some(object), data_store.get(&id));
 	}
 }
