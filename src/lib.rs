@@ -1647,7 +1647,7 @@ impl Node {
 			if funding_template.prior_contribution().is_some() {
 				log_error!(
 					self.logger,
-					"Failed to splice channel: a prior splice contribution is pending; use bump_channel_funding_fee instead"
+					"Failed to splice channel: a prior splice contribution is pending; use bump_channel_funding_fee to bump its fee"
 				);
 				return Err(Error::ChannelSplicingFailed);
 			}
@@ -1770,7 +1770,7 @@ impl Node {
 			if funding_template.prior_contribution().is_some() {
 				log_error!(
 					self.logger,
-					"Failed to splice channel: a prior splice contribution is pending; use bump_channel_funding_fee instead"
+					"Failed to splice channel: a prior splice contribution is pending; use bump_channel_funding_fee to bump its fee"
 				);
 				return Err(Error::ChannelSplicingFailed);
 			}
