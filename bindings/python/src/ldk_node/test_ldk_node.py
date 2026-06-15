@@ -5,6 +5,7 @@ import subprocess
 import os
 import re
 import requests
+import socket
 
 from ldk_node import *
 
@@ -118,8 +119,68 @@ def expect_event(node, expected_event_type):
     assert isinstance(event, expected_event_type)
     print("EVENT:", event)
     node.event_handled()
-    return event 
+    return event
 
+def find_two_free_ports():
+    with socket.socket() as s1, socket.socket() as s2:
+        s1.bind(("127.0.0.1", 0))
+        s2.bind(("127.0.0.1",0))
+        port_1 = s1.getsockname()[1]
+        port_2 = s2.getsockname()[1]
+        return port_1, port_2
+
+def setup_two_nodes(esplora_endpoint):
+    port_1, port_2 = find_two_free_ports()
+    tmp_dir_1 = tempfile.TemporaryDirectory("_ldk_node_1")
+    listening_addresses_1 = [f"127.0.0.1:{port_1}"]
+    node_1 = setup_node(tmp_dir_1.name, esplora_endpoint, listening_addresses_1)
+    node_1.start()
+    node_id_1 = node_1.node_id()
+
+    tmp_dir_2 = tempfile.TemporaryDirectory("_ldk_node_2")
+    listening_addresses_2 = [f"127.0.0.1:{port_2}"]
+    node_2 = setup_node(tmp_dir_2.name, esplora_endpoint, listening_addresses_2)
+    node_2.start()
+    node_id_2 = node_2.node_id()
+
+    return node_1, node_2, tmp_dir_1, tmp_dir_2, node_id_1, node_id_2, listening_addresses_2
+
+def fund_nodes(node_1, node_2, esplora_endpoint, amount_sats=100000):
+    address_1 = node_1.onchain_payment().new_address()
+    txid_1 = send_to_address(address_1, amount_sats)
+    address_2 = node_2.onchain_payment().new_address()
+    txid_2 = send_to_address(address_2, amount_sats)
+
+    wait_for_tx(esplora_endpoint, txid_1)
+    wait_for_tx(esplora_endpoint, txid_2)
+    mine_and_wait(esplora_endpoint, 6)
+
+    node_1.sync_wallets()
+    node_2.sync_wallets()
+
+def open_channel_and_wait_ready(node_1, node_2, node_id_2, listening_address_2, esplora_endpoint, channel_amount_sats=50000):
+    node_1.open_channel(node_id_2, listening_address_2, channel_amount_sats, None, None)
+
+    channel_pending_event_1 = expect_event(node_1, Event.CHANNEL_PENDING)
+    expect_event(node_2, Event.CHANNEL_PENDING)
+
+    funding_txid = channel_pending_event_1.funding_txo.txid
+    wait_for_tx(esplora_endpoint, funding_txid)
+    mine_and_wait(esplora_endpoint, 6)
+
+    node_1.sync_wallets()
+    node_2.sync_wallets()
+
+    channel_ready_event_1 = expect_event(node_1, Event.CHANNEL_READY)
+    channel_ready_event_2 = expect_event(node_2, Event.CHANNEL_READY)
+    return channel_ready_event_1, channel_ready_event_2, funding_txid
+
+def stop_and_cleanup(node_1, node_2, tmp_dir_1, tmp_dir_2):
+    node_1.stop()
+    node_2.stop()
+    time.sleep(1)
+    tmp_dir_1.cleanup()
+    tmp_dir_2.cleanup()
 
 def assert_feature_helpers_return_bool(test_case, features):
     feature_methods = [
@@ -156,42 +217,17 @@ class TestLdkNode(unittest.TestCase):
     def test_channel_full_cycle(self):
         esplora_endpoint = get_esplora_endpoint()
 
-        ## Setup Node 1
-        tmp_dir_1 = tempfile.TemporaryDirectory("_ldk_node_1")
-        print("TMP DIR 1:", tmp_dir_1.name)
-
-        listening_addresses_1 = ["127.0.0.1:2323"]
-        node_1 = setup_node(tmp_dir_1.name, esplora_endpoint, listening_addresses_1)
-        node_1.start()
-        node_id_1 = node_1.node_id()
+        ## Setup two nodes 
+        node_1, node_2, tmp_dir_1, tmp_dir_2, node_id_1, node_id_2, listening_addresses_2 = setup_two_nodes(esplora_endpoint)
         print("Node ID 1:", node_id_1)
-
-        # Setup Node 2
-        tmp_dir_2 = tempfile.TemporaryDirectory("_ldk_node_2")
-        print("TMP DIR 2:", tmp_dir_2.name)
-
-        listening_addresses_2 = ["127.0.0.1:2324"]
-        node_2 = setup_node(tmp_dir_2.name, esplora_endpoint, listening_addresses_2)
-        node_2.start()
-        node_id_2 = node_2.node_id()
         print("Node ID 2:", node_id_2)
 
         # Check node-announcement features exposed through NodeStatus.
         for node in [node_1, node_2]:
             node_features_exposed(self, node.status().node_features)
 
-        address_1 = node_1.onchain_payment().new_address()
-        txid_1 = send_to_address(address_1, 100000)
-        address_2 = node_2.onchain_payment().new_address()
-        txid_2 = send_to_address(address_2, 100000)
+        fund_nodes(node_1, node_2, esplora_endpoint)
 
-        wait_for_tx(esplora_endpoint, txid_1)
-        wait_for_tx(esplora_endpoint, txid_2)
-
-        mine_and_wait(esplora_endpoint, 6)
-
-        node_1.sync_wallets()
-        node_2.sync_wallets()
 
         spendable_balance_1 = node_1.list_balances().spendable_onchain_balance_sats
         spendable_balance_2 = node_2.list_balances().spendable_onchain_balance_sats
@@ -210,22 +246,9 @@ class TestLdkNode(unittest.TestCase):
         print("TOTAL 2:", total_balance_2)
         self.assertEqual(total_balance_2, 100000)
 
-        node_1.open_channel(node_id_2, listening_addresses_2[0], 50000, None, None)
-
-
-        channel_pending_event_1 = expect_event(node_1, Event.CHANNEL_PENDING)
-        channel_pending_event_2 = expect_event(node_2, Event.CHANNEL_PENDING)
-        funding_txid = channel_pending_event_1.funding_txo.txid
-        wait_for_tx(esplora_endpoint, funding_txid)
-        mine_and_wait(esplora_endpoint, 6)
-
-        node_1.sync_wallets()
-        node_2.sync_wallets()
-
-        channel_ready_event_1 = expect_event(node_1, Event.CHANNEL_READY)
+        channel_ready_event_1, channel_ready_event_2, funding_txid = open_channel_and_wait_ready(node_1, node_2, node_id_2, listening_addresses_2[0], esplora_endpoint)
         print("funding_txo:", funding_txid)
 
-        channel_ready_event_2 = expect_event(node_2, Event.CHANNEL_READY)
 
         # Check negotiated init features exposed through ChannelDetails.
         for channel in [node_1.list_channels()[0], node_2.list_channels()[0]]:
@@ -259,13 +282,7 @@ class TestLdkNode(unittest.TestCase):
         self.assertEqual(spendable_balance_after_close_2, 102500)
 
         # Stop nodes
-        node_1.stop()
-        node_2.stop()
-
-        # Cleanup
-        time.sleep(1) # Wait a sec so our logs can finish writing
-        tmp_dir_1.cleanup()
-        tmp_dir_2.cleanup()
+        stop_and_cleanup(node_1, node_2, tmp_dir_1, tmp_dir_2)
 
 if __name__ == '__main__':
     unittest.main()
