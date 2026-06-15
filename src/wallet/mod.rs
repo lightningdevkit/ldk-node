@@ -1433,24 +1433,21 @@ impl Wallet {
 	fn apply_funding_details_status_update(
 		&self, payment_id: PaymentId, event_txid: Txid, confirmation_status: ConfirmationStatus,
 	) -> Result<bool, Error> {
-		// `ChannelReady` may move the payment to the main store before wallet sync
-		// sees the tx confirm. In that case, update `kind` directly; recomputing from
-		// the wallet's view would overwrite the per-node fee set at broadcast time.
+		// A funding payment becomes `Succeeded` only once `handle_channel_ready` has graduated it
+		// on `ChannelReady`, which also removes the pending record. A wallet-sync event arriving
+		// during that removal (the two are awaited separately, so a sync can interleave) or after
+		// it must never downgrade the terminal status or adopt a replaced candidate's txid. At
+		// most it refines the confirmation status of the candidate that actually locked — and
+		// recomputing from the wallet's view would clobber the per-node fee set at broadcast time.
 		if let Some(mut existing) = self.payment_store.get(&payment_id) {
 			if existing.status == PaymentStatus::Succeeded
 				&& matches!(existing.kind, PaymentKind::Onchain { .. })
-				&& self.pending_payment_store.get(&payment_id).is_none()
 			{
-				let needs_update = match existing.kind {
-					PaymentKind::Onchain { txid, status } => {
-						txid != event_txid || status != confirmation_status
-					},
-					_ => false,
-				};
-				if needs_update {
-					existing.kind =
-						PaymentKind::Onchain { txid: event_txid, status: confirmation_status };
-					self.runtime.block_on(self.payment_store.insert_or_update(existing))?;
+				if let PaymentKind::Onchain { txid, status } = existing.kind {
+					if txid == event_txid && status != confirmation_status {
+						existing.kind = PaymentKind::Onchain { txid, status: confirmation_status };
+						self.runtime.block_on(self.payment_store.insert_or_update(existing))?;
+					}
 				}
 				return Ok(true);
 			}
