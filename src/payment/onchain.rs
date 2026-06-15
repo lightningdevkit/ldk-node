@@ -134,11 +134,18 @@ impl OnchainPayment {
 	/// The new transaction will have the same outputs as the original but with a
 	/// higher fee, resulting in faster confirmation potential.
 	///
+	/// This will respect any on-chain reserve we need to keep, i.e., won't allow to cut into
+	/// [`BalanceDetails::total_anchor_channels_reserve_sats`].
+	///
 	/// Returns the [`Txid`] of the new replacement transaction if successful.
+	///
+	/// [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
 	pub fn bump_fee_rbf(
 		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>,
 	) -> Result<Txid, Error> {
+		let cur_anchor_reserve_sats =
+			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
-		self.wallet.bump_fee_rbf(payment_id, fee_rate_opt)
+		self.wallet.bump_fee_rbf(payment_id, fee_rate_opt, cur_anchor_reserve_sats)
 	}
 }

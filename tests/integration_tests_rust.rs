@@ -3032,6 +3032,55 @@ async fn onchain_fee_bump_rbf() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_fee_bump_rbf_respects_anchor_reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 1_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a.clone(), addr_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_b, &node_a, 200_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let balances_before = node_b.list_balances();
+	let reserve = balances_before.total_anchor_channels_reserve_sats;
+	assert!(reserve > 0, "Anchor reserve should be non-zero after channel open");
+	let spendable_before = balances_before.spendable_onchain_balance_sats;
+
+	let buffer_sats = 5_000;
+	assert!(spendable_before > buffer_sats);
+	let amount_to_send_sats = spendable_before - buffer_sats;
+	let txid =
+		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+	node_b.sync_wallets().unwrap();
+
+	let payment_id = PaymentId(txid.to_byte_array());
+	let high_fee_rate = bitcoin::FeeRate::from_sat_per_kwu(20_000);
+	assert_eq!(
+		Err(NodeError::InsufficientFunds),
+		node_b.onchain_payment().bump_fee_rbf(payment_id, Some(high_fee_rate.into()))
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn open_channel_with_all_with_anchors() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);

@@ -1232,7 +1232,7 @@ impl Wallet {
 
 	#[allow(deprecated)]
 	pub(crate) fn bump_fee_rbf(
-		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>,
+		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>, cur_anchor_reserve_sats: u64,
 	) -> Result<Txid, Error> {
 		let payment = self.payment_store.get(&payment_id).ok_or_else(|| {
 			log_error!(self.logger, "Payment {} not found in payment store", payment_id);
@@ -1379,6 +1379,41 @@ impl Wallet {
 				},
 			}?
 		};
+
+		let old_fee_sats = locked_wallet
+			.calculate_fee(&old_tx)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to calculate fee of transaction {}: {}", txid, e);
+				Error::WalletOperationFailed
+			})?
+			.to_sat();
+		let replacement_fee_sats = locked_wallet
+			.calculate_fee(&psbt.unsigned_tx)
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to calculate fee of replacement transaction for {}: {}",
+					txid,
+					e
+				);
+				Error::WalletOperationFailed
+			})?
+			.to_sat();
+		let additional_fee_sats = replacement_fee_sats.saturating_sub(old_fee_sats);
+		let balance = locked_wallet.balance();
+		let spendable_amount_sats =
+			self.get_balances_inner(balance, cur_anchor_reserve_sats).map(|(_, s)| s).unwrap_or(0);
+		if spendable_amount_sats < additional_fee_sats {
+			log_error!(
+				self.logger,
+				"Unable to bump fee due to insufficient reserve-preserving funds. \
+					Available: {}sats, required additional fee: {}sats, reserve: {}sats",
+				spendable_amount_sats,
+				additional_fee_sats,
+				cur_anchor_reserve_sats,
+			);
+			return Err(Error::InsufficientFunds);
+		}
 
 		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
 			Ok(finalized) => {
