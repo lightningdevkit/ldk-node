@@ -127,17 +127,19 @@ where
 	pub(crate) fn update(&self, update: &SO::Update) -> Result<DataStoreUpdateResult, Error> {
 		let mut locked_objects = self.objects.lock().unwrap();
 
-		if let Some(object) = locked_objects.get_mut(&update.id()) {
-			let updated = object.update(update);
-			if updated {
-				self.persist(&object)?;
-				Ok(DataStoreUpdateResult::Updated)
-			} else {
-				Ok(DataStoreUpdateResult::Unchanged)
-			}
-		} else {
-			Ok(DataStoreUpdateResult::NotFound)
+		let id = update.id();
+		let Some(object) = locked_objects.get(&id) else {
+			return Ok(DataStoreUpdateResult::NotFound);
+		};
+		let mut updated_object = object.clone();
+		if !updated_object.update(update) {
+			return Ok(DataStoreUpdateResult::Unchanged);
 		}
+
+		// Persist first, so a failed write leaves the in-memory state aligned with storage.
+		self.persist(&updated_object)?;
+		locked_objects.insert(id, updated_object);
+		Ok(DataStoreUpdateResult::Updated)
 	}
 
 	pub(crate) fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
@@ -382,5 +384,16 @@ mod tests {
 		let new_object = TestObject { id: new_id, data: [34u8; 3] };
 		assert_eq!(Err(Error::PersistenceFailed), data_store.insert_or_update(new_object));
 		assert!(data_store.get(&new_id).is_none());
+	}
+
+	#[test]
+	fn update_does_not_mutate_memory_if_persist_fails() {
+		let id = TestObjectId { id: [42u8; 4] };
+		let object = TestObject { id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![object]);
+
+		let update = TestObjectUpdate { id, data: [24u8; 3] };
+		assert_eq!(Err(Error::PersistenceFailed), data_store.update(&update));
+		assert_eq!(Some(object), data_store.get(&id));
 	}
 }
