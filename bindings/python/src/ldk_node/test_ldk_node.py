@@ -214,6 +214,43 @@ class TestLdkNode(unittest.TestCase):
         esplora_endpoint = get_esplora_endpoint()
         mine_and_wait(esplora_endpoint, 1)
 
+    def test_spontaneous_payment(self):
+        """Spontaneous payment test in python: keysend after channel ready."""
+        esplora_endpoint = get_esplora_endpoint()
+
+        node_1, node_2, tmp_dir_1, tmp_dir_2, node_id_1, node_id_2, listening_addresses_2 = setup_two_nodes(esplora_endpoint)
+        fund_nodes(node_1, node_2, esplora_endpoint)
+        open_channel_and_wait_ready(node_1, node_2, node_id_2, listening_addresses_2[0], esplora_endpoint)
+
+        keysend_amount_msat = 2_500_000
+        custom_tlvs = [CustomTlvRecord(type_num=13377331, value=bytes([1, 2, 3]))]
+        keysend_payment_id = node_1.spontaneous_payment().send_with_custom_tlvs(
+            keysend_amount_msat, node_id_2, None, custom_tlvs
+        )
+
+        expect_event(node_1, Event.PAYMENT_SUCCESSFUL)
+        received_event = expect_event(node_2, Event.PAYMENT_RECEIVED)
+
+        self.assertEqual(received_event.amount_msat, keysend_amount_msat)
+        self.assertEqual(received_event.custom_records, custom_tlvs)
+
+        sender_payment = node_1.payment(keysend_payment_id)
+        receiver_payment = node_2.payment(keysend_payment_id)
+
+        self.assertIsNotNone(sender_payment)
+        self.assertIsNotNone(receiver_payment)
+        self.assertEqual(sender_payment.status, PaymentStatus.SUCCEEDED)
+        self.assertEqual(sender_payment.direction, PaymentDirection.OUTBOUND)
+        self.assertEqual(sender_payment.amount_msat, keysend_amount_msat)
+        self.assertTrue(sender_payment.kind.is_spontaneous())
+
+        self.assertEqual(receiver_payment.status, PaymentStatus.SUCCEEDED)
+        self.assertEqual(receiver_payment.direction, PaymentDirection.INBOUND)
+        self.assertEqual(receiver_payment.amount_msat, keysend_amount_msat)
+        self.assertTrue(receiver_payment.kind.is_spontaneous())
+
+        stop_and_cleanup(node_1, node_2, tmp_dir_1, tmp_dir_2)
+
     def test_channel_full_cycle(self):
         esplora_endpoint = get_esplora_endpoint()
 
