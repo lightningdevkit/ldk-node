@@ -143,8 +143,8 @@ where
 	/// Returns the current in-memory object for `id`.
 	///
 	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
-	/// Until store reads are async, callers may temporarily see in-memory state that is either
-	/// still being persisted or has not yet caught up to a write in progress.
+	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
+	/// caught up to a write in progress.
 	pub(crate) fn get(&self, id: &SO::Id) -> Option<SO> {
 		self.objects.lock().expect("lock").get(id).cloned()
 	}
@@ -173,8 +173,8 @@ where
 	/// Returns in-memory objects matching `f`.
 	///
 	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
-	/// Until store reads are async, callers may temporarily see in-memory state that is either
-	/// still being persisted or has not yet caught up to a write in progress.
+	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
+	/// caught up to a write in progress.
 	pub(crate) fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
 		self.objects.lock().expect("lock").values().filter(f).cloned().collect::<Vec<SO>>()
 	}
@@ -214,8 +214,8 @@ where
 	/// Returns whether the in-memory store contains `id`.
 	///
 	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
-	/// Until store reads are async, callers may temporarily see in-memory state that is either
-	/// still being persisted or has not yet caught up to a write in progress.
+	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
+	/// caught up to a write in progress.
 	pub(crate) fn contains_key(&self, id: &SO::Id) -> bool {
 		self.objects.lock().expect("lock").contains_key(id)
 	}
@@ -410,6 +410,16 @@ mod tests {
 		let new_object = TestObject { id: new_id, data: [34u8; 3] };
 		assert_eq!(Err(Error::PersistenceFailed), data_store.insert_or_update(new_object).await);
 		assert!(data_store.get(&new_id).is_none());
+	}
+
+	#[tokio::test]
+	async fn insert_does_not_mutate_memory_if_persist_fails() {
+		let id = TestObjectId { id: [42u8; 4] };
+		let object = TestObject { id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![]);
+
+		assert_eq!(Err(Error::PersistenceFailed), data_store.insert(object).await);
+		assert!(data_store.get(&id).is_none());
 	}
 
 	#[tokio::test]
