@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::{hash_map, HashMap};
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
@@ -83,28 +83,32 @@ where
 
 	pub(crate) async fn insert_or_update(&self, object: SO) -> Result<bool, Error> {
 		let _guard = self.mutation_lock.lock().await;
-		let (updated, data_to_persist) = {
-			let mut locked_objects = self.objects.lock().expect("lock");
-			match locked_objects.entry(object.id()) {
-				hash_map::Entry::Occupied(mut e) => {
-					let update = object.to_update();
-					let updated = e.get_mut().update(update);
-					let data_to_persist =
-						if updated { Some(Self::encode_object(e.get())) } else { None };
-					(updated, data_to_persist)
-				},
-				hash_map::Entry::Vacant(e) => {
-					let data_to_persist = Self::encode_object(&object);
-					e.insert(object);
-					(true, Some(data_to_persist))
-				},
+
+		let id = object.id();
+		let data_to_persist = {
+			let locked_objects = self.objects.lock().expect("lock");
+			if let Some(existing_object) = locked_objects.get(&id) {
+				let mut updated_object = existing_object.clone();
+				let updated = updated_object.update(object.to_update());
+				if updated {
+					Some(updated_object)
+				} else {
+					None
+				}
+			} else {
+				Some(object)
 			}
 		};
 
-		if let Some((store_key, data)) = data_to_persist {
-			self.persist_encoded(store_key, data).await?;
+		match data_to_persist {
+			Some(updated_object) => {
+				self.persist(&updated_object).await?;
+				let mut locked_objects = self.objects.lock().expect("lock");
+				locked_objects.insert(id, updated_object);
+				Ok(true)
+			},
+			None => Ok(false),
 		}
-		Ok(updated)
 	}
 
 	pub(crate) async fn remove(&self, id: &SO::Id) -> Result<(), Error> {
@@ -219,6 +223,7 @@ where
 #[cfg(test)]
 mod tests {
 	use lightning::impl_writeable_tlv_based;
+	use lightning::io;
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
@@ -280,6 +285,46 @@ mod tests {
 		(0, id, required),
 		(2, data, required),
 	});
+
+	struct FailingStore;
+
+	impl KVStore for FailingStore {
+		fn read(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str,
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "read failed")) }
+		}
+
+		fn write(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _buf: Vec<u8>,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "write failed")) }
+		}
+
+		fn remove(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _lazy: bool,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "remove failed")) }
+		}
+
+		fn list(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "list failed")) }
+		}
+	}
+
+	fn new_failing_data_store(objects: Vec<TestObject>) -> DataStore<TestObject, Arc<TestLogger>> {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let logger = Arc::new(TestLogger::new());
+		DataStore::new(
+			objects,
+			"datastore_test_primary".to_string(),
+			"datastore_test_secondary".to_string(),
+			store,
+			logger,
+		)
+	}
 
 	#[tokio::test]
 	async fn data_is_persisted() {
@@ -345,5 +390,24 @@ mod tests {
 		let mut new_iou_object = iou_object;
 		new_iou_object.data[0] += 1;
 		assert_eq!(Ok(true), data_store.insert_or_update(new_iou_object).await);
+	}
+
+	#[tokio::test]
+	async fn insert_or_update_does_not_mutate_memory_if_persist_fails() {
+		let existing_id = TestObjectId { id: [42u8; 4] };
+		let existing_object = TestObject { id: existing_id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![existing_object]);
+
+		let updated_object = TestObject { id: existing_id, data: [24u8; 3] };
+		assert_eq!(
+			Err(Error::PersistenceFailed),
+			data_store.insert_or_update(updated_object).await
+		);
+		assert_eq!(Some(existing_object), data_store.get(&existing_id));
+
+		let new_id = TestObjectId { id: [55u8; 4] };
+		let new_object = TestObject { id: new_id, data: [34u8; 3] };
+		assert_eq!(Err(Error::PersistenceFailed), data_store.insert_or_update(new_object).await);
+		assert!(data_store.get(&new_id).is_none());
 	}
 }
