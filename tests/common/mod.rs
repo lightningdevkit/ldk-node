@@ -730,6 +730,43 @@ where
 	}
 }
 
+pub(crate) async fn stop_nodes(node_a: TestNode, node_b: TestNode) {
+	let (stop_a_sender, stop_a_receiver) = tokio::sync::oneshot::channel();
+	let (stop_b_sender, stop_b_receiver) = tokio::sync::oneshot::channel();
+	std::thread::spawn(move || {
+		let _ = stop_a_sender.send(node_a.stop());
+	});
+	std::thread::spawn(move || {
+		let _ = stop_b_sender.send(node_b.stop());
+	});
+	stop_a_receiver.await.expect("node_a stop thread panicked").unwrap();
+	stop_b_receiver.await.expect("node_b stop thread panicked").unwrap();
+}
+
+pub(crate) async fn stop_nodes_concurrently(nodes: Vec<TestNode>) {
+	let stop_receivers = nodes
+		.into_iter()
+		.map(|node| {
+			let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel();
+			std::thread::spawn(move || {
+				let _ = stop_sender.send(node.stop());
+			});
+			stop_receiver
+		})
+		.collect::<Vec<_>>();
+
+	for stop_receiver in stop_receivers {
+		stop_receiver.await.expect("node stop thread panicked").unwrap();
+	}
+}
+
+pub(crate) async fn stop_node(node: TestNode) {
+	let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel();
+	std::thread::spawn(move || {
+		let _ = stop_sender.send(node.stop());
+	});
+	stop_receiver.await.expect("node stop thread panicked").unwrap();
+}
 pub(crate) async fn premine_and_distribute_funds<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
 ) {
