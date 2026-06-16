@@ -636,7 +636,9 @@ pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
-	wait_for_block(electrs, cur_height as usize + num).await;
+	let min_height = cur_height as usize + num;
+	wait_for_bitcoind_block(bitcoind, min_height).await;
+	wait_for_block(electrs, min_height).await;
 	print!(" Done!");
 	println!("\n");
 }
@@ -656,26 +658,42 @@ pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
 	assert!(new_cur_height + num_blocks == cur_height);
 }
 
-pub(crate) async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
-	let mut header = match electrs.block_headers_subscribe() {
-		Ok(header) => header,
-		Err(_) => {
-			// While subscribing should succeed the first time around, we ran into some cases where
-			// it didn't. Since we can't proceed without subscribing, we try again after a delay
-			// and panic if it still fails.
-			tokio::time::sleep(Duration::from_secs(3)).await;
-			electrs.block_headers_subscribe().expect("failed to subscribe to block headers")
-		},
-	};
+async fn wait_for_bitcoind_block(bitcoind: &BitcoindClient, min_height: usize) {
+	let mut delay = Duration::from_millis(64);
+	let mut tries = 0;
 	loop {
-		if header.height >= min_height {
-			break;
+		let height =
+			bitcoind.get_blockchain_info().expect("failed to get blockchain info").blocks as usize;
+		if height >= min_height {
+			return;
 		}
-		header = exponential_backoff_poll(|| {
-			electrs.ping().expect("failed to ping electrs");
-			electrs.block_headers_pop().expect("failed to pop block header")
-		})
-		.await;
+		assert!(
+			tries < 120,
+			"bitcoind height did not reach {} within 60 seconds, current height {}",
+			min_height,
+			height
+		);
+		tries += 1;
+		tokio::time::sleep(delay).await;
+		if delay.as_millis() < 512 {
+			delay = delay.mul_f32(2.0);
+		}
+	}
+}
+
+pub(crate) async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
+	let mut delay = Duration::from_millis(64);
+	let mut tries = 0;
+	loop {
+		if electrs.block_header(min_height).is_ok() {
+			return;
+		}
+		assert!(tries < 120, "electrs did not serve block header {} within 60 seconds", min_height);
+		tries += 1;
+		tokio::time::sleep(delay).await;
+		if delay.as_millis() < 512 {
+			delay = delay.mul_f32(2.0);
+		}
 	}
 }
 
