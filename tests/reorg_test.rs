@@ -1,5 +1,6 @@
 mod common;
 use std::collections::HashMap;
+use std::time::Duration;
 
 use bitcoin::Amount;
 use ldk_node::payment::{PaymentDirection, PaymentKind};
@@ -12,6 +13,31 @@ use crate::common::{
 	premine_and_distribute_funds, random_chain_source, random_config, setup_bitcoind_and_electrsd,
 	setup_node, wait_for_outpoint_spend,
 };
+
+async fn wait_for_pending_sweep_balance<F>(node: &ldk_node::Node, mut matches_pending_balance: F)
+where
+	F: FnMut(&PendingSweepBalance) -> bool,
+{
+	let mut delay = Duration::from_millis(64);
+	let mut tries = 0;
+	loop {
+		node.sync_wallets().unwrap();
+		let balances = node.list_balances();
+		if balances
+			.pending_balances_from_channel_closures
+			.iter()
+			.any(|balance| matches_pending_balance(balance))
+		{
+			return;
+		}
+		assert!(tries < 20, "Unexpected balance state: {:?}", balances);
+		tries += 1;
+		tokio::time::sleep(delay).await;
+		if delay.as_millis() < 512 {
+			delay = delay.mul_f32(2.0);
+		}
+	}
+}
 
 proptest! {
 	#![proptest_config(proptest::test_runner::Config::with_cases(5))]
@@ -169,27 +195,21 @@ proptest! {
 							node.sync_wallets().unwrap();
 						}
 
-						let balances = node.list_balances();
-						assert!(
-							balances.pending_balances_from_channel_closures.iter().any(|b| matches!(
-								b,
+						wait_for_pending_sweep_balance(node, |balance| {
+							matches!(
+								balance,
 								PendingSweepBalance::BroadcastAwaitingConfirmation { .. }
 									| PendingSweepBalance::AwaitingThresholdConfirmations { .. }
-							)),
-							"Unexpected balance state: {:?}",
-							balances
-						);
+							)
+						})
+						.await;
 
 						generate_blocks_and_wait(bitcoind, electrs, 1).await;
 						node.sync_wallets().unwrap();
-						let balances = node.list_balances();
-						assert!(
-							balances.pending_balances_from_channel_closures.iter().any(|b| {
-								matches!(b, PendingSweepBalance::AwaitingThresholdConfirmations { .. })
-							}),
-							"Unexpected balance state: {:?}",
-							balances
-						);
+						wait_for_pending_sweep_balance(node, |balance| {
+							matches!(balance, PendingSweepBalance::AwaitingThresholdConfirmations { .. })
+						})
+						.await;
 					}
 					assert!(found_claimable_balance);
 				}
@@ -198,6 +218,11 @@ proptest! {
 			sync_wallets!();
 
 			reorg!(reorg_depth);
+			sync_wallets!();
+
+			// The final reorg can leave close or sweep transactions below the wallet's
+			// trusted spendable depth even after they are confirmed on the replacement chain.
+			generate_blocks_and_wait(bitcoind, electrs, 6).await;
 			sync_wallets!();
 
 			let fee_sat = 7000;
