@@ -21,9 +21,9 @@ pub(crate) mod lnd;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -358,13 +358,14 @@ pub(crate) fn random_storage_path() -> PathBuf {
 	temp_path
 }
 
-static NEXT_PORT: AtomicU16 = AtomicU16::new(20000);
-
 pub(crate) fn generate_listening_addresses() -> Vec<SocketAddress> {
-	let port = NEXT_PORT.fetch_add(2, Ordering::Relaxed);
+	let listener_a = TcpListener::bind(("127.0.0.1", 0)).expect("available listener port");
+	let listener_b = TcpListener::bind(("127.0.0.1", 0)).expect("available listener port");
+	let port_a = listener_a.local_addr().expect("listener address").port();
+	let port_b = listener_b.local_addr().expect("listener address").port();
 	vec![
-		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port },
-		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: port + 1 },
+		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: port_a },
+		SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: port_b },
 	]
 }
 
