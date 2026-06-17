@@ -436,17 +436,17 @@ impl Bolt12Payment {
 				payment_metadata.encode_as_bolt12_payment_metadata(),
 			)
 			.or(Err(Error::OfferCreationFailed))?;
-		let offer = self
-			.runtime
+		self.runtime
 			.block_on(async {
 				tokio::time::timeout(
 					Duration::from_secs(10),
-					self.channel_manager.await_async_receive_offer(),
+					self.channel_manager.get_async_receive_offer_ready_future(),
 				)
 				.await
 			})
-			.map_err(|_| Error::OfferCreationFailed)?
-			.or(Err(Error::OfferCreationFailed))?;
+			.map_err(|_| Error::OfferCreationFailed)?;
+		let offer =
+			self.channel_manager.get_async_receive_offer().or(Err(Error::OfferCreationFailed))?;
 
 		log_info!(
 			self.logger,
