@@ -252,7 +252,7 @@ impl Runtime {
 		log_trace!(
 			self.logger,
 			"Active runtime tasks left prior to shutdown: {}",
-			runtime_handle.metrics().active_tasks_count()
+			runtime_handle.metrics().num_alive_tasks()
 		);
 	}
 
