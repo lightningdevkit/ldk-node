@@ -1725,7 +1725,7 @@ where
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
 			},
-			LdkEvent::OnionMessageIntercepted { next_hop, message } => match next_hop {
+			LdkEvent::OnionMessageIntercepted { next_hop, message, .. } => match next_hop {
 				lightning::blinded_path::message::NextMessageHop::NodeId(peer_node_id) => {
 					if let Some(om_mailbox) = self.om_mailbox.as_ref() {
 						om_mailbox.onion_message_intercepted(peer_node_id, message);
