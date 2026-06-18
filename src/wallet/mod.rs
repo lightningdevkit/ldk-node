@@ -5,6 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -32,14 +33,16 @@ use bitcoin::{
 	WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::{
-	BroadcasterInterface, INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
+	BroadcasterInterface, TransactionType, INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
 };
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::{BlockLocator, ClaimId, Listen};
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::FundingContribution;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
+use lightning::ln::types::ChannelId as LnChannelId;
 use lightning::sign::{
 	ChangeDestinationSource, EntropySource, InMemorySigner, KeysManager, NodeSigner, OutputSpender,
 	PeerStorageKey, Recipient, SignerProvider, SpendableOutputDescriptor,
@@ -54,6 +57,9 @@ use persist::KVStoreWalletPersister;
 use crate::config::Config;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use lightning::chain::chaininterface::{ChannelFunding, FundingCandidate, FundingPurpose};
+
+use crate::payment::pending_payment_store::FundingDetails;
 use crate::payment::store::ConfirmationStatus;
 use crate::payment::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PendingPaymentDetails,
@@ -255,6 +261,24 @@ impl Wallet {
 		for event in events {
 			match event {
 				WalletEvent::TxConfirmed { txid, tx, block_time, .. } => {
+					let confirmation_status = ConfirmationStatus::Confirmed {
+						block_hash: block_time.block_id.hash,
+						height: block_time.block_id.height,
+						timestamp: block_time.confirmation_time,
+					};
+
+					let payment_id = self
+						.find_payment_by_txid(txid)
+						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+
+					if self.apply_funding_details_status_update(
+						payment_id,
+						txid,
+						confirmation_status,
+					)? {
+						continue;
+					}
+
 					let cur_height = locked_wallet.latest_checkpoint().height();
 					let confirmation_height = block_time.block_id.height;
 					let payment_status = if cur_height >= confirmation_height + ANTI_REORG_DELAY - 1
@@ -263,16 +287,6 @@ impl Wallet {
 					} else {
 						PaymentStatus::Pending
 					};
-
-					let confirmation_status = ConfirmationStatus::Confirmed {
-						block_hash: block_time.block_id.hash,
-						height: confirmation_height,
-						timestamp: block_time.confirmation_time,
-					};
-
-					let payment_id = self
-						.find_payment_by_txid(txid)
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					let payment = self.create_payment_from_tx(
 						locked_wallet,
@@ -283,15 +297,12 @@ impl Wallet {
 						confirmation_status,
 					);
 
-					self.runtime.block_on(self.payment_store.insert_or_update(payment.clone()))?;
-
 					if payment_status == PaymentStatus::Pending {
 						let pending_payment =
 							self.create_pending_payment_from_tx(payment, Vec::new());
-
-						self.runtime.block_on(
-							self.pending_payment_store.insert_or_update(pending_payment),
-						)?;
+						self.persist_pending_payment(pending_payment)?;
+					} else {
+						self.runtime.block_on(self.payment_store.insert_or_update(payment))?;
 					}
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
@@ -302,8 +313,11 @@ impl Wallet {
 								"Non-pending payment {:?} found in pending store",
 								p.details.id,
 							);
+							// Funding records complete on `ChannelReady`, not after
+							// `ANTI_REORG_DELAY` confirmations.
 							p.details.status == PaymentStatus::Pending
 								&& matches!(p.details.kind, PaymentKind::Onchain { .. })
+								&& p.funding_details.is_none()
 						});
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
@@ -367,6 +381,14 @@ impl Wallet {
 						.find_payment_by_txid(txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
+					if self.apply_funding_details_status_update(
+						payment_id,
+						txid,
+						ConfirmationStatus::Unconfirmed,
+					)? {
+						continue;
+					}
+
 					let payment = self.create_payment_from_tx(
 						locked_wallet,
 						txid,
@@ -375,11 +397,8 @@ impl Wallet {
 						PaymentStatus::Pending,
 						ConfirmationStatus::Unconfirmed,
 					);
-					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.runtime.block_on(self.payment_store.insert_or_update(payment))?;
-					self.runtime
-						.block_on(self.pending_payment_store.insert_or_update(pending_payment))?;
+					let pending_payment = self.create_pending_payment_from_tx(payment, Vec::new());
+					self.persist_pending_payment(pending_payment)?;
 				},
 				WalletEvent::TxReplaced { txid, conflicts, .. } => {
 					let Some(payment_id) = self.find_payment_by_txid(txid) else {
@@ -390,6 +409,18 @@ impl Wallet {
 						);
 						continue;
 					};
+
+					// Funding records (channel opens and splices) track their active candidate and
+					// status through `classify_*` and the Lightning lifecycle handlers. A replaced
+					// candidate is expected during splice RBF and must not reset the record or drop
+					// its funding details, so leave such records untouched here.
+					if self
+						.pending_payment_store
+						.get(&payment_id)
+						.map_or(false, |p| p.funding_details.is_some())
+					{
+						continue;
+					}
 
 					// Collect all conflict txids
 					let mut conflict_txids: Vec<Txid> =
@@ -417,6 +448,15 @@ impl Wallet {
 					let payment_id = self
 						.find_payment_by_txid(txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+
+					if self.apply_funding_details_status_update(
+						payment_id,
+						txid,
+						ConfirmationStatus::Unconfirmed,
+					)? {
+						continue;
+					}
+
 					let payment = self.create_payment_from_tx(
 						locked_wallet,
 						txid,
@@ -425,11 +465,8 @@ impl Wallet {
 						PaymentStatus::Pending,
 						ConfirmationStatus::Unconfirmed,
 					);
-					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.runtime.block_on(self.payment_store.insert_or_update(payment))?;
-					self.runtime
-						.block_on(self.pending_payment_store.insert_or_update(pending_payment))?;
+					let pending_payment = self.create_pending_payment_from_tx(payment, Vec::new());
+					self.persist_pending_payment(pending_payment)?;
 				},
 				_ => {
 					continue;
@@ -1100,9 +1137,12 @@ impl Wallet {
 		let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).map_err(|e| {
 			log_error!(self.logger, "Failed to construct PSBT: {}", e);
 		})?;
+		// Use list_output rather than get_utxo to include outputs spent by unconfirmed
+		// transactions (e.g., a prior splice being replaced via RBF).
+		let mut wallet_outputs: HashMap<bitcoin::OutPoint, bdk_wallet::LocalOutput> =
+			locked_wallet.list_output().map(|o| (o.outpoint, o)).collect();
 		for (i, txin) in psbt.unsigned_tx.input.iter().enumerate() {
-			if let Some(utxo) = locked_wallet.get_utxo(txin.previous_output) {
-				debug_assert!(!utxo.is_spent);
+			if let Some(utxo) = wallet_outputs.remove(&txin.previous_output) {
 				psbt.inputs[i] = locked_wallet.get_psbt_input(utxo, None, true).map_err(|e| {
 					log_error!(self.logger, "Failed to construct PSBT input: {}", e);
 				})?;
@@ -1158,6 +1198,41 @@ impl Wallet {
 		})?;
 
 		Ok(tx)
+	}
+
+	/// Computes the amount, fee, and direction of an on-chain payment from the
+	/// wallet's view of the transaction. Used by [`TransactionBroadcaster`] to
+	/// describe a single-funded channel-open, for which no [`FundingContribution`]
+	/// is available.
+	///
+	/// [`TransactionBroadcaster`]: crate::tx_broadcaster::TransactionBroadcaster
+	/// [`FundingContribution`]: lightning::ln::funding::FundingContribution
+	pub(crate) fn onchain_payment_fields(
+		&self, tx: &Transaction,
+	) -> (Option<u64>, Option<u64>, PaymentDirection) {
+		let locked_wallet = self.inner.lock().expect("lock");
+		let fee = locked_wallet.calculate_fee(tx).unwrap_or(Amount::ZERO);
+		let (sent, received) = locked_wallet.sent_and_received(tx);
+		let fee_sat = fee.to_sat();
+
+		let (direction, amount_msat) = if sent > received {
+			(
+				PaymentDirection::Outbound,
+				Some(
+					(sent.to_sat().saturating_sub(fee_sat).saturating_sub(received.to_sat()))
+						* 1000,
+				),
+			)
+		} else {
+			(
+				PaymentDirection::Inbound,
+				Some(
+					received.to_sat().saturating_sub(sent.to_sat().saturating_sub(fee_sat)) * 1000,
+				),
+			)
+		};
+
+		(amount_msat, Some(fee_sat * 1000), direction)
 	}
 
 	fn create_payment_from_tx(
@@ -1216,6 +1291,220 @@ impl Wallet {
 		PendingPaymentDetails::new(payment, conflicting_txids)
 	}
 
+	/// Writes a [`PendingPaymentDetails`] and its inner [`PaymentDetails`] to their
+	/// respective stores in a fixed order. Callers that need to keep the two stores in
+	/// sync should always go through this.
+	fn persist_pending_payment(&self, pending: PendingPaymentDetails) -> Result<(), Error> {
+		self.runtime.block_on(self.payment_store.insert_or_update(pending.details.clone()))?;
+		self.runtime.block_on(self.pending_payment_store.insert_or_update(pending))?;
+		Ok(())
+	}
+
+	/// Called on `ChannelReady` to mark a funding payment (channel open or splice) as
+	/// succeeded.
+	///
+	/// If `funding_txo_txid` matches a candidate other than the currently-active one,
+	/// that candidate is promoted to active first and the outer [`PaymentDetails`] is
+	/// updated from its contribution. If no candidate matches (the confirmed funding
+	/// txid belongs to a broadcast this node didn't contribute to), the pending record
+	/// is left in place for later handling.
+	pub(crate) async fn handle_channel_ready(
+		&self, channel_id: LnChannelId, funding_txo_txid: Option<Txid>,
+	) -> Result<(), Error> {
+		let funding_txo_txid = match funding_txo_txid {
+			Some(t) => t,
+			None => return Ok(()),
+		};
+
+		let mut pending = match self
+			.pending_payment_store
+			.list_filter(|p| {
+				p.funding_details
+					.as_ref()
+					.map(|fd| record_includes_channel(fd, channel_id))
+					.unwrap_or(false)
+			})
+			.into_iter()
+			.next()
+		{
+			Some(p) => p,
+			None => return Ok(()),
+		};
+		let funding_details = match pending.funding_details.clone() {
+			Some(fd) => fd,
+			None => return Ok(()),
+		};
+
+		let candidate = match funding_details.candidates.iter().find(|c| c.txid == funding_txo_txid)
+		{
+			Some(c) => c.clone(),
+			None => {
+				// Confirmed `funding_txo` wasn't produced by any of our broadcasts. The
+				// record is left alone; some higher-level flow decides what to do.
+				log_debug!(
+					self.logger,
+					"ChannelReady for channel {}: confirmed funding_txo {} is not one of our candidates",
+					channel_id,
+					funding_txo_txid,
+				);
+				return Ok(());
+			},
+		};
+
+		let old_txid = match pending.details.kind {
+			PaymentKind::Onchain { txid, .. } => txid,
+			_ => {
+				debug_assert!(false, "funding record must use PaymentKind::Onchain");
+				return Ok(());
+			},
+		};
+
+		if old_txid != funding_txo_txid {
+			if !pending.conflicting_txids.contains(&old_txid) {
+				pending.conflicting_txids.push(old_txid);
+			}
+			pending.conflicting_txids.retain(|t| *t != funding_txo_txid);
+
+			let aggregate = aggregate_local_stakes(&candidate);
+			pending.details.amount_msat = aggregate.amount_msat;
+			pending.details.fee_paid_msat = aggregate.fee_paid_msat;
+		}
+
+		// Preserve the confirmation status already on the record (set by wallet sync if
+		// it's seen the tx confirm). `ChannelReady` alone doesn't carry block details.
+		let existing_status = match pending.details.kind {
+			PaymentKind::Onchain { status, .. } => status,
+			_ => ConfirmationStatus::Unconfirmed,
+		};
+		pending.details.kind =
+			PaymentKind::Onchain { txid: funding_txo_txid, status: existing_status };
+
+		pending.details.status = PaymentStatus::Succeeded;
+		let payment_id = pending.details.id;
+		self.payment_store.insert_or_update(pending.details).await?;
+		self.pending_payment_store.remove(&payment_id).await?;
+
+		Ok(())
+	}
+
+	/// Called on `ChannelClosed`. Removes any funding record (channel open or splice)
+	/// for `channel_id` whose candidates never reached confirmed — e.g. a funding
+	/// transaction that never made it on-chain. A record that does reflect a confirmed
+	/// transaction is left alone and will transition to `Succeeded` normally.
+	pub(crate) async fn handle_channel_closed(&self, channel_id: LnChannelId) -> Result<(), Error> {
+		let pending = match self
+			.pending_payment_store
+			.list_filter(|p| {
+				p.funding_details
+					.as_ref()
+					.map(|fd| record_includes_channel(fd, channel_id))
+					.unwrap_or(false)
+			})
+			.into_iter()
+			.next()
+		{
+			Some(p) => p,
+			None => return Ok(()),
+		};
+
+		let is_confirmed = matches!(
+			pending.details.kind,
+			PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
+		);
+		if is_confirmed {
+			return Ok(());
+		}
+
+		let payment_id = pending.details.id;
+		self.pending_payment_store.remove(&payment_id).await?;
+		self.payment_store.remove(&payment_id).await?;
+		Ok(())
+	}
+
+	/// Updates a funding record's `kind` in response to a wallet-sync event, swapping
+	/// the active candidate when `event_txid` differs from the current one.
+	///
+	/// Amount, fee, and direction are not recomputed from the wallet's view: they were
+	/// set at broadcast time from the `FundingContribution` and must persist until
+	/// `ChannelReady`.
+	///
+	/// Returns `true` when a funding record was updated (so the caller skips the
+	/// default Onchain create/update path), `false` otherwise.
+	fn apply_funding_details_status_update(
+		&self, payment_id: PaymentId, event_txid: Txid, confirmation_status: ConfirmationStatus,
+	) -> Result<bool, Error> {
+		// A funding payment becomes `Succeeded` only once `handle_channel_ready` has graduated it
+		// on `ChannelReady`, which also removes the pending record. A wallet-sync event arriving
+		// during that removal (the two are awaited separately, so a sync can interleave) or after
+		// it must never downgrade the terminal status or adopt a replaced candidate's txid. At
+		// most it refines the confirmation status of the candidate that actually locked — and
+		// recomputing from the wallet's view would clobber the per-node fee set at broadcast time.
+		if let Some(mut existing) = self.payment_store.get(&payment_id) {
+			if existing.status == PaymentStatus::Succeeded
+				&& matches!(existing.kind, PaymentKind::Onchain { .. })
+			{
+				if let PaymentKind::Onchain { txid, status } = existing.kind {
+					if txid == event_txid && status != confirmation_status {
+						existing.kind = PaymentKind::Onchain { txid, status: confirmation_status };
+						self.runtime.block_on(self.payment_store.insert_or_update(existing))?;
+					}
+				}
+				return Ok(true);
+			}
+		}
+
+		let mut pending = match self.pending_payment_store.get(&payment_id) {
+			Some(p) => p,
+			None => return Ok(false),
+		};
+		let funding_details = match pending.funding_details.as_ref() {
+			Some(fd) => fd,
+			None => return Ok(false),
+		};
+
+		let candidate = match funding_details.candidates.iter().find(|c| c.txid == event_txid) {
+			Some(c) => c.clone(),
+			None => {
+				log_debug!(
+					self.logger,
+					"Event txid {} resolved to funding_details payment {} but is not in candidates",
+					event_txid,
+					payment_id,
+				);
+				return Ok(false);
+			},
+		};
+
+		let old_txid = match pending.details.kind {
+			PaymentKind::Onchain { txid, .. } => txid,
+			_ => {
+				debug_assert!(false, "funding_details record must use PaymentKind::Onchain");
+				return Ok(false);
+			},
+		};
+
+		if old_txid != event_txid {
+			// A different candidate confirmed. Move the previous active txid onto
+			// `conflicting_txids` and re-derive amount/fee from the new candidate's
+			// contributions.
+			if !pending.conflicting_txids.contains(&old_txid) {
+				pending.conflicting_txids.push(old_txid);
+			}
+			pending.conflicting_txids.retain(|t| *t != event_txid);
+
+			let aggregate = aggregate_local_stakes(&candidate);
+			pending.details.amount_msat = aggregate.amount_msat;
+			pending.details.fee_paid_msat = aggregate.fee_paid_msat;
+		}
+
+		pending.details.kind =
+			PaymentKind::Onchain { txid: event_txid, status: confirmation_status };
+
+		self.persist_pending_payment(pending)?;
+
+		Ok(true)
+	}
+
 	fn find_payment_by_txid(&self, target_txid: Txid) -> Option<PaymentId> {
 		let direct_payment_id = PaymentId(target_txid.to_byte_array());
 		if self.pending_payment_store.contains_key(&direct_payment_id) {
@@ -1227,10 +1516,26 @@ impl Wallet {
 			.list_filter(|p| {
 				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
 					|| p.conflicting_txids.contains(&target_txid)
+					|| p.funding_details
+						.as_ref()
+						.map(|fd| fd.candidates.iter().any(|c| c.txid == target_txid))
+						.unwrap_or(false)
 			})
 			.first()
 		{
 			return Some(replaced_details.details.id);
+		}
+
+		// Once moved to the main store, a funding payment is still matched by its
+		// confirmed txid so late wallet events resolve correctly.
+		if let Some(p) = self
+			.payment_store
+			.list_filter(
+				|p| matches!(p.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid),
+			)
+			.first()
+		{
+			return Some(p.id);
 		}
 
 		None
@@ -1244,6 +1549,23 @@ impl Wallet {
 			log_error!(self.logger, "Payment {} not found in payment store", payment_id);
 			Error::InvalidPaymentId
 		})?;
+
+		// Funding transactions (channel opens and splices) are driven by LDK's funding/splice
+		// lifecycle, not the on-chain wallet. Replacing one via on-chain RBF would broadcast a
+		// transaction LDK isn't tracking (and, for splices, can't sign). Fee-bumping a pending
+		// splice goes through `bump_channel_funding_fee` instead.
+		if self
+			.pending_payment_store
+			.get(&payment_id)
+			.map_or(false, |p| p.funding_details.is_some())
+		{
+			log_error!(
+				self.logger,
+				"Cannot RBF funding payment {} via bump_fee_rbf; use bump_channel_funding_fee instead",
+				payment_id,
+			);
+			return Err(Error::InvalidPaymentId);
+		}
 
 		if let PaymentKind::Onchain { status, .. } = &payment.kind {
 			match status {
@@ -1431,16 +1753,234 @@ impl Wallet {
 			ConfirmationStatus::Unconfirmed,
 		);
 
-		let pending_payment_store =
-			self.create_pending_payment_from_tx(new_payment.clone(), Vec::new());
-
-		self.runtime
-			.block_on(self.pending_payment_store.insert_or_update(pending_payment_store))?;
-		self.runtime.block_on(self.payment_store.insert_or_update(new_payment))?;
+		let pending_payment = self.create_pending_payment_from_tx(new_payment, Vec::new());
+		self.persist_pending_payment(pending_payment)?;
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
 
 		Ok(new_txid)
+	}
+
+	pub(crate) fn classify_broadcast(
+		&self, tx: &Transaction, tx_type: &TransactionType,
+	) -> Result<(), Error> {
+		match tx_type {
+			TransactionType::Funding { channels } => self.classify_funding(tx, channels),
+			TransactionType::InteractiveFunding { candidates } => {
+				self.classify_interactive_funding(tx, candidates)
+			},
+			_ => Ok(()),
+		}
+	}
+
+	fn classify_funding(
+		&self, tx: &Transaction, channels: &[(PublicKey, LnChannelId)],
+	) -> Result<(), Error> {
+		// Batch funding (one transaction funding multiple channels) isn't supported; let
+		// wallet sync record the payment normally so graduation still runs through
+		// ANTI_REORG_DELAY.
+		if channels.len() != 1 {
+			if channels.len() > 1 {
+				log_trace!(
+					self.logger,
+					"Skipping funding classification for batched broadcast ({} channels)",
+					channels.len()
+				);
+			}
+			return Ok(());
+		}
+
+		let (counterparty_node_id, channel_id) = channels[0];
+		let txid = tx.compute_txid();
+		let (amount_msat, fee_paid_msat, direction) = self.onchain_payment_fields(tx);
+
+		let candidate = FundingCandidate {
+			txid,
+			channels: vec![ChannelFunding {
+				counterparty_node_id,
+				channel_id,
+				purpose: FundingPurpose::Establishment,
+				contribution: None,
+			}],
+		};
+
+		let details = PaymentDetails::new(
+			PaymentId(txid.to_byte_array()),
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed },
+			amount_msat,
+			fee_paid_msat,
+			direction,
+			PaymentStatus::Pending,
+		);
+
+		let funding_details = FundingDetails { candidates: vec![candidate] };
+
+		let pending =
+			PendingPaymentDetails::with_funding_details(details, Vec::new(), funding_details);
+
+		self.persist_pending_payment(pending)?;
+		log_debug!(
+			self.logger,
+			"Recorded channel-funding broadcast {} for channel {}",
+			txid,
+			channel_id,
+		);
+		Ok(())
+	}
+
+	fn classify_interactive_funding(
+		&self, tx: &Transaction, candidates: &[FundingCandidate],
+	) -> Result<(), Error> {
+		// `InteractiveFunding` carries the full negotiated history. The currently-broadcast
+		// candidate is the last entry; earlier entries are RBF predecessors.
+		let active = match candidates.last() {
+			Some(c) => c,
+			None => return Ok(()),
+		};
+		let first = match candidates.first() {
+			Some(c) => c,
+			None => return Ok(()),
+		};
+
+		let txid = tx.compute_txid();
+		debug_assert_eq!(active.txid, txid, "broadcast tx must match the active candidate");
+
+		// Aggregate amount/fee/direction across this candidate's channels by summing the
+		// local-stake contributions. If we didn't contribute on this candidate, leave the
+		// record to wallet sync — there's nothing for us to track here, and any wallet-
+		// visible activity (e.g. a counterparty's splice-out paid to our address) is
+		// better surfaced as a plain on-chain receive.
+		let aggregate = aggregate_local_stakes(active);
+		let amount_msat = match aggregate.amount_msat {
+			Some(amt) => Some(amt),
+			None => {
+				log_trace!(
+					self.logger,
+					"Skipping interactive-funding broadcast {}: no local contribution",
+					txid,
+				);
+				return Ok(());
+			},
+		};
+		let fee_paid_msat = aggregate.fee_paid_msat;
+		let direction = aggregate.direction;
+
+		// Skip broadcasts that don't move funds in or out of our on-chain wallet — e.g.
+		// a splice-out we initiated toward an external address.
+		let (wallet_amount_msat, _wallet_fee_msat, _wallet_direction) =
+			self.onchain_payment_fields(tx);
+		if wallet_amount_msat == Some(0) {
+			log_trace!(
+				self.logger,
+				"Skipping interactive-funding broadcast {}: no wallet-level activity",
+				txid,
+			);
+			return Ok(());
+		}
+
+		// Anchor the PaymentId to the first negotiated candidate so the record stays
+		// stable across RBF replacements.
+		let payment_id = PaymentId(first.txid.to_byte_array());
+		let candidate_count = candidates.len();
+		let active_channel_count = active.channels.len();
+
+		let details = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed },
+			amount_msat,
+			fee_paid_msat,
+			direction,
+			PaymentStatus::Pending,
+		);
+
+		// Funding records carry their own RBF history in `candidates`; lookup by txid
+		// (find_payment_by_txid) already searches that, so no separate
+		// `conflicting_txids` Vec is needed.
+		let funding_details = FundingDetails { candidates: candidates.to_vec() };
+
+		let pending =
+			PendingPaymentDetails::with_funding_details(details, Vec::new(), funding_details);
+
+		self.persist_pending_payment(pending)?;
+		log_debug!(
+			self.logger,
+			"Recorded interactive-funding broadcast {} ({} candidates, {} channels)",
+			txid,
+			candidate_count,
+			active_channel_count,
+		);
+		Ok(())
+	}
+}
+
+/// Returns this node's share of the on-chain fee for a funding transaction (channel
+/// open or splice), in millisatoshis. Sourced from the contribution's
+/// [`FundingContribution::estimated_fee`], which upstream computes per-contributor.
+fn our_actual_fee_msat(contribution: &FundingContribution) -> u64 {
+	contribution.estimated_fee().to_sat() * 1000
+}
+
+fn record_includes_channel(details: &FundingDetails, channel_id: LnChannelId) -> bool {
+	details.candidates.iter().any(|c| c.channels.iter().any(|ch| ch.channel_id == channel_id))
+}
+
+struct LocalStakeAggregate {
+	amount_msat: Option<u64>,
+	fee_paid_msat: Option<u64>,
+	direction: PaymentDirection,
+}
+
+/// Aggregates local-stake amount/fee/direction across the channels of a single
+/// [`FundingCandidate`]. Each channel's contribution (when present) is treated as
+/// local-stake-only, so contributions across channels are summed without
+/// double-counting.
+fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
+	let mut amount_outbound: u64 = 0;
+	let mut amount_inbound: u64 = 0;
+	let mut fee: u64 = 0;
+	let mut have_contribution = false;
+	for channel in &candidate.channels {
+		if let Some(c) = channel.contribution.as_ref() {
+			have_contribution = true;
+			fee = fee.saturating_add(our_actual_fee_msat(c));
+			match contribution_direction(c) {
+				Some((PaymentDirection::Outbound, amt)) => {
+					amount_outbound = amount_outbound.saturating_add(amt);
+				},
+				Some((PaymentDirection::Inbound, amt)) => {
+					amount_inbound = amount_inbound.saturating_add(amt);
+				},
+				None => {},
+			}
+		}
+	}
+	if !have_contribution {
+		return LocalStakeAggregate {
+			amount_msat: None,
+			fee_paid_msat: None,
+			direction: PaymentDirection::Outbound,
+		};
+	}
+	let (direction, amount_msat) = if amount_outbound >= amount_inbound {
+		(PaymentDirection::Outbound, amount_outbound.saturating_sub(amount_inbound))
+	} else {
+		(PaymentDirection::Inbound, amount_inbound.saturating_sub(amount_outbound))
+	};
+	LocalStakeAggregate { amount_msat: Some(amount_msat), fee_paid_msat: Some(fee), direction }
+}
+
+/// Returns this contribution's direction and magnitude in msat, or `None` if it can't
+/// be classified as a single inbound or outbound payment.
+fn contribution_direction(contribution: &FundingContribution) -> Option<(PaymentDirection, u64)> {
+	let value_added = contribution.value_added();
+	let outputs_total: Amount = contribution.outputs().iter().map(|o| o.value).sum();
+
+	if value_added > Amount::ZERO && outputs_total == Amount::ZERO {
+		Some((PaymentDirection::Outbound, value_added.to_sat() * 1000))
+	} else if value_added == Amount::ZERO && outputs_total > Amount::ZERO {
+		Some((PaymentDirection::Inbound, outputs_total.to_sat() * 1000))
+	} else {
+		None
 	}
 }
 

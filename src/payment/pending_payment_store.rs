@@ -6,12 +6,26 @@
 // accordance with one or both of these licenses.
 
 use bitcoin::Txid;
+use lightning::chain::chaininterface::FundingCandidate;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
 
 use crate::data_store::{StorableObject, StorableObjectUpdate};
 use crate::payment::store::PaymentDetailsUpdate;
 use crate::payment::PaymentDetails;
+
+/// Marks an on-chain payment as belonging to an interactive-funding negotiation. The
+/// last entry in `candidates` is the currently-broadcast tx; earlier entries are RBF
+/// predecessors that may still confirm if reorgs intervene.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FundingDetails {
+	/// Every negotiated candidate, oldest first.
+	pub candidates: Vec<FundingCandidate>,
+}
+
+impl_writeable_tlv_based!(FundingDetails, {
+	(0, candidates, optional_vec),
+});
 
 /// Represents a pending payment
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,11 +34,24 @@ pub struct PendingPaymentDetails {
 	pub details: PaymentDetails,
 	/// Transaction IDs that have replaced or conflict with this payment.
 	pub conflicting_txids: Vec<Txid>,
+	/// Set when the payment's transaction is an interactive-funding broadcast (channel
+	/// open or splice). The record transitions to [`PaymentStatus::Succeeded`] on
+	/// `ChannelReady` instead of after [`ANTI_REORG_DELAY`] confirmations.
+	///
+	/// [`PaymentStatus::Succeeded`]: crate::payment::store::PaymentStatus::Succeeded
+	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+	pub funding_details: Option<FundingDetails>,
 }
 
 impl PendingPaymentDetails {
 	pub(crate) fn new(details: PaymentDetails, conflicting_txids: Vec<Txid>) -> Self {
-		Self { details, conflicting_txids }
+		Self { details, conflicting_txids, funding_details: None }
+	}
+
+	pub(crate) fn with_funding_details(
+		details: PaymentDetails, conflicting_txids: Vec<Txid>, funding_details: FundingDetails,
+	) -> Self {
+		Self { details, conflicting_txids, funding_details: Some(funding_details) }
 	}
 
 	/// Convert to finalized payment for the main payment store
@@ -36,6 +63,7 @@ impl PendingPaymentDetails {
 impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(0, details, required),
 	(2, conflicting_txids, optional_vec),
+	(4, funding_details, option),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +71,7 @@ pub(crate) struct PendingPaymentDetailsUpdate {
 	pub id: PaymentId,
 	pub payment_update: Option<PaymentDetailsUpdate>,
 	pub conflicting_txids: Option<Vec<Txid>>,
+	pub funding_details: Option<Option<FundingDetails>>,
 }
 
 impl StorableObject for PendingPaymentDetails {
@@ -68,6 +97,13 @@ impl StorableObject for PendingPaymentDetails {
 			}
 		}
 
+		if let Some(new_funding_details) = update.funding_details {
+			if self.funding_details != new_funding_details {
+				self.funding_details = new_funding_details;
+				updated = true;
+			}
+		}
+
 		updated
 	}
 
@@ -89,6 +125,11 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 		} else {
 			Some(value.conflicting_txids.clone())
 		};
-		Self { id: value.id(), payment_update: Some(value.details.to_update()), conflicting_txids }
+		Self {
+			id: value.id(),
+			payment_update: Some(value.details.to_update()),
+			conflicting_txids,
+			funding_details: Some(value.funding_details.clone()),
+		}
 	}
 }

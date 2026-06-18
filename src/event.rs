@@ -33,6 +33,7 @@ use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
+use crate::channel::SpliceRetrier;
 use crate::config::{may_announce_channel, Config};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
@@ -283,7 +284,11 @@ pub enum Event {
 		/// The outpoint of the channel's splice funding transaction.
 		new_funding_txo: OutPoint,
 	},
-	/// A channel splice negotiation round has failed.
+	/// A channel splice has failed and is no longer being pursued.
+	///
+	/// Recoverable failures (e.g., a peer disconnecting mid-negotiation) are retried
+	/// automatically, including across restarts; this event is emitted only once the splice is
+	/// given up on.
 	SpliceNegotiationFailed {
 		/// The `channel_id` of the channel.
 		channel_id: ChannelId,
@@ -543,6 +548,7 @@ where
 	static_invoice_store: Option<StaticInvoiceStore>,
 	onion_messenger: Arc<OnionMessenger>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
+	splice_retrier: Arc<SpliceRetrier<L>>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -557,8 +563,8 @@ where
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
 		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
-		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
-		config: Arc<Config>,
+		om_mailbox: Option<Arc<OnionMessageMailbox>>, splice_retrier: Arc<SpliceRetrier<L>>,
+		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -578,6 +584,7 @@ where
 			static_invoice_store,
 			onion_messenger,
 			om_mailbox,
+			splice_retrier,
 		}
 	}
 
@@ -1585,9 +1592,27 @@ where
 					);
 				}
 
+				if let Err(e) = self
+					.wallet
+					.handle_channel_ready(channel_id, funding_txo.map(|txo| txo.txid))
+					.await
+				{
+					log_error!(
+						self.logger,
+						"Failed to graduate funding payment on ChannelReady for channel {}: {:?}",
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
+
 				self.liquidity_source
 					.lsps2_service()
 					.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
+					.await;
+
+				self.splice_retrier
+					.on_channel_ready(UserChannelId(user_channel_id), funding_txo)
 					.await;
 
 				let event = Event::ChannelReady {
@@ -1612,6 +1637,18 @@ where
 				..
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
+
+				if let Err(e) = self.wallet.handle_channel_closed(channel_id).await {
+					log_error!(
+						self.logger,
+						"Failed to handle ChannelClosed for channel {}: {:?}",
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
+
+				self.splice_retrier.on_channel_closed(UserChannelId(user_channel_id)).await;
 
 				let event = Event::ChannelClosed {
 					channel_id,
@@ -1881,14 +1918,25 @@ where
 				channel_id,
 				user_channel_id,
 				counterparty_node_id,
-				..
+				reason,
+				contribution,
 			} => {
 				log_info!(
 					self.logger,
-					"Channel {} with counterparty {} splice negotiation failed",
+					"Channel {} with counterparty {} splice negotiation failed: {:?}",
 					channel_id,
 					counterparty_node_id,
+					reason,
 				);
+
+				// Only surface failures of splices that are not (or no longer) being retried.
+				let surface = self
+					.splice_retrier
+					.on_negotiation_failed(UserChannelId(user_channel_id), reason, contribution)
+					.await;
+				if !surface {
+					return Ok(());
+				}
 
 				let event = Event::SpliceNegotiationFailed {
 					channel_id,
