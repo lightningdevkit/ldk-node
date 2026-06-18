@@ -24,7 +24,7 @@ use bitcoin::Network;
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::io::{self, Error, ErrorKind};
 use lightning::sign::{EntropySource as LdkEntropySource, RandomBytes};
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 use lightning::util::ser::{Readable, Writeable};
 use prost::Message;
 use vss_client::client::VssClient;
@@ -69,6 +69,8 @@ impl_writeable_tlv_based_enum!(VssSchemaVersion,
 	(0, V0) => {},
 	(1, V1) => {},
 );
+
+const PAGE_SIZE: i32 = 50;
 
 const VSS_HARDENED_CHILD_INDEX: u32 = 877;
 const VSS_SIGS_AUTH_HARDENED_CHILD_INDEX: u32 = 139;
@@ -293,6 +295,32 @@ impl KVStore for VssStore {
 	}
 }
 
+impl PaginatedKVStore for VssStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let inner = Arc::clone(&self.inner);
+		let runtime = self.internal_runtime();
+		async move {
+			let task = runtime.spawn(async move {
+				inner
+					.list_paginated_internal(
+						&inner.async_client,
+						primary_namespace,
+						secondary_namespace,
+						page_token,
+					)
+					.await
+			});
+			task.await.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("VSS runtime task failed: {}", e))
+			})?
+		}
+	}
+}
+
 impl Drop for VssStore {
 	fn drop(&mut self) {
 		if let Some(runtime) = self.internal_runtime.take() {
@@ -391,35 +419,33 @@ impl VssStoreInner {
 		}
 	}
 
-	async fn list_all_keys(
+	async fn list_keys(
 		&self, client: &VssClient<CustomRetryPolicy>, primary_namespace: &str,
-		secondary_namespace: &str,
-	) -> io::Result<Vec<String>> {
-		let mut page_token = None;
-		let mut keys = vec![];
-		let key_prefix = self.build_obfuscated_prefix(primary_namespace, secondary_namespace);
-		while page_token != Some("".to_string()) {
-			let request = ListKeyVersionsRequest {
-				store_id: self.store_id.clone(),
-				key_prefix: Some(key_prefix.clone()),
-				page_token,
-				page_size: None,
-			};
+		secondary_namespace: &str, key_prefix: String, page_token: Option<String>, page_size: Option<i32>,
+	) -> io::Result<(Vec<String>, Option<String>)> {
+		let request = ListKeyVersionsRequest {
+			store_id: self.store_id.clone(),
+			key_prefix: Some(key_prefix),
+			page_token,
+			page_size,
+		};
 
-			let response = client.list_key_versions(&request).await.map_err(|e| {
-				let msg = format!(
-					"Failed to list keys in {}/{}: {}",
-					primary_namespace, secondary_namespace, e
-				);
-				Error::new(ErrorKind::Other, msg)
-			})?;
+		let response = client.list_key_versions(&request).await.map_err(|e| {
+			let msg = format!(
+				"Failed to list keys in {}/{}: {}",
+				primary_namespace, secondary_namespace, e
+			);
+			Error::new(ErrorKind::Other, msg)
+		})?;
 
-			for kv in response.key_versions {
-				keys.push(self.extract_key(&kv.key)?);
-			}
-			page_token = response.next_page_token;
+		let mut keys = Vec::with_capacity(response.key_versions.len());
+		for kv in response.key_versions {
+			keys.push(self.extract_key(&kv.key)?);
 		}
-		Ok(keys)
+
+		// VSS may return an empty string instead of None to signal the last page.
+		let next_page_token = response.next_page_token.filter(|t| !t.is_empty());
+		Ok((keys, next_page_token))
 	}
 
 	async fn read_internal(
@@ -543,18 +569,49 @@ impl VssStoreInner {
 	) -> io::Result<Vec<String>> {
 		check_namespace_key_validity(&primary_namespace, &secondary_namespace, None, "list")?;
 
-		let keys = self
-			.list_all_keys(client, &primary_namespace, &secondary_namespace)
-			.await
-			.map_err(|e| {
-				let msg = format!(
-					"Failed to retrieve keys in namespace: {}/{} : {}",
-					primary_namespace, secondary_namespace, e
-				);
-				Error::new(ErrorKind::Other, msg)
-			})?;
-
+		let key_prefix = self.build_obfuscated_prefix(&primary_namespace, &secondary_namespace);
+		let mut page_token: Option<String> = None;
+		let mut keys = vec![];
+		loop {
+			let (page_keys, next_page_token) = self
+				.list_keys(client, &primary_namespace, &secondary_namespace, key_prefix.clone(), page_token, None)
+				.await?;
+			keys.extend(page_keys);
+			match next_page_token {
+				Some(t) => page_token = Some(t),
+				None => break,
+			}
+		}
 		Ok(keys)
+	}
+
+	async fn list_paginated_internal(
+		&self, client: &VssClient<CustomRetryPolicy>, primary_namespace: String,
+		secondary_namespace: String, page_token: Option<PageToken>,
+	) -> io::Result<PaginatedListResponse> {
+		check_namespace_key_validity(
+			&primary_namespace,
+			&secondary_namespace,
+			None,
+			"list_paginated",
+		)?;
+
+		let key_prefix = self.build_obfuscated_prefix(&primary_namespace, &secondary_namespace);
+		let vss_page_token = page_token.map(|t| t.to_string());
+		let (keys, next_page_token) = self
+			.list_keys(
+				client,
+				&primary_namespace,
+				&secondary_namespace,
+				key_prefix,
+				vss_page_token,
+				Some(PAGE_SIZE),
+			)
+			.await?;
+
+		let next_page_token = next_page_token.map(PageToken::new);
+
+		Ok(PaginatedListResponse { keys, next_page_token })
 	}
 
 	async fn execute_locked_write<
@@ -626,6 +683,7 @@ fn retry_policy() -> CustomRetryPolicy {
 				VssError::NoSuchKeyError(..)
 					| VssError::InvalidRequestError(..)
 					| VssError::ConflictError(..)
+					| VssError::VSSVersionMismatchError { .. }
 			)
 		}) as _)
 }
@@ -646,6 +704,12 @@ async fn determine_and_write_schema_version(
 		Err(VssError::NoSuchKeyError(..)) => {
 			// The value is not set.
 			None
+		},
+		Err(VssError::VSSVersionMismatchError { version_served, version_expected }) => {
+			let msg = format!(
+				"VSS version mismatch, expected: {version_expected}, got: {version_served:?}"
+			);
+			return Err(Error::new(ErrorKind::Other, msg));
 		},
 		Err(e) => {
 			let msg = format!("Failed to read schema version: {}", e);
@@ -941,35 +1005,109 @@ mod tests {
 	use super::*;
 	use crate::io::test_utils::do_read_write_remove_list_persist;
 
-	#[tokio::test]
-	async fn vss_read_write_remove_list_persist() {
+	fn build_vss_store() -> VssStore {
 		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
 		let mut rng = rng();
 		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
 		let mut node_seed = [0u8; 64];
 		rng.fill_bytes(&mut node_seed);
 		let entropy = NodeEntropy::from_seed_bytes(node_seed);
-		let vss_store =
-			VssStoreBuilder::new(entropy, vss_base_url, rand_store_id, Network::Testnet)
-				.build_with_sigs_auth(HashMap::new())
-				.unwrap();
+		VssStoreBuilder::new(entropy, vss_base_url, rand_store_id, Network::Testnet)
+			.build_with_sigs_auth(HashMap::new())
+			.unwrap()
+	}
+
+	#[tokio::test]
+	async fn vss_read_write_remove_list_persist() {
+		let vss_store = build_vss_store();
 		do_read_write_remove_list_persist(&vss_store).await;
 	}
 
 	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 	async fn vss_read_write_remove_list_persist_in_runtime_context() {
-		let vss_base_url = std::env::var("TEST_VSS_BASE_URL").unwrap();
-		let mut rng = rng();
-		let rand_store_id: String = (0..7).map(|_| rng.sample(Alphanumeric) as char).collect();
-		let mut node_seed = [0u8; 64];
-		rng.fill_bytes(&mut node_seed);
-		let entropy = NodeEntropy::from_seed_bytes(node_seed);
-		let vss_store =
-			VssStoreBuilder::new(entropy, vss_base_url, rand_store_id, Network::Testnet)
-				.build_with_sigs_auth(HashMap::new())
-				.unwrap();
-
+		let vss_store = build_vss_store();
 		do_read_write_remove_list_persist(&vss_store).await;
 		drop(vss_store)
+	}
+
+	#[tokio::test]
+	async fn vss_paginated_listing() {
+		let store = build_vss_store();
+		let ns = "test_paginated";
+		let sub = "listing";
+		let num_entries = 5;
+
+		for i in 0..num_entries {
+			let key = format!("key_{:04}", i);
+			let data = vec![i as u8; 32];
+			KVStore::write(&store, ns, sub, &key, data).await.unwrap();
+		}
+
+		let mut all_keys = Vec::new();
+		let mut page_token = None;
+
+		loop {
+			let response =
+				PaginatedKVStore::list_paginated(&store, ns, sub, page_token).await.unwrap();
+			all_keys.extend(response.keys);
+			match response.next_page_token {
+				Some(token) => page_token = Some(token),
+				_ => break,
+			}
+		}
+
+		assert_eq!(all_keys.len(), num_entries);
+
+		// Verify no duplicates
+		let mut unique = all_keys.clone();
+		unique.sort();
+		unique.dedup();
+		assert_eq!(unique.len(), num_entries);
+	}
+
+	#[tokio::test]
+	async fn vss_paginated_empty_namespace() {
+		let store = build_vss_store();
+		let response =
+			PaginatedKVStore::list_paginated(&store, "nonexistent", "ns", None).await.unwrap();
+		assert!(response.keys.is_empty());
+		assert!(response.next_page_token.is_none());
+	}
+
+	#[tokio::test]
+	async fn vss_paginated_removal() {
+		let store = build_vss_store();
+		let ns = "test_paginated";
+		let sub = "removal";
+
+		KVStore::write(&store, ns, sub, "a", vec![1u8; 8]).await.unwrap();
+		KVStore::write(&store, ns, sub, "b", vec![2u8; 8]).await.unwrap();
+		KVStore::write(&store, ns, sub, "c", vec![3u8; 8]).await.unwrap();
+
+		KVStore::remove(&store, ns, sub, "b", false).await.unwrap();
+
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
+		assert_eq!(response.keys.len(), 2);
+		assert!(response.keys.contains(&"a".to_string()));
+		assert!(!response.keys.contains(&"b".to_string()));
+		assert!(response.keys.contains(&"c".to_string()));
+	}
+
+	#[tokio::test]
+	async fn vss_paginated_namespace_isolation() {
+		let store = build_vss_store();
+
+		KVStore::write(&store, "ns_a", "sub", "key_1", vec![1u8; 8]).await.unwrap();
+		KVStore::write(&store, "ns_a", "sub", "key_2", vec![2u8; 8]).await.unwrap();
+		KVStore::write(&store, "ns_b", "sub", "key_3", vec![3u8; 8]).await.unwrap();
+
+		let response = PaginatedKVStore::list_paginated(&store, "ns_a", "sub", None).await.unwrap();
+		assert_eq!(response.keys.len(), 2);
+		assert!(response.keys.contains(&"key_1".to_string()));
+		assert!(response.keys.contains(&"key_2".to_string()));
+
+		let response = PaginatedKVStore::list_paginated(&store, "ns_b", "sub", None).await.unwrap();
+		assert_eq!(response.keys.len(), 1);
+		assert!(response.keys.contains(&"key_3".to_string()));
 	}
 }
