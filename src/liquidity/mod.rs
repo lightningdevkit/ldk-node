@@ -10,10 +10,6 @@
 pub(crate) mod client;
 pub(crate) mod service;
 
-pub use client::lsps1::LSPS1Liquidity;
-pub use client::LSPS1OrderStatus;
-pub use service::lsps2::LSPS2ServiceConfig;
-
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -21,6 +17,8 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
+pub use client::lsps1::LSPS1Liquidity;
+pub use client::LSPS1OrderStatus;
 use lightning::ln::msgs::SocketAddress;
 use lightning_liquidity::events::LiquidityEvent;
 use lightning_liquidity::lsps0::event::LSPS0ClientEvent;
@@ -28,6 +26,7 @@ use lightning_liquidity::lsps1::client::LSPS1ClientConfig as LdkLSPS1ClientConfi
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
+pub use service::lsps2::LSPS2ServiceConfig;
 use tokio::sync::oneshot;
 
 use crate::builder::BuildError;

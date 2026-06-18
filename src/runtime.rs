@@ -381,9 +381,9 @@ impl FutureSpawner for RuntimeSpawner {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
-
 	use tokio::sync::oneshot;
+
+	use super::*;
 
 	fn test_runtime() -> Runtime {
 		Runtime::new(Arc::new(Logger::new_log_facade())).unwrap()

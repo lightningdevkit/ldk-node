@@ -421,7 +421,8 @@ impl VssStoreInner {
 
 	async fn list_keys(
 		&self, client: &VssClient<CustomRetryPolicy>, primary_namespace: &str,
-		secondary_namespace: &str, key_prefix: String, page_token: Option<String>, page_size: Option<i32>,
+		secondary_namespace: &str, key_prefix: String, page_token: Option<String>,
+		page_size: Option<i32>,
 	) -> io::Result<(Vec<String>, Option<String>)> {
 		let request = ListKeyVersionsRequest {
 			store_id: self.store_id.clone(),
@@ -574,7 +575,14 @@ impl VssStoreInner {
 		let mut keys = vec![];
 		loop {
 			let (page_keys, next_page_token) = self
-				.list_keys(client, &primary_namespace, &secondary_namespace, key_prefix.clone(), page_token, None)
+				.list_keys(
+					client,
+					&primary_namespace,
+					&secondary_namespace,
+					key_prefix.clone(),
+					page_token,
+					None,
+				)
 				.await?;
 			keys.extend(page_keys);
 			match next_page_token {
