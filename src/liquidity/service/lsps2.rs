@@ -27,7 +27,7 @@ use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, W
 use crate::{total_anchor_channels_reserve_sats, Config};
 
 const LSPS2_GETINFO_REQUEST_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
-const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u32 = 72;
+const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u16 = 72;
 
 pub(crate) struct LSPS2Service {
 	pub(crate) service_config: LSPS2ServiceConfig,

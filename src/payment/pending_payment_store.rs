@@ -6,7 +6,7 @@
 // accordance with one or both of these licenses.
 
 use bitcoin::Txid;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
 
 use crate::data_store::{StorableObject, StorableObjectUpdate};
@@ -33,7 +33,7 @@ impl PendingPaymentDetails {
 	}
 }
 
-impl_writeable_tlv_based!(PendingPaymentDetails, {
+impl_ser_tlv_based!(PendingPaymentDetails, {
 	(0, details, required),
 	(2, conflicting_txids, optional_vec),
 });
