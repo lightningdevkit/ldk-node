@@ -1651,8 +1651,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert!(closed_a[0].funding_txo.is_some());
 	assert!(closed_b[0].funding_txo.is_some());
 	assert_eq!(closed_a[0].funding_txo, closed_b[0].funding_txo);
-	assert_eq!(closed_a[0].counterparty_node_id, Some(node_b.node_id()));
-	assert_eq!(closed_b[0].counterparty_node_id, Some(node_a.node_id()));
+	assert_eq!(closed_a[0].counterparty_node_id, node_b.node_id());
+	assert_eq!(closed_b[0].counterparty_node_id, node_a.node_id());
 
 	node_a.stop().unwrap();
 	println!("\nA stopped");

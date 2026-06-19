@@ -3206,7 +3206,7 @@ async fn closed_channel_history_persists_after_restart() {
 		assert_eq!(record.channel_capacity_sats, Some(channel_amount_sat));
 		assert!(record.is_outbound);
 		assert!(record.is_announced);
-		assert_eq!(record.counterparty_node_id, Some(node_b.node_id()));
+		assert_eq!(record.counterparty_node_id, node_b.node_id());
 		assert!(record.funding_txo.is_some());
 		assert_eq!(record.funding_txo.unwrap().txid, funding_txo.txid);
 		assert!(record.closure_reason.is_some());
@@ -3219,7 +3219,7 @@ async fn closed_channel_history_persists_after_restart() {
 		assert_eq!(record_b.channel_capacity_sats, Some(channel_amount_sat));
 		assert!(!record_b.is_outbound);
 		assert!(record_b.is_announced);
-		assert_eq!(record_b.counterparty_node_id, Some(node_a.node_id()));
+		assert_eq!(record_b.counterparty_node_id, node_a.node_id());
 		assert!(record_b.funding_txo.is_some());
 		assert_eq!(record_b.funding_txo.unwrap().txid, funding_txo.txid);
 		assert!(record_b.closure_reason.is_some());

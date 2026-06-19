@@ -34,7 +34,8 @@ use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
-use crate::closed_channel::{ClosedChannelDetails, PendingChannelInfo};
+use crate::channel::store::ChannelRecord;
+use crate::closed_channel::ClosedChannelDetails;
 use crate::config::{may_announce_channel, Config};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
@@ -55,8 +56,8 @@ use crate::payment::store::{
 use crate::payment::PaymentMetadata;
 use crate::runtime::Runtime;
 use crate::types::{
-	ClosedChannelStore, CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore,
-	PendingChannelStore, Sweeper, Wallet,
+	ChannelRecordStore, ClosedChannelStore, CustomTlvRecord, DynStore, KeysManager, OnionMessenger,
+	PaymentStore, Sweeper, Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -551,7 +552,7 @@ where
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
 	closed_channel_store: Arc<ClosedChannelStore>,
-	pending_channel_store: Arc<PendingChannelStore>,
+	channel_record_store: Arc<ChannelRecordStore>,
 	// Tracks which user_channel_ids correspond to outbound channels. Populated at startup from
 	// list_channels() and updated on ChannelPending events. Consumed on ChannelClosed events.
 	outbound_channel_ids: Mutex<HashSet<UserChannelId>>,
@@ -578,7 +579,7 @@ where
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
 		peer_store: Arc<PeerStore<L>>, closed_channel_store: Arc<ClosedChannelStore>,
-		pending_channel_store: Arc<PendingChannelStore>, keys_manager: Arc<KeysManager>,
+		channel_record_store: Arc<ChannelRecordStore>, keys_manager: Arc<KeysManager>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
 		config: Arc<Config>,
@@ -611,7 +612,7 @@ where
 			payment_store,
 			peer_store,
 			closed_channel_store,
-			pending_channel_store,
+			channel_record_store,
 			outbound_channel_ids,
 			announced_channel_ids,
 			keys_manager,
@@ -1581,13 +1582,13 @@ where
 					},
 				};
 
-				let (pending_info_opt, peer_to_store) = {
+				let (record_opt, peer_to_store) = {
 					let network_graph = self.network_graph.read_only();
 					let channels =
 						self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 					let pending_channel = channels.into_iter().find(|c| c.channel_id == channel_id);
 
-					let pending_info_opt = if let Some(ref ch) = pending_channel {
+					let record_opt = if let Some(ref ch) = pending_channel {
 						if ch.is_outbound {
 							self.outbound_channel_ids
 								.lock()
@@ -1600,8 +1601,10 @@ where
 								.expect("Lock poisoned")
 								.insert(UserChannelId(user_channel_id));
 						}
-						Some(PendingChannelInfo {
+						Some(ChannelRecord::Funded {
 							user_channel_id: UserChannelId(user_channel_id),
+							counterparty_node_id,
+							channel_id,
 							is_outbound: ch.is_outbound,
 							is_announced: ch.is_announced,
 						})
@@ -1626,15 +1629,14 @@ where
 								})
 						});
 
-					(pending_info_opt, peer_to_store)
+					(record_opt, peer_to_store)
 				}; // network_graph is dropped here, before any await
 
-				if let Some(pending_info) = pending_info_opt {
-					if let Err(e) = self.pending_channel_store.insert_or_update(pending_info).await
-					{
+				if let Some(record) = record_opt {
+					if let Err(e) = self.channel_record_store.insert_or_update(record).await {
 						log_error!(
 							self.logger,
-							"Failed to persist pending channel info {}: {}",
+							"Failed to persist channel record for {}: {}",
 							channel_id,
 							e
 						);
@@ -1718,15 +1720,19 @@ where
 					.expect("Lock poisoned")
 					.remove(&user_channel_id);
 
-				// Primary: use the durably-persisted PendingChannelInfo written at
-				// ChannelPending time. Falls back to in-memory sets (populated at startup
-				// or on ChannelPending), then to any already-persisted ClosedChannelDetails
-				// record (for the replay case where insert_or_update already succeeded but
-				// add_event failed and PendingChannelInfo was already cleaned up).
+				// Primary: use the durably-persisted ChannelRecord written at ChannelPending
+				// time. Falls back to in-memory sets (populated at startup or on
+				// ChannelPending), then to any already-persisted ClosedChannelDetails record
+				// (for the replay case where insert_or_update already succeeded but
+				// add_event failed and the ChannelRecord was already cleaned up).
 				let (is_outbound, is_announced) = self
-					.pending_channel_store
+					.channel_record_store
 					.get(&user_channel_id)
-					.map(|info| (info.is_outbound, info.is_announced))
+					.and_then(|record| match record {
+						ChannelRecord::Funded { is_outbound, is_announced, .. } => {
+							Some((is_outbound, is_announced))
+						},
+					})
 					.or_else(|| {
 						self.closed_channel_store
 							.get(&user_channel_id)
@@ -1739,8 +1745,12 @@ where
 					.unwrap_or(Duration::ZERO)
 					.as_secs();
 
-				let funding_txo =
-					channel_funding_txo.map(|op| OutPoint { txid: op.txid, vout: op.index as u32 });
+				let funding_txo = channel_funding_txo.map(|op| op.into_bitcoin_outpoint());
+
+				// Since LDK Node v0.2 this is expected to always be set. See
+				// CHANGELOG.md for details on the serialization compatibility break.
+				let counterparty_node_id = counterparty_node_id
+					.expect("counterparty_node_id must be set for closed channels");
 
 				let record = ClosedChannelDetails {
 					channel_id,
@@ -1768,10 +1778,7 @@ where
 				let event = Event::ChannelClosed {
 					channel_id,
 					user_channel_id,
-					counterparty_node_id: counterparty_node_id
-						// Since LDK Node v0.2 this is expected to always be set. See
-						// CHANGELOG.md for details on the serialization compatibility break.
-						.expect("counterparty_node_id must be set for closed channels"),
+					counterparty_node_id,
 					reason: Some(reason),
 					channel_capacity_sats,
 					channel_funding_txo: funding_txo,
@@ -1780,10 +1787,10 @@ where
 
 				match self.event_queue.add_event(event).await {
 					Ok(_) => {
-						if let Err(e) = self.pending_channel_store.remove(&user_channel_id).await {
+						if let Err(e) = self.channel_record_store.remove(&user_channel_id).await {
 							log_error!(
 								self.logger,
-								"Failed to remove pending channel info for {}: {}",
+								"Failed to remove channel record for {}: {}",
 								channel_id,
 								e
 							);

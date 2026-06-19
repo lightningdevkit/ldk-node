@@ -38,7 +38,8 @@ use lightning_net_tokio::SocketDescriptor;
 
 use crate::chain::bitcoind::UtxoSourceClient;
 use crate::chain::ChainSource;
-use crate::closed_channel::{ClosedChannelDetails, PendingChannelInfo};
+use crate::channel::store::ChannelRecord;
+use crate::closed_channel::ClosedChannelDetails;
 use crate::config::ChannelConfig;
 use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
@@ -632,4 +633,4 @@ pub(crate) type PendingPaymentStore = DataStore<PendingPaymentDetails, Arc<Logge
 
 pub(crate) type ClosedChannelStore = DataStore<ClosedChannelDetails, Arc<Logger>>;
 
-pub(crate) type PendingChannelStore = DataStore<PendingChannelInfo, Arc<Logger>>;
+pub(crate) type ChannelRecordStore = DataStore<ChannelRecord, Arc<Logger>>;

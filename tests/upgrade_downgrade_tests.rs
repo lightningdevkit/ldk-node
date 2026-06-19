@@ -290,7 +290,7 @@ async fn expect_current_channel_pending(
 async fn expect_current_channel_ready(node: &CurrentNode, expected_counterparty: PublicKey) {
 	match next_current_event(node).await {
 		ldk_node::Event::ChannelReady { counterparty_node_id, .. } => {
-			assert_eq!(counterparty_node_id, Some(expected_counterparty));
+			assert_eq!(counterparty_node_id, expected_counterparty);
 			node.event_handled().unwrap();
 		},
 		event => panic!("{} got unexpected event: {:?}", node.node_id(), event),

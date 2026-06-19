@@ -5,16 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::OutPoint;
 use lightning::events::ClosureReason;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::types::ChannelId;
 
-use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate};
-use crate::hex_utils;
+use crate::data_store::{StorableObject, StorableObjectUpdate};
 use crate::types::UserChannelId;
 
 /// Details of a closed channel.
@@ -30,10 +27,7 @@ pub struct ClosedChannelDetails {
 	/// The local identifier of the channel.
 	pub user_channel_id: UserChannelId,
 	/// The node ID of the channel's counterparty.
-	///
-	/// Will be `None` if the channel was closed before the counterparty's node ID could be
-	/// determined (e.g., very early in the channel negotiation process).
-	pub counterparty_node_id: Option<PublicKey>,
+	pub counterparty_node_id: PublicKey,
 	/// The channel's funding transaction outpoint.
 	///
 	/// Will be `None` if the channel was closed before a funding transaction was established.
@@ -67,57 +61,15 @@ pub struct ClosedChannelDetails {
 impl_writeable_tlv_based!(ClosedChannelDetails, {
 	(0, channel_id, required),
 	(2, user_channel_id, required),
-	(4, counterparty_node_id, option),
+	(4, counterparty_node_id, required),
 	(6, funding_txo, option),
 	(8, channel_capacity_sats, option),
 	(10, last_local_balance_msat, option),
 	(12, is_outbound, required),
 	(14, closure_reason, upgradable_option),
-	(16, closed_at, (default_value, SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs())),
+	(16, closed_at, required),
 	(18, is_announced, required),
 });
-
-/// Channel flags persisted at channel-pending time so they remain accessible when the channel
-/// closes, even after a restart or when `handle_event` returns [`ReplayEvent`].
-///
-/// [`ReplayEvent`]: lightning::events::ReplayEvent
-#[derive(Clone, Debug)]
-pub(crate) struct PendingChannelInfo {
-	pub user_channel_id: UserChannelId,
-	pub is_outbound: bool,
-	pub is_announced: bool,
-}
-
-impl_writeable_tlv_based!(PendingChannelInfo, {
-	(0, user_channel_id, required),
-	(2, is_outbound, required),
-	(4, is_announced, required),
-});
-
-pub(crate) struct PendingChannelInfoUpdate(pub UserChannelId);
-
-impl StorableObjectUpdate<PendingChannelInfo> for PendingChannelInfoUpdate {
-	fn id(&self) -> UserChannelId {
-		self.0
-	}
-}
-
-impl StorableObject for PendingChannelInfo {
-	type Id = UserChannelId;
-	type Update = PendingChannelInfoUpdate;
-
-	fn id(&self) -> UserChannelId {
-		self.user_channel_id
-	}
-
-	fn update(&mut self, _update: Self::Update) -> bool {
-		false
-	}
-
-	fn to_update(&self) -> Self::Update {
-		PendingChannelInfoUpdate(self.user_channel_id)
-	}
-}
 
 pub(crate) struct ClosedChannelDetailsUpdate(pub UserChannelId);
 
@@ -142,11 +94,5 @@ impl StorableObject for ClosedChannelDetails {
 
 	fn to_update(&self) -> Self::Update {
 		ClosedChannelDetailsUpdate(self.user_channel_id)
-	}
-}
-
-impl StorableObjectId for UserChannelId {
-	fn encode_to_hex_str(&self) -> String {
-		hex_utils::to_string(&self.0.to_be_bytes())
 	}
 }
