@@ -133,7 +133,7 @@ macro_rules! expect_channel_ready_event {
 		match event {
 			ref e @ Event::ChannelReady { user_channel_id, counterparty_node_id, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
-				assert_eq!(counterparty_node_id, Some($counterparty_node_id));
+				assert_eq!(counterparty_node_id, $counterparty_node_id);
 				$node.event_handled().unwrap();
 				user_channel_id
 			},
@@ -170,8 +170,7 @@ macro_rules! expect_channel_ready_events {
 			}
 		}
 		assert!(
-			ids.contains(&Some($counterparty_node_id_a))
-				&& ids.contains(&Some($counterparty_node_id_b)),
+			ids.contains(&$counterparty_node_id_a) && ids.contains(&$counterparty_node_id_b),
 			"Expected ChannelReady events from {:?} and {:?}, but got {:?}",
 			$counterparty_node_id_a,
 			$counterparty_node_id_b,
@@ -1637,6 +1636,23 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	// Check we handled all events
 	assert_eq!(node_a.next_event(), None);
 	assert_eq!(node_b.next_event(), None);
+
+	// Check that the closed channel record was persisted.
+	let closed_a = node_a.list_closed_channels();
+	let closed_b = node_b.list_closed_channels();
+	assert_eq!(closed_a.len(), 1);
+	assert_eq!(closed_b.len(), 1);
+	assert!(closed_a[0].channel_capacity_sats.is_some());
+	assert!(closed_b[0].channel_capacity_sats.is_some());
+	assert!(closed_a[0].is_outbound, "node_a opened the channel, should be outbound");
+	assert!(!closed_b[0].is_outbound, "node_b received the channel, should be inbound");
+	assert!(closed_a[0].closure_reason.is_some());
+	assert!(closed_b[0].closure_reason.is_some());
+	assert!(closed_a[0].funding_txo.is_some());
+	assert!(closed_b[0].funding_txo.is_some());
+	assert_eq!(closed_a[0].funding_txo, closed_b[0].funding_txo);
+	assert_eq!(closed_a[0].counterparty_node_id, node_b.node_id());
+	assert_eq!(closed_b[0].counterparty_node_id, node_a.node_id());
 
 	node_a.stop().unwrap();
 	println!("\nA stopped");
