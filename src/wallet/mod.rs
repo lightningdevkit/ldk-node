@@ -310,6 +310,7 @@ impl Wallet {
 							PaymentKind::Onchain {
 								txid,
 								status: ConfirmationStatus::Unconfirmed,
+								..
 							} if payment.details.direction == PaymentDirection::Outbound => {
 								unconfirmed_outbound_txids.push(txid);
 							},
@@ -1171,7 +1172,7 @@ impl Wallet {
 		// here to determine the `PaymentKind`, but that's not really satisfactory, so
 		// we're punting on it until we can come up with a better solution.
 
-		let kind = PaymentKind::Onchain { txid, status: confirmation_status };
+		let kind = PaymentKind::Onchain { txid, status: confirmation_status, tx_type: None };
 
 		let fee = locked_wallet.calculate_fee(tx).unwrap_or(Amount::ZERO);
 		let (sent, received) = locked_wallet.sent_and_received(tx);

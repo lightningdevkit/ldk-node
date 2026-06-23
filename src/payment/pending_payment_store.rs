@@ -108,7 +108,7 @@ mod tests {
 	fn pending_onchain_payment(payment_id: PaymentId, txid: Txid) -> PaymentDetails {
 		PaymentDetails::new(
 			payment_id,
-			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed },
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed, tx_type: None },
 			Some(1_000),
 			Some(100),
 			PaymentDirection::Outbound,
