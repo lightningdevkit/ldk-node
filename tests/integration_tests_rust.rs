@@ -1306,6 +1306,18 @@ async fn splice_channel() {
 	let payment =
 		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
 	assert_eq!(payment.fee_paid_msat, Some(expected_splice_out_fee_sat * 1_000));
+	// The splice-out graduated to a confirmed interactive-funding payment. Its `direction` is left
+	// unasserted on purpose: the destination is our own address, so it is a self-transfer (channel
+	// balance -> on-chain wallet) whose inbound/outbound sense is ambiguous.
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain {
+			status: ConfirmationStatus::Confirmed { .. },
+			tx_type: Some(TransactionType::InteractiveFunding { .. }),
+			..
+		}
+	));
 
 	assert_eq!(
 		node_a.list_balances().total_onchain_balance_sats,
@@ -1596,6 +1608,80 @@ async fn funding_payment_graduates_without_channel_ready() {
 	node_b.sync_wallets().unwrap();
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_payment_reorged_to_unconfirmed() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// node_b splices in, recording a funding payment it contributed to.
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, splice_txo.txid).await;
+
+	// Confirm the splice with a single block — confirmed, but short of `ANTI_REORG_DELAY`, so the
+	// payment is `Confirmed`/`Pending` rather than graduated.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	node_b.sync_wallets().unwrap();
+
+	let payment_id = PaymentId(splice_txo.txid.to_byte_array());
+	let payment = node_b.payment(&payment_id).expect("splice payment exists");
+	assert_eq!(payment.status, PaymentStatus::Pending);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
+	));
+
+	// Reorg the splice transaction out by replacing its block with a longer, transaction-free chain.
+	let original_height =
+		bitcoind.client.get_blockchain_info().expect("failed to get blockchain info").blocks;
+	invalidate_blocks(&bitcoind.client, 1);
+	let replacement_address = bitcoind.client.new_address().expect("failed to get new address");
+	for _ in 0..2 {
+		let _res: serde_json::Value = bitcoind
+			.client
+			.call("generateblock", &[json!(replacement_address.to_string()), json!([])])
+			.expect("failed to generate empty block");
+	}
+	wait_for_block(&electrsd.client, original_height as usize + 1).await;
+	node_b.sync_wallets().unwrap();
+
+	// The funding payment returns to `Unconfirmed` and stays `Pending`, exercising the
+	// `TxUnconfirmed` arm for a funding payment.
+	let payment = node_b.payment(&payment_id).expect("splice payment still exists");
+	assert_eq!(payment.status, PaymentStatus::Pending);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
+	));
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
