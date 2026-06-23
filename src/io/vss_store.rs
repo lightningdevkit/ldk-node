@@ -399,7 +399,7 @@ impl VssStoreInner {
 		}
 	}
 
-	fn extract_key(&self, unified_key: &str) -> io::Result<String> {
+	fn extract_obfuscated_key<'a>(&self, unified_key: &'a str) -> io::Result<&'a str> {
 		let mut parts = if self.schema_version == VssSchemaVersion::V1 {
 			let mut parts = unified_key.splitn(2, '#');
 			let _obfuscated_namespace = parts.next();
@@ -411,12 +411,15 @@ impl VssStoreInner {
 			parts
 		};
 		match parts.next() {
-			Some(obfuscated_key) => {
-				let actual_key = self.key_obfuscator.deobfuscate(obfuscated_key)?;
-				Ok(actual_key)
-			},
+			Some(obfuscated_key) => Ok(obfuscated_key),
 			None => Err(Error::new(ErrorKind::InvalidData, "Invalid key format")),
 		}
+	}
+
+	fn extract_key(&self, unified_key: &str) -> io::Result<String> {
+		let obfuscated_key = self.extract_obfuscated_key(unified_key)?;
+		let actual_key = self.key_obfuscator.deobfuscate(obfuscated_key)?;
+		Ok(actual_key)
 	}
 
 	async fn list_keys(
