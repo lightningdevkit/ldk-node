@@ -24,7 +24,9 @@ use bitcoin::Network;
 use lightning::impl_writeable_tlv_based_enum;
 use lightning::io::{self, Error, ErrorKind};
 use lightning::sign::{EntropySource as LdkEntropySource, RandomBytes};
-use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+use lightning::util::persist::{
+	KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+};
 use lightning::util::ser::{Readable, Writeable};
 use prost::Message;
 use vss_client::client::VssClient;
@@ -321,6 +323,22 @@ impl PaginatedKVStore for VssStore {
 	}
 }
 
+impl MigratableKVStore for VssStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		let runtime = self.internal_runtime();
+		async move {
+			let task = runtime
+				.spawn(async move { inner.list_all_keys_internal(&inner.async_client).await });
+			task.await.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("VSS runtime task failed: {}", e))
+			})?
+		}
+	}
+}
+
 impl Drop for VssStore {
 	fn drop(&mut self) {
 		if let Some(runtime) = self.internal_runtime.take() {
@@ -420,6 +438,41 @@ impl VssStoreInner {
 		let obfuscated_key = self.extract_obfuscated_key(unified_key)?;
 		let actual_key = self.key_obfuscator.deobfuscate(obfuscated_key)?;
 		Ok(actual_key)
+	}
+
+	fn extract_namespaces(&self, unified_key: &str) -> io::Result<(String, String)> {
+		if self.schema_version == VssSchemaVersion::V1 {
+			let mut parts = unified_key.splitn(2, '#');
+			let obfuscated_namespace = parts.next();
+			let _obfuscated_key = parts.next();
+			match (obfuscated_namespace, _obfuscated_key) {
+				(Some(obfuscated_namespace), Some(_obfuscated_key)) => {
+					let namespace = self.key_obfuscator.deobfuscate(obfuscated_namespace)?;
+					let mut namespace_parts = namespace.splitn(2, '#');
+					let primary_namespace = namespace_parts.next();
+					let secondary_namespace = namespace_parts.next();
+					match (primary_namespace, secondary_namespace) {
+						(Some(primary_namespace), Some(secondary_namespace)) => {
+							Ok((primary_namespace.to_string(), secondary_namespace.to_string()))
+						},
+						_ => Err(Error::new(ErrorKind::InvalidData, "Invalid namespace format")),
+					}
+				},
+				_ => Err(Error::new(ErrorKind::InvalidData, "Invalid key format")),
+			}
+		} else {
+			// Default to V0 schema.
+			let mut parts = unified_key.splitn(3, '#');
+			let primary_namespace = parts.next();
+			let secondary_namespace = parts.next();
+			match (primary_namespace, secondary_namespace) {
+				(Some(_obfuscated_key), None) => Ok(("".to_string(), "".to_string())),
+				(Some(primary_namespace), Some(secondary_namespace)) => {
+					Ok((primary_namespace.to_string(), secondary_namespace.to_string()))
+				},
+				_ => Err(Error::new(ErrorKind::InvalidData, "Invalid key format")),
+			}
+		}
 	}
 
 	async fn list_keys(
@@ -623,6 +676,52 @@ impl VssStoreInner {
 		let next_page_token = next_page_token.map(PageToken::new);
 
 		Ok(PaginatedListResponse { keys, next_page_token })
+	}
+
+	async fn list_all_keys_internal(
+		&self, client: &VssClient<CustomRetryPolicy>,
+	) -> io::Result<Vec<(String, String, String)>> {
+		let mut page_token: Option<String> = None;
+		let mut keys = vec![];
+		loop {
+			let request = ListKeyVersionsRequest {
+				store_id: self.store_id.clone(),
+				key_prefix: None,
+				page_token,
+				page_size: Some(PAGE_SIZE),
+			};
+
+			let response = client.list_key_versions(&request).await.map_err(|e| {
+				let msg = format!("Failed to list all keys: {}", e);
+				Error::new(ErrorKind::Other, msg)
+			})?;
+
+			for kv in response.key_versions {
+				let (primary_namespace, secondary_namespace) = self.extract_namespaces(&kv.key)?;
+				let key = match self.extract_key(&kv.key) {
+					Ok(key) => key,
+					Err(_)
+						if self.schema_version == VssSchemaVersion::V0 && !kv.key.contains('#') =>
+					{
+						self.key_obfuscator.deobfuscate(&kv.key)?
+					},
+					Err(e) => return Err(e),
+				};
+				if primary_namespace.is_empty()
+					&& secondary_namespace.is_empty()
+					&& key == VSS_SCHEMA_VERSION_KEY
+				{
+					continue;
+				}
+				keys.push((primary_namespace, secondary_namespace, key));
+			}
+
+			match response.next_page_token.filter(|t| !t.is_empty()) {
+				Some(t) => page_token = Some(t),
+				None => break,
+			}
+		}
+		Ok(keys)
 	}
 
 	async fn execute_locked_write<
@@ -1039,6 +1138,27 @@ mod tests {
 		let vss_store = build_vss_store();
 		do_read_write_remove_list_persist(&vss_store).await;
 		drop(vss_store)
+	}
+
+	#[tokio::test]
+	async fn vss_list_all_keys() {
+		let store = build_vss_store();
+
+		KVStore::write(&store, "ns_a", "sub_a", "key_a", vec![1u8]).await.unwrap();
+		KVStore::write(&store, "ns_a", "sub_b", "key_b", vec![2u8]).await.unwrap();
+		KVStore::write(&store, "ns_b", "", "key_c", vec![3u8]).await.unwrap();
+
+		let mut keys = MigratableKVStore::list_all_keys(&store).await.unwrap();
+		keys.sort();
+
+		assert_eq!(
+			keys,
+			vec![
+				("ns_a".to_string(), "sub_a".to_string(), "key_a".to_string()),
+				("ns_a".to_string(), "sub_b".to_string(), "key_b".to_string()),
+				("ns_b".to_string(), "".to_string(), "key_c".to_string()),
+			]
+		);
 	}
 
 	#[tokio::test]
