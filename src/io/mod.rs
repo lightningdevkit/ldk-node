@@ -84,3 +84,7 @@ pub(crate) const BDK_WALLET_INDEXER_KEY: &str = "indexer";
 ///
 /// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
 pub(crate) const STATIC_INVOICE_STORE_PRIMARY_NAMESPACE: &str = "static_invoices";
+
+/// The per-channel records will be persisted under this prefix.
+pub(crate) const CHANNEL_RECORD_PERSISTENCE_PRIMARY_NAMESPACE: &str = "channel_records";
+pub(crate) const CHANNEL_RECORD_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";

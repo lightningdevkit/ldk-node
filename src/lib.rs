@@ -83,6 +83,7 @@
 mod balance;
 mod builder;
 mod chain;
+mod channel;
 pub mod config;
 mod connection;
 mod data_store;
@@ -175,9 +176,9 @@ use peer_store::{PeerInfo, PeerStore};
 use runtime::Runtime;
 pub use tokio;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
-	Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, ChannelRecordStore,
+	DynStore, Graph, HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router,
+	Scorer, Sweeper, Wallet,
 };
 pub use types::{
 	ChannelCounterparty, ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId,
@@ -244,6 +245,10 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	// Foundational per-channel record store, loaded and persisted here so that upcoming
+	// per-channel features can build on it. Not yet read within this crate.
+	#[allow(dead_code)]
+	channel_record_store: Arc<ChannelRecordStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
