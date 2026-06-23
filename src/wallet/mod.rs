@@ -58,8 +58,8 @@ use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::store::ConfirmationStatus;
 use crate::payment::{
-	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, PendingPaymentDetails,
-	TransactionType,
+	FundingTxCandidate, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
+	PendingPaymentDetails, TransactionType,
 };
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, PaymentStore, PendingPaymentStore};
@@ -1235,7 +1235,7 @@ impl Wallet {
 			direction,
 			PaymentStatus::Pending,
 		);
-		self.persist_funding_payment(details).await?;
+		self.persist_funding_payment(details, Vec::new()).await?;
 		log_debug!(
 			self.logger,
 			"Recorded channel-funding broadcast {} for channel {}",
@@ -1298,6 +1298,23 @@ impl Wallet {
 		// Anchor the `PaymentId` to the first negotiated candidate so the record stays stable
 		// across RBF replacements.
 		let payment_id = PaymentId(first.txid.to_byte_array());
+
+		// Record every candidate's figures (`None` for any round we didn't contribute to, e.g. a
+		// counterparty-initiated splice our `splice_in` later joined via RBF) so the confirmed
+		// candidate's amount/fee can be applied on confirmation, even if it isn't the last one
+		// broadcast or one we contributed to.
+		let candidate_records: Vec<FundingTxCandidate> = candidates
+			.iter()
+			.map(|candidate| {
+				let aggregate = aggregate_local_stakes(candidate);
+				FundingTxCandidate {
+					txid: candidate.txid,
+					amount_msat: aggregate.amount_msat,
+					fee_paid_msat: aggregate.fee_paid_msat,
+				}
+			})
+			.collect();
+
 		let details = PaymentDetails::new(
 			payment_id,
 			PaymentKind::Onchain {
@@ -1310,7 +1327,7 @@ impl Wallet {
 			direction,
 			PaymentStatus::Pending,
 		);
-		self.persist_funding_payment(details).await?;
+		self.persist_funding_payment(details, candidate_records).await?;
 		log_debug!(
 			self.logger,
 			"Recorded interactive-funding broadcast {} ({} candidates, {} channels)",
@@ -1323,9 +1340,11 @@ impl Wallet {
 
 	/// Writes a freshly-classified funding payment to the authoritative payment store and adds a
 	/// pending-store index entry, so wallet sync graduates it through `ANTI_REORG_DELAY`.
-	async fn persist_funding_payment(&self, details: PaymentDetails) -> Result<(), Error> {
+	async fn persist_funding_payment(
+		&self, details: PaymentDetails, candidates: Vec<FundingTxCandidate>,
+	) -> Result<(), Error> {
 		self.payment_store.insert_or_update(details.clone()).await?;
-		let pending = PendingPaymentDetails::new(details, Vec::new());
+		let pending = PendingPaymentDetails::new(details, Vec::new(), candidates);
 		self.pending_payment_store.insert_or_update(pending).await?;
 		Ok(())
 	}
@@ -1395,7 +1414,7 @@ impl Wallet {
 	fn create_pending_payment_from_tx(
 		&self, payment: PaymentDetails, conflicting_txids: Vec<Txid>,
 	) -> PendingPaymentDetails {
-		PendingPaymentDetails::new(payment, conflicting_txids)
+		PendingPaymentDetails::new(payment, conflicting_txids, Vec::new())
 	}
 
 	fn find_payment_by_txid(&self, target_txid: Txid) -> Option<PaymentId> {
@@ -1441,6 +1460,17 @@ impl Wallet {
 			} => tx_type.clone(),
 			_ => return Ok(false),
 		};
+		// Report the figures of the candidate that actually confirmed, which need not be the last
+		// one broadcast (an earlier, lower-fee candidate may win) and may carry no figures at all
+		// (`None`) for a round we didn't contribute to. (`direction` is invariant across a splice's
+		// candidates and cannot be changed through the store anyway.)
+		if let Some(pending) = self.pending_payment_store.get(&payment_id) {
+			if let Some(candidate) = pending.candidate(event_txid) {
+				payment.amount_msat = candidate.amount_msat;
+				payment.fee_paid_msat = candidate.fee_paid_msat;
+			}
+		}
+
 		payment.kind =
 			PaymentKind::Onchain { txid: event_txid, status: confirmation_status, tx_type };
 		self.runtime.block_on(self.payment_store.insert_or_update(payment.clone()))?;

@@ -1319,6 +1319,15 @@ async fn splice_channel() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn rbf_splice_channel() {
+	run_rbf_splice_channel_test(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rbf_splice_channel_original_candidate_confirms() {
+	run_rbf_splice_channel_test(true).await;
+}
+
+async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// Use a custom bitcoind config with a lower incrementalrelayfee so that the +25 sat/kwu
 	// (0.1 sat/vB) RBF feerate bump satisfies BIP125's absolute fee increase requirement.
 	let bitcoind_exe = std::env::var("BITCOIND_EXE")
@@ -1389,6 +1398,20 @@ async fn rbf_splice_channel() {
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
+	// For `confirm_original`, capture the original candidate's fee and raw transaction now, before
+	// the RBF replaces it, so it can be force-confirmed (instead of the RBF) further below.
+	let original_candidate: Option<(Option<u64>, String)> = if confirm_original {
+		let payment_id = PaymentId(original_txo.txid.to_byte_array());
+		let fee = node_b.payment(&payment_id).expect("splice payment exists").fee_paid_msat;
+		let raw_tx: String = bitcoind
+			.client
+			.call("getrawtransaction", &[json!(original_txo.txid.to_string())])
+			.expect("failed to fetch the original splice transaction");
+		Some((fee, raw_tx))
+	} else {
+		None
+	};
+
 	// splice_in should fail when there's a pending splice (RBF guard)
 	assert_eq!(
 		node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000),
@@ -1419,7 +1442,7 @@ async fn rbf_splice_channel() {
 	// payment covering both candidates: id anchored to the first broadcast, `kind.txid` pointing
 	// at the latest (RBF) candidate, and the durable interactive-funding `tx_type` preserved across
 	// the replacement.
-	{
+	let rbf_candidate_fee = {
 		let payment_id = PaymentId(original_txo.txid.to_byte_array());
 		let payment = node_b.payment(&payment_id).expect("splice payment exists");
 		match payment.kind {
@@ -1448,19 +1471,35 @@ async fn rbf_splice_channel() {
 			splice_payments.len(),
 			splice_payments,
 		);
-	}
 
-	// Mine blocks and confirm the RBF splice
-	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+		// The fee recorded for the latest (RBF) candidate, which is the one that confirms below.
+		assert!(payment.fee_paid_msat.is_some());
+		payment.fee_paid_msat
+	};
+
+	// Confirm the splice. Normally the latest (RBF) candidate wins through the mempool; for
+	// `confirm_original` we instead mine the original candidate directly into a block so an
+	// earlier, lower-fee candidate is the one that confirms.
+	let winning_txo = if confirm_original { original_txo } else { rbf_txo };
+	if let Some((_, ref original_tx_hex)) = original_candidate {
+		let address = bitcoind.client.new_address().expect("failed to get new address");
+		let _: serde_json::Value = bitcoind
+			.client
+			.call("generateblock", &[json!(address.to_string()), json!([original_tx_hex])])
+			.expect("failed to mine the original splice candidate");
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 5).await;
+	} else {
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	}
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	// Verify the RBF transaction is the one that locked, not the original
+	// Verify the candidate that locked is the one that confirmed, not necessarily the last broadcast.
 	match node_a.next_event_async().await {
 		Event::ChannelReady { funding_txo, counterparty_node_id, .. } => {
 			assert_eq!(counterparty_node_id, Some(node_b.node_id()));
-			assert_eq!(funding_txo, Some(rbf_txo));
+			assert_eq!(funding_txo, Some(winning_txo));
 			node_a.event_handled().unwrap();
 		},
 		ref e => panic!("node_a got unexpected event: {:?}", e),
@@ -1468,7 +1507,7 @@ async fn rbf_splice_channel() {
 	match node_b.next_event_async().await {
 		Event::ChannelReady { funding_txo, counterparty_node_id, .. } => {
 			assert_eq!(counterparty_node_id, Some(node_a.node_id()));
-			assert_eq!(funding_txo, Some(rbf_txo));
+			assert_eq!(funding_txo, Some(winning_txo));
 			node_b.event_handled().unwrap();
 		},
 		ref e => panic!("node_b got unexpected event: {:?}", e),
@@ -1484,14 +1523,23 @@ async fn rbf_splice_channel() {
 		assert_eq!(payment.status, PaymentStatus::Succeeded);
 		match payment.kind {
 			PaymentKind::Onchain { txid, status: ConfirmationStatus::Confirmed { .. }, .. } => {
-				assert_eq!(txid, rbf_txo.txid);
+				assert_eq!(txid, winning_txo.txid);
 			},
 			ref other => panic!("expected Onchain Confirmed, got {:?}", other),
 		}
-		assert!(
-			payment.fee_paid_msat.is_some(),
-			"splice payment should carry a fee from its FundingContribution",
-		);
+		// Graduation stamps the economics of the candidate that actually confirmed. For
+		// `confirm_original` that is the earlier, lower-fee candidate, whose fee differs from the
+		// last-broadcast (RBF) candidate's — so this would fail if the payment kept the
+		// last-broadcast figures instead of the confirmed candidate's.
+		let expected_fee = match original_candidate {
+			Some((original_fee, _)) => {
+				assert_ne!(original_fee, rbf_candidate_fee);
+				original_fee
+			},
+			None => rbf_candidate_fee,
+		};
+		assert!(expected_fee.is_some());
+		assert_eq!(payment.fee_paid_msat, expected_fee);
 	}
 
 	node_a.stop().unwrap();
