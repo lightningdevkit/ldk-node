@@ -1653,7 +1653,7 @@ impl Node {
 			if funding_template.prior_contribution().is_some() {
 				log_error!(
 					self.logger,
-					"Failed to splice channel: a prior splice contribution is pending"
+					"Failed to splice channel: a prior splice contribution is pending; use bump_channel_funding_fee to bump its fee"
 				);
 				return Err(Error::ChannelSplicingFailed);
 			}
@@ -1776,7 +1776,7 @@ impl Node {
 			if funding_template.prior_contribution().is_some() {
 				log_error!(
 					self.logger,
-					"Failed to splice channel: a prior splice contribution is pending"
+					"Failed to splice channel: a prior splice contribution is pending; use bump_channel_funding_fee to bump its fee"
 				);
 				return Err(Error::ChannelSplicingFailed);
 			}
@@ -1800,6 +1800,77 @@ impl Node {
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})
+		} else {
+			log_error!(
+				self.logger,
+				"Channel not found for user_channel_id {} and counterparty {}",
+				user_channel_id,
+				counterparty_node_id
+			);
+			Err(Error::ChannelSplicingFailed)
+		}
+	}
+
+	/// Fee-bumps the pending splice on a channel by replacing its in-flight funding transaction
+	/// (RBF). The splice's amount and destination are preserved; only the fee rate is raised.
+	/// Errors if the channel has no pending splice to bump.
+	pub fn bump_channel_funding_fee(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+	) -> Result<(), Error> {
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			let min_feerate =
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+
+			let funding_template = self
+				.channel_manager
+				.splice_channel(&channel_details.channel_id, &counterparty_node_id)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})?;
+
+			let Some(min_rbf_feerate) = funding_template.min_rbf_feerate() else {
+				log_error!(self.logger, "Failed to RBF channel: no pending splice to replace");
+				return Err(Error::ChannelSplicingFailed);
+			};
+
+			let Some((target_feerate, max_feerate)) =
+				rbf_splice_feerates(min_feerate, min_rbf_feerate)
+			else {
+				log_error!(
+					self.logger,
+					"Failed to RBF channel: the RBF minimum feerate exceeds our maximum"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			};
+
+			let contribution = self
+				.runtime
+				.block_on(funding_template.rbf_prior_contribution(
+					Some(target_feerate),
+					max_feerate,
+					Arc::clone(&self.wallet),
+				))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {}", e);
+					Error::ChannelSplicingFailed
+				})?;
+
+			self.channel_manager
+				.funding_contributed(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					contribution,
+					None,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {:?}", e);
 					Error::ChannelSplicingFailed
 				})
 		} else {
@@ -2322,11 +2393,43 @@ pub(crate) fn new_channel_anchor_reserve_sats(
 	})
 }
 
+/// The most we are willing to pay for a channel funding transaction: `1.5x` our funding feerate
+/// estimate. Used as the `max_feerate` ceiling for splices and their RBF fee bumps.
+fn max_funding_feerate(estimate: FeeRate) -> FeeRate {
+	FeeRate::from_sat_per_kwu(estimate.to_sat_per_kwu() * 3 / 2)
+}
+
+/// Picks the `(target, max)` feerates for replacing a pending splice's in-flight funding
+/// transaction via RBF, or `None` if the RBF can't be done within our fee ceiling.
+///
+/// `max` is the most we are willing to pay (see [`max_funding_feerate`]), which tracks our current
+/// estimate and so may have risen or fallen since the original splice; it is never inflated to meet
+/// the RBF minimum. `target` is what we actually pay — our current estimate, or the template's RBF
+/// minimum if that is higher (required to replace the transaction). If that minimum exceeds `max`,
+/// we can't RBF.
+fn rbf_splice_feerates(estimate: FeeRate, min_rbf_feerate: FeeRate) -> Option<(FeeRate, FeeRate)> {
+	let max = max_funding_feerate(estimate);
+	let target = estimate.max(min_rbf_feerate);
+	(target <= max).then_some((target, max))
+}
+
 #[cfg(test)]
 mod tests {
 	use lightning::util::ser::{Readable, Writeable};
 
 	use super::*;
+
+	#[test]
+	fn rbf_splice_feerates_target_and_max() {
+		let kwu = FeeRate::from_sat_per_kwu;
+		// Estimate below the RBF minimum but within our ceiling: pay the minimum to replace the
+		// transaction; the max stays 1.5x the estimate (never inflated) and already clears it.
+		assert_eq!(rbf_splice_feerates(kwu(253), kwu(278)), Some((kwu(278), kwu(253 * 3 / 2))));
+		// Estimate risen above the RBF minimum: pay the higher estimate, not the stale minimum.
+		assert_eq!(rbf_splice_feerates(kwu(500), kwu(278)), Some((kwu(500), kwu(500 * 3 / 2))));
+		// RBF minimum above our max (1.5x a fallen estimate): we can't RBF within our ceiling.
+		assert_eq!(rbf_splice_feerates(kwu(100), kwu(278)), None);
+	}
 
 	#[test]
 	fn node_metrics_reads_legacy_rgs_snapshot_timestamp() {
