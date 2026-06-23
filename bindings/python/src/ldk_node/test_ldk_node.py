@@ -121,6 +121,29 @@ def expect_event(node, expected_event_type):
     return event 
 
 
+def assert_feature_helpers_return_bool(test_case, features):
+    feature_methods = [
+        method_name for method_name in dir(features)
+        if method_name.startswith("supports_") or method_name.startswith("requires_")
+    ]
+
+    test_case.assertGreater(len(feature_methods), 0)
+    for method_name in feature_methods:
+        with test_case.subTest(method_name=method_name):
+            test_case.assertIsInstance(getattr(features, method_name)(), bool)
+
+
+def node_features_exposed(test_case, node_features):
+    test_case.assertIsInstance(node_features, NodeFeatures)
+    assert_feature_helpers_return_bool(test_case, node_features)
+
+
+def init_features_exposed(test_case, init_features):
+    test_case.assertIsInstance(init_features, InitFeatures)
+    assert_feature_helpers_return_bool(test_case, init_features)
+    test_case.assertIsInstance(init_features.initial_routing_sync(), bool)
+
+
 
 class TestLdkNode(unittest.TestCase):
     def setUp(self):
@@ -152,6 +175,10 @@ class TestLdkNode(unittest.TestCase):
         node_2.start()
         node_id_2 = node_2.node_id()
         print("Node ID 2:", node_id_2)
+
+        # Check node-announcement features exposed through NodeStatus.
+        for node in [node_1, node_2]:
+            node_features_exposed(self, node.status().node_features)
 
         address_1 = node_1.onchain_payment().new_address()
         txid_1 = send_to_address(address_1, 100000)
@@ -199,6 +226,10 @@ class TestLdkNode(unittest.TestCase):
         print("funding_txo:", funding_txid)
 
         channel_ready_event_2 = expect_event(node_2, Event.CHANNEL_READY)
+
+        # Check negotiated init features exposed through ChannelDetails.
+        for channel in [node_1.list_channels()[0], node_2.list_channels()[0]]:
+            init_features_exposed(self, channel.counterparty.features)
 
         description = Bolt11InvoiceDescription.DIRECT("asdf")
         invoice = node_2.bolt11_payment().receive(2500000, description, 9217)
