@@ -2062,6 +2062,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		manual_payment_hash,
 		expected_received_amount_msat
 	);
+	assert_ne!(client_payment_id.0, manual_payment_hash.0);
 	println!("Claiming payment!");
 	client_node
 		.bolt11_payment()
@@ -2115,6 +2116,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		manual_payment_hash,
 		expected_received_amount_msat
 	);
+	assert_ne!(client_payment_id.0, manual_payment_hash.0);
 	println!("Failing payment!");
 	client_node.bolt11_payment().fail_for_id(client_payment_id).unwrap();
 

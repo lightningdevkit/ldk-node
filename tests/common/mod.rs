@@ -1294,10 +1294,20 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			manual_payment_hash,
 		)
 		.unwrap();
+	assert!(matches!(
+		node_b.bolt11_payment().receive_for_hash(
+			invoice_amount_3_msat,
+			&invoice_description.clone().into(),
+			9217,
+			manual_payment_hash,
+		),
+		Err(NodeError::DuplicatePayment)
+	));
 	let outbound_manual_payment_id = node_a.bolt11_payment().send(&manual_invoice, None).unwrap();
 
 	let (manual_payment_id, claimable_amount_msat) =
 		expect_payment_claimable_event!(node_b, manual_payment_hash, invoice_amount_3_msat);
+	assert_ne!(manual_payment_id.0, manual_payment_hash.0);
 	node_b
 		.bolt11_payment()
 		.claim_for_id(manual_payment_id, claimable_amount_msat, manual_preimage)
@@ -1348,6 +1358,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	let (manual_fail_payment_id, _) =
 		expect_payment_claimable_event!(node_b, manual_fail_payment_hash, invoice_amount_4_msat);
+	assert_ne!(manual_fail_payment_id.0, manual_fail_payment_hash.0);
 	node_b.bolt11_payment().fail_for_id(manual_fail_payment_id).unwrap();
 	expect_event!(node_a, PaymentFailed);
 	assert_eq!(

@@ -10,6 +10,7 @@ use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
@@ -53,7 +54,8 @@ use crate::payment::store::{
 use crate::payment::PaymentMetadata;
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, PendingPaymentStore,
+	Sweeper, Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -529,6 +531,7 @@ where
 	network_graph: Arc<Graph>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	pending_payment_store: Arc<PendingPaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
 	runtime: Arc<Runtime>,
@@ -549,10 +552,10 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
-		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
-		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
-		om_mailbox: Option<Arc<OnionMessageMailbox>>, runtime: Arc<Runtime>, logger: L,
-		config: Arc<Config>,
+		pending_payment_store: Arc<PendingPaymentStore>, peer_store: Arc<PeerStore<L>>,
+		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
+		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
+		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -564,6 +567,7 @@ where
 			network_graph,
 			liquidity_source,
 			payment_store,
+			pending_payment_store,
 			peer_store,
 			keys_manager,
 			logger,
@@ -605,6 +609,59 @@ where
 		})
 	}
 
+	fn current_time_secs() -> u64 {
+		SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs()
+	}
+
+	async fn prune_expired_pending_payments(&self) -> Result<(), ReplayEvent> {
+		let now = Self::current_time_secs();
+		let expired_payment_ids = self
+			.pending_payment_store
+			.list_filter(|payment| payment.has_expired(now))
+			.into_iter()
+			.map(|payment| payment.details.id)
+			.collect::<Vec<_>>();
+
+		for payment_id in expired_payment_ids {
+			if let Err(e) = self.pending_payment_store.remove(&payment_id).await {
+				log_error!(
+					self.logger,
+					"Failed to remove expired pending payment with ID {}: {}",
+					payment_id,
+					e
+				);
+				return Err(ReplayEvent());
+			}
+		}
+
+		Ok(())
+	}
+
+	fn find_inbound_payment_by_hash(&self, payment_hash: &PaymentHash) -> Option<PaymentDetails> {
+		self.payment_store
+			.list_filter(|payment| {
+				payment.direction == PaymentDirection::Inbound
+					&& matches!(&payment.kind, PaymentKind::Bolt11 { hash, .. } if hash == payment_hash)
+			})
+			.first()
+			.cloned()
+	}
+
+	async fn find_pending_inbound_payment_id(
+		&self, payment_hash: &PaymentHash,
+	) -> Result<Option<PaymentId>, ReplayEvent> {
+		self.prune_expired_pending_payments().await?;
+		Ok(self
+			.pending_payment_store
+			.list_filter(|payment| {
+				payment.details.direction == PaymentDirection::Inbound
+					&& payment.details.status == PaymentStatus::Pending
+					&& matches!(&payment.details.kind, PaymentKind::Bolt11 { hash, .. } if hash == payment_hash)
+			})
+			.first()
+			.map(|payment| payment.details.id))
+	}
+
 	fn resolve_inbound_payment_id(
 		&self, event_payment_id: PaymentId, payment_hash: &PaymentHash,
 	) -> (PaymentId, Option<PaymentDetails>) {
@@ -617,6 +674,10 @@ where
 			if let Some(info) = self.payment_store.get(&legacy_id) {
 				return (legacy_id, Some(info));
 			}
+		}
+
+		if let Some(info) = self.find_inbound_payment_by_hash(payment_hash) {
+			return (info.id, Some(info));
 		}
 
 		(event_payment_id, None)
@@ -735,8 +796,16 @@ where
 				..
 			} => {
 				let event_payment_id = payment_id.unwrap_or(PaymentId(payment_hash.0));
-				let (payment_id, payment_info) =
+				let (mut payment_id, payment_info) =
 					self.resolve_inbound_payment_id(event_payment_id, &payment_hash);
+				let pending_payment_id = if payment_info.is_none() {
+					self.find_pending_inbound_payment_id(&payment_hash).await?
+				} else {
+					None
+				};
+				if let Some(pending_payment_id) = pending_payment_id {
+					payment_id = pending_payment_id;
+				}
 				if let Some(info) = payment_info.as_ref() {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
@@ -910,6 +979,19 @@ where
 									);
 									return Err(ReplayEvent());
 								},
+							}
+
+							if pending_payment_id.is_some() {
+								if let Err(e) = self.pending_payment_store.remove(&payment_id).await
+								{
+									log_error!(
+										self.logger,
+										"Failed to remove pending payment with ID {}: {}",
+										payment_id,
+										e
+									);
+									return Err(ReplayEvent());
+								}
 							}
 						}
 

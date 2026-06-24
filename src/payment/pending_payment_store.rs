@@ -20,22 +20,35 @@ pub struct PendingPaymentDetails {
 	pub details: PaymentDetails,
 	/// Transaction IDs that have replaced or conflict with this payment.
 	pub conflicting_txids: Vec<Txid>,
+	/// The timestamp after which this pending payment can be pruned.
+	pub expires_at: Option<u64>,
 }
 
 impl PendingPaymentDetails {
 	pub(crate) fn new(details: PaymentDetails, conflicting_txids: Vec<Txid>) -> Self {
-		Self { details, conflicting_txids }
+		Self::new_with_expiry(details, conflicting_txids, None)
+	}
+
+	pub(crate) fn new_with_expiry(
+		details: PaymentDetails, conflicting_txids: Vec<Txid>, expires_at: Option<u64>,
+	) -> Self {
+		Self { details, conflicting_txids, expires_at }
 	}
 
 	/// Convert to finalized payment for the main payment store
 	pub fn into_payment_details(self) -> PaymentDetails {
 		self.details
 	}
+
+	pub(crate) fn has_expired(&self, now: u64) -> bool {
+		self.expires_at.map_or(false, |expires_at| expires_at <= now)
+	}
 }
 
 impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(0, details, required),
 	(2, conflicting_txids, optional_vec),
+	(4, expires_at, option),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,6 +56,7 @@ pub(crate) struct PendingPaymentDetailsUpdate {
 	pub id: PaymentId,
 	pub payment_update: Option<PaymentDetailsUpdate>,
 	pub conflicting_txids: Option<Vec<Txid>>,
+	pub expires_at: Option<Option<u64>>,
 }
 
 impl StorableObject for PendingPaymentDetails {
@@ -68,6 +82,13 @@ impl StorableObject for PendingPaymentDetails {
 			}
 		}
 
+		if let Some(new_expires_at) = update.expires_at {
+			if self.expires_at != new_expires_at {
+				self.expires_at = new_expires_at;
+				updated = true;
+			}
+		}
+
 		updated
 	}
 
@@ -89,6 +110,11 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 		} else {
 			Some(value.conflicting_txids.clone())
 		};
-		Self { id: value.id(), payment_update: Some(value.details.to_update()), conflicting_txids }
+		Self {
+			id: value.id(),
+			payment_update: Some(value.details.to_update()),
+			conflicting_txids,
+			expires_at: Some(value.expires_at),
+		}
 	}
 }
