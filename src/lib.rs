@@ -1658,11 +1658,21 @@ impl Node {
 				return Err(Error::ChannelSplicingFailed);
 			}
 
+			// When contributing to a pending splice, the funding template requires at least the RBF
+			// minimum feerate to replace the in-flight transaction. Use it in place of our funding
+			// feerate estimate when it's higher, as long as it stays within our max.
+			let feerate = match funding_template.min_rbf_feerate() {
+				Some(min_rbf_feerate) if min_rbf_feerate <= max_feerate => {
+					min_feerate.max(min_rbf_feerate)
+				},
+				_ => min_feerate,
+			};
+
 			let contribution = self
 				.runtime
 				.block_on(funding_template.splice_in(
 					Amount::from_sat(splice_amount_sats),
-					min_feerate,
+					feerate,
 					max_feerate,
 					Arc::clone(&self.wallet),
 				))
@@ -1781,12 +1791,22 @@ impl Node {
 				return Err(Error::ChannelSplicingFailed);
 			}
 
+			// When contributing to a pending splice, the funding template requires at least the RBF
+			// minimum feerate to replace the in-flight transaction. Use it in place of our funding
+			// feerate estimate when it's higher, as long as it stays within our max.
+			let feerate = match funding_template.min_rbf_feerate() {
+				Some(min_rbf_feerate) if min_rbf_feerate <= max_feerate => {
+					min_feerate.max(min_rbf_feerate)
+				},
+				_ => min_feerate,
+			};
+
 			let outputs = vec![bitcoin::TxOut {
 				value: Amount::from_sat(splice_amount_sats),
 				script_pubkey: address.script_pubkey(),
 			}];
 			let contribution =
-				funding_template.splice_out(outputs, min_feerate, max_feerate).map_err(|e| {
+				funding_template.splice_out(outputs, feerate, max_feerate).map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;

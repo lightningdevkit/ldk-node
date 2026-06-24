@@ -1387,7 +1387,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
 	// bump_channel_funding_fee should fail when there's no pending splice
@@ -1424,16 +1424,10 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 		None
 	};
 
-	// splice_in should fail when there's a pending splice (RBF guard)
+	// Re-splicing the pending splice we already contributed to is rejected; the RBF guard points at
+	// bump_channel_funding_fee instead.
 	assert_eq!(
 		node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000),
-		Err(NodeError::ChannelSplicingFailed),
-	);
-
-	// splice_out should fail when there's a pending splice (RBF guard)
-	let address = node_a.onchain_payment().new_address().unwrap();
-	assert_eq!(
-		node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, 100_000),
 		Err(NodeError::ChannelSplicingFailed),
 	);
 
@@ -1682,6 +1676,55 @@ async fn splice_payment_reorged_to_unconfirmed() {
 		payment.kind,
 		PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
 	));
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_in_rbf_joins_counterparty_splice() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// node_b (which didn't fund the channel open, so holds the on-chain balance) initiates a
+	// splice-in; node_a does not contribute to this first candidate.
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	let counterparty_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, counterparty_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// node_a contributes to the pending splice via RBF. Before honoring the funding template's RBF
+	// minimum feerate, this was rejected with FeeRateBelowRbfMinimum because node_a's funding
+	// feerate estimate sat below the minimum required to replace the in-flight transaction.
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 100_000).unwrap();
+	let rbf_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	assert_ne!(counterparty_txo, rbf_txo, "node_a's RBF should produce a different funding txo");
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
