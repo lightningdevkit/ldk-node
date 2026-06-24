@@ -10,6 +10,7 @@
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
@@ -19,10 +20,11 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::outbound_payment::{Bolt11PaymentError, Retry, RetryableSendFailure};
 use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
+use lightning::sign::EntropySource;
 use lightning_invoice::{
 	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
 };
-use lightning_types::payment::{PaymentHash, PaymentPreimage};
+use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
@@ -35,9 +37,10 @@ use crate::payment::store::{
 	LSPS2Parameters, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus,
 };
+use crate::payment::PendingPaymentDetails;
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
-use crate::types::{ChannelManager, PaymentStore};
+use crate::types::{ChannelManager, KeysManager, PaymentStore, PendingPaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11Invoice = LdkBolt11Invoice;
@@ -69,9 +72,11 @@ impl_writeable_tlv_based!(PaymentMetadata, {
 pub struct Bolt11Payment {
 	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
+	keys_manager: Arc<KeysManager>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	pending_payment_store: Arc<PendingPaymentStore>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	config: Arc<Config>,
 	is_running: Arc<RwLock<bool>>,
@@ -81,17 +86,19 @@ pub struct Bolt11Payment {
 impl Bolt11Payment {
 	pub(crate) fn new(
 		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
-		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+		keys_manager: Arc<KeysManager>, connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
-		peer_store: Arc<PeerStore<Arc<Logger>>>, config: Arc<Config>,
-		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		pending_payment_store: Arc<PendingPaymentStore>, peer_store: Arc<PeerStore<Arc<Logger>>>,
+		config: Arc<Config>, is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
 	) -> Self {
 		Self {
 			runtime,
 			channel_manager,
+			keys_manager,
 			connection_manager,
 			liquidity_source,
 			payment_store,
+			pending_payment_store,
 			peer_store,
 			config,
 			is_running,
@@ -99,10 +106,86 @@ impl Bolt11Payment {
 		}
 	}
 
+	fn current_time_secs() -> u64 {
+		SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs()
+	}
+
+	fn prune_expired_pending_payments(&self) -> Result<(), Error> {
+		let now = Self::current_time_secs();
+		let expired_payment_ids = self
+			.pending_payment_store
+			.list_filter(|payment| payment.has_expired(now))
+			.into_iter()
+			.map(|payment| payment.details.id)
+			.collect::<Vec<_>>();
+
+		for payment_id in expired_payment_ids {
+			self.runtime.block_on(self.pending_payment_store.remove(&payment_id))?;
+		}
+
+		Ok(())
+	}
+
+	fn has_pending_or_succeeded_inbound_payment(&self, payment_hash: &PaymentHash) -> bool {
+		!self
+			.payment_store
+			.list_filter(|payment| {
+				payment.direction == PaymentDirection::Inbound
+					&& matches!(&payment.kind, PaymentKind::Bolt11 { hash, .. } if hash == payment_hash)
+					&& matches!(payment.status, PaymentStatus::Pending | PaymentStatus::Succeeded)
+			})
+			.is_empty()
+			|| !self
+				.pending_payment_store
+				.list_filter(|payment| {
+					payment.details.direction == PaymentDirection::Inbound
+						&& matches!(&payment.details.kind, PaymentKind::Bolt11 { hash, .. } if hash == payment_hash)
+						&& matches!(
+							payment.details.status,
+							PaymentStatus::Pending | PaymentStatus::Succeeded
+						)
+				})
+				.is_empty()
+	}
+
+	fn register_manual_claim_invoice(
+		&self, payment_hash: PaymentHash, amount_msat: Option<u64>, payment_secret: PaymentSecret,
+		expiry_secs: u32,
+	) -> Result<(), Error> {
+		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
+		let kind = PaymentKind::Bolt11 {
+			hash: payment_hash,
+			preimage: None,
+			secret: Some(payment_secret),
+			counterparty_skimmed_fee_msat: None,
+		};
+		let payment = PaymentDetails::new(
+			payment_id,
+			kind,
+			amount_msat,
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+		let expires_at = Some(Self::current_time_secs().saturating_add(expiry_secs as u64));
+		let pending_payment =
+			PendingPaymentDetails::new_with_expiry(payment, Vec::new(), expires_at);
+		self.runtime.block_on(self.pending_payment_store.insert_or_update(pending_payment))?;
+		Ok(())
+	}
+
 	pub(crate) fn receive_inner(
 		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
 	) -> Result<LdkBolt11Invoice, Error> {
+		if let Some(payment_hash) = manual_claim_payment_hash {
+			self.prune_expired_pending_payments()?;
+			if self.has_pending_or_succeeded_inbound_payment(&payment_hash) {
+				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
+				return Err(Error::DuplicatePayment);
+			}
+		}
+
 		let invoice = {
 			let invoice_params = Bolt11InvoiceParameters {
 				amount_msats: amount_msat,
@@ -124,41 +207,14 @@ impl Bolt11Payment {
 			}
 		};
 
-		let payment_hash = invoice.payment_hash();
-		let payment_secret = invoice.payment_secret();
-		let id = PaymentId(payment_hash.0);
-		let preimage = if manual_claim_payment_hash.is_none() {
-			// If the user hasn't registered a custom payment hash, we're positive ChannelManager
-			// will know the preimage at this point.
-			let mut payment_metadata = invoice.payment_metadata().cloned();
-			let res = self
-				.channel_manager
-				.get_payment_preimage_decrypt_metadata(
-					payment_hash,
-					payment_secret.clone(),
-					payment_metadata.as_deref_mut(),
-				)
-				.ok();
-			debug_assert!(res.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
-			res
-		} else {
-			None
-		};
-		let kind = PaymentKind::Bolt11 {
-			hash: payment_hash,
-			preimage,
-			secret: Some(payment_secret.clone()),
-			counterparty_skimmed_fee_msat: None,
-		};
-		let payment = PaymentDetails::new(
-			id,
-			kind,
-			amount_msat,
-			None,
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-		self.runtime.block_on(self.payment_store.insert(payment))?;
+		if let Some(payment_hash) = manual_claim_payment_hash {
+			self.register_manual_claim_invoice(
+				payment_hash,
+				amount_msat,
+				*invoice.payment_secret(),
+				expiry_secs,
+			)?;
+		}
 
 		Ok(invoice)
 	}
@@ -168,6 +224,14 @@ impl Bolt11Payment {
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
 	) -> Result<LdkBolt11Invoice, Error> {
+		if let Some(payment_hash) = payment_hash {
+			self.prune_expired_pending_payments()?;
+			if self.has_pending_or_succeeded_inbound_payment(&payment_hash) {
+				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
+				return Err(Error::DuplicatePayment);
+			}
+		}
+
 		let connection_manager = Arc::clone(&self.connection_manager);
 		let (invoice, chosen_lsp) = self.runtime.block_on(async move {
 			if let Some(amount_msat) = amount_msat {
@@ -196,38 +260,18 @@ impl Bolt11Payment {
 			}
 		})?;
 
-		// Register payment in payment store.
-		let payment_hash = invoice.payment_hash();
-		let payment_secret = invoice.payment_secret();
-		let id = PaymentId(payment_hash.0);
-		let mut payment_metadata = invoice.payment_metadata().cloned();
-		let preimage = self
-			.channel_manager
-			.get_payment_preimage_decrypt_metadata(
-				payment_hash,
-				payment_secret.clone(),
-				payment_metadata.as_deref_mut(),
-			)
-			.ok();
-		let kind = PaymentKind::Bolt11 {
-			hash: payment_hash,
-			preimage,
-			secret: Some(payment_secret.clone()),
-			counterparty_skimmed_fee_msat: None,
-		};
-		let payment = PaymentDetails::new(
-			id,
-			kind,
-			amount_msat,
-			None,
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-		self.runtime.block_on(self.payment_store.insert(payment))?;
-
 		// Persist the chosen LSP peer to make sure we reconnect on restart.
 		let peer_info = PeerInfo { node_id: chosen_lsp.node_id, address: chosen_lsp.address };
 		self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
+
+		if let Some(payment_hash) = payment_hash {
+			self.register_manual_claim_invoice(
+				payment_hash,
+				amount_msat,
+				*invoice.payment_secret(),
+				expiry_secs,
+			)?;
+		}
 
 		Ok(invoice)
 	}
@@ -275,15 +319,7 @@ impl Bolt11Payment {
 		}
 
 		let payment_hash = invoice.payment_hash();
-		let payment_id = PaymentId(invoice.payment_hash().0);
-		if let Some(payment) = self.payment_store.get(&payment_id) {
-			if payment.status == PaymentStatus::Pending
-				|| payment.status == PaymentStatus::Succeeded
-			{
-				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
-				return Err(Error::DuplicatePayment);
-			}
-		}
+		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
 
 		let route_params_config =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();
@@ -490,13 +526,31 @@ impl Bolt11Payment {
 	/// [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`PaymentReceived`]: crate::Event::PaymentReceived
-	pub fn claim_for_hash(
-		&self, payment_hash: PaymentHash, claimable_amount_msat: u64, preimage: PaymentPreimage,
+	pub fn claim_for_id(
+		&self, payment_id: PaymentId, claimable_amount_msat: u64, preimage: PaymentPreimage,
 	) -> Result<(), Error> {
-		let payment_id = PaymentId(payment_hash.0);
+		let details = self.payment_store.get(&payment_id).ok_or_else(|| {
+			log_error!(
+				self.logger,
+				"Failed to manually claim unknown payment with ID: {}",
+				payment_id
+			);
+			Error::InvalidPaymentId
+		})?;
+
+		let payment_hash = match details.kind {
+			PaymentKind::Bolt11 { hash, .. } => hash,
+			_ => {
+				log_error!(
+					self.logger,
+					"Failed to manually claim payment with ID {} of unsupported kind",
+					payment_id
+				);
+				return Err(Error::InvalidPaymentId);
+			},
+		};
 
 		let expected_payment_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
-
 		if expected_payment_hash != payment_hash {
 			log_error!(
 				self.logger,
@@ -506,40 +560,30 @@ impl Bolt11Payment {
 			return Err(Error::InvalidPaymentPreimage);
 		}
 
-		if let Some(details) = self.payment_store.get(&payment_id) {
-			// For payments requested via `receive*_via_jit_channel_for_hash()`
-			// `skimmed_fee_msat` held by LSP must be taken into account.
-			let skimmed_fee_msat = match details.kind {
-				PaymentKind::Bolt11 {
-					counterparty_skimmed_fee_msat: Some(skimmed_fee_msat),
-					..
-				} => skimmed_fee_msat,
-				_ => 0,
-			};
-			if let Some(invoice_amount_msat) = details.amount_msat {
-				if claimable_amount_msat < invoice_amount_msat.saturating_sub(skimmed_fee_msat) {
-					log_error!(
-						self.logger,
-						"Failed to manually claim payment {} as the claimable amount is less than expected",
-						payment_id
-					);
-					return Err(Error::InvalidAmount);
-				}
+		// For payments requested via `receive*_via_jit_channel_for_hash()`
+		// `skimmed_fee_msat` held by LSP must be taken into account.
+		let skimmed_fee_msat = match details.kind {
+			PaymentKind::Bolt11 {
+				counterparty_skimmed_fee_msat: Some(skimmed_fee_msat), ..
+			} => skimmed_fee_msat,
+			_ => 0,
+		};
+		if let Some(invoice_amount_msat) = details.amount_msat {
+			if claimable_amount_msat < invoice_amount_msat.saturating_sub(skimmed_fee_msat) {
+				log_error!(
+					self.logger,
+					"Failed to manually claim payment {} as the claimable amount is less than expected",
+					payment_id
+				);
+				return Err(Error::InvalidAmount);
 			}
-		} else {
-			log_error!(
-				self.logger,
-				"Failed to manually claim unknown payment with hash: {}",
-				payment_hash
-			);
-			return Err(Error::InvalidPaymentHash);
 		}
 
 		self.channel_manager.claim_funds(preimage);
 		Ok(())
 	}
 
-	/// Allows to manually fail payments with the given hash that have previously
+	/// Allows to manually fail payments with the given id that have previously
 	/// been registered via [`receive_for_hash`] or [`receive_variable_amount_for_hash`].
 	///
 	/// This should be called in reponse to a [`PaymentClaimable`] event if the payment needs to be
@@ -552,8 +596,27 @@ impl Bolt11Payment {
 	/// [`receive_for_hash`]: Self::receive_for_hash
 	/// [`receive_variable_amount_for_hash`]: Self::receive_variable_amount_for_hash
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
-	pub fn fail_for_hash(&self, payment_hash: PaymentHash) -> Result<(), Error> {
-		let payment_id = PaymentId(payment_hash.0);
+	pub fn fail_for_id(&self, payment_id: PaymentId) -> Result<(), Error> {
+		let details = self.payment_store.get(&payment_id).ok_or_else(|| {
+			log_error!(
+				self.logger,
+				"Failed to manually fail unknown payment with ID {}",
+				payment_id,
+			);
+			Error::InvalidPaymentId
+		})?;
+
+		let payment_hash = match details.kind {
+			PaymentKind::Bolt11 { hash, .. } => hash,
+			_ => {
+				log_error!(
+					self.logger,
+					"Failed to manually fail payment with ID {} of unsupported kind",
+					payment_id
+				);
+				return Err(Error::InvalidPaymentId);
+			},
+		};
 
 		let update = PaymentDetailsUpdate {
 			status: Some(PaymentStatus::Failed),
@@ -565,10 +628,10 @@ impl Bolt11Payment {
 			Ok(DataStoreUpdateResult::NotFound) => {
 				log_error!(
 					self.logger,
-					"Failed to manually fail unknown payment with hash {}",
-					payment_hash,
+					"Failed to manually fail unknown payment with ID {}",
+					payment_id,
 				);
-				return Err(Error::InvalidPaymentHash);
+				return Err(Error::InvalidPaymentId);
 			},
 			Err(e) => {
 				log_error!(
@@ -604,13 +667,13 @@ impl Bolt11Payment {
 	/// the inbound payment arrives.
 	///
 	/// **Note:** users *MUST* handle this event and claim the payment manually via
-	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// [`claim_for_id`] as soon as they have obtained access to the preimage of the given
 	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
-	/// [`fail_for_hash`].
+	/// [`fail_for_id`].
 	///
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
-	/// [`claim_for_hash`]: Self::claim_for_hash
-	/// [`fail_for_hash`]: Self::fail_for_hash
+	/// [`claim_for_id`]: Self::claim_for_id
+	/// [`fail_for_id`]: Self::fail_for_id
 	pub fn receive_for_hash(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		payment_hash: PaymentHash,
@@ -640,13 +703,13 @@ impl Bolt11Payment {
 	/// the inbound payment arrives.
 	///
 	/// **Note:** users *MUST* handle this event and claim the payment manually via
-	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// [`claim_for_id`] as soon as they have obtained access to the preimage of the given
 	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
-	/// [`fail_for_hash`].
+	/// [`fail_for_id`].
 	///
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
-	/// [`claim_for_hash`]: Self::claim_for_hash
-	/// [`fail_for_hash`]: Self::fail_for_hash
+	/// [`claim_for_id`]: Self::claim_for_id
+	/// [`fail_for_id`]: Self::fail_for_id
 	pub fn receive_variable_amount_for_hash(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
@@ -695,14 +758,14 @@ impl Bolt11Payment {
 	/// is performed *before* emitting the event.
 	///
 	/// **Note:** users *MUST* handle this event and claim the payment manually via
-	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// [`claim_for_id`] as soon as they have obtained access to the preimage of the given
 	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
-	/// [`fail_for_hash`].
+	/// [`fail_for_id`].
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
-	/// [`claim_for_hash`]: Self::claim_for_hash
-	/// [`fail_for_hash`]: Self::fail_for_hash
+	/// [`claim_for_id`]: Self::claim_for_id
+	/// [`fail_for_id`]: Self::fail_for_id
 	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
 	pub fn receive_via_jit_channel_for_hash(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
@@ -762,14 +825,14 @@ impl Bolt11Payment {
 	/// is performed *before* emitting the event.
 	///
 	/// **Note:** users *MUST* handle this event and claim the payment manually via
-	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
+	/// [`claim_for_id`] as soon as they have obtained access to the preimage of the given
 	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
-	/// [`fail_for_hash`].
+	/// [`fail_for_id`].
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
-	/// [`claim_for_hash`]: Self::claim_for_hash
-	/// [`fail_for_hash`]: Self::fail_for_hash
+	/// [`claim_for_id`]: Self::claim_for_id
+	/// [`fail_for_id`]: Self::fail_for_id
 	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
 	pub fn receive_variable_amount_via_jit_channel_for_hash(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
