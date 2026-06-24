@@ -92,10 +92,10 @@ pub(crate) async fn wait_for_htlcs_settled(
 pub(crate) fn setup_ldk_node() -> Node {
 	let config = crate::common::random_config();
 	let mut builder = ldk_node::Builder::from_config(config.node_config);
-	let mut sync_config = ldk_node::config::ElectrumSyncConfig::default();
+	let mut sync_config = ldk_node::config::EsploraSyncConfig::default();
 	sync_config.timeouts_config.onchain_wallet_sync_timeout_secs = 180;
 	sync_config.timeouts_config.lightning_wallet_sync_timeout_secs = 120;
-	builder.set_chain_source_electrum("tcp://127.0.0.1:50001".to_string(), Some(sync_config));
+	builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), Some(sync_config));
 	let node = builder.build(config.node_entropy).unwrap();
 	node.start().unwrap();
 	node
