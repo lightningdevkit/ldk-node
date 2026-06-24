@@ -119,8 +119,6 @@ pub use bitcoin;
 use bitcoin::secp256k1::PublicKey;
 #[cfg(feature = "uniffi")]
 pub use bitcoin::FeeRate;
-#[cfg(not(feature = "uniffi"))]
-use bitcoin::FeeRate;
 use bitcoin::{Address, Amount, BlockHash, Network};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
@@ -138,7 +136,9 @@ pub use error::Error as NodeError;
 use error::Error;
 pub use event::Event;
 use event::{EventHandler, EventQueue};
-use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
+use fee_estimator::{
+	max_funding_feerate, rbf_splice_feerates, ConfirmationTarget, FeeEstimator, OnchainFeeEstimator,
+};
 #[cfg(feature = "uniffi")]
 use ffi::*;
 use gossip::GossipSource;
@@ -1584,7 +1584,7 @@ impl Node {
 		{
 			let min_feerate =
 				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
-			let max_feerate = FeeRate::from_sat_per_kwu(min_feerate.to_sat_per_kwu() * 3 / 2);
+			let max_feerate = max_funding_feerate(min_feerate);
 
 			let splice_amount_sats = match splice_amount_sats {
 				FundingAmount::Exact { amount_sats } => amount_sats,
@@ -1773,7 +1773,7 @@ impl Node {
 
 			let min_feerate =
 				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
-			let max_feerate = FeeRate::from_sat_per_kwu(min_feerate.to_sat_per_kwu() * 3 / 2);
+			let max_feerate = max_funding_feerate(min_feerate);
 
 			let funding_template = self
 				.channel_manager
@@ -2413,43 +2413,11 @@ pub(crate) fn new_channel_anchor_reserve_sats(
 	})
 }
 
-/// The most we are willing to pay for a channel funding transaction: `1.5x` our funding feerate
-/// estimate. Used as the `max_feerate` ceiling for splices and their RBF fee bumps.
-fn max_funding_feerate(estimate: FeeRate) -> FeeRate {
-	FeeRate::from_sat_per_kwu(estimate.to_sat_per_kwu() * 3 / 2)
-}
-
-/// Picks the `(target, max)` feerates for replacing a pending splice's in-flight funding
-/// transaction via RBF, or `None` if the RBF can't be done within our fee ceiling.
-///
-/// `max` is the most we are willing to pay (see [`max_funding_feerate`]), which tracks our current
-/// estimate and so may have risen or fallen since the original splice; it is never inflated to meet
-/// the RBF minimum. `target` is what we actually pay — our current estimate, or the template's RBF
-/// minimum if that is higher (required to replace the transaction). If that minimum exceeds `max`,
-/// we can't RBF.
-fn rbf_splice_feerates(estimate: FeeRate, min_rbf_feerate: FeeRate) -> Option<(FeeRate, FeeRate)> {
-	let max = max_funding_feerate(estimate);
-	let target = estimate.max(min_rbf_feerate);
-	(target <= max).then_some((target, max))
-}
-
 #[cfg(test)]
 mod tests {
 	use lightning::util::ser::{Readable, Writeable};
 
 	use super::*;
-
-	#[test]
-	fn rbf_splice_feerates_target_and_max() {
-		let kwu = FeeRate::from_sat_per_kwu;
-		// Estimate below the RBF minimum but within our ceiling: pay the minimum to replace the
-		// transaction; the max stays 1.5x the estimate (never inflated) and already clears it.
-		assert_eq!(rbf_splice_feerates(kwu(253), kwu(278)), Some((kwu(278), kwu(253 * 3 / 2))));
-		// Estimate risen above the RBF minimum: pay the higher estimate, not the stale minimum.
-		assert_eq!(rbf_splice_feerates(kwu(500), kwu(278)), Some((kwu(500), kwu(500 * 3 / 2))));
-		// RBF minimum above our max (1.5x a fallen estimate): we can't RBF within our ceiling.
-		assert_eq!(rbf_splice_feerates(kwu(100), kwu(278)), None);
-	}
 
 	#[test]
 	fn node_metrics_reads_legacy_rgs_snapshot_timestamp() {
