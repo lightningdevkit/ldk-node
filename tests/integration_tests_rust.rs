@@ -2675,7 +2675,11 @@ async fn build_0_6_2_node(
 	assert!(balance > 0);
 	let node_id = node_old.node_id();
 
-	node_old.stop().unwrap();
+	// Workaround necessary as v0.6.2's runtime wasn't dropsafe in a tokio context.
+	tokio::task::block_in_place(move || {
+		node_old.stop().unwrap();
+		drop(node_old);
+	});
 
 	(balance, node_id)
 }
