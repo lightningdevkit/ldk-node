@@ -945,6 +945,7 @@ impl Node {
 		Bolt11Payment::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
@@ -963,6 +964,7 @@ impl Node {
 		Arc::new(Bolt11Payment::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
