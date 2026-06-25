@@ -31,7 +31,9 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
-use lightning::util::persist::{KVStore, MonitorUpdatingPersisterAsync};
+use lightning::util::persist::{
+	KVStore, MonitorUpdatingPersisterAsync, PageToken, PaginatedKVStore, PaginatedListResponse,
+};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
@@ -67,6 +69,13 @@ pub(crate) trait DynStoreTrait: Send + Sync {
 	fn list_async(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static>>;
+	fn list_paginated_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> Pin<
+		Box<
+			dyn Future<Output = Result<PaginatedListResponse, bitcoin::io::Error>> + Send + 'static,
+		>,
+	>;
 }
 
 impl<'a> KVStore for dyn DynStoreTrait + 'a {
@@ -92,6 +101,19 @@ impl<'a> KVStore for dyn DynStoreTrait + 'a {
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> impl Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static {
 		DynStoreTrait::list_async(self, primary_namespace, secondary_namespace)
+	}
+}
+
+impl<'a> PaginatedKVStore for dyn DynStoreTrait + 'a {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, bitcoin::io::Error>> + Send + 'static {
+		DynStoreTrait::list_paginated_async(
+			self,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		)
 	}
 }
 
@@ -130,9 +152,22 @@ impl KVStore for DynStoreRef {
 	}
 }
 
-pub(crate) struct DynStoreWrapper<T: KVStore + Send + Sync>(pub(crate) T);
+impl PaginatedKVStore for DynStoreRef {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, bitcoin::io::Error>> + Send + 'static {
+		DynStoreTrait::list_paginated_async(
+			&*self.0,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		)
+	}
+}
 
-impl<T: KVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
+pub(crate) struct DynStoreWrapper<T: PaginatedKVStore + Send + Sync>(pub(crate) T);
+
+impl<T: PaginatedKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
 	fn read_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>> {
@@ -155,6 +190,21 @@ impl<T: KVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static>> {
 		Box::pin(KVStore::list(&self.0, primary_namespace, secondary_namespace))
+	}
+
+	fn list_paginated_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> Pin<
+		Box<
+			dyn Future<Output = Result<PaginatedListResponse, bitcoin::io::Error>> + Send + 'static,
+		>,
+	> {
+		Box::pin(PaginatedKVStore::list_paginated(
+			&self.0,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		))
 	}
 }
 

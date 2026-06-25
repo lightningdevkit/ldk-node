@@ -50,7 +50,7 @@ use ldk_node::{
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_persister::fs_store::v1::FilesystemStore;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -1702,6 +1702,21 @@ impl KVStore for TestSyncStore {
 	}
 }
 
+impl PaginatedKVStore for TestSyncStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let inner = Arc::clone(&self.inner);
+		async move {
+			inner
+				.list_paginated_internal_async(&primary_namespace, &secondary_namespace, page_token)
+				.await
+		}
+	}
+}
+
 struct TestSyncStoreInner {
 	serializer: tokio::sync::RwLock<()>,
 	test_store: InMemoryStore,
@@ -1763,6 +1778,37 @@ impl TestSyncStoreInner {
 	) -> lightning::io::Result<Vec<String>> {
 		let _guard = self.serializer.read().await;
 		self.do_list_async(primary_namespace, secondary_namespace).await
+	}
+
+	async fn list_paginated_internal_async(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> lightning::io::Result<PaginatedListResponse> {
+		let _guard = self.serializer.read().await;
+		let sqlite_res = PaginatedKVStore::list_paginated(
+			&self.sqlite_store,
+			primary_namespace,
+			secondary_namespace,
+			page_token.clone(),
+		)
+		.await;
+		let test_res = PaginatedKVStore::list_paginated(
+			&self.test_store,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		)
+		.await;
+
+		match sqlite_res {
+			Ok(sqlite_response) => {
+				assert_eq!(sqlite_response, test_res.unwrap());
+				Ok(sqlite_response)
+			},
+			Err(e) => {
+				assert!(test_res.is_err());
+				Err(e)
+			},
+		}
 	}
 
 	async fn read_internal_async(

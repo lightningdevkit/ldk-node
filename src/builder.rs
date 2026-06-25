@@ -37,8 +37,8 @@ use lightning::routing::scoring::{
 use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::config::HTLCInterceptionFlags;
 use lightning::util::persist::{
-	KVStore, CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
-	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+	KVStore, PaginatedKVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
+	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
@@ -254,7 +254,7 @@ impl std::error::Error for BuildError {}
 /// - [`build`] uses an SQLite database (recommended default).
 /// - [`build_with_fs_store`] uses a filesystem-based store.
 /// - [`build_with_vss_store`] and variants use a [VSS] remote store (**experimental**).
-/// - [`build_with_store`] allows providing a custom [`KVStore`] implementation.
+/// - [`build_with_store`] allows providing a custom [`PaginatedKVStore`] implementation.
 ///
 /// ### Logging
 ///
@@ -270,7 +270,7 @@ impl std::error::Error for BuildError {}
 /// [`build_with_vss_store`]: Self::build_with_vss_store
 /// [`build_with_store`]: Self::build_with_store
 /// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-/// [`KVStore`]: lightning::util::persist::KVStore
+/// [`PaginatedKVStore`]: lightning::util::persist::PaginatedKVStore
 /// [`DEFAULT_LOG_LEVEL`]: crate::config::DEFAULT_LOG_LEVEL
 /// [`set_filesystem_logger`]: Self::set_filesystem_logger
 /// [`set_log_facade_logger`]: Self::set_log_facade_logger
@@ -813,7 +813,7 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
-	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
@@ -832,14 +832,14 @@ impl NodeBuilder {
 		}
 	}
 
-	fn build_with_store_and_logger<S: KVStore + Send + Sync + 'static>(
+	fn build_with_store_and_logger<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
 		let runtime = self.setup_runtime(&logger)?;
 		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
 	}
 
-	fn build_with_store_runtime_and_logger<S: KVStore + Send + Sync + 'static>(
+	fn build_with_store_runtime_and_logger<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, runtime: Arc<Runtime>, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
 		let seed_bytes = node_entropy.to_seed_bytes();
@@ -876,7 +876,7 @@ impl NodeBuilder {
 /// - [`build`] uses an SQLite database (recommended default).
 /// - [`build_with_fs_store`] uses a filesystem-based store.
 /// - [`build_with_vss_store`] and variants use a [VSS] remote store (**experimental**).
-/// - [`build_with_store`] allows providing a custom [`KVStore`] implementation.
+/// - [`build_with_store`] allows providing a custom [`PaginatedKVStore`] implementation.
 ///
 /// ### Logging
 ///
@@ -892,7 +892,7 @@ impl NodeBuilder {
 /// [`build_with_vss_store`]: Self::build_with_vss_store
 /// [`build_with_store`]: Self::build_with_store
 /// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-/// [`KVStore`]: lightning::util::persist::KVStore
+/// [`PaginatedKVStore`]: lightning::util::persist::PaginatedKVStore
 /// [`DEFAULT_LOG_LEVEL`]: crate::config::DEFAULT_LOG_LEVEL
 /// [`set_filesystem_logger`]: Self::set_filesystem_logger
 /// [`set_log_facade_logger`]: Self::set_log_facade_logger
@@ -1330,7 +1330,7 @@ impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
 	// this so its not needed.
-	pub fn build_with_store<S: KVStore + Send + Sync + 'static>(
+	pub fn build_with_store<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)
