@@ -73,8 +73,12 @@ impl SortedTransactions {
 		SortedTransactions(txs)
 	}
 
-	pub(crate) fn into_inner(self) -> Vec<Transaction> {
-		self.0
+	pub(crate) fn try_into_single_tx(mut self) -> Result<Transaction, ()> {
+		if self.0.len() == 1 {
+			Ok(self.0.pop().expect("The length is 1"))
+		} else {
+			Err(())
+		}
 	}
 }
 
