@@ -16,6 +16,7 @@ use bdk_chain::bdk_core::spk_client::{
 };
 use bdk_electrum::BdkElectrumClient;
 use bdk_wallet::{KeychainKind as BdkKeyChainKind, Update as BdkUpdate};
+use bitcoin::transaction::Version;
 use bitcoin::{FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{
 	Batch, Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder, ElectrumApi,
@@ -364,8 +365,14 @@ impl ElectrumChainSource {
 			return;
 		};
 
-		for tx in txs.into_inner() {
-			electrum_client.broadcast(tx).await;
+		let all_txs_are_v3 = txs.iter().all(|tx| tx.version == Version::non_standard(3));
+		match txs.len() {
+			2.. if all_txs_are_v3 => electrum_client.submit_package(txs).await,
+			_ => {
+				for tx in txs.into_inner() {
+					electrum_client.broadcast(tx).await
+				}
+			},
 		}
 	}
 }
@@ -659,6 +666,46 @@ impl ElectrumRuntimeClient {
 				Err(e) => self.log_broadcast_error(e, &[txid], core::slice::from_ref(tx.as_ref())),
 			},
 			Err(e) => self.log_broadcast_error(e, &[txid], core::slice::from_ref(tx.as_ref())),
+		}
+	}
+
+	async fn submit_package(&self, package: SortedTransactions) {
+		let electrum_client = Arc::clone(&self.electrum_client);
+
+		let txids: Vec<_> = package.iter().map(|tx| tx.compute_txid()).collect();
+		let package = Arc::new(package);
+
+		let spawn_fut = self.runtime.spawn_blocking({
+			let package = Arc::clone(&package);
+			move || electrum_client.transaction_broadcast_package(&package)
+		});
+		let timeout_fut = tokio::time::timeout(
+			Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
+			spawn_fut,
+		);
+
+		match timeout_fut.await {
+			Ok(res) => match res {
+				Ok(Ok(result)) => {
+					if result.success {
+						log_trace!(
+							self.logger,
+							"Successfully broadcast transaction(s) {:?}",
+							txids
+						);
+						log_trace!(
+							self.logger,
+							"Successfully broadcast transaction(s) {:?}",
+							result
+						);
+					} else {
+						self.log_broadcast_error(format!("{:?}", result), &txids, &package);
+					}
+				},
+				Ok(Err(e)) => self.log_broadcast_error(e, &txids, &package),
+				Err(e) => self.log_broadcast_error(e, &txids, &package),
+			},
+			Err(e) => self.log_broadcast_error(e, &txids, &package),
 		}
 	}
 
