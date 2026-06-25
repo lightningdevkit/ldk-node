@@ -431,21 +431,54 @@ impl EsploraChainSource {
 	}
 
 	pub(crate) async fn process_transaction_broadcast(&self, txs: TransactionBroadcast) {
-		for tx in txs.iter() {
-			let txid = tx.compute_txid();
-			let timeout_fut = tokio::time::timeout(
-				Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
-				self.esplora_client.broadcast(tx),
-			);
-			match timeout_fut.await {
-				Ok(res) => match res {
-					Ok(()) => {
-						log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
+		match txs.len() {
+			0 => (),
+			1 => {
+				let tx = txs.first().expect("The length is 1");
+				let txid = tx.compute_txid();
+				let timeout_fut = tokio::time::timeout(
+					Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
+					self.esplora_client.broadcast(&tx),
+				);
+				match timeout_fut.await {
+					Ok(res) => match res {
+						Ok(()) => {
+							log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
+						},
+						Err(e) => self.log_http_error(e, &[txid], &txs),
 					},
-					Err(e) => self.log_http_error(e, &[txid], &txs),
-				},
-				Err(e) => self.log_broadcast_error(e, &[txid], &txs),
-			}
+					Err(e) => self.log_broadcast_error(e, &[txid], &txs),
+				}
+			},
+			2.. => {
+				let txids: Vec<_> = txs.iter().map(|tx| tx.compute_txid()).collect();
+				let timeout_fut = tokio::time::timeout(
+					Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
+					self.esplora_client.submit_package(&txs, None, None),
+				);
+				match timeout_fut.await {
+					Ok(res) => match res {
+						Ok(result) => {
+							if result.package_msg.eq_ignore_ascii_case("success") {
+								log_trace!(
+									self.logger,
+									"Successfully broadcast transactions {:?}",
+									txids
+								);
+								log_trace!(
+									self.logger,
+									"Successfully broadcast transactions {:?}",
+									result
+								);
+							} else {
+								self.log_broadcast_error(format!("{:?}", result), &txids, &txs);
+							}
+						},
+						Err(e) => self.log_http_error(e, &txids, &txs),
+					},
+					Err(e) => self.log_broadcast_error(e, &txids, &txs),
+				}
+			},
 		}
 	}
 }

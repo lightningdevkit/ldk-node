@@ -605,27 +605,43 @@ impl BitcoindChainSource {
 	}
 
 	pub(crate) async fn process_transaction_broadcast(&self, txs: TransactionBroadcast) {
-		// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
-		// features, we should eventually switch to use `submitpackage` via the
-		// `rust-bitcoind-json-rpc` crate rather than just broadcasting individual
-		// transactions.
-		let txs = txs.into_inner();
-		for tx in txs {
-			let txid = tx.compute_txid();
-			let timeout_fut = tokio::time::timeout(
-				Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
-				self.api_client.broadcast_transaction(&tx),
-			);
-			match timeout_fut.await {
-				Ok(res) => match res {
-					Ok(id) => {
-						debug_assert_eq!(id, txid);
-						log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
+		match txs.len() {
+			0 => (),
+			1 => {
+				let tx = txs.into_inner().pop().expect("The length is 1");
+				let txid = tx.compute_txid();
+				let timeout_fut = tokio::time::timeout(
+					Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
+					self.api_client.broadcast_transaction(&tx),
+				);
+				match timeout_fut.await {
+					Ok(res) => match res {
+						Ok(id) => {
+							debug_assert_eq!(id, txid);
+							log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
+						},
+						Err(e) => self.log_broadcast_error(e, &[txid], &[tx]),
 					},
 					Err(e) => self.log_broadcast_error(e, &[txid], &[tx]),
-				},
-				Err(e) => self.log_broadcast_error(e, &[txid], &[tx]),
-			}
+				}
+			},
+			2.. => {
+				let txids: Vec<_> = txs.iter().map(|tx| tx.compute_txid()).collect();
+				let timeout_fut = tokio::time::timeout(
+					Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
+					self.api_client.submit_package(&txs),
+				);
+				match timeout_fut.await {
+					Ok(res) => match res {
+						Ok(result) => {
+							log_trace!(self.logger, "Successfully broadcast package {:?}", txids);
+							log_trace!(self.logger, "Successfully broadcast package {}", result);
+						},
+						Err(e) => self.log_broadcast_error(e, &txids, &txs),
+					},
+					Err(e) => self.log_broadcast_error(e, &txids, &txs),
+				}
+			},
 		}
 	}
 }
@@ -814,6 +830,38 @@ impl BitcoindClient {
 		let tx_serialized = bitcoin::consensus::encode::serialize_hex(tx);
 		let tx_json = serde_json::json!(tx_serialized);
 		rpc_client.call_method::<Txid>("sendrawtransaction", &[tx_json]).await
+	}
+
+	/// Submits the provided package
+	pub(crate) async fn submit_package(
+		&self, package: &[Transaction],
+	) -> Result<String, BitcoindClientError> {
+		match self {
+			BitcoindClient::Rpc { rpc_client, .. } => {
+				Self::submit_package_inner(Arc::clone(rpc_client), package)
+					.await
+					.map_err(BitcoindClientError::Rpc)
+			},
+			BitcoindClient::Rest { rpc_client, .. } => {
+				// Bitcoin Core's REST interface does not support submitting packages
+				// so we use the RPC client.
+				Self::submit_package_inner(Arc::clone(rpc_client), package)
+					.await
+					.map_err(BitcoindClientError::Rpc)
+			},
+		}
+	}
+
+	async fn submit_package_inner(
+		rpc_client: Arc<RpcClient>, package: &[Transaction],
+	) -> Result<String, RpcClientError> {
+		let package_serialized: Vec<_> =
+			package.iter().map(|tx| bitcoin::consensus::encode::serialize_hex(tx)).collect();
+		let package_json = serde_json::json!(package_serialized);
+		rpc_client
+			.call_method::<SubmitPackageResponse>("submitpackage", &[package_json])
+			.await
+			.map(|response| response.0)
 	}
 
 	/// Retrieve the fee estimate needed for a transaction to begin
@@ -1364,6 +1412,23 @@ impl TryInto<GetMempoolEntryResponse> for JsonResponse {
 		};
 
 		Ok(GetMempoolEntryResponse { time, height })
+	}
+}
+
+pub struct SubmitPackageResponse(String);
+
+impl TryInto<SubmitPackageResponse> for JsonResponse {
+	type Error = String;
+	fn try_into(self) -> Result<SubmitPackageResponse, String> {
+		let response = self.0.to_string();
+		let res = self.0.as_object().ok_or("Failed to parse submitpackage response".to_string())?;
+
+		match res["package_msg"].as_str() {
+			Some("success") => Ok(SubmitPackageResponse(response)),
+			Some(_) | None => {
+				return Err(response);
+			},
+		}
 	}
 }
 
