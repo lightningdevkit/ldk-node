@@ -590,14 +590,23 @@ impl ElectrumRuntimeClient {
 			})
 	}
 
+	fn log_broadcast_error(&self, e: impl core::fmt::Display, txids: &[Txid], txs: &[Transaction]) {
+		log_error!(self.logger, "Failed to broadcast transaction(s) {:?}: {}", txids, e);
+		log_trace!(self.logger, "Failed broadcast transaction bytes:");
+		for tx in txs {
+			log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+		}
+	}
+
 	async fn broadcast(&self, tx: Transaction) {
 		let electrum_client = Arc::clone(&self.electrum_client);
 
 		let txid = tx.compute_txid();
-		let tx_bytes = tx.encode();
 
-		let spawn_fut =
-			self.runtime.spawn_blocking(move || electrum_client.transaction_broadcast(&tx));
+		let spawn_fut = self.runtime.spawn_blocking({
+			let tx = tx.clone();
+			move || electrum_client.transaction_broadcast(&tx)
+		});
 		let timeout_fut = tokio::time::timeout(
 			Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
 			spawn_fut,
@@ -605,31 +614,13 @@ impl ElectrumRuntimeClient {
 
 		match timeout_fut.await {
 			Ok(res) => match res {
-				Ok(_) => {
+				Ok(Ok(txid)) => {
 					log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
 				},
-				Err(e) => {
-					log_error!(self.logger, "Failed to broadcast transaction {}: {}", txid, e);
-					log_trace!(
-						self.logger,
-						"Failed broadcast transaction bytes: {}",
-						log_bytes!(tx_bytes)
-					);
-				},
+				Ok(Err(e)) => self.log_broadcast_error(e, &[txid], &[tx]),
+				Err(e) => self.log_broadcast_error(e, &[txid], &[tx]),
 			},
-			Err(e) => {
-				log_error!(
-					self.logger,
-					"Failed to broadcast transaction due to timeout {}: {}",
-					txid,
-					e
-				);
-				log_trace!(
-					self.logger,
-					"Failed broadcast transaction bytes: {}",
-					log_bytes!(tx_bytes)
-				);
-			},
+			Err(e) => self.log_broadcast_error(e, &[txid], &[tx]),
 		}
 	}
 

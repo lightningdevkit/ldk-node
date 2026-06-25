@@ -596,16 +596,25 @@ impl BitcoindChainSource {
 		Ok(())
 	}
 
+	fn log_broadcast_error(&self, e: impl core::fmt::Display, txids: &[Txid], txs: &[Transaction]) {
+		log_error!(self.logger, "Failed to broadcast transaction(s) {:?}: {}", txids, e);
+		log_trace!(self.logger, "Failed broadcast transaction bytes:");
+		for tx in txs.iter() {
+			log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+		}
+	}
+
 	pub(crate) async fn process_transaction_broadcast(&self, txs: TransactionBroadcast) {
 		// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
 		// features, we should eventually switch to use `submitpackage` via the
 		// `rust-bitcoind-json-rpc` crate rather than just broadcasting individual
 		// transactions.
-		for tx in txs.iter() {
+		let txs = txs.into_inner();
+		for tx in txs {
 			let txid = tx.compute_txid();
 			let timeout_fut = tokio::time::timeout(
 				Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
-				self.api_client.broadcast_transaction(tx),
+				self.api_client.broadcast_transaction(&tx),
 			);
 			match timeout_fut.await {
 				Ok(res) => match res {
@@ -613,28 +622,9 @@ impl BitcoindChainSource {
 						debug_assert_eq!(id, txid);
 						log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
 					},
-					Err(e) => {
-						log_error!(self.logger, "Failed to broadcast transaction {}: {}", txid, e);
-						log_trace!(
-							self.logger,
-							"Failed broadcast transaction bytes: {}",
-							log_bytes!(tx.encode())
-						);
-					},
+					Err(e) => self.log_broadcast_error(e, &[txid], &[tx]),
 				},
-				Err(e) => {
-					log_error!(
-						self.logger,
-						"Failed to broadcast transaction due to timeout {}: {}",
-						txid,
-						e
-					);
-					log_trace!(
-						self.logger,
-						"Failed broadcast transaction bytes: {}",
-						log_bytes!(tx.encode())
-					);
-				},
+				Err(e) => self.log_broadcast_error(e, &[txid], &[tx]),
 			}
 		}
 	}
