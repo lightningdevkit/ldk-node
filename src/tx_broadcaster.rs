@@ -18,6 +18,32 @@ const BCAST_PACKAGE_QUEUE_SIZE: usize = 50;
 pub(crate) struct TransactionBroadcast(Vec<Transaction>);
 
 impl TransactionBroadcast {
+	fn sort_parents_child_package_topologically(mut txs: Vec<Transaction>) -> TransactionBroadcast {
+		if txs.len() == 0 || txs.len() == 1 {
+			return TransactionBroadcast(txs);
+		}
+		let txids: Vec<_> = txs.iter().map(|tx| tx.compute_txid()).collect();
+		let any_spends_from_package = |tx: &Transaction| -> bool {
+			tx.input.iter().any(|input| txids.contains(&input.previous_output.txid))
+		};
+		txs.sort_by_key(any_spends_from_package);
+
+		#[cfg(debug_assertions)]
+		{
+			let child = txs.last().expect("txs is not empty");
+			let child_input_txids: Vec<_> =
+				child.input.iter().map(|input| input.previous_output.txid).collect();
+			let parents = &txs[..txs.len() - 1];
+			let parent_txids: Vec<_> = parents.iter().map(|parent| parent.compute_txid()).collect();
+			// Make sure all the parent txids are parents of the child transaction
+			debug_assert!(parent_txids.iter().all(|txid| child_input_txids.contains(&txid)));
+			// Make sure there are no grandparents
+			debug_assert_eq!(txs.iter().filter(|tx| any_spends_from_package(tx)).count(), 1);
+		}
+
+		TransactionBroadcast(txs)
+	}
+
 	pub(crate) fn into_inner(self) -> Vec<Transaction> {
 		self.0
 	}
@@ -27,13 +53,6 @@ impl Deref for TransactionBroadcast {
 	type Target = Vec<Transaction>;
 	fn deref(&self) -> &Self::Target {
 		&self.0
-	}
-}
-
-impl From<Vec<Transaction>> for TransactionBroadcast {
-	fn from(mut value: Vec<Transaction>) -> Self {
-		sort_parents_child_package_topologically(&mut value);
-		TransactionBroadcast(value)
 	}
 }
 
@@ -67,34 +86,12 @@ where
 	L::Target: LdkLogger,
 {
 	fn broadcast_transactions(&self, txs: &[(&Transaction, TransactionType)]) {
-		let package = txs.iter().map(|(t, _)| (*t).clone()).collect::<Vec<Transaction>>();
-		self.queue_sender.try_send(package.into()).unwrap_or_else(|e| {
-			log_error!(self.logger, "Failed to broadcast transactions: {}", e);
-		});
-	}
-}
-
-fn sort_parents_child_package_topologically(txs: &mut [Transaction]) {
-	if txs.len() == 0 || txs.len() == 1 {
-		return;
-	}
-	let txids: Vec<_> = txs.iter().map(|tx| tx.compute_txid()).collect();
-	let any_spends_from_package = |tx: &Transaction| -> bool {
-		tx.input.iter().any(|input| txids.contains(&input.previous_output.txid))
-	};
-	txs.sort_by_key(any_spends_from_package);
-
-	#[cfg(debug_assertions)]
-	{
-		let child = txs.last().expect("txs is not empty");
-		let child_input_txids: Vec<_> =
-			child.input.iter().map(|input| input.previous_output.txid).collect();
-		let parents = &txs[..txs.len() - 1];
-		let parent_txids: Vec<_> = parents.iter().map(|parent| parent.compute_txid()).collect();
-		// Make sure all the parent txids are parents of the child transaction
-		debug_assert!(parent_txids.iter().all(|txid| child_input_txids.contains(&txid)));
-		// Make sure there are no grandparents
-		debug_assert_eq!(txs.iter().filter(|tx| any_spends_from_package(tx)).count(), 1);
+		let txs = txs.iter().map(|(t, _)| (*t).clone()).collect::<Vec<Transaction>>();
+		self.queue_sender
+			.try_send(TransactionBroadcast::sort_parents_child_package_topologically(txs))
+			.unwrap_or_else(|e| {
+				log_error!(self.logger, "Failed to broadcast transactions: {}", e);
+			});
 	}
 }
 
@@ -103,7 +100,7 @@ mod tests {
 	use bitcoin::hashes::Hash;
 	use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 
-	use super::sort_parents_child_package_topologically;
+	use super::TransactionBroadcast;
 
 	fn txin(txid: Txid, vout: u32) -> TxIn {
 		TxIn {
@@ -161,9 +158,9 @@ mod tests {
 
 		let original_txids =
 			[parent_a.compute_txid(), parent_b.compute_txid(), child.compute_txid()];
-		let mut package = vec![parent_a, parent_b, child];
+		let txs = vec![parent_a, parent_b, child];
 
-		sort_parents_child_package_topologically(&mut package);
+		let package = TransactionBroadcast::sort_parents_child_package_topologically(txs);
 
 		assert_eq!(
 			package.iter().map(Transaction::compute_txid).collect::<Vec<_>>(),
@@ -177,9 +174,9 @@ mod tests {
 		let child = child_tx(&[&parent]);
 		let parent_txids = [parent.compute_txid()];
 		let child_txid = child.compute_txid();
-		let mut package = vec![child, parent];
+		let txs = vec![child, parent];
 
-		sort_parents_child_package_topologically(&mut package);
+		let package = TransactionBroadcast::sort_parents_child_package_topologically(txs);
 
 		assert_parents_before_child(&package, child_txid, &parent_txids);
 	}
@@ -191,9 +188,9 @@ mod tests {
 		let child = child_tx(&[&parent_a, &parent_b]);
 		let parent_txids = [parent_a.compute_txid(), parent_b.compute_txid()];
 		let child_txid = child.compute_txid();
-		let mut package = vec![child, parent_a, parent_b];
+		let txs = vec![child, parent_a, parent_b];
 
-		sort_parents_child_package_topologically(&mut package);
+		let package = TransactionBroadcast::sort_parents_child_package_topologically(txs);
 
 		assert_parents_before_child(&package, child_txid, &parent_txids);
 	}
@@ -207,9 +204,9 @@ mod tests {
 		let parent_txids =
 			[parent_a.compute_txid(), parent_b.compute_txid(), parent_c.compute_txid()];
 		let child_txid = child.compute_txid();
-		let mut package = vec![child, parent_a, parent_b, parent_c];
+		let txs = vec![child, parent_a, parent_b, parent_c];
 
-		sort_parents_child_package_topologically(&mut package);
+		let package = TransactionBroadcast::sort_parents_child_package_topologically(txs);
 
 		assert_parents_before_child(&package, child_txid, &parent_txids);
 	}
@@ -221,9 +218,9 @@ mod tests {
 		let child = child_tx(&[&parent_a, &parent_b]);
 		let parent_txids = [parent_a.compute_txid(), parent_b.compute_txid()];
 		let child_txid = child.compute_txid();
-		let mut package = vec![parent_a, child, parent_b];
+		let txs = vec![parent_a, child, parent_b];
 
-		sort_parents_child_package_topologically(&mut package);
+		let package = TransactionBroadcast::sort_parents_child_package_topologically(txs);
 
 		assert_parents_before_child(&package, child_txid, &parent_txids);
 	}
@@ -232,9 +229,9 @@ mod tests {
 	fn topological_sort_leaves_single_transaction_package_unchanged() {
 		let parent = parent_tx(1);
 		let parent_txid = parent.compute_txid();
-		let mut package = vec![parent];
+		let txs = vec![parent];
 
-		sort_parents_child_package_topologically(&mut package);
+		let package = TransactionBroadcast::sort_parents_child_package_topologically(txs);
 
 		assert_eq!(package.len(), 1);
 		assert_eq!(package[0].compute_txid(), parent_txid);
@@ -242,6 +239,6 @@ mod tests {
 
 	#[test]
 	fn topological_sort_accepts_empty_vec() {
-		sort_parents_child_package_topologically(&mut []);
+		TransactionBroadcast::sort_parents_child_package_topologically(Vec::new());
 	}
 }
