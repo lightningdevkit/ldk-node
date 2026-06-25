@@ -1922,3 +1922,26 @@ impl TestSyncStoreInner {
 		}
 	}
 }
+
+/// The PostgreSQL connection string used by the Postgres-backed tests, overridable via the
+/// `TEST_POSTGRES_URL` environment variable.
+#[cfg(feature = "postgres")]
+pub(crate) fn test_connection_string() -> String {
+	std::env::var("TEST_POSTGRES_URL")
+		.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string())
+}
+
+/// Drops the given table from the `ldk_db` database, ignoring the case where the database doesn't
+/// exist yet. Used to ensure a clean slate before and after Postgres-backed tests.
+#[cfg(feature = "postgres")]
+pub(crate) async fn drop_table(table_name: &str) {
+	let connection_string = format!("{} dbname=ldk_db", test_connection_string());
+	let Ok((client, connection)) =
+		tokio_postgres::connect(&connection_string, tokio_postgres::NoTls).await
+	else {
+		// Database doesn't exist yet — nothing to drop.
+		return;
+	};
+	tokio::spawn(connection);
+	let _ = client.execute(&format!("DROP TABLE IF EXISTS {table_name}"), &[]).await;
+}

@@ -9,26 +9,10 @@
 
 mod common;
 
+use common::{drop_table, test_connection_string};
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::Builder;
 use rand::RngCore;
-
-fn test_connection_string() -> String {
-	std::env::var("TEST_POSTGRES_URL")
-		.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string())
-}
-
-async fn drop_table(table_name: &str) {
-	let connection_string = format!("{} dbname=ldk_db", test_connection_string());
-	let Ok((client, connection)) =
-		tokio_postgres::connect(&connection_string, tokio_postgres::NoTls).await
-	else {
-		// Database doesn't exist yet — nothing to drop.
-		return;
-	};
-	tokio::spawn(connection);
-	let _ = client.execute(&format!("DROP TABLE IF EXISTS {table_name}"), &[]).await;
-}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn channel_full_cycle_with_postgres_store() {

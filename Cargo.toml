@@ -92,6 +92,7 @@ winapi = { version = "0.3", features = ["winbase"] }
 
 [dev-dependencies]
 lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3dfcc4cca1866c5e5d4d4eaf3b82e09584e2ce5c", features = ["std", "_test_utils"] }
+lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3dfcc4cca1866c5e5d4d4eaf3b82e09584e2ce5c", features = ["tokio"] }
 rand = { version = "0.9.2", default-features = false, features = ["std", "thread_rng", "os_rng"] }
 proptest = "1.0.0"
 regex = "1.5.6"
