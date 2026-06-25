@@ -391,6 +391,55 @@ impl EsploraChainSource {
 		Ok(())
 	}
 
+	fn log_http_error(&self, e: esplora_client::Error, txids: &[Txid], txs: &SortedTransactions) {
+		match e {
+			esplora_client::Error::HttpResponse { status, message } => {
+				if status == 400 && txs.len() == 1 {
+					// Log 400 at lesser level, as this often just means bitcoind already knows the
+					// transaction.
+					// FIXME: We can further differentiate here based on the error
+					// message which will be available with rust-esplora-client 0.7 and
+					// later.
+					log_trace!(
+						self.logger,
+						"Failed to broadcast due to HTTP connection error: {}",
+						message
+					);
+					log_trace!(self.logger, "Failed to broadcast transaction(s) {:?}", txids);
+				} else {
+					log_error!(
+						self.logger,
+						"Failed to broadcast due to HTTP connection error: {} - {}",
+						status,
+						message
+					);
+					log_error!(self.logger, "Failed to broadcast transaction(s) {:?}", txids);
+				}
+				log_trace!(self.logger, "Failed broadcast transaction(s) bytes:");
+				for tx in txs.iter() {
+					log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+				}
+			},
+			_ => {
+				log_error!(self.logger, "Failed to broadcast transaction(s) {:?}: {}", txids, e);
+				log_trace!(self.logger, "Failed broadcast transaction(s) bytes:");
+				for tx in txs.iter() {
+					log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+				}
+			},
+		}
+	}
+
+	fn log_broadcast_error(
+		&self, e: impl core::fmt::Display, txids: &[Txid], txs: &SortedTransactions,
+	) {
+		log_error!(self.logger, "Failed to broadcast transaction(s) {:?}: {}", txids, e);
+		log_trace!(self.logger, "Failed broadcast transaction bytes:");
+		for tx in txs.iter() {
+			log_trace!(self.logger, "{}", log_bytes!(tx.encode()));
+		}
+	}
+
 	pub(crate) async fn process_transaction_broadcast(&self, txs: SortedTransactions) {
 		for tx in txs.iter() {
 			let txid = tx.compute_txid();
@@ -403,61 +452,9 @@ impl EsploraChainSource {
 					Ok(()) => {
 						log_trace!(self.logger, "Successfully broadcast transaction {}", txid);
 					},
-					Err(e) => match e {
-						esplora_client::Error::HttpResponse { status, message } => {
-							if status == 400 {
-								// Log 400 at lesser level, as this often just means bitcoind already knows the
-								// transaction.
-								// FIXME: We can further differentiate here based on the error
-								// message which will be available with rust-esplora-client 0.7 and
-								// later.
-								log_trace!(
-									self.logger,
-									"Failed to broadcast due to HTTP connection error: {}",
-									message
-								);
-							} else {
-								log_error!(
-									self.logger,
-									"Failed to broadcast due to HTTP connection error: {} - {}",
-									status,
-									message
-								);
-							}
-							log_trace!(
-								self.logger,
-								"Failed broadcast transaction bytes: {}",
-								log_bytes!(tx.encode())
-							);
-						},
-						_ => {
-							log_error!(
-								self.logger,
-								"Failed to broadcast transaction {}: {}",
-								txid,
-								e
-							);
-							log_trace!(
-								self.logger,
-								"Failed broadcast transaction bytes: {}",
-								log_bytes!(tx.encode())
-							);
-						},
-					},
+					Err(e) => self.log_http_error(e, &[txid], &txs),
 				},
-				Err(e) => {
-					log_error!(
-						self.logger,
-						"Failed to broadcast transaction due to timeout {}: {}",
-						txid,
-						e
-					);
-					log_trace!(
-						self.logger,
-						"Failed broadcast transaction bytes: {}",
-						log_bytes!(tx.encode())
-					);
-				},
+				Err(e) => self.log_broadcast_error(e, &[txid], &txs),
 			}
 		}
 	}
