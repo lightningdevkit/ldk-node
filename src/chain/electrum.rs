@@ -631,9 +631,10 @@ impl ElectrumRuntimeClient {
 		let electrum_client = Arc::clone(&self.electrum_client);
 
 		let txids: Vec<_> = package.iter().map(|tx| tx.compute_txid()).collect();
+		let package = Arc::new(package);
 
 		let spawn_fut = self.runtime.spawn_blocking({
-			let package = package.clone();
+			let package = Arc::clone(&package);
 			move || electrum_client.transaction_broadcast_package(&package)
 		});
 		let timeout_fut = tokio::time::timeout(
@@ -656,13 +657,13 @@ impl ElectrumRuntimeClient {
 							result
 						);
 					} else {
-						self.log_broadcast_error(format!("{:?}", result), &txids, &package);
+						self.log_broadcast_error(format!("{:?}", result), &txids, package.as_ref());
 					}
 				},
-				Ok(Err(e)) => self.log_broadcast_error(e, &txids, &package),
-				Err(e) => self.log_broadcast_error(e, &txids, &package),
+				Ok(Err(e)) => self.log_broadcast_error(e, &txids, package.as_ref()),
+				Err(e) => self.log_broadcast_error(e, &txids, package.as_ref()),
 			},
-			Err(e) => self.log_broadcast_error(e, &txids, &package),
+			Err(e) => self.log_broadcast_error(e, &txids, package.as_ref()),
 		}
 	}
 
