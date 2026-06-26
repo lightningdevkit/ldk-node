@@ -54,10 +54,10 @@ lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning
 lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3dfcc4cca1866c5e5d4d4eaf3b82e09584e2ce5c" }
 lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3dfcc4cca1866c5e5d4d4eaf3b82e09584e2ce5c" }
 
-bdk_chain = { version = "0.23.0", default-features = false, features = ["std"] }
-bdk_esplora = { version = "0.22.0", default-features = false, features = ["async-https-rustls", "tokio"]}
+bdk_chain = { version = "0.23.3", default-features = false, features = ["std"] }
+bdk_esplora = { version = "0.22.2", default-features = false, features = ["async-https-rustls", "tokio"]}
 bdk_electrum = { version = "0.24.0", default-features = false, features = ["use-rustls-ring"]}
-bdk_wallet = { version = "2.3.0", default-features = false, features = ["std", "keys-bip39"]}
+bdk_wallet = { version = "3.1.0", default-features = false, features = ["std", "keys-bip39"]}
 
 bitreq = { version = "0.3", default-features = false, features = ["async-https", "json-using-serde"] }
 rustls = { version = "0.23", default-features = false }

@@ -13,10 +13,9 @@ use std::sync::{Arc, Mutex};
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
-use bdk_wallet::event::WalletEvent;
 #[allow(deprecated)]
 use bdk_wallet::SignOptions;
-use bdk_wallet::{Balance, KeychainKind, PersistedWallet, Update};
+use bdk_wallet::{Balance, KeychainKind, PersistedWallet, Update, WalletEvent};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -186,29 +185,13 @@ impl Wallet {
 
 		let mut locked_wallet = self.inner.lock().expect("lock");
 
-		let chain_tip1 = locked_wallet.latest_checkpoint().block_id();
-		let wallet_txs1 = locked_wallet
-			.transactions()
-			.map(|wtx| (wtx.tx_node.txid, (wtx.tx_node.tx.clone(), wtx.chain_position)))
-			.collect::<std::collections::BTreeMap<
-				Txid,
-				(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
-			>>();
-
-		locked_wallet.apply_unconfirmed_txs(unconfirmed_txs);
-		locked_wallet.apply_evicted_txs(evicted_txids);
-
-		let chain_tip2 = locked_wallet.latest_checkpoint().block_id();
-		let wallet_txs2 = locked_wallet
-			.transactions()
-			.map(|wtx| (wtx.tx_node.txid, (wtx.tx_node.tx.clone(), wtx.chain_position)))
-			.collect::<std::collections::BTreeMap<
-				Txid,
-				(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
-			>>();
-
-		let events =
-			wallet_events(&mut *locked_wallet, chain_tip1, chain_tip2, wallet_txs1, wallet_txs2);
+		let events = locked_wallet
+			.events_helper(|wallet| -> Result<(), std::convert::Infallible> {
+				wallet.apply_unconfirmed_txs(unconfirmed_txs);
+				wallet.apply_evicted_txs(evicted_txids);
+				Ok(())
+			})
+			.expect("applying mempool updates cannot fail");
 
 		self.update_payment_store(&mut *locked_wallet, events).map_err(|e| {
 			log_error!(self.logger, "Failed to update payment store: {}", e);
@@ -362,7 +345,7 @@ impl Wallet {
 						}
 					}
 				},
-				WalletEvent::TxUnconfirmed { txid, tx, old_block_time: None } => {
+				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
 					let payment_id = self
 						.find_payment_by_txid(txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
@@ -513,17 +496,28 @@ impl Wallet {
 		Ok(address_info.address)
 	}
 
-	pub(crate) fn cancel_tx(&self, tx: &Transaction) -> Result<(), Error> {
+	pub(crate) fn cancel_tx(&self, tx: Transaction) -> Result<(), Error> {
 		let mut locked_wallet = self.inner.lock().expect("lock");
 		let mut locked_persister = self.persister.lock().expect("lock");
 
-		locked_wallet.cancel_tx(tx);
+		Self::cancel_tx_inner(&mut locked_wallet, tx);
 		self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)).map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
 
 		Ok(())
+	}
+
+	fn cancel_tx_inner(
+		locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>, tx: Transaction,
+	) {
+		for txout in tx.output {
+			if let Some((keychain, index)) = locked_wallet.derivation_of_spk(txout.script_pubkey) {
+				// This mirrors the removed BDK helper: it only frees superficial usage marks.
+				locked_wallet.unmark_used(keychain, index);
+			}
+		}
 	}
 
 	pub(crate) fn get_balances(
@@ -678,7 +672,7 @@ impl Wallet {
 			None,
 		)?;
 
-		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+		Self::cancel_tx_inner(&mut locked_wallet, tmp_psbt.unsigned_tx);
 
 		Ok(max_amount)
 	}
@@ -708,7 +702,7 @@ impl Wallet {
 			Some(&shared_input),
 		)?;
 
-		locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+		Self::cancel_tx_inner(&mut locked_wallet, tmp_psbt.unsigned_tx);
 
 		Ok(splice_amount)
 	}
@@ -764,7 +758,7 @@ impl Wallet {
 							e
 						})?;
 
-					locked_wallet.cancel_tx(&tmp_psbt.unsigned_tx);
+					Self::cancel_tx_inner(&mut locked_wallet, tmp_psbt.unsigned_tx);
 
 					let mut tx_builder = locked_wallet.build_tx();
 					tx_builder
@@ -1238,7 +1232,7 @@ impl Wallet {
 
 	#[allow(deprecated)]
 	pub(crate) fn bump_fee_rbf(
-		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>,
+		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>, cur_anchor_reserve_sats: u64,
 	) -> Result<Txid, Error> {
 		let payment = self.payment_store.get(&payment_id).ok_or_else(|| {
 			log_error!(self.logger, "Payment {} not found in payment store", payment_id);
@@ -1385,6 +1379,41 @@ impl Wallet {
 				},
 			}?
 		};
+
+		let old_fee_sats = locked_wallet
+			.calculate_fee(&old_tx)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to calculate fee of transaction {}: {}", txid, e);
+				Error::WalletOperationFailed
+			})?
+			.to_sat();
+		let replacement_fee_sats = locked_wallet
+			.calculate_fee(&psbt.unsigned_tx)
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to calculate fee of replacement transaction for {}: {}",
+					txid,
+					e
+				);
+				Error::WalletOperationFailed
+			})?
+			.to_sat();
+		let additional_fee_sats = replacement_fee_sats.saturating_sub(old_fee_sats);
+		let balance = locked_wallet.balance();
+		let spendable_amount_sats =
+			self.get_balances_inner(balance, cur_anchor_reserve_sats).map(|(_, s)| s).unwrap_or(0);
+		if spendable_amount_sats < additional_fee_sats {
+			log_error!(
+				self.logger,
+				"Unable to bump fee due to insufficient reserve-preserving funds. \
+					Available: {}sats, required additional fee: {}sats, reserve: {}sats",
+				spendable_amount_sats,
+				additional_fee_sats,
+				cur_anchor_reserve_sats,
+			);
+			return Err(Error::InsufficientFunds);
+		}
 
 		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
 			Ok(finalized) => {
@@ -1754,106 +1783,4 @@ fn ldk_to_bdk_satisfaction_weight(ldk_satisfaction_weight: u64) -> Weight {
 		ldk_satisfaction_weight
 			.saturating_sub(EMPTY_SCRIPT_SIG_WEIGHT + EMPTY_WITNESS_COUNT_WEIGHT),
 	)
-}
-
-// FIXME/TODO: This is copied-over from bdk_wallet and only used to generate `WalletEvent`s after
-// applying mempool transactions. We should drop this when BDK offers to generate events for
-// mempool transactions natively.
-pub(crate) fn wallet_events(
-	wallet: &mut bdk_wallet::Wallet, chain_tip1: bdk_chain::BlockId,
-	chain_tip2: bdk_chain::BlockId,
-	wallet_txs1: std::collections::BTreeMap<
-		Txid,
-		(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
-	>,
-	wallet_txs2: std::collections::BTreeMap<
-		Txid,
-		(Arc<Transaction>, bdk_chain::ChainPosition<bdk_chain::ConfirmationBlockTime>),
-	>,
-) -> Vec<WalletEvent> {
-	let mut events: Vec<WalletEvent> = Vec::new();
-
-	if chain_tip1 != chain_tip2 {
-		events.push(WalletEvent::ChainTipChanged { old_tip: chain_tip1, new_tip: chain_tip2 });
-	}
-
-	wallet_txs2.iter().for_each(|(txid2, (tx2, cp2))| {
-		if let Some((tx1, cp1)) = wallet_txs1.get(txid2) {
-			assert_eq!(tx1.compute_txid(), *txid2);
-			match (cp1, cp2) {
-				(
-					bdk_chain::ChainPosition::Unconfirmed { .. },
-					bdk_chain::ChainPosition::Confirmed { anchor, .. },
-				) => {
-					events.push(WalletEvent::TxConfirmed {
-						txid: *txid2,
-						tx: tx2.clone(),
-						block_time: *anchor,
-						old_block_time: None,
-					});
-				},
-				(
-					bdk_chain::ChainPosition::Confirmed { anchor, .. },
-					bdk_chain::ChainPosition::Unconfirmed { .. },
-				) => {
-					events.push(WalletEvent::TxUnconfirmed {
-						txid: *txid2,
-						tx: tx2.clone(),
-						old_block_time: Some(*anchor),
-					});
-				},
-				(
-					bdk_chain::ChainPosition::Confirmed { anchor: anchor1, .. },
-					bdk_chain::ChainPosition::Confirmed { anchor: anchor2, .. },
-				) => {
-					if *anchor1 != *anchor2 {
-						events.push(WalletEvent::TxConfirmed {
-							txid: *txid2,
-							tx: tx2.clone(),
-							block_time: *anchor2,
-							old_block_time: Some(*anchor1),
-						});
-					}
-				},
-				(
-					bdk_chain::ChainPosition::Unconfirmed { .. },
-					bdk_chain::ChainPosition::Unconfirmed { .. },
-				) => {
-					// do nothing if still unconfirmed
-				},
-			}
-		} else {
-			match cp2 {
-				bdk_chain::ChainPosition::Confirmed { anchor, .. } => {
-					events.push(WalletEvent::TxConfirmed {
-						txid: *txid2,
-						tx: tx2.clone(),
-						block_time: *anchor,
-						old_block_time: None,
-					});
-				},
-				bdk_chain::ChainPosition::Unconfirmed { .. } => {
-					events.push(WalletEvent::TxUnconfirmed {
-						txid: *txid2,
-						tx: tx2.clone(),
-						old_block_time: None,
-					});
-				},
-			}
-		}
-	});
-
-	// find tx that are no longer canonical
-	wallet_txs1.iter().for_each(|(txid1, (tx1, _))| {
-		if !wallet_txs2.contains_key(txid1) {
-			let conflicts = wallet.tx_graph().direct_conflicts(tx1).collect::<Vec<_>>();
-			if !conflicts.is_empty() {
-				events.push(WalletEvent::TxReplaced { txid: *txid1, tx: tx1.clone(), conflicts });
-			} else {
-				events.push(WalletEvent::TxDropped { txid: *txid1, tx: tx1.clone() });
-			}
-		}
-	});
-
-	events
 }

@@ -21,10 +21,11 @@ use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
 	expect_event, expect_payment_claimable_event, expect_payment_received_event,
 	expect_payment_successful_event, expect_splice_negotiated_event, generate_blocks_and_wait,
-	generate_listening_addresses, open_channel, open_channel_push_amt, open_channel_with_all,
-	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
-	wait_for_tx, TestChainSource, TestConfig, TestStoreType, TestSyncStore,
+	generate_listening_addresses, invalidate_blocks, open_channel, open_channel_push_amt,
+	open_channel_with_all, premine_and_distribute_funds, premine_blocks, prepare_rbf,
+	random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_builder, setup_node,
+	setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_tx, TestChainSource, TestConfig,
+	TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::ElectrsD;
@@ -42,6 +43,7 @@ use lightning::routing::router::RouteParametersConfig;
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
+use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle() {
@@ -673,6 +675,74 @@ async fn onchain_send_receive() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn reorged_onchain_payment_returns_to_unconfirmed() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 500_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let amount_to_send_sats = 100_000;
+	let txid =
+		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let payment_id = PaymentId(txid.to_byte_array());
+	for node in [&node_a, &node_b] {
+		let payment = node.payment(&payment_id).unwrap();
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		match payment.kind {
+			PaymentKind::Onchain { status, .. } => {
+				assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+			},
+			_ => panic!("Unexpected payment kind"),
+		}
+	}
+
+	let original_height =
+		bitcoind.client.get_blockchain_info().expect("failed to get blockchain info").blocks;
+	invalidate_blocks(&bitcoind.client, 1);
+	let replacement_address = bitcoind.client.new_address().expect("failed to get new address");
+	for _ in 0..2 {
+		let _res: serde_json::Value = bitcoind
+			.client
+			.call("generateblock", &[json!(replacement_address.to_string()), json!([])])
+			.expect("failed to generate empty block");
+	}
+	wait_for_block(&electrsd.client, original_height as usize + 1).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	for node in [&node_a, &node_b] {
+		let payment = node.payment(&payment_id).unwrap();
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		match payment.kind {
+			PaymentKind::Onchain { status, .. } => {
+				assert!(matches!(status, ConfirmationStatus::Unconfirmed));
+			},
+			_ => panic!("Unexpected payment kind"),
+		}
+	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_send_all_retains_reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
@@ -1175,15 +1245,13 @@ async fn splice_channel() {
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	let expected_splice_in_fee_sat = 251;
-	let expected_splice_in_onchain_cost_sat = 254;
+	let expected_splice_in_onchain_cost_sat = 253;
 
-	// LDK's fee calculation differs from BDK wallet's, which over pays on fees. Rather than giving
-	// the extra fees to the miner, LDK sends it to the channel balance since there may not be a
-	// change output.
-	//
-	// TODO: Some of the discrepancy is addressed upstream, so this number should be adjusted when
-	// updating the BDK wallet dependency. See: https://github.com/bitcoindevkit/bdk_wallet/pull/479
-	let expected_splice_in_lightning_balance_sat = 4_000_003;
+	// BDK 3.1.0 avoids the previous per-UTXO fee rounding during coin selection. Keep the
+	// remaining 2-sat LDK/BDK fee-accounting drift explicit so a dependency change cannot silently
+	// reintroduce the larger surplus. Rather than giving the extra sats to the miner, LDK sends
+	// them to the channel balance since there may not be a change output.
+	let expected_splice_in_lightning_balance_sat = 4_000_002;
 
 	let payments = node_b.list_payments();
 	let payment =
@@ -2961,6 +3029,55 @@ async fn onchain_fee_bump_rbf() {
 	}
 	assert_eq!(node_a_received_payment[0].amount_msat, Some(amount_to_send_sats * 1000));
 	assert_eq!(node_a_received_payment[0].status, PaymentStatus::Succeeded);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_fee_bump_rbf_respects_anchor_reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 1_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a.clone(), addr_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_b, &node_a, 200_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let balances_before = node_b.list_balances();
+	let reserve = balances_before.total_anchor_channels_reserve_sats;
+	assert!(reserve > 0, "Anchor reserve should be non-zero after channel open");
+	let spendable_before = balances_before.spendable_onchain_balance_sats;
+
+	let buffer_sats = 5_000;
+	assert!(spendable_before > buffer_sats);
+	let amount_to_send_sats = spendable_before - buffer_sats;
+	let txid =
+		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+	node_b.sync_wallets().unwrap();
+
+	let payment_id = PaymentId(txid.to_byte_array());
+	let high_fee_rate = bitcoin::FeeRate::from_sat_per_kwu(20_000);
+	assert_eq!(
+		Err(NodeError::InsufficientFunds),
+		node_b.onchain_payment().bump_fee_rbf(payment_id, Some(high_fee_rate.into()))
+	);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

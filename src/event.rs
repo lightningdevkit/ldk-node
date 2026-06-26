@@ -1648,7 +1648,7 @@ where
 							})
 							.collect(),
 					};
-					if let Err(e) = self.wallet.cancel_tx(&tx) {
+					if let Err(e) = self.wallet.cancel_tx(tx) {
 						log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
 						return Err(ReplayEvent());
 					}

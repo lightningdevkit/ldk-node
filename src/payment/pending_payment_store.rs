@@ -11,7 +11,7 @@ use lightning::ln::channelmanager::PaymentId;
 
 use crate::data_store::{StorableObject, StorableObjectUpdate};
 use crate::payment::store::PaymentDetailsUpdate;
-use crate::payment::PaymentDetails;
+use crate::payment::{PaymentDetails, PaymentKind};
 
 /// Represents a pending payment
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,11 +25,6 @@ pub struct PendingPaymentDetails {
 impl PendingPaymentDetails {
 	pub(crate) fn new(details: PaymentDetails, conflicting_txids: Vec<Txid>) -> Self {
 		Self { details, conflicting_txids }
-	}
-
-	/// Convert to finalized payment for the main payment store
-	pub fn into_payment_details(self) -> PaymentDetails {
-		self.details
 	}
 }
 
@@ -68,6 +63,12 @@ impl StorableObject for PendingPaymentDetails {
 			}
 		}
 
+		if let PaymentKind::Onchain { txid, .. } = &self.details.kind {
+			let conflicts_len = self.conflicting_txids.len();
+			self.conflicting_txids.retain(|conflicting_txid| conflicting_txid != txid);
+			updated |= self.conflicting_txids.len() != conflicts_len;
+		}
+
 		updated
 	}
 
@@ -90,5 +91,52 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 			Some(value.conflicting_txids.clone())
 		};
 		Self { id: value.id(), payment_update: Some(value.details.to_update()), conflicting_txids }
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use bitcoin::hashes::Hash;
+
+	use super::*;
+	use crate::payment::{ConfirmationStatus, PaymentDirection, PaymentKind, PaymentStatus};
+
+	fn test_txid(byte: u8) -> Txid {
+		Txid::from_byte_array([byte; 32])
+	}
+
+	fn pending_onchain_payment(payment_id: PaymentId, txid: Txid) -> PaymentDetails {
+		PaymentDetails::new(
+			payment_id,
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed },
+			Some(1_000),
+			Some(100),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		)
+	}
+
+	#[test]
+	fn pending_onchain_conflicts_exclude_current_txid_after_txid_rotation() {
+		let original_txid = test_txid(1);
+		let replacement_txid = test_txid(2);
+		let payment_id = PaymentId(original_txid.to_byte_array());
+
+		let mut pending_payment = PendingPaymentDetails::new(
+			pending_onchain_payment(payment_id, replacement_txid),
+			vec![original_txid],
+		);
+		let update = PendingPaymentDetails::new(
+			pending_onchain_payment(payment_id, original_txid),
+			Vec::new(),
+		)
+		.to_update();
+
+		assert!(pending_payment.update(update));
+		assert_eq!(
+			pending_payment.conflicting_txids,
+			Vec::<Txid>::new(),
+			"current txid must not remain in its own conflict list"
+		);
 	}
 }
