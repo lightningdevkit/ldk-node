@@ -15,7 +15,9 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, ScriptBuf, Txid};
-use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
+use common::logging::{
+	init_log_logger, validate_log_entry, MockLogFacadeLogger, MultiNodeLogger, TestLogWriter,
+};
 use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
 	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
@@ -36,7 +38,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	TransactionType, UnifiedPaymentResult,
 };
-use ldk_node::{BuildError, Builder, Event, Node, NodeError};
+use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -2877,6 +2879,165 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_rejects_jit_channel_without_anchor_reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let channel_opening_fee_ppm = 10_000;
+	let channel_over_provisioning_ppm = 100_000;
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm,
+		channel_over_provisioning_ppm,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: false,
+		disable_client_reserve: false,
+	};
+
+	let service_logger = Arc::new(MockLogFacadeLogger::new());
+	let service_config = random_config(true);
+	let anchor_reserve_sats = service_config
+		.node_config
+		.anchor_channels_config
+		.as_ref()
+		.unwrap()
+		.per_channel_reserve_sats;
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.set_custom_logger(service_logger.clone());
+	service_builder.enable_liquidity_provider(lsps2_service_config);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+	let client_node_id = client_node.node_id();
+
+	let payer_config = random_config(true);
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	let service_addr = service_node.onchain_payment().new_address().unwrap();
+	let client_addr = client_node.onchain_payment().new_address().unwrap();
+	let payer_addr = payer_node.onchain_payment().new_address().unwrap();
+
+	let reserve_shortfall_margin_sat = 5_000;
+	let jit_amount_msat = 100_000_000;
+	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
+	let amount_to_forward_msat = jit_amount_msat - service_fee_msat;
+	let channel_overprovisioning_msat =
+		(amount_to_forward_msat * channel_over_provisioning_ppm as u64) / 1_000_000;
+	let expected_channel_size_sat = (amount_to_forward_msat + channel_overprovisioning_msat) / 1000;
+	let service_funding_sats =
+		anchor_reserve_sats + expected_channel_size_sat + reserve_shortfall_margin_sat;
+	assert!(
+		service_funding_sats
+			< anchor_reserve_sats + expected_channel_size_sat + anchor_reserve_sats
+	);
+
+	premine_blocks(&bitcoind.client, &electrsd.client).await;
+	distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr],
+		Amount::from_sat(service_funding_sats),
+	)
+	.await;
+	distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![client_addr],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![payer_addr],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	let service_balances = service_node.list_balances();
+	assert_eq!(service_balances.total_anchor_channels_reserve_sats, anchor_reserve_sats);
+	assert_eq!(
+		service_balances.spendable_onchain_balance_sats,
+		expected_channel_size_sat + reserve_shortfall_margin_sat
+	);
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let jit_invoice = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel(jit_amount_msat, &invoice_description.into(), 1024, None)
+		.unwrap();
+
+	let _payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+
+	tokio::time::timeout(
+		std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+		async {
+			loop {
+				if service_logger
+					.retrieve_logs()
+					.iter()
+					.any(|log| log.contains("Unable to create channel due to insufficient funds"))
+				{
+					break;
+				}
+				assert!(
+					service_node
+						.list_channels()
+						.iter()
+						.all(|c| c.counterparty.node_id != client_node_id),
+					"LSPS2 service opened a channel without retaining the optional anchor reserve"
+				);
+				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+			}
+		},
+	)
+	.await
+	.expect(&format!(
+		"Timed out waiting for LSPS2 insufficient-funds log. Logs: {:?}",
+		service_logger.retrieve_logs()
+	));
+
+	assert!(service_node.list_channels().iter().all(|c| c.counterparty.node_id != client_node_id));
+	assert!(client_node.list_channels().iter().all(|c| c.counterparty.node_id != service_node_id));
+
+	service_node.stop().unwrap();
+	client_node.stop().unwrap();
+	payer_node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn facade_logging() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
@@ -3811,6 +3972,161 @@ async fn open_channel_with_all_with_anchors() {
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
+}
+
+#[derive(Clone, Copy)]
+enum OpenChannelVariant {
+	Standard,
+	Announced,
+	ZeroReserve,
+	StandardWithAll,
+	AnnouncedWithAll,
+	ZeroReserveWithAll,
+}
+
+impl OpenChannelVariant {
+	fn label(&self) -> &'static str {
+		match self {
+			Self::Standard => "open_channel",
+			Self::Announced => "open_announced_channel",
+			Self::ZeroReserve => "open_0reserve_channel",
+			Self::StandardWithAll => "open_channel_with_all",
+			Self::AnnouncedWithAll => "open_announced_channel_with_all",
+			Self::ZeroReserveWithAll => "open_0reserve_channel_with_all",
+		}
+	}
+}
+
+fn open_channel_variant(
+	variant: OpenChannelVariant, node_a: &Node, node_b: &Node, channel_amount_sats: u64,
+) -> Result<(), NodeError> {
+	let address = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	match variant {
+		OpenChannelVariant::Standard => node_a
+			.open_channel(node_b.node_id(), address, channel_amount_sats, None, None)
+			.map(|_| ()),
+		OpenChannelVariant::Announced => node_a
+			.open_announced_channel(node_b.node_id(), address, channel_amount_sats, None, None)
+			.map(|_| ()),
+		OpenChannelVariant::ZeroReserve => node_a
+			.open_0reserve_channel(node_b.node_id(), address, channel_amount_sats, None, None)
+			.map(|_| ()),
+		OpenChannelVariant::StandardWithAll => {
+			node_a.open_channel_with_all(node_b.node_id(), address, None, None).map(|_| ())
+		},
+		OpenChannelVariant::AnnouncedWithAll => node_a
+			.open_announced_channel_with_all(node_b.node_id(), address, None, None)
+			.map(|_| ()),
+		OpenChannelVariant::ZeroReserveWithAll => {
+			node_a.open_0reserve_channel_with_all(node_b.node_id(), address, None, None).map(|_| ())
+		},
+	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn open_channel_variants_reserve_funds_for_anchor_peers() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let exact_variants = [
+		OpenChannelVariant::Standard,
+		OpenChannelVariant::Announced,
+		OpenChannelVariant::ZeroReserve,
+	];
+	let with_all_variants = [
+		OpenChannelVariant::StandardWithAll,
+		OpenChannelVariant::AnnouncedWithAll,
+		OpenChannelVariant::ZeroReserveWithAll,
+	];
+
+	let premine_amount_sat = 1_000_000;
+	let exact_channel_amount_sat = premine_amount_sat - 10_000;
+	let anchor_reserve_sat = 25_000;
+
+	let mut addresses = Vec::new();
+	let mut exact_cases = Vec::new();
+	for variant in exact_variants {
+		let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+		addresses.push(node_a.onchain_payment().new_address().unwrap());
+		addresses.push(node_b.onchain_payment().new_address().unwrap());
+		exact_cases.push((variant, node_a, node_b));
+	}
+
+	let mut with_all_cases = Vec::new();
+	for variant in with_all_variants {
+		let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+		addresses.push(node_a.onchain_payment().new_address().unwrap());
+		addresses.push(node_b.onchain_payment().new_address().unwrap());
+		with_all_cases.push((variant, node_a, node_b));
+	}
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		addresses,
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	for (_, node_a, node_b) in exact_cases.iter().chain(with_all_cases.iter()) {
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+		assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+		assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	}
+
+	for (variant, node_a, node_b) in exact_cases {
+		assert_eq!(
+			Err(NodeError::InsufficientFunds),
+			open_channel_variant(variant, &node_a, &node_b, exact_channel_amount_sat),
+			"{} should require funds for the channel amount plus anchor reserve",
+			variant.label()
+		);
+		node_a.stop().unwrap();
+		node_b.stop().unwrap();
+	}
+
+	let mut opened_with_all_cases = Vec::new();
+	for (variant, node_a, node_b) in with_all_cases {
+		open_channel_variant(variant, &node_a, &node_b, 0)
+			.unwrap_or_else(|e| panic!("{} failed: {e:?}", variant.label()));
+
+		let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
+		let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
+		assert_eq!(funding_txo_a, funding_txo_b, "{} funding txo mismatch", variant.label());
+		wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
+
+		opened_with_all_cases.push((variant, node_a, node_b, funding_txo_a));
+	}
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	for (variant, node_a, node_b, funding_txo) in opened_with_all_cases {
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+
+		let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+		let _user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+		let balances = node_a.list_balances();
+		assert_eq!(balances.total_onchain_balance_sats, anchor_reserve_sat - 1);
+		assert_eq!(balances.total_anchor_channels_reserve_sats, anchor_reserve_sat - 1);
+		assert_eq!(balances.spendable_onchain_balance_sats, 0);
+
+		let channels = node_a.list_channels();
+		assert_eq!(channels.len(), 1, "{} should have one channel", variant.label());
+		let channel = &channels[0];
+		// Also subtract the fees spent to open the channel
+		assert_eq!(channel.channel_value_sats, premine_amount_sat - anchor_reserve_sat - 155);
+		assert_eq!(channel.counterparty.node_id, node_b.node_id());
+		assert!(channel.counterparty.features.supports_anchors_zero_fee_htlc_tx());
+		assert!(!channel.counterparty.features.requires_anchors_zero_fee_htlc_tx());
+		assert_eq!(channel.funding_txo.unwrap(), funding_txo);
+		assert_eq!(channel.reserve_type, Some(ReserveType::Adaptive));
+
+		node_a.stop().unwrap();
+		node_b.stop().unwrap();
+	}
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
