@@ -105,6 +105,7 @@ enum ChainDataSourceConfig {
 		rpc_user: String,
 		rpc_password: String,
 		rest_client_config: Option<BitcoindRestClientConfig>,
+		wallet_rescan_from_height: Option<u32>,
 	},
 }
 
@@ -203,6 +204,8 @@ pub enum BuildError {
 	/// wallet birthday. Falling back to genesis would silently force a full-history rescan on
 	/// the next successful startup, so we abort instead.
 	ChainTipFetchFailed,
+	/// The configured wallet rescan height is above the current chain tip.
+	WalletRescanHeightTooHigh,
 }
 
 impl fmt::Display for BuildError {
@@ -245,6 +248,9 @@ impl fmt::Display for BuildError {
 					f,
 					"Failed to determine the current chain tip on first startup. Verify the chain data source is reachable and correctly configured."
 				)
+			},
+			Self::WalletRescanHeightTooHigh => {
+				write!(f, "Wallet rescan height is above the current chain tip.")
 			},
 		}
 	}
@@ -300,7 +306,6 @@ pub struct NodeBuilder {
 	async_payments_role: Option<AsyncPaymentsRole>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
-	recovery_mode: bool,
 }
 
 impl NodeBuilder {
@@ -318,7 +323,6 @@ impl NodeBuilder {
 		let log_writer_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
-		let recovery_mode = false;
 		Self {
 			config,
 			chain_data_source_config,
@@ -328,7 +332,6 @@ impl NodeBuilder {
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
-			recovery_mode,
 		}
 	}
 
@@ -393,8 +396,13 @@ impl NodeBuilder {
 	/// ## Parameters:
 	/// * `rpc_host`, `rpc_port`, `rpc_user`, `rpc_password` - Required parameters for the Bitcoin Core RPC
 	///   connection.
+	/// * `wallet_rescan_from_height` - Optional wallet birthday height to rescan from on first
+	///   startup, before wallet state exists. Existing wallets are not rewound. The height must
+	///   be at or below the current tip. Passing `Some(0)` rescans from genesis; passing `None`
+	///   checkpoints at the current tip.
 	pub fn set_chain_source_bitcoind_rpc(
 		&mut self, rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
+		wallet_rescan_from_height: Option<u32>,
 	) -> &mut Self {
 		self.chain_data_source_config = Some(ChainDataSourceConfig::Bitcoind {
 			rpc_host,
@@ -402,6 +410,7 @@ impl NodeBuilder {
 			rpc_user,
 			rpc_password,
 			rest_client_config: None,
+			wallet_rescan_from_height,
 		});
 		self
 	}
@@ -415,9 +424,13 @@ impl NodeBuilder {
 	/// * `rest_host`, `rest_port` - Required parameters for the Bitcoin Core REST connection.
 	/// * `rpc_host`, `rpc_port`, `rpc_user`, `rpc_password` - Required parameters for the Bitcoin Core RPC
 	///   connection
+	/// * `wallet_rescan_from_height` - Optional wallet birthday height to rescan from on first
+	///   startup, before wallet state exists. Existing wallets are not rewound. The height must
+	///   be at or below the current tip. Passing `Some(0)` rescans from genesis; passing `None`
+	///   checkpoints at the current tip.
 	pub fn set_chain_source_bitcoind_rest(
 		&mut self, rest_host: String, rest_port: u16, rpc_host: String, rpc_port: u16,
-		rpc_user: String, rpc_password: String,
+		rpc_user: String, rpc_password: String, wallet_rescan_from_height: Option<u32>,
 	) -> &mut Self {
 		self.chain_data_source_config = Some(ChainDataSourceConfig::Bitcoind {
 			rpc_host,
@@ -425,6 +438,7 @@ impl NodeBuilder {
 			rpc_user,
 			rpc_password,
 			rest_client_config: Some(BitcoindRestClientConfig { rest_host, rest_port }),
+			wallet_rescan_from_height,
 		});
 
 		self
@@ -613,16 +627,6 @@ impl NodeBuilder {
 
 		self.async_payments_role = role;
 		Ok(self)
-	}
-
-	/// Configures the [`Node`] to resync chain data from genesis on first startup, recovering any
-	/// historical wallet funds.
-	///
-	/// This should only be set on first startup when importing an older wallet from a previously
-	/// used [`NodeEntropy`].
-	pub fn set_wallet_recovery_mode(&mut self) -> &mut Self {
-		self.recovery_mode = true;
-		self
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -865,7 +869,6 @@ impl NodeBuilder {
 			self.liquidity_source_config.as_ref(),
 			self.pathfinding_scores_sync_config.as_ref(),
 			self.async_payments_role,
-			self.recovery_mode,
 			seed_bytes,
 			runtime,
 			logger,
@@ -979,14 +982,20 @@ impl ArcedNodeBuilder {
 	/// ## Parameters:
 	/// * `rpc_host`, `rpc_port`, `rpc_user`, `rpc_password` - Required parameters for the Bitcoin Core RPC
 	///   connection.
+	/// * `wallet_rescan_from_height` - Optional wallet birthday height to rescan from on first
+	///   startup, before wallet state exists. Existing wallets are not rewound. The height must
+	///   be at or below the current tip. Passing `Some(0)` rescans from genesis; passing `None`
+	///   checkpoints at the current tip.
 	pub fn set_chain_source_bitcoind_rpc(
 		&self, rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
+		wallet_rescan_from_height: Option<u32>,
 	) {
 		self.inner.write().expect("lock").set_chain_source_bitcoind_rpc(
 			rpc_host,
 			rpc_port,
 			rpc_user,
 			rpc_password,
+			wallet_rescan_from_height,
 		);
 	}
 
@@ -999,9 +1008,13 @@ impl ArcedNodeBuilder {
 	/// * `rest_host`, `rest_port` - Required parameters for the Bitcoin Core REST connection.
 	/// * `rpc_host`, `rpc_port`, `rpc_user`, `rpc_password` - Required parameters for the Bitcoin Core RPC
 	///   connection
+	/// * `wallet_rescan_from_height` - Optional wallet birthday height to rescan from on first
+	///   startup, before wallet state exists. Existing wallets are not rewound. The height must
+	///   be at or below the current tip. Passing `Some(0)` rescans from genesis; passing `None`
+	///   checkpoints at the current tip.
 	pub fn set_chain_source_bitcoind_rest(
 		&self, rest_host: String, rest_port: u16, rpc_host: String, rpc_port: u16,
-		rpc_user: String, rpc_password: String,
+		rpc_user: String, rpc_password: String, wallet_rescan_from_height: Option<u32>,
 	) {
 		self.inner.write().expect("lock").set_chain_source_bitcoind_rest(
 			rest_host,
@@ -1010,6 +1023,7 @@ impl ArcedNodeBuilder {
 			rpc_port,
 			rpc_user,
 			rpc_password,
+			wallet_rescan_from_height,
 		);
 	}
 
@@ -1150,15 +1164,6 @@ impl ArcedNodeBuilder {
 		&self, role: Option<AsyncPaymentsRole>,
 	) -> Result<(), BuildError> {
 		self.inner.write().expect("lock").set_async_payments_role(role).map(|_| ())
-	}
-
-	/// Configures the [`Node`] to resync chain data from genesis on first startup, recovering any
-	/// historical wallet funds.
-	///
-	/// This should only be set on first startup when importing an older wallet from a previously
-	/// used [`NodeEntropy`].
-	pub fn set_wallet_recovery_mode(&self) {
-		self.inner.write().expect("lock").set_wallet_recovery_mode();
 	}
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
@@ -1356,8 +1361,8 @@ fn build_with_store_internal(
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
-	async_payments_role: Option<AsyncPaymentsRole>, recovery_mode: bool, seed_bytes: [u8; 64],
-	runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
+	async_payments_role: Option<AsyncPaymentsRole>, seed_bytes: [u8; 64], runtime: Arc<Runtime>,
+	logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -1473,6 +1478,7 @@ fn build_with_store_internal(
 			rpc_user,
 			rpc_password,
 			rest_client_config,
+			..
 		}) => match rest_client_config {
 			Some(rest_client_config) => runtime.block_on(async {
 				ChainSource::new_bitcoind_rest(
@@ -1526,6 +1532,12 @@ fn build_with_store_internal(
 		},
 	};
 	let chain_source = Arc::new(chain_source);
+	let wallet_rescan_from_height = match chain_data_source_config {
+		Some(ChainDataSourceConfig::Bitcoind { wallet_rescan_from_height, .. }) => {
+			*wallet_rescan_from_height
+		},
+		_ => None,
+	};
 
 	// Initialize the on-chain wallet and chain access
 	let xprv = bitcoin::bip32::Xpriv::new_master(config.network, &seed_bytes).map_err(|e| {
@@ -1568,7 +1580,14 @@ fn build_with_store_internal(
 			},
 		})?;
 	let bdk_wallet = match wallet_opt {
-		Some(wallet) => wallet,
+		Some(wallet) => {
+			// `wallet_rescan_from_height`, when set, is fresh-wallet-only. Rewinding a
+			// persisted wallet is not just replacing BDK's best block: its local-chain and
+			// tx-graph changesets are already persisted, and LDK state may also have synced
+			// to a later tip. A safe rewind needs an explicit recovery flow that invalidates
+			// all dependent state before replaying blocks.
+			wallet
+		},
 		None => {
 			// Guard against silently setting the wallet birthday to genesis on a fresh node:
 			// if we are creating a new wallet but failed to learn the current chain tip from
@@ -1577,9 +1596,10 @@ fn build_with_store_internal(
 			// Abort cleanly instead so the misconfiguration surfaces on the first startup.
 			// Esplora/Electrum backends currently never return a tip at build time, so they
 			// retain their existing behavior.
-			let is_bitcoind_source =
-				matches!(chain_data_source_config, Some(ChainDataSourceConfig::Bitcoind { .. }));
-			if !recovery_mode && chain_tip_opt.is_none() && is_bitcoind_source {
+			if wallet_rescan_from_height.is_none()
+				&& chain_tip_opt.is_none()
+				&& matches!(chain_data_source_config, Some(ChainDataSourceConfig::Bitcoind { .. }))
+			{
 				log_error!(
 					logger,
 					"Failed to determine chain tip on first startup. Aborting to avoid pinning the wallet birthday to genesis."
@@ -1599,23 +1619,67 @@ fn build_with_store_internal(
 					BuildError::WalletSetupFailed
 				})?;
 
-			if !recovery_mode {
-				if let Some(best_block) = chain_tip_opt {
-					// Insert the first checkpoint if we have it, to avoid resyncing from genesis.
-					// TODO: Use a proper wallet birthday once BDK supports it.
-					let mut latest_checkpoint = wallet.latest_checkpoint();
-					let block_id = bdk_chain::BlockId {
-						height: best_block.height,
-						hash: best_block.block_hash,
-					};
-					latest_checkpoint = latest_checkpoint.insert(block_id);
-					let update =
-						bdk_wallet::Update { chain: Some(latest_checkpoint), ..Default::default() };
-					wallet.apply_update(update).map_err(|e| {
-						log_error!(logger, "Failed to apply checkpoint during wallet setup: {}", e);
+			// Decide which block (if any) to insert as the initial BDK checkpoint. If the
+			// bitcoind config provides a wallet rescan height, resolve that block and use it as
+			// the checkpoint. Otherwise, use the current chain tip to avoid any rescan.
+			let checkpoint_block = match wallet_rescan_from_height {
+				None => chain_tip_opt,
+				Some(height) => {
+					if let Some(chain_tip) = chain_tip_opt {
+						if height > chain_tip.height {
+							log_error!(
+								logger,
+								"Wallet rescan height {} is above current chain tip {}.",
+								height,
+								chain_tip.height
+							);
+							return Err(BuildError::WalletRescanHeightTooHigh);
+						}
+					}
+
+					let utxo_source = chain_source.as_utxo_source().ok_or_else(|| {
+						log_error!(
+							logger,
+							"Wallet rescan height requested but the chain source does not support block-by-height lookups.",
+						);
 						BuildError::WalletSetupFailed
 					})?;
-				}
+					let hash_res = runtime.block_on(async {
+						lightning_block_sync::gossip::UtxoSource::get_block_hash_by_height(
+							&utxo_source,
+							height,
+						)
+						.await
+					});
+					match hash_res {
+						Ok(hash) => Some(BlockLocator::new(hash, height)),
+						Err(e) => {
+							log_error!(
+								logger,
+								"Failed to resolve block hash at height {} for wallet rescan: {:?}",
+								height,
+								e,
+							);
+							return Err(BuildError::WalletSetupFailed);
+						},
+					}
+				},
+			};
+
+			if let Some(best_block) = checkpoint_block {
+				// Insert the checkpoint so BDK starts scanning from there instead of from
+				// genesis.
+				// TODO: Use a proper wallet birthday once BDK supports it.
+				let mut latest_checkpoint = wallet.latest_checkpoint();
+				let block_id =
+					bdk_chain::BlockId { height: best_block.height, hash: best_block.block_hash };
+				latest_checkpoint = latest_checkpoint.insert(block_id);
+				let update =
+					bdk_wallet::Update { chain: Some(latest_checkpoint), ..Default::default() };
+				wallet.apply_update(update).map_err(|e| {
+					log_error!(logger, "Failed to apply checkpoint during wallet setup: {}", e);
+					BuildError::WalletSetupFailed
+				})?;
 			}
 			wallet
 		},

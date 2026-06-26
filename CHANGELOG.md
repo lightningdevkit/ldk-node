@@ -6,6 +6,14 @@
 - Users of the VSS storage backend must upgrade their VSS server to at least version
   `v0.1.0-alpha.0` before upgrading LDK Node.
 
+## Feature and API updates
+- The Bitcoin Core RPC and REST chain-source builder methods now accept an optional
+  `wallet_rescan_from_height` argument. Passing a height lets fresh wallets rescan from a known
+  birthday block instead of checkpointing at the current tip, which is useful when restoring a
+  wallet on a pruned node where the full history is unavailable but the wallet birthday height is
+  known. Existing wallets are not rewound, and future heights fail the build. Passing `Some(0)`
+  rescans from genesis; passing `None` keeps the default current-tip checkpoint behavior. (#884)
+
 ## Bug Fixes and Improvements
 - Building a fresh node against a Bitcoin Core RPC or REST chain source that fails to return the
   current chain tip now aborts with a new `BuildError::ChainTipFetchFailed` variant instead of
