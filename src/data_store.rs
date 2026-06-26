@@ -225,6 +225,7 @@ where
 mod tests {
 	use lightning::impl_writeable_tlv_based;
 	use lightning::io;
+	use lightning::util::persist::{PageToken, PaginatedKVStore, PaginatedListResponse};
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
@@ -312,6 +313,16 @@ mod tests {
 			&self, _primary_namespace: &str, _secondary_namespace: &str,
 		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
 			async { Err(io::Error::new(io::ErrorKind::Other, "list failed")) }
+		}
+	}
+
+	impl PaginatedKVStore for FailingStore {
+		fn list_paginated(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+			_page_token: Option<PageToken>,
+		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
+			async { Err(io::Error::new(io::ErrorKind::Other, "list_paginated failed")) }
 		}
 	}
 
