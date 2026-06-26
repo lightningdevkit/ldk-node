@@ -1334,7 +1334,7 @@ impl Node {
 			.peer_by_node_id(peer_node_id)
 			.ok_or(Error::ConnectionFailed)?
 			.init_features;
-		let anchor_channel = init_features.requires_anchors_zero_fee_htlc_tx();
+		let anchor_channel = init_features.supports_anchors_zero_fee_htlc_tx();
 		Ok(new_channel_anchor_reserve_sats(&self.config, peer_node_id, anchor_channel))
 	}
 

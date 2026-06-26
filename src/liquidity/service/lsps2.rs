@@ -454,7 +454,7 @@ where
 					self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
 				let required_funds_sats = channel_amount_sats
 					+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
-						if init_features.requires_anchors_zero_fee_htlc_tx()
+						if init_features.supports_anchors_zero_fee_htlc_tx()
 							&& !c.trusted_peers_no_reserve.contains(&their_network_key)
 						{
 							c.per_channel_reserve_sats
