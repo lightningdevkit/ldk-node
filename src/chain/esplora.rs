@@ -6,6 +6,7 @@
 // accordance with one or both of these licenses.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -38,6 +39,7 @@ pub(super) struct EsploraChainSource {
 	config: Arc<Config>,
 	logger: Arc<Logger>,
 	node_metrics: Arc<PersistedNodeMetrics>,
+	force_wallet_full_scan: AtomicBool,
 }
 
 impl EsploraChainSource {
@@ -62,6 +64,7 @@ impl EsploraChainSource {
 
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
+		let force_wallet_full_scan = AtomicBool::new(sync_config.force_wallet_full_scan);
 		Ok(Self {
 			sync_config,
 			esplora_client,
@@ -73,6 +76,7 @@ impl EsploraChainSource {
 			config,
 			logger,
 			node_metrics,
+			force_wallet_full_scan,
 		})
 	}
 
@@ -101,9 +105,11 @@ impl EsploraChainSource {
 
 	async fn sync_onchain_wallet_inner(&self, onchain_wallet: Arc<Wallet>) -> Result<(), Error> {
 		// If this is our first sync, do a full scan with the configured gap limit.
-		// Otherwise just do an incremental sync.
-		let incremental_sync =
+		// Otherwise just do an incremental sync, unless a forced full scan is still pending.
+		let has_prior_sync =
 			self.node_metrics.read().expect("lock").latest_onchain_wallet_sync_timestamp.is_some();
+		let forced_full_scan = self.force_wallet_full_scan.load(Ordering::Acquire);
+		let incremental_sync = has_prior_sync && !forced_full_scan;
 
 		macro_rules! get_and_apply_wallet_update {
 			($sync_future: expr) => {{
@@ -177,7 +183,7 @@ impl EsploraChainSource {
 			}}
 		}
 
-		if incremental_sync {
+		let res = if incremental_sync {
 			let sync_request = onchain_wallet.get_incremental_sync_request();
 			let wallet_sync_timeout_fut = tokio::time::timeout(
 				Duration::from_secs(
@@ -199,7 +205,11 @@ impl EsploraChainSource {
 				),
 			);
 			get_and_apply_wallet_update!(wallet_sync_timeout_fut)
+		};
+		if forced_full_scan && res.is_ok() {
+			self.force_wallet_full_scan.store(false, Ordering::Release);
 		}
+		res
 	}
 
 	pub(super) async fn sync_lightning_wallet(
