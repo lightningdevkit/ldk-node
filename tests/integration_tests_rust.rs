@@ -36,7 +36,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	TransactionType, UnifiedPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{Builder, Event, Node, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -44,6 +44,34 @@ use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
 use serde_json::json;
+
+/// Waits until `node` has classified the funding broadcast `funding_txid` (a channel open or splice
+/// candidate) into a payment record carrying a `tx_type`. Classification runs off the broadcaster's
+/// queue, which can lag a `sync_wallets` call under load — and for a splice the counterparty also
+/// broadcasts the same tx, so a racing sync can see it before this node classifies. Waiting here
+/// keeps the next sync on the funding short-circuit instead of recording a generic on-chain payment
+/// that clobbers the classification.
+async fn wait_for_classified_funding_payment(node: &Node, funding_txid: Txid) {
+	let poll = async {
+		loop {
+			let classified = node.list_payments().into_iter().any(|p| {
+				matches!(
+					p.kind,
+					PaymentKind::Onchain { txid, tx_type: Some(_), .. } if txid == funding_txid
+				)
+			});
+			if classified {
+				return;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+		}
+	};
+	tokio::time::timeout(std::time::Duration::from_secs(common::INTEROP_TIMEOUT_SECS), poll)
+		.await
+		.unwrap_or_else(|_| {
+			panic!("timed out waiting for funding broadcast {} to be classified", funding_txid)
+		});
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle() {
@@ -1236,6 +1264,10 @@ async fn splice_channel() {
 	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
+	// Node B contributed to this splice, so wait for its funding broadcast to be classified before
+	// syncing — otherwise a sync racing the broadcaster's queue records a generic on-chain payment.
+	wait_for_classified_funding_payment(&node_b, txo.txid).await;
+
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
 	node_a.sync_wallets().unwrap();
@@ -1291,6 +1323,10 @@ async fn splice_channel() {
 
 	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
+
+	// Node A contributed to this splice, so wait for its funding broadcast to be classified before
+	// syncing — otherwise a sync racing the broadcaster's queue records a generic on-chain payment.
+	wait_for_classified_funding_payment(&node_a, txo.txid).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
@@ -1407,6 +1443,9 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// replaced (a `WalletEvent::TxReplaced`), which must not drop the payment's durable funding
 	// classification — the `tx_type` assertion below catches a regression deterministically.
 	wait_for_tx(&electrsd.client, original_txo.txid).await;
+	// Node B contributed to this splice; wait for its classification before syncing so the sync
+	// takes the funding short-circuit rather than racing the broadcaster's queue.
+	wait_for_classified_funding_payment(&node_b, original_txo.txid).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1441,6 +1480,9 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 
 	// Wait for the RBF transaction to replace the original in the mempool.
 	wait_for_tx(&electrsd.client, rbf_txo.txid).await;
+	// Wait for node_b's re-classification of the RBF candidate before syncing, so the recorded
+	// candidate figures reflect the replacement rather than racing the broadcaster's queue.
+	wait_for_classified_funding_payment(&node_b, rbf_txo.txid).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1640,6 +1682,9 @@ async fn splice_payment_reorged_to_unconfirmed() {
 	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(&electrsd.client, splice_txo.txid).await;
+	// Ensure node_b classified the splice before syncing so the test exercises a funding payment's
+	// reorg rather than a generic on-chain payment's.
+	wait_for_classified_funding_payment(&node_b, splice_txo.txid).await;
 
 	// Confirm the splice with a single block — confirmed, but short of `ANTI_REORG_DELAY`, so the
 	// payment is `Confirmed`/`Pending` rather than graduated.
