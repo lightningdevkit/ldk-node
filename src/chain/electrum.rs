@@ -305,17 +305,33 @@ impl ElectrumChainSource {
 				false,
 				"We should have started the chain source before checking submitpackage support"
 			);
-			return Err(Error::ChainSourceNotSupported);
+			return Err(Error::ConnectionFailed);
 		};
 
 		// TODO: Use `protocol_version` API once shipped in
-		// https://github.com/bitcoindevkit/rust-electrum-client/pull/213
+		// https://github.com/bitcoindevkit/rust-electrum-client/pull/213.
+		//
+		// This could still accept an Electrum server running against Bitcoin Core v26
+		// through v28, which does not relay ephemeral dust.
 		electrum_client
 			.electrum_client
 			.transaction_broadcast_package(&super::dummy_package())
 			.map_err(|e| {
-				log_error!(self.logger, "Electrum server does not support submitpackage: {:?}", e);
-				Error::ChainSourceNotSupported
+				if let electrum_client::Error::AllAttemptsErrored(_) = e {
+					log_error!(
+						self.logger,
+						"Electrum server does not support submitpackage: {:?}",
+						e
+					);
+					Error::ChainSourceNotSupported
+				} else {
+					log_error!(
+						self.logger,
+						"Failed to check support for submitpackage on the Electrum server: {}",
+						e
+					);
+					Error::ConnectionFailed
+				}
 			})?;
 		Ok(())
 	}

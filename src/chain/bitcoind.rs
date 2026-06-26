@@ -128,15 +128,15 @@ impl BitcoindChainSource {
 		.await
 		.map_err(|e| {
 			log_error!(self.logger, "Failed to get node version: {:?}", e);
-			Error::ChainSourceNotSupported
+			Error::ConnectionFailed
 		})?;
 
 		let node_version = node_version_result.map_err(|e| {
 			log_error!(self.logger, "Failed to get node version: {:?}", e);
-			Error::ChainSourceNotSupported
+			Error::ConnectionFailed
 		})?;
 
-		// v26 first shipped the `submitpackage` RPC, but we need v29 to relay ephemeral dust.
+		// v26 first shipped the `submitpackage` RPC, but we need v29 to relay ephemeral dust
 		if node_version < 290000 {
 			log_error!(self.logger, "Bitcoin backend MUST be greater than or equal to v29");
 			return Err(Error::ChainSourceNotSupported);
