@@ -937,6 +937,69 @@ async fn onchain_wallet_recovery() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_wallet_force_full_scan_rediscovers_esplora_funds() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	premine_blocks(&bitcoind.client, &electrsd.client).await;
+
+	let address_source_config = random_config(true);
+	let node_entropy = address_source_config.node_entropy;
+	let address_source_node = setup_node(&chain_source, address_source_config);
+	let addr_1 = address_source_node.onchain_payment().new_address().unwrap();
+	let addr_2 = address_source_node.onchain_payment().new_address().unwrap();
+	address_source_node.stop().unwrap();
+	drop(address_source_node);
+
+	let premine_amount_sat = 100_000;
+	let mut stale_config = random_config(true);
+	stale_config.node_entropy = node_entropy;
+	stale_config.store_type = TestStoreType::Sqlite;
+	let stale_node = setup_node(&chain_source, stale_config.clone());
+	stale_node.sync_wallets().unwrap();
+	assert_eq!(stale_node.list_balances().spendable_onchain_balance_sats, 0);
+	stale_node.stop().unwrap();
+	drop(stale_node);
+
+	let txid_1 = bitcoind
+		.client
+		.send_to_address(&addr_1, Amount::from_sat(premine_amount_sat))
+		.unwrap()
+		.0
+		.parse()
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid_1).await;
+	let txid_2 = bitcoind
+		.client
+		.send_to_address(&addr_2, Amount::from_sat(premine_amount_sat))
+		.unwrap()
+		.0
+		.parse()
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid_2).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+
+	let normal_node = setup_node(&chain_source, stale_config.clone());
+	normal_node.sync_wallets().unwrap();
+	assert_eq!(
+		normal_node.list_balances().spendable_onchain_balance_sats,
+		0,
+		"normal incremental sync should not rediscover previously-unknown addresses"
+	);
+	normal_node.stop().unwrap();
+	drop(normal_node);
+
+	stale_config.force_wallet_full_scan = true;
+	let recovered_node = setup_node(&chain_source, stale_config);
+	recovered_node.sync_wallets().unwrap();
+	assert_eq!(
+		recovered_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat * 2,
+		"forced full scan should rediscover funds sent to previously-unknown addresses"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_wallet_recovery_rescans_from_birthday_height() {
 	// End-to-end test for `wallet_rescan_from_height` against a bitcoind chain source. The
 	// scenario:

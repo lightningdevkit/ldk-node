@@ -506,6 +506,11 @@ pub struct EsploraSyncConfig {
 	pub background_sync_config: Option<BackgroundSyncConfig>,
 	/// Sync timeouts configuration.
 	pub timeouts_config: SyncTimeoutsConfig,
+	/// Whether to force BDK full scans until one succeeds.
+	///
+	/// This can be useful when restoring a wallet from seed on a node that has already synced
+	/// before, but may be missing funds sent to previously-unknown addresses.
+	pub force_wallet_full_scan: bool,
 }
 
 impl Default for EsploraSyncConfig {
@@ -513,6 +518,7 @@ impl Default for EsploraSyncConfig {
 		Self {
 			background_sync_config: Some(BackgroundSyncConfig::default()),
 			timeouts_config: SyncTimeoutsConfig::default(),
+			force_wallet_full_scan: false,
 		}
 	}
 }
@@ -533,6 +539,11 @@ pub struct ElectrumSyncConfig {
 	pub background_sync_config: Option<BackgroundSyncConfig>,
 	/// Sync timeouts configuration.
 	pub timeouts_config: SyncTimeoutsConfig,
+	/// Whether to force BDK full scans until one succeeds.
+	///
+	/// This can be useful when restoring a wallet from seed on a node that has already synced
+	/// before, but may be missing funds sent to previously-unknown addresses.
+	pub force_wallet_full_scan: bool,
 }
 
 impl Default for ElectrumSyncConfig {
@@ -540,6 +551,7 @@ impl Default for ElectrumSyncConfig {
 		Self {
 			background_sync_config: Some(BackgroundSyncConfig::default()),
 			timeouts_config: SyncTimeoutsConfig::default(),
+			force_wallet_full_scan: false,
 		}
 	}
 }
