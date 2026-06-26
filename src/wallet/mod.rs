@@ -1330,6 +1330,14 @@ impl Wallet {
 		&self, tx: &Transaction,
 	) -> (Option<u64>, Option<u64>, PaymentDirection) {
 		let locked_wallet = self.inner.lock().expect("lock");
+		self.onchain_payment_fields_locked(&locked_wallet, tx)
+	}
+
+	/// [`Self::onchain_payment_fields`] against an already-locked wallet, so callers that hold the
+	/// lock (e.g. [`Self::create_payment_from_tx`]) can reuse the derivation without re-locking.
+	fn onchain_payment_fields_locked(
+		&self, locked_wallet: &PersistedWallet<KVStoreWalletPersister>, tx: &Transaction,
+	) -> (Option<u64>, Option<u64>, PaymentDirection) {
 		let fee = locked_wallet.calculate_fee(tx).unwrap_or(Amount::ZERO);
 		let (sent, received) = locked_wallet.sent_and_received(tx);
 		let fee_sat = fee.to_sat();
@@ -1373,35 +1381,10 @@ impl Wallet {
 
 		let kind = PaymentKind::Onchain { txid, status: confirmation_status, tx_type: None };
 
-		let fee = locked_wallet.calculate_fee(tx).unwrap_or(Amount::ZERO);
-		let (sent, received) = locked_wallet.sent_and_received(tx);
-		let fee_sat = fee.to_sat();
+		let (amount_msat, fee_paid_msat, direction) =
+			self.onchain_payment_fields_locked(locked_wallet, tx);
 
-		let (direction, amount_msat) = if sent > received {
-			(
-				PaymentDirection::Outbound,
-				Some(
-					(sent.to_sat().saturating_sub(fee_sat).saturating_sub(received.to_sat()))
-						* 1000,
-				),
-			)
-		} else {
-			(
-				PaymentDirection::Inbound,
-				Some(
-					received.to_sat().saturating_sub(sent.to_sat().saturating_sub(fee_sat)) * 1000,
-				),
-			)
-		};
-
-		PaymentDetails::new(
-			payment_id,
-			kind,
-			amount_msat,
-			Some(fee_sat * 1000),
-			direction,
-			payment_status,
-		)
+		PaymentDetails::new(payment_id, kind, amount_msat, fee_paid_msat, direction, payment_status)
 	}
 
 	fn create_pending_payment_from_tx(
