@@ -12,7 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lightning::io;
-use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+use lightning::util::persist::{
+	KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+};
 use lightning_types::string::PrintableString;
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
@@ -341,6 +343,24 @@ impl PaginatedKVStore for PostgresStore {
 					.list_paginated_internal(&primary_namespace, &secondary_namespace, page_token)
 					.await
 			});
+			task.await.map_err(|e| {
+				io::Error::new(
+					io::ErrorKind::Other,
+					format!("PostgreSQL runtime task failed: {}", e),
+				)
+			})?
+		}
+	}
+}
+
+impl MigratableKVStore for PostgresStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		let runtime = self.internal_runtime();
+		async move {
+			let task = runtime.spawn(async move { inner.list_all_keys_internal().await });
 			task.await.map_err(|e| {
 				io::Error::new(
 					io::ErrorKind::Other,
@@ -725,6 +745,25 @@ impl PostgresStoreInner {
 		Ok(keys)
 	}
 
+	async fn list_all_keys_internal(&self) -> io::Result<Vec<(String, String, String)>> {
+		let sql = format!(
+			"SELECT primary_namespace, secondary_namespace, key FROM {}",
+			self.kv_table_name_sql
+		);
+
+		let err_map = |e: PgError| {
+			let msg = format!("Failed to retrieve queried rows: {e}");
+			io::Error::new(io::ErrorKind::Other, msg)
+		};
+
+		let mut locked = self.locked_client().await?;
+		let rows = query_with_retry!(self, locked, err_map, locked.query(sql.as_str(), &[]))?;
+
+		let keys: Vec<(String, String, String)> =
+			rows.iter().map(|row| (row.get(0), row.get(1), row.get(2))).collect();
+		Ok(keys)
+	}
+
 	async fn list_paginated_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
 	) -> io::Result<PaginatedListResponse> {
@@ -902,6 +941,29 @@ mod tests {
 		do_test_store(&store_0, &store_1);
 		cleanup_store(&store_0).await;
 		cleanup_store(&store_1).await;
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_postgres_store_list_all_keys() {
+		let store = create_test_store("test_pg_list_all_keys").await;
+
+		KVStore::write(&store, "ns_a", "sub_a", "key_a", vec![1u8]).await.unwrap();
+		KVStore::write(&store, "ns_a", "sub_b", "key_b", vec![2u8]).await.unwrap();
+		KVStore::write(&store, "ns_b", "", "key_c", vec![3u8]).await.unwrap();
+
+		let mut keys = MigratableKVStore::list_all_keys(&store).await.unwrap();
+		keys.sort();
+
+		assert_eq!(
+			keys,
+			vec![
+				("ns_a".to_string(), "sub_a".to_string(), "key_a".to_string()),
+				("ns_a".to_string(), "sub_b".to_string(), "key_b".to_string()),
+				("ns_b".to_string(), "".to_string(), "key_c".to_string()),
+			]
+		);
+
+		cleanup_store(&store).await;
 	}
 
 	async fn kill_connection(store: &PostgresStore) {
