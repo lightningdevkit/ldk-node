@@ -17,6 +17,8 @@ use lightning::routing::gossip::RoutingFees;
 #[cfg(not(feature = "uniffi"))]
 use lightning::routing::gossip::{ChannelInfo, NodeInfo};
 
+#[cfg(feature = "uniffi")]
+use crate::config::NodeColor;
 use crate::types::Graph;
 
 /// Represents the network as nodes and channels between them.
@@ -159,6 +161,8 @@ pub struct NodeAnnouncementInfo {
 	/// May be invalid or malicious (eg control chars),
 	/// should not be exposed to the user.
 	pub alias: String,
+	/// RGB color assigned to the node.
+	pub color: NodeColor,
 	/// List of addresses on which this node is reachable
 	pub addresses: Vec<SocketAddress>,
 }
@@ -169,6 +173,7 @@ impl From<lightning::routing::gossip::NodeAnnouncementInfo> for NodeAnnouncement
 		Self {
 			last_update: value.last_update(),
 			alias: value.alias().to_string(),
+			color: NodeColor { red: value.rgb()[0], green: value.rgb()[1], blue: value.rgb()[2] },
 			addresses: value.addresses().iter().cloned().collect(),
 		}
 	}
