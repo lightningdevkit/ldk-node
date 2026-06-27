@@ -1251,7 +1251,7 @@ impl Node {
 			FundingAmount::Exact { amount_sats } => {
 				// Check funds availability after connection (includes anchor reserve
 				// calculation).
-				self.check_sufficient_funds_for_channel(amount_sats, &peer_info.node_id)?;
+				self.check_sufficient_onchain_funds(amount_sats, &peer_info.node_id, true)?;
 				amount_sats
 			},
 			FundingAmount::Max => {
@@ -1357,33 +1357,37 @@ impl Node {
 		Ok(new_channel_anchor_reserve_sats(&self.config, peer_node_id, anchor_channel))
 	}
 
-	fn check_sufficient_funds_for_channel(
-		&self, amount_sats: u64, peer_node_id: &PublicKey,
+	fn check_sufficient_onchain_funds(
+		&self, amount_sats: u64, peer_node_id: &PublicKey, for_new_channel: bool,
 	) -> Result<(), Error> {
+		let action_str = if for_new_channel { "create channel" } else { "splice-in" };
 		let cur_anchor_reserve_sats =
 			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let spendable_amount_sats =
 			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
 
-		// Fail early if we have less than the channel value available.
 		if spendable_amount_sats < amount_sats {
-			log_error!(self.logger,
-				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
-				spendable_amount_sats, amount_sats
+			log_error!(
+				self.logger,
+				"Unable to {} due to insufficient funds. Available: {}sats, Required: {}sats",
+				action_str,
+				spendable_amount_sats,
+				amount_sats
 			);
 			return Err(Error::InsufficientFunds);
 		}
 
-		// Fail if we have less than the channel value + anchor reserve available (if applicable).
-		let required_funds_sats =
-			amount_sats + self.new_channel_anchor_reserve_sats(peer_node_id)?;
+		if for_new_channel {
+			let required_funds_sats =
+				amount_sats + self.new_channel_anchor_reserve_sats(peer_node_id)?;
 
-		if spendable_amount_sats < required_funds_sats {
-			log_error!(self.logger,
-				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
-				spendable_amount_sats, required_funds_sats
-			);
-			return Err(Error::InsufficientFunds);
+			if spendable_amount_sats < required_funds_sats {
+				log_error!(self.logger,
+					"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
+					spendable_amount_sats, required_funds_sats
+				);
+				return Err(Error::InsufficientFunds);
+			}
 		}
 
 		Ok(())
@@ -1659,7 +1663,7 @@ impl Node {
 				},
 			};
 
-			self.check_sufficient_funds_for_channel(splice_amount_sats, &counterparty_node_id)?;
+			self.check_sufficient_onchain_funds(splice_amount_sats, &counterparty_node_id, false)?;
 
 			let funding_template = self
 				.channel_manager
