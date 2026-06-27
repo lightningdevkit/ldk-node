@@ -415,16 +415,19 @@ impl TierStoreInner {
 
 		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
 			if let Some(eph_store) = self.ephemeral_store.as_ref() {
-				let res = KVStore::write(
-					eph_store.as_ref(),
-					primary_namespace.as_str(),
-					secondary_namespace.as_str(),
-					key.as_str(),
-					buf,
-				)
-				.await;
-				self.clean_locks(&lock_ref, locking_key);
-				return res;
+				let eph_store = Arc::clone(eph_store);
+				return self
+					.execute_locked_write(lock_ref, locking_key, version, || async move {
+						KVStore::write(
+							eph_store.as_ref(),
+							primary_namespace.as_str(),
+							secondary_namespace.as_str(),
+							key.as_str(),
+							buf,
+						)
+						.await
+					})
+					.await;
 			}
 		}
 
@@ -453,16 +456,19 @@ impl TierStoreInner {
 
 		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
 			if let Some(eph_store) = self.ephemeral_store.as_ref() {
-				let res = KVStore::remove(
-					eph_store.as_ref(),
-					primary_namespace.as_str(),
-					secondary_namespace.as_str(),
-					key.as_str(),
-					lazy,
-				)
-				.await;
-				self.clean_locks(&lock_ref, locking_key);
-				return res;
+				let eph_store = Arc::clone(eph_store);
+				return self
+					.execute_locked_write(lock_ref, locking_key, version, || async move {
+						KVStore::remove(
+							eph_store.as_ref(),
+							primary_namespace.as_str(),
+							secondary_namespace.as_str(),
+							key.as_str(),
+							lazy,
+						)
+						.await
+					})
+					.await;
 			}
 		}
 
@@ -847,6 +853,97 @@ mod tests {
 			.await
 			.unwrap();
 		assert_eq!(persisted, new_data);
+	}
+
+	#[tokio::test]
+	async fn ephemeral_writes_preserve_latest_call_order() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
+		let mut tier = setup_tier_store(primary_store, logger);
+
+		let ephemeral_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("ephemeral")).unwrap()));
+		tier.set_ephemeral_store(ephemeral_store);
+
+		let old_data = vec![1u8; 32];
+		let new_data = vec![2u8; 32];
+
+		let old_write = tier.write(
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+			old_data,
+		);
+		let new_write = tier.write(
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+			new_data.clone(),
+		);
+
+		new_write.await.unwrap();
+		old_write.await.unwrap();
+
+		let persisted = tier
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await
+			.unwrap();
+		assert_eq!(persisted, new_data);
+	}
+
+	#[tokio::test]
+	async fn ephemeral_removes_preserve_latest_call_order() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
+		let mut tier = setup_tier_store(primary_store, logger);
+
+		let ephemeral_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("ephemeral")).unwrap()));
+		tier.set_ephemeral_store(ephemeral_store);
+
+		let data = vec![2u8; 32];
+
+		let stale_remove = tier.remove(
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+			true,
+		);
+		let new_write = tier.write(
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+			data.clone(),
+		);
+
+		new_write.await.unwrap();
+		stale_remove.await.unwrap();
+
+		let persisted = tier
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await
+			.unwrap();
+		assert_eq!(persisted, data);
 	}
 
 	#[tokio::test]
