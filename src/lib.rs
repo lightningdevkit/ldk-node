@@ -1370,6 +1370,23 @@ impl Node {
 		Ok(())
 	}
 
+	fn check_sufficient_funds_for_splice_in(&self, amount_sats: u64) -> Result<(), Error> {
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		let spendable_amount_sats =
+			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+
+		if spendable_amount_sats < amount_sats {
+			log_error!(self.logger,
+				"Unable to splice channel due to insufficient funds. Available: {}sats, Requested: {}sats",
+				spendable_amount_sats, amount_sats
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		Ok(())
+	}
+
 	/// Connect to a node and open a new unannounced channel.
 	///
 	/// To open an announced channel, see [`Node::open_announced_channel`].
@@ -1640,7 +1657,7 @@ impl Node {
 				},
 			};
 
-			self.check_sufficient_funds_for_channel(splice_amount_sats, &counterparty_node_id)?;
+			self.check_sufficient_funds_for_splice_in(splice_amount_sats)?;
 
 			let funding_template = self
 				.channel_manager
