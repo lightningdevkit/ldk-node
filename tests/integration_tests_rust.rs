@@ -15,7 +15,9 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
 use bitcoin::{Address, Amount, ScriptBuf, Txid};
-use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
+use common::logging::{
+	init_log_logger, validate_log_entry, MockLogFacadeLogger, MultiNodeLogger, TestLogWriter,
+};
 use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
 	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
@@ -2126,6 +2128,165 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	expect_event!(payer_node, PaymentFailed);
 	assert_eq!(client_node.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_rejects_jit_channel_without_anchor_reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let channel_opening_fee_ppm = 10_000;
+	let channel_over_provisioning_ppm = 100_000;
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm,
+		channel_over_provisioning_ppm,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: false,
+		disable_client_reserve: false,
+	};
+
+	let service_logger = Arc::new(MockLogFacadeLogger::new());
+	let service_config = random_config(true);
+	let anchor_reserve_sats = service_config
+		.node_config
+		.anchor_channels_config
+		.as_ref()
+		.unwrap()
+		.per_channel_reserve_sats;
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.set_custom_logger(service_logger.clone());
+	service_builder.enable_liquidity_provider(lsps2_service_config);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+	let client_node_id = client_node.node_id();
+
+	let payer_config = random_config(true);
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	let service_addr = service_node.onchain_payment().new_address().unwrap();
+	let client_addr = client_node.onchain_payment().new_address().unwrap();
+	let payer_addr = payer_node.onchain_payment().new_address().unwrap();
+
+	let reserve_shortfall_margin_sat = 5_000;
+	let jit_amount_msat = 100_000_000;
+	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
+	let amount_to_forward_msat = jit_amount_msat - service_fee_msat;
+	let channel_overprovisioning_msat =
+		(amount_to_forward_msat * channel_over_provisioning_ppm as u64) / 1_000_000;
+	let expected_channel_size_sat = (amount_to_forward_msat + channel_overprovisioning_msat) / 1000;
+	let service_funding_sats =
+		anchor_reserve_sats + expected_channel_size_sat + reserve_shortfall_margin_sat;
+	assert!(
+		service_funding_sats
+			< anchor_reserve_sats + expected_channel_size_sat + anchor_reserve_sats
+	);
+
+	premine_blocks(&bitcoind.client, &electrsd.client).await;
+	distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr],
+		Amount::from_sat(service_funding_sats),
+	)
+	.await;
+	distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![client_addr],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![payer_addr],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	let service_balances = service_node.list_balances();
+	assert_eq!(service_balances.total_anchor_channels_reserve_sats, anchor_reserve_sats);
+	assert_eq!(
+		service_balances.spendable_onchain_balance_sats,
+		expected_channel_size_sat + reserve_shortfall_margin_sat
+	);
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let jit_invoice = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel(jit_amount_msat, &invoice_description.into(), 1024, None)
+		.unwrap();
+
+	let _payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+
+	tokio::time::timeout(
+		std::time::Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+		async {
+			loop {
+				if service_logger
+					.retrieve_logs()
+					.iter()
+					.any(|log| log.contains("Unable to create channel due to insufficient funds"))
+				{
+					break;
+				}
+				assert!(
+					service_node
+						.list_channels()
+						.iter()
+						.all(|c| c.counterparty.node_id != client_node_id),
+					"LSPS2 service opened a channel without retaining the optional anchor reserve"
+				);
+				tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+			}
+		},
+	)
+	.await
+	.expect(&format!(
+		"Timed out waiting for LSPS2 insufficient-funds log. Logs: {:?}",
+		service_logger.retrieve_logs()
+	));
+
+	assert!(service_node.list_channels().iter().all(|c| c.counterparty.node_id != client_node_id));
+	assert!(client_node.list_channels().iter().all(|c| c.counterparty.node_id != service_node_id));
+
+	service_node.stop().unwrap();
+	client_node.stop().unwrap();
+	payer_node.stop().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
