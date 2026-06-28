@@ -1256,7 +1256,8 @@ where
 					}
 				}
 
-				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
+				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx()
+					|| channel_type.requires_anchor_zero_fee_commitments();
 				if anchor_channel && self.config.anchor_channels_config.is_none() {
 					log_error!(
 						self.logger,

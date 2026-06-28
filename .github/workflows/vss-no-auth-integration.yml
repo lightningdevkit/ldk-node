@@ -30,6 +30,21 @@ jobs:
         uses: actions/checkout@v6
         with:
           path: ldk-node
+      - name: Enable caching for electrs
+        id: cache-electrs
+        uses: actions/cache@v5
+        with:
+          path: bin/electrs-${{ runner.os }}-${{ runner.arch }}
+          key: electrs-submit-package-${{ runner.os }}-${{ runner.arch }}
+      - name: Download electrs
+        if: "steps.cache-electrs.outputs.cache-hit != 'true'"
+        run: |
+          source ./ldk-node/scripts/build_electrs.sh
+          mkdir -p bin
+          mv "$ELECTRS_EXE" bin/electrs-${{ runner.os }}-${{ runner.arch }}
+      - name: Set electrs environment variable
+        run: |
+          echo "ELECTRS_EXE=$( pwd )/bin/electrs-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
       - name: Checkout VSS
         uses: actions/checkout@v6
         with:

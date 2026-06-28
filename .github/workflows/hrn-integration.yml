@@ -27,13 +27,18 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bin/electrs-${{ runner.os }}-${{ runner.arch }}
-          key: electrs-${{ runner.os }}-${{ runner.arch }}
-      - name: Download bitcoind/electrs
-        if: "steps.cache-bitcoind.outputs.cache-hit != 'true' || steps.cache-electrs.outputs.cache-hit != 'true'"
+          key: electrs-submit-package-${{ runner.os }}-${{ runner.arch }}
+      - name: Download bitcoind
+        if: "steps.cache-bitcoind.outputs.cache-hit != 'true'"
         run: |
-          source ./scripts/download_bitcoind_electrs.sh
+          source ./scripts/download_bitcoind.sh
           mkdir -p bin
           mv "$BITCOIND_EXE" bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
+      - name: Download electrs
+        if: "steps.cache-electrs.outputs.cache-hit != 'true'"
+        run: |
+          source ./scripts/build_electrs.sh
+          mkdir -p bin
           mv "$ELECTRS_EXE" bin/electrs-${{ runner.os }}-${{ runner.arch }}
       - name: Set bitcoind/electrs environment variables
         run: |

@@ -285,9 +285,28 @@ impl Node {
 			e
 		})?;
 
-		// Block to ensure we update our fee rate cache once on startup
+		let any_current_0fc_channels =
+			self.chain_monitor.list_monitors().into_iter().any(|channel_id| {
+				self.chain_monitor
+					.get_monitor(channel_id)
+					.map(|monitor| {
+						monitor.channel_type_features().requires_anchor_zero_fee_commitments()
+					})
+					.unwrap_or(false)
+			});
+
+		// Block to ensure we update our fee rate cache once on startup.
+		// Also take this opportunity to make sure our chain source supports any current or
+		// future 0FC channels.
 		let chain_source = Arc::clone(&self.chain_source);
-		self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await })?;
+		self.runtime.block_on(async move {
+			tokio::try_join!(
+				chain_source.update_fee_rate_estimates(),
+				chain_source.validate_zero_fee_commitments_support_if_required(
+					any_current_0fc_channels || self.config.anchor_channels_config.is_some()
+				)
+			)
+		})?;
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
@@ -1334,7 +1353,8 @@ impl Node {
 			.peer_by_node_id(peer_node_id)
 			.ok_or(Error::ConnectionFailed)?
 			.init_features;
-		let anchor_channel = init_features.requires_anchors_zero_fee_htlc_tx();
+		let anchor_channel = init_features.supports_anchors_zero_fee_htlc_tx()
+			|| init_features.supports_anchor_zero_fee_commitments();
 		Ok(new_channel_anchor_reserve_sats(&self.config, peer_node_id, anchor_channel))
 	}
 
@@ -1363,6 +1383,23 @@ impl Node {
 			log_error!(self.logger,
 				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
 				spendable_amount_sats, required_funds_sats
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		Ok(())
+	}
+
+	fn check_sufficient_funds_for_splice_in(&self, amount_sats: u64) -> Result<(), Error> {
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		let spendable_amount_sats =
+			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+
+		if spendable_amount_sats < amount_sats {
+			log_error!(self.logger,
+				"Unable to splice channel due to insufficient funds. Available: {}sats, Requested: {}sats",
+				spendable_amount_sats, amount_sats
 			);
 			return Err(Error::InsufficientFunds);
 		}
@@ -1640,7 +1677,7 @@ impl Node {
 				},
 			};
 
-			self.check_sufficient_funds_for_channel(splice_amount_sats, &counterparty_node_id)?;
+			self.check_sufficient_funds_for_splice_in(splice_amount_sats)?;
 
 			let funding_template = self
 				.channel_manager
@@ -2297,9 +2334,10 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 				!anchor_channels_config.trusted_peers_no_reserve.contains(&c.counterparty.node_id)
 					&& c.channel_shutdown_state
 						.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
-					&& c.channel_type
-						.as_ref()
-						.map_or(false, |t| t.requires_anchors_zero_fee_htlc_tx())
+					&& c.channel_type.as_ref().map_or(false, |t| {
+						t.requires_anchors_zero_fee_htlc_tx()
+							|| t.requires_anchor_zero_fee_commitments()
+					})
 			})
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
