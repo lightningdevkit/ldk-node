@@ -649,8 +649,9 @@ async fn onchain_send_receive() {
 	let payment_a = node_a.payment(&payment_id).unwrap();
 	assert_eq!(payment_a.status, PaymentStatus::Pending);
 	match payment_a.kind {
-		PaymentKind::Onchain { status, .. } => {
+		PaymentKind::Onchain { status, tx_type, .. } => {
 			assert!(matches!(status, ConfirmationStatus::Unconfirmed));
+			assert_eq!(tx_type, None);
 		},
 		_ => panic!("Unexpected payment kind"),
 	}
@@ -658,8 +659,9 @@ async fn onchain_send_receive() {
 	let payment_b = node_b.payment(&payment_id).unwrap();
 	assert_eq!(payment_b.status, PaymentStatus::Pending);
 	match payment_b.kind {
-		PaymentKind::Onchain { status, .. } => {
+		PaymentKind::Onchain { status, tx_type, .. } => {
 			assert!(matches!(status, ConfirmationStatus::Unconfirmed));
+			assert_eq!(tx_type, None);
 		},
 		_ => panic!("Unexpected payment kind"),
 	}
@@ -688,18 +690,20 @@ async fn onchain_send_receive() {
 
 	let payment_a = node_a.payment(&payment_id).unwrap();
 	match payment_a.kind {
-		PaymentKind::Onchain { txid: _txid, status, .. } => {
+		PaymentKind::Onchain { txid: _txid, status, tx_type } => {
 			assert_eq!(_txid, txid);
 			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+			assert_eq!(tx_type, None);
 		},
 		_ => panic!("Unexpected payment kind"),
 	}
 
 	let payment_b = node_b.payment(&payment_id).unwrap();
 	match payment_b.kind {
-		PaymentKind::Onchain { txid: _txid, status, .. } => {
+		PaymentKind::Onchain { txid: _txid, status, tx_type } => {
 			assert_eq!(_txid, txid);
 			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+			assert_eq!(tx_type, None);
 		},
 		_ => panic!("Unexpected payment kind"),
 	}
