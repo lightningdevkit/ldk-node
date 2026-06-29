@@ -181,11 +181,8 @@ pub struct Config {
 	/// counterparty doesn't support `option_anchors_zero_fee_htlc_tx`. If set to `None`, new
 	/// channels will be negotiated with the legacy `option_static_remotekey` channel type only.
 	///
-	/// **Note:** If set to `None` *after* some Anchor channels have already been
-	/// opened, no dedicated emergency on-chain reserve will be maintained for these channels,
-	/// which can be dangerous if only insufficient funds are available at the time of channel
-	/// closure. We *will* however still try to get the Anchor spending transactions confirmed
-	/// on-chain with the funds available.
+	/// **Note:** If set to `None`, the node must not have any anchor channels open or
+	/// pending closure.
 	pub anchor_channels_config: Option<AnchorChannelsConfig>,
 	/// Configuration options for payment routing and pathfinding.
 	///

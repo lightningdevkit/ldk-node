@@ -297,6 +297,29 @@ impl Node {
 			e
 		})?;
 
+		let any_current_anchor_channels =
+			self.channel_manager.list_channels().into_iter().any(|channel| {
+				channel
+					.channel_shutdown_state
+					.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
+					&& channel.channel_type.as_ref().map_or(false, requires_anchor_channel_type)
+			}) || self.chain_monitor.list_monitors().into_iter().any(|channel_id| {
+				self.chain_monitor
+					.get_monitor(channel_id)
+					.map(|monitor| requires_anchor_channel_type(&monitor.channel_type_features()))
+					.unwrap_or(false)
+			});
+
+		if any_current_anchor_channels && self.config.anchor_channels_config.is_none() {
+			log_error!(
+				self.logger,
+				"Cannot remove the anchor channels config while anchor channels \
+				are still open or unresolved. You must close and resolve all anchor \
+				channels before disabling anchor channels."
+			);
+			return Err(Error::ChannelConfigUpdateFailed);
+		}
+
 		// Block to ensure we update our fee rate cache once on startup.
 		// Also take this opportunity to make sure our chain source supports 0FC channels
 		// if anchor channels are configured.
