@@ -119,8 +119,6 @@ pub use bitcoin;
 use bitcoin::secp256k1::PublicKey;
 #[cfg(feature = "uniffi")]
 pub use bitcoin::FeeRate;
-#[cfg(not(feature = "uniffi"))]
-use bitcoin::FeeRate;
 use bitcoin::{Address, Amount, BlockHash, Network};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
@@ -138,7 +136,9 @@ pub use error::Error as NodeError;
 use error::Error;
 pub use event::Event;
 use event::{EventHandler, EventQueue};
-use fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
+use fee_estimator::{
+	max_funding_feerate, rbf_splice_feerates, ConfirmationTarget, FeeEstimator, OnchainFeeEstimator,
+};
 #[cfg(feature = "uniffi")]
 use ffi::*;
 use gossip::GossipSource;
@@ -1584,7 +1584,7 @@ impl Node {
 		{
 			let min_feerate =
 				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
-			let max_feerate = FeeRate::from_sat_per_kwu(min_feerate.to_sat_per_kwu() * 3 / 2);
+			let max_feerate = max_funding_feerate(min_feerate);
 
 			let splice_amount_sats = match splice_amount_sats {
 				FundingAmount::Exact { amount_sats } => amount_sats,
@@ -1653,16 +1653,26 @@ impl Node {
 			if funding_template.prior_contribution().is_some() {
 				log_error!(
 					self.logger,
-					"Failed to splice channel: a prior splice contribution is pending"
+					"Failed to splice channel: a prior splice contribution is pending; use bump_channel_funding_fee to bump its fee"
 				);
 				return Err(Error::ChannelSplicingFailed);
 			}
+
+			// When contributing to a pending splice, the funding template requires at least the RBF
+			// minimum feerate to replace the in-flight transaction. Use it in place of our funding
+			// feerate estimate when it's higher, as long as it stays within our max.
+			let feerate = match funding_template.min_rbf_feerate() {
+				Some(min_rbf_feerate) if min_rbf_feerate <= max_feerate => {
+					min_feerate.max(min_rbf_feerate)
+				},
+				_ => min_feerate,
+			};
 
 			let contribution = self
 				.runtime
 				.block_on(funding_template.splice_in(
 					Amount::from_sat(splice_amount_sats),
-					min_feerate,
+					feerate,
 					max_feerate,
 					Arc::clone(&self.wallet),
 				))
@@ -1763,7 +1773,7 @@ impl Node {
 
 			let min_feerate =
 				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
-			let max_feerate = FeeRate::from_sat_per_kwu(min_feerate.to_sat_per_kwu() * 3 / 2);
+			let max_feerate = max_funding_feerate(min_feerate);
 
 			let funding_template = self
 				.channel_manager
@@ -1776,17 +1786,27 @@ impl Node {
 			if funding_template.prior_contribution().is_some() {
 				log_error!(
 					self.logger,
-					"Failed to splice channel: a prior splice contribution is pending"
+					"Failed to splice channel: a prior splice contribution is pending; use bump_channel_funding_fee to bump its fee"
 				);
 				return Err(Error::ChannelSplicingFailed);
 			}
+
+			// When contributing to a pending splice, the funding template requires at least the RBF
+			// minimum feerate to replace the in-flight transaction. Use it in place of our funding
+			// feerate estimate when it's higher, as long as it stays within our max.
+			let feerate = match funding_template.min_rbf_feerate() {
+				Some(min_rbf_feerate) if min_rbf_feerate <= max_feerate => {
+					min_feerate.max(min_rbf_feerate)
+				},
+				_ => min_feerate,
+			};
 
 			let outputs = vec![bitcoin::TxOut {
 				value: Amount::from_sat(splice_amount_sats),
 				script_pubkey: address.script_pubkey(),
 			}];
 			let contribution =
-				funding_template.splice_out(outputs, min_feerate, max_feerate).map_err(|e| {
+				funding_template.splice_out(outputs, feerate, max_feerate).map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
@@ -1800,6 +1820,77 @@ impl Node {
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})
+		} else {
+			log_error!(
+				self.logger,
+				"Channel not found for user_channel_id {} and counterparty {}",
+				user_channel_id,
+				counterparty_node_id
+			);
+			Err(Error::ChannelSplicingFailed)
+		}
+	}
+
+	/// Fee-bumps the pending splice on a channel by replacing its in-flight funding transaction
+	/// (RBF). The splice's amount and destination are preserved; only the fee rate is raised.
+	/// Errors if the channel has no pending splice to bump.
+	pub fn bump_channel_funding_fee(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+	) -> Result<(), Error> {
+		let open_channels =
+			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
+		if let Some(channel_details) =
+			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
+		{
+			let min_feerate =
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+
+			let funding_template = self
+				.channel_manager
+				.splice_channel(&channel_details.channel_id, &counterparty_node_id)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {:?}", e);
+					Error::ChannelSplicingFailed
+				})?;
+
+			let Some(min_rbf_feerate) = funding_template.min_rbf_feerate() else {
+				log_error!(self.logger, "Failed to RBF channel: no pending splice to replace");
+				return Err(Error::ChannelSplicingFailed);
+			};
+
+			let Some((target_feerate, max_feerate)) =
+				rbf_splice_feerates(min_feerate, min_rbf_feerate)
+			else {
+				log_error!(
+					self.logger,
+					"Failed to RBF channel: the RBF minimum feerate exceeds our maximum"
+				);
+				return Err(Error::ChannelSplicingFailed);
+			};
+
+			let contribution = self
+				.runtime
+				.block_on(funding_template.rbf_prior_contribution(
+					Some(target_feerate),
+					max_feerate,
+					Arc::clone(&self.wallet),
+				))
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {}", e);
+					Error::ChannelSplicingFailed
+				})?;
+
+			self.channel_manager
+				.funding_contributed(
+					&channel_details.channel_id,
+					&counterparty_node_id,
+					contribution,
+					None,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to RBF channel: {:?}", e);
 					Error::ChannelSplicingFailed
 				})
 		} else {

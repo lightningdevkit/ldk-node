@@ -27,16 +27,16 @@ use common::{
 	setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_tx, TestChainSource, TestConfig,
 	TestStoreType, TestSyncStore,
 };
-use electrsd::corepc_node::Node as BitcoinD;
+use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
-	UnifiedPaymentResult,
+	TransactionType, UnifiedPaymentResult,
 };
-use ldk_node::{Builder, Event, NodeError};
+use ldk_node::{Builder, Event, Node, NodeError};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -44,6 +44,34 @@ use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
 use serde_json::json;
+
+/// Waits until `node` has classified the funding broadcast `funding_txid` (a channel open or splice
+/// candidate) into a payment record carrying a `tx_type`. Classification runs off the broadcaster's
+/// queue, which can lag a `sync_wallets` call under load — and for a splice the counterparty also
+/// broadcasts the same tx, so a racing sync can see it before this node classifies. Waiting here
+/// keeps the next sync on the funding short-circuit instead of recording a generic on-chain payment
+/// that clobbers the classification.
+async fn wait_for_classified_funding_payment(node: &Node, funding_txid: Txid) {
+	let poll = async {
+		loop {
+			let classified = node.list_payments().into_iter().any(|p| {
+				matches!(
+					p.kind,
+					PaymentKind::Onchain { txid, tx_type: Some(_), .. } if txid == funding_txid
+				)
+			});
+			if classified {
+				return;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+		}
+	};
+	tokio::time::timeout(std::time::Duration::from_secs(common::INTEROP_TIMEOUT_SECS), poll)
+		.await
+		.unwrap_or_else(|_| {
+			panic!("timed out waiting for funding broadcast {} to be classified", funding_txid)
+		});
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle() {
@@ -610,7 +638,7 @@ async fn onchain_send_receive() {
 
 	let payment_a = node_a.payment(&payment_id).unwrap();
 	match payment_a.kind {
-		PaymentKind::Onchain { txid: _txid, status } => {
+		PaymentKind::Onchain { txid: _txid, status, .. } => {
 			assert_eq!(_txid, txid);
 			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
 		},
@@ -619,7 +647,7 @@ async fn onchain_send_receive() {
 
 	let payment_b = node_a.payment(&payment_id).unwrap();
 	match payment_b.kind {
-		PaymentKind::Onchain { txid: _txid, status } => {
+		PaymentKind::Onchain { txid: _txid, status, .. } => {
 			assert_eq!(_txid, txid);
 			assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
 		},
@@ -1236,6 +1264,10 @@ async fn splice_channel() {
 	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
+	// Node B contributed to this splice, so wait for its funding broadcast to be classified before
+	// syncing — otherwise a sync racing the broadcaster's queue records a generic on-chain payment.
+	wait_for_classified_funding_payment(&node_b, txo.txid).await;
+
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
 	node_a.sync_wallets().unwrap();
@@ -1292,6 +1324,10 @@ async fn splice_channel() {
 	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
+	// Node A contributed to this splice, so wait for its funding broadcast to be classified before
+	// syncing — otherwise a sync racing the broadcaster's queue records a generic on-chain payment.
+	wait_for_classified_funding_payment(&node_a, txo.txid).await;
+
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
 	node_a.sync_wallets().unwrap();
@@ -1306,6 +1342,18 @@ async fn splice_channel() {
 	let payment =
 		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
 	assert_eq!(payment.fee_paid_msat, Some(expected_splice_out_fee_sat * 1_000));
+	// The splice-out graduated to a confirmed interactive-funding payment. Its `direction` is left
+	// unasserted on purpose: the destination is our own address, so it is a self-transfer (channel
+	// balance -> on-chain wallet) whose inbound/outbound sense is ambiguous.
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain {
+			status: ConfirmationStatus::Confirmed { .. },
+			tx_type: Some(TransactionType::InteractiveFunding { .. }),
+			..
+		}
+	));
 
 	assert_eq!(
 		node_a.list_balances().total_onchain_balance_sats,
@@ -1315,6 +1363,416 @@ async fn splice_channel() {
 		node_a.list_balances().total_lightning_balance_sats,
 		4_000_000 - closing_transaction_fee_sat - anchor_output_sat - expected_splice_out_fee_sat
 	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rbf_splice_channel() {
+	run_rbf_splice_channel_test(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rbf_splice_channel_original_candidate_confirms() {
+	run_rbf_splice_channel_test(true).await;
+}
+
+async fn run_rbf_splice_channel_test(confirm_original: bool) {
+	// Use a custom bitcoind config with a lower incrementalrelayfee so that the +25 sat/kwu
+	// (0.1 sat/vB) RBF feerate bump satisfies BIP125's absolute fee increase requirement.
+	let bitcoind_exe = std::env::var("BITCOIND_EXE")
+		.ok()
+		.or_else(|| corepc_node::downloaded_exe_path().ok())
+		.expect(
+			"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
+		);
+	let mut bitcoind_conf = corepc_node::Conf::default();
+	bitcoind_conf.network = "regtest";
+	bitcoind_conf.args.push("-rest");
+	bitcoind_conf.args.push("-incrementalrelayfee=0.00000100");
+	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
+
+	let electrs_exe = std::env::var("ELECTRS_EXE")
+		.ok()
+		.or_else(electrsd::downloaded_exe_path)
+		.expect("you need to provide env var ELECTRS_EXE or specify an electrsd version feature");
+	let mut electrsd_conf = electrsd::Conf::default();
+	electrsd_conf.http_enabled = true;
+	electrsd_conf.network = "regtest";
+	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// bump_channel_funding_fee should fail when there's no pending splice
+	assert_eq!(
+		node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id()),
+		Err(NodeError::ChannelSplicingFailed),
+	);
+
+	// Initiate a splice-in to create a pending splice
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+
+	let original_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+
+	// Sync so the original splice candidate is recorded as a canonical wallet transaction before
+	// the RBF below replaces it. The post-RBF sync then observes the original candidate being
+	// replaced (a `WalletEvent::TxReplaced`), which must not drop the payment's durable funding
+	// classification — the `tx_type` assertion below catches a regression deterministically.
+	wait_for_tx(&electrsd.client, original_txo.txid).await;
+	// Node B contributed to this splice; wait for its classification before syncing so the sync
+	// takes the funding short-circuit rather than racing the broadcaster's queue.
+	wait_for_classified_funding_payment(&node_b, original_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// For `confirm_original`, capture the original candidate's fee and raw transaction now, before
+	// the RBF replaces it, so it can be force-confirmed (instead of the RBF) further below.
+	let original_candidate: Option<(Option<u64>, String)> = if confirm_original {
+		let payment_id = PaymentId(original_txo.txid.to_byte_array());
+		let fee = node_b.payment(&payment_id).expect("splice payment exists").fee_paid_msat;
+		let raw_tx: String = bitcoind
+			.client
+			.call("getrawtransaction", &[json!(original_txo.txid.to_string())])
+			.expect("failed to fetch the original splice transaction");
+		Some((fee, raw_tx))
+	} else {
+		None
+	};
+
+	// Re-splicing the pending splice we already contributed to is rejected; the RBF guard points at
+	// bump_channel_funding_fee instead.
+	assert_eq!(
+		node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000),
+		Err(NodeError::ChannelSplicingFailed),
+	);
+
+	// bump_channel_funding_fee should succeed when there's a pending splice
+	node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id()).unwrap();
+
+	let rbf_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+
+	assert_ne!(original_txo, rbf_txo, "RBF should produce a different funding txo");
+
+	// Wait for the RBF transaction to replace the original in the mempool.
+	wait_for_tx(&electrsd.client, rbf_txo.txid).await;
+	// Wait for node_b's re-classification of the RBF candidate before syncing, so the recorded
+	// candidate figures reflect the replacement rather than racing the broadcaster's queue.
+	wait_for_classified_funding_payment(&node_b, rbf_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// After RBF but before confirmation, node_b (the initiator) should have a single on-chain
+	// payment covering both candidates: id anchored to the first broadcast, `kind.txid` pointing
+	// at the latest (RBF) candidate, and the durable interactive-funding `tx_type` preserved across
+	// the replacement.
+	let rbf_candidate_fee = {
+		let payment_id = PaymentId(original_txo.txid.to_byte_array());
+		let payment = node_b.payment(&payment_id).expect("splice payment exists");
+		match payment.kind {
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: Some(TransactionType::InteractiveFunding { .. }),
+			} => {
+				assert_eq!(txid, rbf_txo.txid);
+			},
+			ref other => {
+				panic!("expected Onchain Unconfirmed interactive-funding, got {:?}", other)
+			},
+		}
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		// Only one Onchain Pending payment for this splice attempt (not one per candidate).
+		let splice_payments = node_b.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Outbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. })
+				&& p.status == PaymentStatus::Pending
+		});
+		assert_eq!(
+			splice_payments.len(),
+			1,
+			"expected exactly one pending Onchain payment for the splice, got {}: {:#?}",
+			splice_payments.len(),
+			splice_payments,
+		);
+
+		// The fee recorded for the latest (RBF) candidate, which is the one that confirms below.
+		assert!(payment.fee_paid_msat.is_some());
+		payment.fee_paid_msat
+	};
+
+	// Confirm the splice. Normally the latest (RBF) candidate wins through the mempool; for
+	// `confirm_original` we instead mine the original candidate directly into a block so an
+	// earlier, lower-fee candidate is the one that confirms.
+	let winning_txo = if confirm_original { original_txo } else { rbf_txo };
+	if let Some((_, ref original_tx_hex)) = original_candidate {
+		let address = bitcoind.client.new_address().expect("failed to get new address");
+		let _: serde_json::Value = bitcoind
+			.client
+			.call("generateblock", &[json!(address.to_string()), json!([original_tx_hex])])
+			.expect("failed to mine the original splice candidate");
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 5).await;
+	} else {
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	}
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Verify the candidate that locked is the one that confirmed, not necessarily the last broadcast.
+	match node_a.next_event_async().await {
+		Event::ChannelReady { funding_txo, counterparty_node_id, .. } => {
+			assert_eq!(counterparty_node_id, Some(node_b.node_id()));
+			assert_eq!(funding_txo, Some(winning_txo));
+			node_a.event_handled().unwrap();
+		},
+		ref e => panic!("node_a got unexpected event: {:?}", e),
+	}
+	match node_b.next_event_async().await {
+		Event::ChannelReady { funding_txo, counterparty_node_id, .. } => {
+			assert_eq!(counterparty_node_id, Some(node_a.node_id()));
+			assert_eq!(funding_txo, Some(winning_txo));
+			node_b.event_handled().unwrap();
+		},
+		ref e => panic!("node_b got unexpected event: {:?}", e),
+	}
+
+	// The splice payment graduates to `Succeeded` purely from wallet sync reaching
+	// `ANTI_REORG_DELAY` confirmations — the `ChannelReady` events above are a separate
+	// channel-lifecycle signal, not what drives payment status. Its `kind.txid` reflects the
+	// winning RBF candidate, and `fee_paid_msat` carries this node's `FundingContribution` fee.
+	{
+		let payment_id = PaymentId(original_txo.txid.to_byte_array());
+		let payment = node_b.payment(&payment_id).expect("splice payment graduated");
+		assert_eq!(payment.status, PaymentStatus::Succeeded);
+		match payment.kind {
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Confirmed { .. }, .. } => {
+				assert_eq!(txid, winning_txo.txid);
+			},
+			ref other => panic!("expected Onchain Confirmed, got {:?}", other),
+		}
+		// Graduation stamps the economics of the candidate that actually confirmed. For
+		// `confirm_original` that is the earlier, lower-fee candidate, whose fee differs from the
+		// last-broadcast (RBF) candidate's — so this would fail if the payment kept the
+		// last-broadcast figures instead of the confirmed candidate's.
+		let expected_fee = match original_candidate {
+			Some((original_fee, _)) => {
+				assert_ne!(original_fee, rbf_candidate_fee);
+				original_fee
+			},
+			None => rbf_candidate_fee,
+		};
+		assert!(expected_fee.is_some());
+		assert_eq!(payment.fee_paid_msat, expected_fee);
+	}
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn funding_payment_graduates_without_channel_ready() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// node_a funds the channel, so it holds the funding payment. `open_channel` drains only the
+	// `ChannelPending` events, leaving any `ChannelReady` queued and undrained.
+	let funding_txo = open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+
+	// Mine past `ANTI_REORG_DELAY` and sync only node_a. node_b stays behind, so it cannot yet
+	// send `channel_ready` and node_a therefore cannot have emitted a `ChannelReady` event — any
+	// graduation below must come from wallet sync alone.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+
+	// The funding payment is `Succeeded` purely from wallet sync reaching `ANTI_REORG_DELAY`
+	// confirmations, asserted before draining any LDK event — so graduation is not driven by the
+	// Lightning `ChannelReady` signal.
+	let payment_id = PaymentId(funding_txo.txid.to_byte_array());
+	let payment = node_a.payment(&payment_id).expect("funding payment exists");
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	match payment.kind {
+		PaymentKind::Onchain {
+			txid,
+			status: ConfirmationStatus::Confirmed { .. },
+			tx_type: Some(TransactionType::Funding { .. }),
+		} => assert_eq!(txid, funding_txo.txid),
+		ref other => panic!("expected Onchain Confirmed funding payment, got {:?}", other),
+	}
+
+	// Let node_b catch up so the channel completes; the `ChannelReady` events follow the
+	// already-`Succeeded` payment rather than driving it.
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_payment_reorged_to_unconfirmed() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// node_b splices in, recording a funding payment it contributed to.
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, splice_txo.txid).await;
+	// Ensure node_b classified the splice before syncing so the test exercises a funding payment's
+	// reorg rather than a generic on-chain payment's.
+	wait_for_classified_funding_payment(&node_b, splice_txo.txid).await;
+
+	// Confirm the splice with a single block — confirmed, but short of `ANTI_REORG_DELAY`, so the
+	// payment is `Confirmed`/`Pending` rather than graduated.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	node_b.sync_wallets().unwrap();
+
+	let payment_id = PaymentId(splice_txo.txid.to_byte_array());
+	let payment = node_b.payment(&payment_id).expect("splice payment exists");
+	assert_eq!(payment.status, PaymentStatus::Pending);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
+	));
+
+	// Reorg the splice transaction out by replacing its block with a longer, transaction-free chain.
+	let original_height =
+		bitcoind.client.get_blockchain_info().expect("failed to get blockchain info").blocks;
+	invalidate_blocks(&bitcoind.client, 1);
+	let replacement_address = bitcoind.client.new_address().expect("failed to get new address");
+	for _ in 0..2 {
+		let _res: serde_json::Value = bitcoind
+			.client
+			.call("generateblock", &[json!(replacement_address.to_string()), json!([])])
+			.expect("failed to generate empty block");
+	}
+	wait_for_block(&electrsd.client, original_height as usize + 1).await;
+	node_b.sync_wallets().unwrap();
+
+	// The funding payment returns to `Unconfirmed` and stays `Pending`, exercising the
+	// `TxUnconfirmed` arm for a funding payment.
+	let payment = node_b.payment(&payment_id).expect("splice payment still exists");
+	assert_eq!(payment.status, PaymentStatus::Pending);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
+	));
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_in_rbf_joins_counterparty_splice() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// node_b (which didn't fund the channel open, so holds the on-chain balance) initiates a
+	// splice-in; node_a does not contribute to this first candidate.
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	let counterparty_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, counterparty_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// node_a contributes to the pending splice via RBF. Before honoring the funding template's RBF
+	// minimum feerate, this was rejected with FeeRateBelowRbfMinimum because node_a's funding
+	// feerate estimate sat below the minimum required to replace the in-flight transaction.
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 100_000).unwrap();
+	let rbf_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	assert_ne!(counterparty_txo, rbf_txo, "node_a's RBF should produce a different funding txo");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
