@@ -8,6 +8,7 @@ concurrency:
 
 jobs:
   check-python:
+    timeout-minutes: 60
     runs-on: ubuntu-latest
 
     env:
