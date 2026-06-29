@@ -14,7 +14,9 @@ use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use lightning::io;
-use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+use lightning::util::persist::{
+	KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+};
 use lightning_types::string::PrintableString;
 use rusqlite::{named_params, Connection};
 
@@ -193,6 +195,21 @@ impl PaginatedKVStore for SqliteStore {
 		let fut = tokio::task::spawn_blocking(move || {
 			inner.list_paginated_internal(&primary_namespace, &secondary_namespace, page_token)
 		});
+		async move {
+			fut.await.unwrap_or_else(|e| {
+				let msg = format!("Failed to IO operation due join error: {}", e);
+				Err(io::Error::new(io::ErrorKind::Other, msg))
+			})
+		}
+	}
+}
+
+impl MigratableKVStore for SqliteStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		let fut = tokio::task::spawn_blocking(move || inner.list_all_keys_internal());
 		async move {
 			fut.await.unwrap_or_else(|e| {
 				let msg = format!("Failed to IO operation due join error: {}", e);
@@ -486,6 +503,42 @@ impl SqliteStoreInner {
 		Ok(keys)
 	}
 
+	fn list_all_keys_internal(&self) -> io::Result<Vec<(String, String, String)>> {
+		let locked_conn = self.connection.lock().expect("lock");
+
+		let sql = format!(
+			"SELECT primary_namespace, secondary_namespace, key FROM {}",
+			self.kv_table_name
+		);
+		let count_sql = format!("SELECT COUNT(*) FROM {}", self.kv_table_name);
+		let count: usize =
+			locked_conn.query_row(&count_sql, [], |row| row.get(0)).map_err(|e| {
+				let msg = format!("Failed to count rows: {}", e);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
+
+		let mut stmt = locked_conn.prepare_cached(&sql).map_err(|e| {
+			let msg = format!("Failed to prepare statement: {}", e);
+			io::Error::new(io::ErrorKind::Other, msg)
+		})?;
+
+		let mut keys = Vec::with_capacity(count);
+		let rows_iter =
+			stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).map_err(|e| {
+				let msg = format!("Failed to retrieve queried rows: {}", e);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
+
+		for key in rows_iter {
+			keys.push(key.map_err(|e| {
+				let msg = format!("Failed to retrieve queried rows: {}", e);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?);
+		}
+
+		Ok(keys)
+	}
+
 	fn list_paginated_internal(
 		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
 	) -> io::Result<PaginatedListResponse> {
@@ -677,6 +730,34 @@ mod tests {
 		)
 		.unwrap();
 		do_test_store(&store_0, &store_1)
+	}
+
+	#[tokio::test]
+	async fn test_sqlite_store_list_all_keys() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_list_all_keys");
+		let store = SqliteStore::new(
+			temp_path,
+			Some("test_db".to_string()),
+			Some("test_table".to_string()),
+		)
+		.unwrap();
+
+		KVStore::write(&store, "ns_a", "sub_a", "key_a", vec![1u8]).await.unwrap();
+		KVStore::write(&store, "ns_a", "sub_b", "key_b", vec![2u8]).await.unwrap();
+		KVStore::write(&store, "ns_b", "", "key_c", vec![3u8]).await.unwrap();
+
+		let mut keys = MigratableKVStore::list_all_keys(&store).await.unwrap();
+		keys.sort();
+
+		assert_eq!(
+			keys,
+			vec![
+				("ns_a".to_string(), "sub_a".to_string(), "key_a".to_string()),
+				("ns_a".to_string(), "sub_b".to_string(), "key_b".to_string()),
+				("ns_b".to_string(), "".to_string(), "key_c".to_string()),
+			]
+		);
 	}
 
 	#[tokio::test]

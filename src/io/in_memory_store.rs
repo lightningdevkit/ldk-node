@@ -11,7 +11,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use lightning::io;
-use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+use lightning::util::persist::{
+	KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+};
 
 const IN_MEMORY_PAGE_SIZE: usize = 50;
 
@@ -95,6 +97,28 @@ impl InMemoryStore {
 			hash_map::Entry::Occupied(e) => Ok(e.get().keys().cloned().collect()),
 			hash_map::Entry::Vacant(_) => Ok(Vec::new()),
 		}
+	}
+
+	fn list_all_keys_internal(&self) -> io::Result<Vec<(String, String, String)>> {
+		let persisted_lock = self.persisted_bytes.lock().unwrap();
+		let capacity = persisted_lock.values().map(|entries| entries.len()).sum();
+		let mut keys = Vec::with_capacity(capacity);
+
+		for (prefixed_namespace, namespace_entries) in persisted_lock.iter() {
+			let (primary_namespace, secondary_namespace) =
+				prefixed_namespace.split_once('/').ok_or_else(|| {
+					io::Error::new(io::ErrorKind::InvalidData, "Invalid namespace format")
+				})?;
+			for key in namespace_entries.keys() {
+				keys.push((
+					primary_namespace.to_string(),
+					secondary_namespace.to_string(),
+					key.clone(),
+				));
+			}
+		}
+
+		Ok(keys)
 	}
 }
 
@@ -187,5 +211,40 @@ impl PaginatedKVStore for InMemoryStore {
 	}
 }
 
+impl MigratableKVStore for InMemoryStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send {
+		let res = self.list_all_keys_internal();
+		async move { res }
+	}
+}
+
 unsafe impl Sync for InMemoryStore {}
 unsafe impl Send for InMemoryStore {}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn in_memory_store_list_all_keys() {
+		let store = InMemoryStore::new();
+
+		KVStore::write(&store, "ns_a", "sub_a", "key_a", vec![1u8]).await.unwrap();
+		KVStore::write(&store, "ns_a", "sub_b", "key_b", vec![2u8]).await.unwrap();
+		KVStore::write(&store, "ns_b", "", "key_c", vec![3u8]).await.unwrap();
+
+		let mut keys = MigratableKVStore::list_all_keys(&store).await.unwrap();
+		keys.sort();
+
+		assert_eq!(
+			keys,
+			vec![
+				("ns_a".to_string(), "sub_a".to_string(), "key_a".to_string()),
+				("ns_a".to_string(), "sub_b".to_string(), "key_b".to_string()),
+				("ns_b".to_string(), "".to_string(), "key_c".to_string()),
+			]
+		);
+	}
+}
