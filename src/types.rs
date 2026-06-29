@@ -649,7 +649,7 @@ impl ChannelDetails {
 		value: LdkChannelDetails, anchor_channels_config: Option<&AnchorChannelsConfig>,
 	) -> Self {
 		let reserve_type = value.channel_type.as_ref().map(|channel_type| {
-			if channel_type.supports_anchors_zero_fee_htlc_tx() {
+			if channel_type.requires_anchors_zero_fee_htlc_tx() {
 				if let Some(config) = anchor_channels_config {
 					if config.trusted_peers_no_reserve.contains(&value.counterparty.node_id) {
 						ReserveType::TrustedPeersNoReserve
