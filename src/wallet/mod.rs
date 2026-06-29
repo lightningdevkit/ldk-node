@@ -1171,9 +1171,8 @@ impl Wallet {
 		Ok(tx)
 	}
 
-	/// Classifies a funding broadcast (channel open or splice) handed to the broadcaster by LDK,
-	/// recording a payment for it before it is sent. Other transaction types are left for wallet
-	/// sync to record normally.
+	/// Classifies an on-chain broadcast handed to the broadcaster by LDK, recording a payment for it
+	/// before it is sent when it affects this node's wallet.
 	pub(crate) async fn classify_broadcast(
 		&self, tx: &Transaction, tx_type: &LdkTransactionType,
 	) -> Result<(), Error> {
@@ -1184,7 +1183,13 @@ impl Wallet {
 			LdkTransactionType::InteractiveFunding { candidates } => {
 				self.classify_interactive_funding(tx, candidates, tx_type.clone().into()).await
 			},
-			_ => Ok(()),
+			LdkTransactionType::CooperativeClose { .. }
+			| LdkTransactionType::UnilateralClose { .. }
+			| LdkTransactionType::AnchorBump { .. }
+			| LdkTransactionType::Claim { .. }
+			| LdkTransactionType::Sweep { .. } => {
+				self.classify_regular_broadcast(tx, tx_type.clone().into()).await
+			},
 		}
 	}
 
@@ -1322,6 +1327,40 @@ impl Wallet {
 			candidates.len(),
 			active.channels.len(),
 		);
+		Ok(())
+	}
+
+	/// Records a non-funding LDK broadcast as an on-chain payment, tagged with its transaction type.
+	/// Wallet sync later refreshes confirmation status while preserving the type.
+	async fn classify_regular_broadcast(
+		&self, tx: &Transaction, tx_type: TransactionType,
+	) -> Result<(), Error> {
+		let txid = tx.compute_txid();
+		let (amount_msat, fee_paid_msat, direction) = self.onchain_payment_fields(tx);
+
+		if amount_msat == Some(0) && fee_paid_msat == Some(0) {
+			log_trace!(
+				self.logger,
+				"Not recording classified broadcast {} as a payment: no wallet-level activity",
+				txid,
+			);
+			return Ok(());
+		}
+
+		let details = PaymentDetails::new(
+			PaymentId(txid.to_byte_array()),
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: Some(tx_type),
+			},
+			amount_msat,
+			fee_paid_msat,
+			direction,
+			PaymentStatus::Pending,
+		);
+		self.payment_store.insert_or_update(details).await?;
+		log_debug!(self.logger, "Recorded classified on-chain broadcast {}", txid);
 		Ok(())
 	}
 
