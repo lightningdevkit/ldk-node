@@ -288,7 +288,9 @@ impl StorableObject for PaymentDetails {
 		if let Some(tx_type_update) = update.tx_type {
 			match self.kind {
 				PaymentKind::Onchain { ref mut tx_type, .. } => {
-					update_if_necessary!(*tx_type, tx_type_update);
+					if tx_type.is_none() || tx_type_update.is_some() {
+						update_if_necessary!(*tx_type, tx_type_update);
+					}
 				},
 				_ => {},
 			}
@@ -920,6 +922,103 @@ mod tests {
 			}),
 		};
 		assert_eq!(kind, PaymentKind::read(&mut &*kind.encode()).unwrap());
+	}
+
+	#[test]
+	fn known_onchain_tx_type_survives_unknown_update() {
+		use bitcoin::hashes::Hash;
+		use std::str::FromStr;
+
+		let txid = Txid::from_byte_array([8u8; 32]);
+		let payment_id = PaymentId(txid.to_byte_array());
+		let pubkey = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let tx_type = TransactionType::CooperativeClose {
+			counterparty_node_id: pubkey,
+			channel_id: ChannelId([4u8; 32]),
+		};
+		let mut classified = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: Some(tx_type.clone()),
+			},
+			Some(1_000),
+			Some(100),
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+		let wallet_sync_update = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Confirmed {
+					block_hash: BlockHash::from_byte_array([9u8; 32]),
+					height: 42,
+					timestamp: 123,
+				},
+				tx_type: None,
+			},
+			Some(1_000),
+			Some(100),
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		assert!(classified.update(PaymentDetailsUpdate::from(&wallet_sync_update)));
+		match classified.kind {
+			PaymentKind::Onchain { status, tx_type: Some(updated_tx_type), .. } => {
+				assert!(matches!(status, ConfirmationStatus::Confirmed { height: 42, .. }));
+				assert_eq!(updated_tx_type, tx_type);
+			},
+			other => panic!("Unexpected payment kind: {:?}", other),
+		}
+	}
+
+	#[test]
+	fn transaction_type_from_ldk_variants() {
+		use std::str::FromStr;
+
+		let pubkey = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel_id = ChannelId([5u8; 32]);
+		let channel = Channel { counterparty_node_id: pubkey, channel_id };
+
+		let variants = vec![
+			(
+				LdkTransactionType::Funding { channels: vec![(pubkey, channel_id)] },
+				TransactionType::Funding { channels: vec![channel.clone()] },
+			),
+			(
+				LdkTransactionType::CooperativeClose { counterparty_node_id: pubkey, channel_id },
+				TransactionType::CooperativeClose { counterparty_node_id: pubkey, channel_id },
+			),
+			(
+				LdkTransactionType::UnilateralClose { counterparty_node_id: pubkey, channel_id },
+				TransactionType::UnilateralClose { counterparty_node_id: pubkey, channel_id },
+			),
+			(
+				LdkTransactionType::AnchorBump { counterparty_node_id: pubkey, channel_id },
+				TransactionType::AnchorBump { counterparty_node_id: pubkey, channel_id },
+			),
+			(
+				LdkTransactionType::Claim { counterparty_node_id: pubkey, channel_id },
+				TransactionType::Claim { counterparty_node_id: pubkey, channel_id },
+			),
+			(
+				LdkTransactionType::Sweep { channels: vec![(pubkey, channel_id)] },
+				TransactionType::Sweep { channels: vec![channel] },
+			),
+		];
+
+		for (ldk_type, expected_type) in variants {
+			assert_eq!(TransactionType::from(ldk_type), expected_type);
+		}
 	}
 
 	#[derive(Clone, Debug, PartialEq, Eq)]
