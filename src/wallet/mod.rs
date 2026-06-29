@@ -32,7 +32,7 @@ use bitcoin::{
 	WPubkeyHash, Weight, WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::{
-	BroadcasterInterface, FundingCandidate, TransactionType as LdkTransactionType,
+	FundingCandidate, TransactionType as LdkTransactionType,
 	INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
 };
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
@@ -335,21 +335,12 @@ impl Wallet {
 							.collect();
 
 						if !txs_to_broadcast.is_empty() {
-							let tx_refs: Vec<(
-								&Transaction,
-								lightning::chain::chaininterface::TransactionType,
-							)> =
-								txs_to_broadcast
-									.iter()
-									.map(|tx| {
-										(tx, lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] })
-									})
-									.collect();
-							self.broadcaster.broadcast_transactions(&tx_refs);
+							let tx_count = txs_to_broadcast.len();
+							self.broadcaster.broadcast_unclassified_transactions(txs_to_broadcast);
 							log_info!(
 								self.logger,
 								"Rebroadcast {} unconfirmed transactions on chain tip change",
-								txs_to_broadcast.len()
+								tx_count
 							);
 						}
 					}
@@ -889,12 +880,8 @@ impl Wallet {
 			})?
 		};
 
-		self.broadcaster.broadcast_transactions(&[(
-			&tx,
-			lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] },
-		)]);
-
 		let txid = tx.compute_txid();
+		self.broadcaster.broadcast_unclassified_transactions(vec![tx]);
 
 		match send_amount {
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
@@ -1719,11 +1706,6 @@ impl Wallet {
 
 		let new_txid = fee_bumped_tx.compute_txid();
 
-		self.broadcaster.broadcast_transactions(&[(
-			&fee_bumped_tx,
-			lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] },
-		)]);
-
 		let new_payment = self.create_payment_from_tx(
 			&locked_wallet,
 			new_txid,
@@ -1732,6 +1714,8 @@ impl Wallet {
 			PaymentStatus::Pending,
 			ConfirmationStatus::Unconfirmed,
 		);
+
+		self.broadcaster.broadcast_unclassified_transactions(vec![fee_bumped_tx]);
 
 		let pending_payment_store =
 			self.create_pending_payment_from_tx(new_payment.clone(), Vec::new());
