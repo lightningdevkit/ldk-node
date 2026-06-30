@@ -143,7 +143,7 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// | `node_alias`                           | None                                 |
 /// | `trusted_peers_0conf`                  | []                                   |
 /// | `probing_liquidity_limit_multiplier`   | 3                                    |
-/// | `anchor_channels_config`               | Some(..)                             |
+/// | `anchor_channels_config`               | AnchorChannelsConfig::default()      |
 /// | `route_parameters`                     | None                                 |
 /// | `tor_config`                           | None                                 |
 /// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
@@ -190,19 +190,7 @@ pub struct Config {
 	/// `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
 	///
 	/// Please refer to [`AnchorChannelsConfig`] for further information on Anchor channels.
-	///
-	/// If set to `Some`, we'll try to open new channels with Anchors enabled, i.e., new channels
-	/// will be negotiated with the `option_anchors_zero_fee_htlc_tx` channel type if supported by
-	/// the counterparty. Note that this won't prevent us from opening non-Anchor channels if the
-	/// counterparty doesn't support `option_anchors_zero_fee_htlc_tx`. If set to `None`, new
-	/// channels will be negotiated with the legacy `option_static_remotekey` channel type only.
-	///
-	/// **Note:** If set to `None` *after* some Anchor channels have already been
-	/// opened, no dedicated emergency on-chain reserve will be maintained for these channels,
-	/// which can be dangerous if only insufficient funds are available at the time of channel
-	/// closure. We *will* however still try to get the Anchor spending transactions confirmed
-	/// on-chain with the funds available.
-	pub anchor_channels_config: Option<AnchorChannelsConfig>,
+	pub anchor_channels_config: AnchorChannelsConfig,
 	/// Configuration options for payment routing and pathfinding.
 	///
 	/// Setting the [`RouteParametersConfig`] provides flexibility to customize how payments are routed,
@@ -233,7 +221,7 @@ impl Default for Config {
 			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
-			anchor_channels_config: Some(AnchorChannelsConfig::default()),
+			anchor_channels_config: AnchorChannelsConfig::default(),
 			tor_config: None,
 			route_parameters: None,
 			node_alias: None,
@@ -418,8 +406,6 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	// will mostly be relevant for inbound channels.
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
-	user_config.channel_handshake_config.negotiate_anchors_zero_fee_htlc_tx =
-		config.anchor_channels_config.is_some();
 	user_config.reject_inbound_splices = false;
 
 	if may_announce_channel(config).is_err() {
