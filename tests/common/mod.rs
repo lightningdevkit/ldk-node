@@ -1601,6 +1601,20 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		assert!(node_b.list_balances().pending_balances_from_channel_closures.is_empty());
 	}
 
+	if force_close {
+		// Peer retained after local force-close to allow channel_reestablish recovery.
+		assert!(
+			node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
+			"node_b should remain persisted in node_a peer store after locally-initiated force-close"
+		);
+	} else {
+		// Peer removed after cooperative close — no further reason to reconnect.
+		assert!(
+			!node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
+			"node_b should be removed from node_a peer store after cooperative close"
+		);
+	}
+
 	let sum_of_all_payments_sat = (push_msat
 		+ invoice_amount_1_msat
 		+ overpaid_amount_msat
