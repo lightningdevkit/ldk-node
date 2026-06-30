@@ -20,7 +20,9 @@ pub use bolt11::Bolt11Payment;
 pub(crate) use bolt11::PaymentMetadata;
 pub use bolt12::Bolt12Payment;
 pub use onchain::OnchainPayment;
-pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
+pub(crate) use pending_payment_store::{
+	FundingTxCandidate, PendingPaymentDetails, PendingPaymentStore,
+};
 pub use spontaneous::SpontaneousPayment;
 pub use store::{
 	Channel, ConfirmationStatus, LSPS2Parameters, PaymentDetails, PaymentDirection, PaymentKind,

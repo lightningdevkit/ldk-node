@@ -5,13 +5,21 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::collections::HashMap;
+use std::ops::Deref;
+use std::sync::{Arc, Mutex};
+
 use bitcoin::Txid;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
+use lightning_types::payment::PaymentHash;
 
-use crate::data_store::{StorableObject, StorableObjectUpdate};
+use crate::data_store::{DataStore, StorableObject, StorableObjectUpdate};
+use crate::logger::LdkLogger;
 use crate::payment::store::PaymentDetailsUpdate;
-use crate::payment::{PaymentDetails, PaymentKind};
+use crate::payment::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
+use crate::types::DynStore;
+use crate::Error;
 
 /// One candidate transaction in an interactive-funding (splice) RBF history, holding this node's
 /// share of the funding amount and fee for that candidate. Both are `None` for a candidate this
@@ -47,18 +55,30 @@ pub struct PendingPaymentDetails {
 	/// RBF history, keyed by each candidate's txid. Empty for non-funding payments and for
 	/// records written before per-candidate tracking existed.
 	pub(crate) candidates: Vec<FundingTxCandidate>,
+	/// The timestamp after which this pending payment can be pruned.
+	pub expires_at: Option<u64>,
 }
 
 impl PendingPaymentDetails {
 	pub(crate) fn new(
 		details: PaymentDetails, conflicting_txids: Vec<Txid>, candidates: Vec<FundingTxCandidate>,
 	) -> Self {
-		Self { details, conflicting_txids, candidates }
+		Self { details, conflicting_txids, candidates, expires_at: None }
+	}
+
+	pub(crate) fn new_with_expiry(
+		details: PaymentDetails, conflicting_txids: Vec<Txid>, expires_at: Option<u64>,
+	) -> Self {
+		Self { details, conflicting_txids, candidates: Vec::new(), expires_at }
 	}
 
 	/// Returns this node's recorded funding figures for the candidate with the given txid, if any.
 	pub(crate) fn candidate(&self, txid: Txid) -> Option<&FundingTxCandidate> {
 		self.candidates.iter().find(|candidate| candidate.txid == txid)
+	}
+
+	pub(crate) fn has_expired(&self, now: u64) -> bool {
+		self.expires_at.map_or(false, |expires_at| expires_at <= now)
 	}
 }
 
@@ -66,6 +86,7 @@ impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(0, details, required),
 	(2, conflicting_txids, optional_vec),
 	(4, candidates, optional_vec),
+	(6, expires_at, option),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +95,7 @@ pub(crate) struct PendingPaymentDetailsUpdate {
 	pub payment_update: Option<PaymentDetailsUpdate>,
 	pub conflicting_txids: Option<Vec<Txid>>,
 	pub candidates: Vec<FundingTxCandidate>,
+	pub expires_at: Option<Option<u64>>,
 }
 
 impl StorableObject for PendingPaymentDetails {
@@ -112,6 +134,13 @@ impl StorableObject for PendingPaymentDetails {
 			updated = true;
 		}
 
+		if let Some(new_expires_at) = update.expires_at {
+			if self.expires_at != new_expires_at {
+				self.expires_at = new_expires_at;
+				updated = true;
+			}
+		}
+
 		updated
 	}
 
@@ -138,7 +167,151 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 			payment_update: Some(value.details.to_update()),
 			conflicting_txids,
 			candidates: value.candidates.clone(),
+			expires_at: Some(value.expires_at),
 		}
+	}
+}
+
+pub(crate) struct PendingPaymentStore<L: Deref>
+where
+	L::Target: LdkLogger,
+{
+	inner: DataStore<PendingPaymentDetails, L>,
+	mutation_lock: tokio::sync::Mutex<()>,
+	manual_bolt11_payment_hash_index: Mutex<HashMap<PaymentHash, Vec<PaymentId>>>,
+}
+
+impl<L: Deref> PendingPaymentStore<L>
+where
+	L::Target: LdkLogger,
+{
+	pub(crate) fn new(
+		pending_payments: Vec<PendingPaymentDetails>, primary_namespace: String,
+		secondary_namespace: String, kv_store: Arc<DynStore>, logger: L,
+	) -> Self {
+		// TODO: Revisit this initialization once pending payments are no longer all kept in
+		// memory.
+		let manual_bolt11_payment_hash_index =
+			Mutex::new(Self::build_manual_bolt11_payment_hash_index(&pending_payments));
+		let inner = DataStore::new(
+			pending_payments,
+			primary_namespace,
+			secondary_namespace,
+			kv_store,
+			logger,
+		);
+		Self { inner, mutation_lock: tokio::sync::Mutex::new(()), manual_bolt11_payment_hash_index }
+	}
+
+	pub(crate) async fn insert_or_update(
+		&self, pending_payment: PendingPaymentDetails,
+	) -> Result<bool, Error> {
+		let _guard = self.mutation_lock.lock().await;
+		let id = pending_payment.id();
+		let before = self.inner.get(&id);
+		let updated = self.inner.insert_or_update(pending_payment).await?;
+		if updated {
+			let after = self.inner.get(&id);
+			self.replace_in_index(before.as_ref(), after.as_ref());
+		}
+		Ok(updated)
+	}
+
+	pub(crate) async fn remove(&self, id: &PaymentId) -> Result<(), Error> {
+		let _guard = self.mutation_lock.lock().await;
+		let before = self.inner.get(id);
+		self.inner.remove(id).await?;
+		if let Some(payment) = before.as_ref() {
+			self.remove_from_index(payment);
+		}
+		Ok(())
+	}
+
+	pub(crate) fn get(&self, id: &PaymentId) -> Option<PendingPaymentDetails> {
+		self.inner.get(id)
+	}
+
+	pub(crate) fn contains_key(&self, id: &PaymentId) -> bool {
+		self.inner.contains_key(id)
+	}
+
+	pub(crate) fn list_filter<F: FnMut(&&PendingPaymentDetails) -> bool>(
+		&self, f: F,
+	) -> Vec<PendingPaymentDetails> {
+		self.inner.list_filter(f)
+	}
+
+	pub(crate) fn get_pending_manual_bolt11_by_payment_hash(
+		&self, payment_hash: &PaymentHash,
+	) -> Option<PendingPaymentDetails> {
+		let ids = self
+			.manual_bolt11_payment_hash_index
+			.lock()
+			.expect("lock")
+			.get(payment_hash)
+			.cloned()
+			.unwrap_or_default();
+		ids.into_iter().find_map(|id| self.inner.get(&id))
+	}
+
+	fn build_manual_bolt11_payment_hash_index(
+		pending_payments: &[PendingPaymentDetails],
+	) -> HashMap<PaymentHash, Vec<PaymentId>> {
+		let mut index = HashMap::new();
+		for payment in pending_payments {
+			Self::insert_into_manual_bolt11_hash_index(&mut index, payment);
+		}
+		index
+	}
+
+	fn replace_in_index(
+		&self, before: Option<&PendingPaymentDetails>, after: Option<&PendingPaymentDetails>,
+	) {
+		let mut index = self.manual_bolt11_payment_hash_index.lock().expect("lock");
+		if let Some(payment) = before {
+			Self::remove_from_manual_bolt11_hash_index(&mut index, payment);
+		}
+		if let Some(payment) = after {
+			Self::insert_into_manual_bolt11_hash_index(&mut index, payment);
+		}
+	}
+
+	fn remove_from_index(&self, payment: &PendingPaymentDetails) {
+		let mut index = self.manual_bolt11_payment_hash_index.lock().expect("lock");
+		Self::remove_from_manual_bolt11_hash_index(&mut index, payment);
+	}
+
+	fn insert_into_manual_bolt11_hash_index(
+		index: &mut HashMap<PaymentHash, Vec<PaymentId>>, payment: &PendingPaymentDetails,
+	) {
+		if let Some(payment_hash) = manual_bolt11_payment_hash(&payment.details) {
+			index.entry(payment_hash).or_default().push(payment.details.id);
+		}
+	}
+
+	fn remove_from_manual_bolt11_hash_index(
+		index: &mut HashMap<PaymentHash, Vec<PaymentId>>, payment: &PendingPaymentDetails,
+	) {
+		if let Some(payment_hash) = manual_bolt11_payment_hash(&payment.details) {
+			if let Some(ids) = index.get_mut(&payment_hash) {
+				ids.retain(|id| *id != payment.details.id);
+				if ids.is_empty() {
+					index.remove(&payment_hash);
+				}
+			}
+		}
+	}
+}
+
+fn manual_bolt11_payment_hash(payment: &PaymentDetails) -> Option<PaymentHash> {
+	match payment.kind {
+		PaymentKind::Bolt11 { hash, preimage: None, .. }
+			if payment.direction == PaymentDirection::Inbound
+				&& payment.status == PaymentStatus::Pending =>
+		{
+			Some(hash)
+		},
+		_ => None,
 	}
 }
 
