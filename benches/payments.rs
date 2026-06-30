@@ -121,13 +121,8 @@ fn payment_benchmark(c: &mut Criterion) {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
-	let (node_a, node_b) = setup_two_nodes_with_store(
-		&chain_source,
-		false,
-		true,
-		false,
-		common::TestStoreType::Sqlite,
-	);
+	let (node_a, node_b) =
+		setup_two_nodes_with_store(&chain_source, false, false, common::TestStoreType::Sqlite);
 
 	let runtime =
 		tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build().unwrap();

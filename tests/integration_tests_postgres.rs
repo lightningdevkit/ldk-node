@@ -22,7 +22,7 @@ async fn channel_full_cycle_with_postgres_store() {
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
 	println!("== Node A ==");
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-	let config_a = common::random_config(true);
+	let config_a = common::random_config();
 	let mut builder_a = Builder::from_config(config_a.node_config);
 	builder_a.set_chain_source_esplora(esplora_url.clone(), None);
 	let node_a = builder_a
@@ -37,7 +37,7 @@ async fn channel_full_cycle_with_postgres_store() {
 	node_a.start().unwrap();
 
 	println!("\n== Node B ==");
-	let config_b = common::random_config(true);
+	let config_b = common::random_config();
 	let mut builder_b = Builder::from_config(config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
 	let node_b = builder_b
