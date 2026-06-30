@@ -243,6 +243,14 @@ impl ExternalNode for TestLndNode {
 		Ok(response.payment_request)
 	}
 
+	async fn create_offer(
+		&self, amount_msat: u64, description: &str,
+	) -> Result<String, TestFailure> {
+		Err(self.make_error(
+			"create_offer is not supported on LND without LNDK integration".to_string(),
+		))
+	}
+
 	async fn pay_invoice(&self, invoice: &str) -> Result<String, TestFailure> {
 		let mut client = self.client.lock().await;
 		let request = SendPaymentRequest {
@@ -278,6 +286,13 @@ impl ExternalNode for TestLndNode {
 		}
 
 		Err(self.make_error("payment stream ended without terminal status"))
+	}
+
+	async fn pay_offer(
+		&self, _offer_str: &str, _amount_msat: Option<u64>,
+	) -> Result<String, TestFailure> {
+		Err(self
+			.make_error("pay_offer is not supported on LND without LNDK integration".to_string()))
 	}
 
 	async fn send_keysend(

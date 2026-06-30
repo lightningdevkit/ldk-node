@@ -87,8 +87,18 @@ pub(crate) trait ExternalNode: Send + Sync {
 		&self, amount_msat: u64, description: &str,
 	) -> Result<String, TestFailure>;
 
+	/// Create a BOLT12 offer for the given amount
+	async fn create_offer(
+		&self, amount_msat: u64, description: &str,
+	) -> Result<String, TestFailure>;
+
 	/// Pay a BOLT11 invoice; returns an implementation-specific payment identifier on success.
 	async fn pay_invoice(&self, invoice: &str) -> Result<String, TestFailure>;
+
+	/// Pay a BOLT12 offer; returns an implementation-specific payment identifier on success.
+	async fn pay_offer(
+		&self, offer_str: &str, amount_msat: Option<u64>,
+	) -> Result<String, TestFailure>;
 
 	/// Send a keysend payment to a peer.
 	async fn send_keysend(
