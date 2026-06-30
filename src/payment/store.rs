@@ -5,6 +5,9 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::collections::HashMap;
+use std::fmt::{Debug, Display};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::secp256k1::PublicKey;
@@ -14,6 +17,7 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 use lightning::ln::types::ChannelId;
 use lightning::offers::offer::OfferId;
+use lightning::util::logger::Logger as _;
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{
 	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
@@ -22,8 +26,11 @@ use lightning::{
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning_types::string::UntrustedString;
 
-use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate};
+use crate::data_store::{DataStore, StorableObject, StorableObjectId, StorableObjectUpdate};
 use crate::hex_utils;
+use crate::logger::{log_debug, log_error, Logger};
+use crate::Error;
+use crate::UserChannelId;
 
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -983,5 +990,620 @@ mod tests {
 		let reencoded = decoded.encode();
 		assert_eq!(reencoded[0], 2);
 		assert_eq!(decoded, PaymentKind::read(&mut &*reencoded).unwrap());
+	}
+}
+
+/// A unique identifier for a forwarded payment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ForwardedPaymentId(pub [u8; 32]);
+
+impl StorableObjectId for ForwardedPaymentId {
+	fn encode_to_hex_str(&self) -> String {
+		hex_utils::to_string(&self.0)
+	}
+}
+
+impl Writeable for ForwardedPaymentId {
+	fn write<W: lightning::util::ser::Writer>(
+		&self, writer: &mut W,
+	) -> Result<(), lightning::io::Error> {
+		self.0.write(writer)
+	}
+}
+
+impl Readable for ForwardedPaymentId {
+	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		Ok(Self(Readable::read(reader)?))
+	}
+}
+
+/// Details of a payment that has been forwarded through this node.
+///
+/// Detailed channel-pair records are only stored for forwards with exactly one incoming HTLC and
+/// one outgoing HTLC. Multi-HTLC forwards are omitted from detailed channel-pair tracking until LDK
+/// exposes enough data to identify the exact incoming/outgoing HTLC pairs.
+///
+/// TODO: Store multi-HTLC channel-pair records once LDK exposes exact pair data for trampoline
+/// forwards.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ForwardedPaymentDetails {
+	/// A randomly generated identifier for this forwarded payment.
+	pub id: ForwardedPaymentId,
+	/// The incoming channel id.
+	pub prev_channel_id: ChannelId,
+	/// The outgoing channel id.
+	pub next_channel_id: ChannelId,
+	/// The incoming user channel id, if available.
+	pub prev_user_channel_id: Option<UserChannelId>,
+	/// The outgoing user channel id, if available.
+	pub next_user_channel_id: Option<UserChannelId>,
+	/// The previous node id, if available.
+	pub prev_node_id: Option<PublicKey>,
+	/// The next node id, if available.
+	pub next_node_id: Option<PublicKey>,
+	/// The total fee earned by forwarding this payment, in millisatoshis.
+	pub total_fee_earned_msat: Option<u64>,
+	/// The skimmed fee, in millisatoshis.
+	pub skimmed_fee_msat: Option<u64>,
+	/// Whether the forwarded HTLC was claimed from an on-chain transaction.
+	pub claim_from_onchain_tx: bool,
+	/// The outbound amount forwarded, in millisatoshis.
+	pub outbound_amount_forwarded_msat: Option<u64>,
+	/// The timestamp when this payment was forwarded.
+	pub forwarded_at_timestamp: u64,
+}
+
+impl_writeable_tlv_based!(ForwardedPaymentDetails, {
+	(0, id, required),
+	(2, prev_channel_id, required),
+	(4, next_channel_id, required),
+	(6, prev_user_channel_id, option),
+	(8, next_user_channel_id, option),
+	(10, prev_node_id, option),
+	(12, next_node_id, option),
+	(14, total_fee_earned_msat, option),
+	(16, skimmed_fee_msat, option),
+	(18, claim_from_onchain_tx, required),
+	(20, outbound_amount_forwarded_msat, option),
+	(22, forwarded_at_timestamp, required),
+});
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ForwardedPaymentDetailsUpdate {
+	id: ForwardedPaymentId,
+}
+
+impl StorableObjectUpdate<ForwardedPaymentDetails> for ForwardedPaymentDetailsUpdate {
+	fn id(&self) -> ForwardedPaymentId {
+		self.id
+	}
+}
+
+impl StorableObject for ForwardedPaymentDetails {
+	type Id = ForwardedPaymentId;
+	type Update = ForwardedPaymentDetailsUpdate;
+
+	fn id(&self) -> Self::Id {
+		self.id
+	}
+
+	fn update(&mut self, _update: Self::Update) -> bool {
+		false
+	}
+
+	fn to_update(&self) -> Self::Update {
+		ForwardedPaymentDetailsUpdate { id: self.id }
+	}
+}
+
+/// Aggregate statistics for forwarded payments through a single channel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ChannelForwardingStats {
+	/// The channel id these stats apply to.
+	pub channel_id: ChannelId,
+	/// The channel counterparty node id, if known.
+	pub counterparty_node_id: Option<PublicKey>,
+	/// Number of forwarded payments where this was the incoming channel.
+	pub inbound_payments_forwarded: u64,
+	/// Number of forwarded payments where this was the outgoing channel.
+	pub outbound_payments_forwarded: u64,
+	/// Total inbound amount forwarded through this channel, in millisatoshis.
+	pub total_inbound_amount_msat: u64,
+	/// Total outbound amount forwarded through this channel, in millisatoshis.
+	pub total_outbound_amount_msat: u64,
+	/// Total forwarding fees earned through this channel, in millisatoshis.
+	pub total_fee_earned_msat: u64,
+	/// Total skimmed fees for this channel, in millisatoshis.
+	pub total_skimmed_fee_msat: u64,
+	/// Number of forwarded HTLCs claimed from on-chain transactions.
+	pub onchain_claims_count: u64,
+	/// Timestamp of the first forward recorded for this channel.
+	pub first_forwarded_at_timestamp: u64,
+	/// Timestamp of the latest forward recorded for this channel.
+	pub last_forwarded_at_timestamp: u64,
+}
+
+impl_writeable_tlv_based!(ChannelForwardingStats, {
+	(0, channel_id, required),
+	(2, counterparty_node_id, option),
+	(4, inbound_payments_forwarded, required),
+	(6, outbound_payments_forwarded, required),
+	(8, total_inbound_amount_msat, required),
+	(10, total_outbound_amount_msat, required),
+	(12, total_fee_earned_msat, required),
+	(14, total_skimmed_fee_msat, required),
+	(16, onchain_claims_count, required),
+	(18, first_forwarded_at_timestamp, required),
+	(20, last_forwarded_at_timestamp, required),
+});
+
+/// Channel pair identifier, formed from previous channel, next channel, and time bucket.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChannelPairStatsId(pub [u8; 72]);
+
+impl ChannelPairStatsId {
+	pub fn from_channel_pair_and_bucket(
+		prev: &ChannelId, next: &ChannelId, bucket_start_timestamp: u64,
+	) -> Self {
+		let mut result = [0u8; 72];
+		result[0..32].copy_from_slice(&prev.0);
+		result[32..64].copy_from_slice(&next.0);
+		result[64..72].copy_from_slice(&bucket_start_timestamp.to_be_bytes());
+		Self(result)
+	}
+}
+
+impl Writeable for ChannelPairStatsId {
+	fn write<W: lightning::util::ser::Writer>(
+		&self, writer: &mut W,
+	) -> Result<(), lightning::io::Error> {
+		writer.write_all(&self.0)
+	}
+}
+
+impl Readable for ChannelPairStatsId {
+	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let mut bytes = [0u8; 72];
+		reader.read_exact(&mut bytes)?;
+		Ok(Self(bytes))
+	}
+}
+
+impl Display for ChannelPairStatsId {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", hex_utils::to_string(&self.0))
+	}
+}
+
+impl Debug for ChannelPairStatsId {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "ChannelPairStatsId({})", hex_utils::to_string(&self.0))
+	}
+}
+
+impl StorableObjectId for ChannelPairStatsId {
+	fn encode_to_hex_str(&self) -> String {
+		hex_utils::to_string(&self.0)
+	}
+}
+
+/// Aggregated statistics for a specific channel pair.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ChannelPairForwardingStats {
+	/// The unique channel-pair bucket id.
+	pub id: ChannelPairStatsId,
+	/// The incoming channel id.
+	pub prev_channel_id: ChannelId,
+	/// The outgoing channel id.
+	pub next_channel_id: ChannelId,
+	/// Start timestamp of this aggregation bucket.
+	pub bucket_start_timestamp: u64,
+	/// The previous node id, if available.
+	pub prev_node_id: Option<PublicKey>,
+	/// The next node id, if available.
+	pub next_node_id: Option<PublicKey>,
+	/// Number of payments aggregated in this bucket.
+	pub payment_count: u64,
+	/// Total inbound amount in this bucket, in millisatoshis.
+	pub total_inbound_amount_msat: u64,
+	/// Total outbound amount in this bucket, in millisatoshis.
+	pub total_outbound_amount_msat: u64,
+	/// Total forwarding fees earned in this bucket, in millisatoshis.
+	pub total_fee_earned_msat: u64,
+	/// Total skimmed fees in this bucket, in millisatoshis.
+	pub total_skimmed_fee_msat: u64,
+	/// Number of forwarded HTLCs claimed from on-chain transactions.
+	pub onchain_claims_count: u64,
+	/// Average forwarding fee per payment, in millisatoshis.
+	pub avg_fee_msat: u64,
+	/// Average inbound amount per payment, in millisatoshis.
+	pub avg_inbound_amount_msat: u64,
+	/// Timestamp of the first forward in this bucket.
+	pub first_forwarded_at_timestamp: u64,
+	/// Timestamp of the latest forward in this bucket.
+	pub last_forwarded_at_timestamp: u64,
+	/// Timestamp when this bucket was aggregated.
+	pub aggregated_at_timestamp: u64,
+}
+
+impl_writeable_tlv_based!(ChannelPairForwardingStats, {
+	(0, id, required),
+	(2, prev_channel_id, required),
+	(4, next_channel_id, required),
+	(6, prev_node_id, option),
+	(8, next_node_id, option),
+	(10, payment_count, required),
+	(12, total_inbound_amount_msat, required),
+	(14, total_outbound_amount_msat, required),
+	(16, total_fee_earned_msat, required),
+	(18, total_skimmed_fee_msat, required),
+	(20, onchain_claims_count, required),
+	(22, avg_fee_msat, required),
+	(24, avg_inbound_amount_msat, required),
+	(26, first_forwarded_at_timestamp, required),
+	(28, last_forwarded_at_timestamp, required),
+	(30, aggregated_at_timestamp, required),
+	(32, bucket_start_timestamp, required),
+});
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChannelForwardingStatsUpdate {
+	pub channel_id: ChannelId,
+	pub counterparty_node_id: Option<PublicKey>,
+	pub inbound_payments_increment: u64,
+	pub outbound_payments_increment: u64,
+	pub inbound_amount_increment_msat: u64,
+	pub outbound_amount_increment_msat: u64,
+	pub fee_earned_increment_msat: u64,
+	pub skimmed_fee_increment_msat: u64,
+	pub onchain_claims_increment: u64,
+	pub timestamp: u64,
+}
+
+impl StorableObjectUpdate<ChannelForwardingStats> for ChannelForwardingStatsUpdate {
+	fn id(&self) -> ChannelId {
+		self.channel_id
+	}
+}
+
+impl StorableObjectId for ChannelId {
+	fn encode_to_hex_str(&self) -> String {
+		hex_utils::to_string(&self.0)
+	}
+}
+
+impl StorableObject for ChannelForwardingStats {
+	type Id = ChannelId;
+	type Update = ChannelForwardingStatsUpdate;
+
+	fn id(&self) -> Self::Id {
+		self.channel_id
+	}
+
+	fn update(&mut self, update: Self::Update) -> bool {
+		debug_assert_eq!(self.channel_id, update.channel_id);
+		let mut updated = false;
+		if self.counterparty_node_id.is_none() && update.counterparty_node_id.is_some() {
+			self.counterparty_node_id = update.counterparty_node_id;
+			updated = true;
+		}
+		if update.inbound_payments_increment > 0 {
+			self.inbound_payments_forwarded += update.inbound_payments_increment;
+			updated = true;
+		}
+		if update.outbound_payments_increment > 0 {
+			self.outbound_payments_forwarded += update.outbound_payments_increment;
+			updated = true;
+		}
+		if update.inbound_amount_increment_msat > 0 {
+			self.total_inbound_amount_msat += update.inbound_amount_increment_msat;
+			updated = true;
+		}
+		if update.outbound_amount_increment_msat > 0 {
+			self.total_outbound_amount_msat += update.outbound_amount_increment_msat;
+			updated = true;
+		}
+		if update.fee_earned_increment_msat > 0 {
+			self.total_fee_earned_msat += update.fee_earned_increment_msat;
+			updated = true;
+		}
+		if update.skimmed_fee_increment_msat > 0 {
+			self.total_skimmed_fee_msat += update.skimmed_fee_increment_msat;
+			updated = true;
+		}
+		if update.onchain_claims_increment > 0 {
+			self.onchain_claims_count += update.onchain_claims_increment;
+			updated = true;
+		}
+		if updated {
+			self.first_forwarded_at_timestamp =
+				self.first_forwarded_at_timestamp.min(update.timestamp);
+			self.last_forwarded_at_timestamp =
+				self.last_forwarded_at_timestamp.max(update.timestamp);
+		}
+		updated
+	}
+
+	fn to_update(&self) -> Self::Update {
+		ChannelForwardingStatsUpdate {
+			channel_id: self.channel_id,
+			counterparty_node_id: self.counterparty_node_id,
+			inbound_payments_increment: self.inbound_payments_forwarded,
+			outbound_payments_increment: self.outbound_payments_forwarded,
+			inbound_amount_increment_msat: self.total_inbound_amount_msat,
+			outbound_amount_increment_msat: self.total_outbound_amount_msat,
+			fee_earned_increment_msat: self.total_fee_earned_msat,
+			skimmed_fee_increment_msat: self.total_skimmed_fee_msat,
+			onchain_claims_increment: self.onchain_claims_count,
+			timestamp: self.last_forwarded_at_timestamp,
+		}
+	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ChannelPairForwardingStatsUpdate {
+	pub id: ChannelPairStatsId,
+	pub prev_node_id: Option<PublicKey>,
+	pub next_node_id: Option<PublicKey>,
+	pub payment_count_increment: u64,
+	pub inbound_amount_increment_msat: u64,
+	pub outbound_amount_increment_msat: u64,
+	pub fee_earned_increment_msat: u64,
+	pub skimmed_fee_increment_msat: u64,
+	pub onchain_claims_increment: u64,
+	pub first_timestamp: u64,
+	pub last_timestamp: u64,
+}
+
+impl StorableObjectUpdate<ChannelPairForwardingStats> for ChannelPairForwardingStatsUpdate {
+	fn id(&self) -> ChannelPairStatsId {
+		self.id
+	}
+}
+
+impl StorableObject for ChannelPairForwardingStats {
+	type Id = ChannelPairStatsId;
+	type Update = ChannelPairForwardingStatsUpdate;
+
+	fn id(&self) -> Self::Id {
+		self.id
+	}
+
+	fn update(&mut self, update: Self::Update) -> bool {
+		debug_assert_eq!(self.id, update.id);
+		let mut updated = false;
+		if self.prev_node_id.is_none() && update.prev_node_id.is_some() {
+			self.prev_node_id = update.prev_node_id;
+			updated = true;
+		}
+		if self.next_node_id.is_none() && update.next_node_id.is_some() {
+			self.next_node_id = update.next_node_id;
+			updated = true;
+		}
+		if update.payment_count_increment > 0 {
+			self.payment_count += update.payment_count_increment;
+			updated = true;
+		}
+		if update.inbound_amount_increment_msat > 0 {
+			self.total_inbound_amount_msat += update.inbound_amount_increment_msat;
+			updated = true;
+		}
+		if update.outbound_amount_increment_msat > 0 {
+			self.total_outbound_amount_msat += update.outbound_amount_increment_msat;
+			updated = true;
+		}
+		if update.fee_earned_increment_msat > 0 {
+			self.total_fee_earned_msat += update.fee_earned_increment_msat;
+			updated = true;
+		}
+		if update.skimmed_fee_increment_msat > 0 {
+			self.total_skimmed_fee_msat += update.skimmed_fee_increment_msat;
+			updated = true;
+		}
+		if update.onchain_claims_increment > 0 {
+			self.onchain_claims_count += update.onchain_claims_increment;
+			updated = true;
+		}
+		if updated {
+			if self.first_forwarded_at_timestamp == 0 {
+				self.first_forwarded_at_timestamp = update.first_timestamp;
+			} else {
+				self.first_forwarded_at_timestamp =
+					self.first_forwarded_at_timestamp.min(update.first_timestamp);
+			}
+			self.last_forwarded_at_timestamp =
+				self.last_forwarded_at_timestamp.max(update.last_timestamp);
+			if self.payment_count > 0 {
+				self.avg_fee_msat = self.total_fee_earned_msat / self.payment_count;
+				self.avg_inbound_amount_msat = self.total_inbound_amount_msat / self.payment_count;
+			}
+		}
+		updated
+	}
+
+	fn to_update(&self) -> Self::Update {
+		ChannelPairForwardingStatsUpdate {
+			id: self.id,
+			prev_node_id: self.prev_node_id,
+			next_node_id: self.next_node_id,
+			payment_count_increment: self.payment_count,
+			inbound_amount_increment_msat: self.total_inbound_amount_msat,
+			outbound_amount_increment_msat: self.total_outbound_amount_msat,
+			fee_earned_increment_msat: self.total_fee_earned_msat,
+			skimmed_fee_increment_msat: self.total_skimmed_fee_msat,
+			onchain_claims_increment: self.onchain_claims_count,
+			first_timestamp: self.first_forwarded_at_timestamp,
+			last_timestamp: self.last_forwarded_at_timestamp,
+		}
+	}
+}
+
+/// Aggregate expired forwarded payments into time-bucketed channel pair statistics.
+pub(crate) async fn aggregate_expired_forwarded_payments(
+	forwarded_payment_store: &DataStore<ForwardedPaymentDetails, Arc<Logger>>,
+	channel_pair_stats_store: &DataStore<ChannelPairForwardingStats, Arc<Logger>>,
+	retention_minutes: u64, logger: &Arc<Logger>,
+) -> Result<(u64, u64), Error> {
+	let now =
+		SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs();
+	let cutoff = now.saturating_sub(retention_minutes.saturating_mul(60));
+	let bucket_size_secs = retention_minutes.saturating_mul(60);
+	if bucket_size_secs == 0 {
+		return Ok((0, 0));
+	}
+
+	let expired = forwarded_payment_store.list_filter(|p| p.forwarded_at_timestamp < cutoff);
+	if expired.is_empty() {
+		log_debug!(logger, "No expired forwarded payments found");
+		return Ok((0, 0));
+	}
+
+	let mut bucket_groups: HashMap<(ChannelId, ChannelId, u64), Vec<&ForwardedPaymentDetails>> =
+		HashMap::new();
+	for payment in &expired {
+		let bucket_start = (payment.forwarded_at_timestamp / bucket_size_secs) * bucket_size_secs;
+		bucket_groups
+			.entry((payment.prev_channel_id, payment.next_channel_id, bucket_start))
+			.or_default()
+			.push(payment);
+	}
+
+	let mut aggregated_bucket_count = 0u64;
+	let mut removed_payment_count = 0u64;
+	for ((prev_channel_id, next_channel_id, bucket_start), payments) in bucket_groups {
+		let pair_id = ChannelPairStatsId::from_channel_pair_and_bucket(
+			&prev_channel_id,
+			&next_channel_id,
+			bucket_start,
+		);
+
+		let first_payment = payments[0];
+		let mut total_inbound_amount_msat = 0u64;
+		let mut total_outbound_amount_msat = 0u64;
+		let mut total_fee_earned_msat = 0u64;
+		let mut total_skimmed_fee_msat = 0u64;
+		let mut onchain_claims_count = 0u64;
+		let mut first_timestamp = u64::MAX;
+		let mut last_timestamp = 0u64;
+
+		for payment in &payments {
+			let outbound = payment.outbound_amount_forwarded_msat.unwrap_or(0);
+			let fee = payment.total_fee_earned_msat.unwrap_or(0);
+			let skimmed = payment.skimmed_fee_msat.unwrap_or(0);
+			total_inbound_amount_msat =
+				total_inbound_amount_msat.saturating_add(outbound.saturating_add(fee));
+			total_outbound_amount_msat = total_outbound_amount_msat.saturating_add(outbound);
+			total_fee_earned_msat = total_fee_earned_msat.saturating_add(fee);
+			total_skimmed_fee_msat = total_skimmed_fee_msat.saturating_add(skimmed);
+			if payment.claim_from_onchain_tx {
+				onchain_claims_count += 1;
+			}
+			first_timestamp = first_timestamp.min(payment.forwarded_at_timestamp);
+			last_timestamp = last_timestamp.max(payment.forwarded_at_timestamp);
+		}
+
+		let payment_count = payments.len() as u64;
+		let stats = ChannelPairForwardingStats {
+			id: pair_id,
+			prev_channel_id,
+			next_channel_id,
+			bucket_start_timestamp: bucket_start,
+			prev_node_id: first_payment.prev_node_id,
+			next_node_id: first_payment.next_node_id,
+			payment_count,
+			total_inbound_amount_msat,
+			total_outbound_amount_msat,
+			total_fee_earned_msat,
+			total_skimmed_fee_msat,
+			onchain_claims_count,
+			avg_fee_msat: total_fee_earned_msat / payment_count,
+			avg_inbound_amount_msat: total_inbound_amount_msat / payment_count,
+			first_forwarded_at_timestamp: first_timestamp,
+			last_forwarded_at_timestamp: last_timestamp,
+			aggregated_at_timestamp: now,
+		};
+
+		channel_pair_stats_store.insert_or_update(stats).await.map_err(|e| {
+			log_error!(logger, "Failed to upsert channel pair stats bucket for {pair_id:?}: {e}");
+			e
+		})?;
+		aggregated_bucket_count += 1;
+
+		for payment in payments {
+			forwarded_payment_store.remove(&payment.id).await.map_err(|e| {
+				log_error!(logger, "Failed to remove forwarded payment {:?}: {}", payment.id, e);
+				e
+			})?;
+			removed_payment_count += 1;
+		}
+	}
+
+	Ok((aggregated_bucket_count, removed_payment_count))
+}
+
+/// Aggregates multiple channel pair statistics buckets into cumulative totals.
+pub fn aggregate_channel_pair_stats(
+	buckets: &[ChannelPairForwardingStats],
+) -> ChannelPairForwardingStats {
+	assert!(!buckets.is_empty(), "Cannot aggregate empty bucket list");
+	let first = &buckets[0];
+	for bucket in &buckets[1..] {
+		assert_eq!(bucket.prev_channel_id, first.prev_channel_id);
+		assert_eq!(bucket.next_channel_id, first.next_channel_id);
+	}
+
+	let mut payment_count = 0u64;
+	let mut total_inbound_amount_msat = 0u64;
+	let mut total_outbound_amount_msat = 0u64;
+	let mut total_fee_earned_msat = 0u64;
+	let mut total_skimmed_fee_msat = 0u64;
+	let mut onchain_claims_count = 0u64;
+	let mut first_forwarded_at_timestamp = u64::MAX;
+	let mut last_forwarded_at_timestamp = 0u64;
+	let mut earliest_bucket_start = u64::MAX;
+	for bucket in buckets {
+		payment_count += bucket.payment_count;
+		total_inbound_amount_msat += bucket.total_inbound_amount_msat;
+		total_outbound_amount_msat += bucket.total_outbound_amount_msat;
+		total_fee_earned_msat += bucket.total_fee_earned_msat;
+		total_skimmed_fee_msat += bucket.total_skimmed_fee_msat;
+		onchain_claims_count += bucket.onchain_claims_count;
+		first_forwarded_at_timestamp =
+			first_forwarded_at_timestamp.min(bucket.first_forwarded_at_timestamp);
+		last_forwarded_at_timestamp =
+			last_forwarded_at_timestamp.max(bucket.last_forwarded_at_timestamp);
+		earliest_bucket_start = earliest_bucket_start.min(bucket.bucket_start_timestamp);
+	}
+	let now =
+		SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs();
+	ChannelPairForwardingStats {
+		id: ChannelPairStatsId::from_channel_pair_and_bucket(
+			&first.prev_channel_id,
+			&first.next_channel_id,
+			earliest_bucket_start,
+		),
+		prev_channel_id: first.prev_channel_id,
+		next_channel_id: first.next_channel_id,
+		bucket_start_timestamp: earliest_bucket_start,
+		prev_node_id: first.prev_node_id,
+		next_node_id: first.next_node_id,
+		payment_count,
+		total_inbound_amount_msat,
+		total_outbound_amount_msat,
+		total_fee_earned_msat,
+		total_skimmed_fee_msat,
+		onchain_claims_count,
+		avg_fee_msat: if payment_count > 0 { total_fee_earned_msat / payment_count } else { 0 },
+		avg_inbound_amount_msat: if payment_count > 0 {
+			total_inbound_amount_msat / payment_count
+		} else {
+			0
+		},
+		first_forwarded_at_timestamp,
+		last_forwarded_at_timestamp,
+		aggregated_at_timestamp: now,
 	}
 }

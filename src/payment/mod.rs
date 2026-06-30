@@ -24,7 +24,8 @@ pub(crate) use pending_payment_store::FundingTxCandidate;
 pub(crate) use pending_payment_store::PendingPaymentDetails;
 pub use spontaneous::SpontaneousPayment;
 pub use store::{
-	Channel, ConfirmationStatus, LSPS2Parameters, PaymentDetails, PaymentDirection, PaymentKind,
-	PaymentStatus, TransactionType,
+	Channel, ChannelForwardingStats, ChannelPairForwardingStats, ConfirmationStatus,
+	ForwardedPaymentDetails, ForwardedPaymentId, LSPS2Parameters, PaymentDetails, PaymentDirection,
+	PaymentKind, PaymentStatus, TransactionType,
 };
 pub use unified::{UnifiedPayment, UnifiedPaymentResult};

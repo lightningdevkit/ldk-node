@@ -11,6 +11,8 @@ typedef dictionary ElectrumSyncConfig;
 
 typedef dictionary TorConfig;
 
+typedef enum ForwardedPaymentTrackingMode;
+
 typedef interface NodeEntropy;
 
 typedef enum WordCount;
@@ -137,6 +139,19 @@ interface Node {
 	void remove_payment([ByRef]PaymentId payment_id);
 	BalanceDetails list_balances();
 	sequence<PaymentDetails> list_payments();
+	ForwardedPaymentDetails? forwarded_payment([ByRef]ForwardedPaymentId forwarded_payment_id);
+	[Throws=NodeError]
+	ForwardedPaymentDetailsPage list_forwarded_payments(PageToken? page_token);
+	ForwardedPaymentTrackingMode forwarded_payment_tracking_mode();
+	ChannelForwardingStats? channel_forwarding_stats([ByRef]ChannelId channel_id);
+	[Throws=NodeError]
+	ChannelForwardingStatsPage list_channel_forwarding_stats(PageToken? page_token);
+	[Throws=NodeError]
+	ChannelPairForwardingStatsPage list_channel_pair_forwarding_stats(PageToken? page_token);
+	[Throws=NodeError]
+	ChannelPairForwardingStatsPage list_channel_pair_forwarding_stats_in_range(u64 start_timestamp, u64 end_timestamp, PageToken? page_token);
+	[Throws=NodeError]
+	ChannelPairForwardingStatsPage list_channel_pair_forwarding_stats_for_pair(ChannelId prev_channel_id, ChannelId next_channel_id, PageToken? page_token);
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
 	NetworkGraph network_graph();
@@ -380,6 +395,9 @@ typedef string OfferId;
 typedef string PaymentId;
 
 [Custom]
+typedef string ForwardedPaymentId;
+
+[Custom]
 typedef string PaymentHash;
 
 [Custom]
@@ -390,6 +408,12 @@ typedef string PaymentSecret;
 
 [Custom]
 typedef string ChannelId;
+
+[Custom]
+typedef string ChannelPairStatsId;
+
+[Custom]
+typedef string PageToken;
 
 [Custom]
 typedef string UserChannelId;
@@ -417,3 +441,15 @@ typedef enum Event;
 typedef interface HRNResolverConfig;
 
 typedef dictionary HumanReadableNamesConfig;
+
+typedef dictionary ForwardedPaymentDetails;
+
+typedef dictionary ChannelForwardingStats;
+
+typedef dictionary ChannelPairForwardingStats;
+
+typedef dictionary ForwardedPaymentDetailsPage;
+
+typedef dictionary ChannelForwardingStatsPage;
+
+typedef dictionary ChannelPairForwardingStatsPage;
