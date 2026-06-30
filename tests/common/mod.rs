@@ -435,7 +435,8 @@ pub(crate) struct TestConfig {
 	pub store_type: TestStoreType,
 	pub node_entropy: NodeEntropy,
 	pub async_payments_role: Option<AsyncPaymentsRole>,
-	pub recovery_mode: bool,
+	pub wallet_rescan_from_height: Option<u32>,
+	pub force_wallet_full_scan: bool,
 }
 
 impl Default for TestConfig {
@@ -447,14 +448,16 @@ impl Default for TestConfig {
 		let mnemonic = generate_entropy_mnemonic(None);
 		let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 		let async_payments_role = None;
-		let recovery_mode = false;
+		let wallet_rescan_from_height = None;
+		let force_wallet_full_scan = false;
 		TestConfig {
 			node_config,
 			log_writer,
 			store_type,
 			node_entropy,
 			async_payments_role,
-			recovery_mode,
+			wallet_rescan_from_height,
+			force_wallet_full_scan,
 		}
 	}
 }
@@ -537,12 +540,14 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 			let mut sync_config = EsploraSyncConfig::default();
 			sync_config.background_sync_config = None;
+			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
 			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		},
 		TestChainSource::Electrum(electrsd) => {
 			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
 			let mut sync_config = ElectrumSyncConfig::default();
 			sync_config.background_sync_config = None;
+			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
 			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
 		},
 		TestChainSource::BitcoindRpcSync(bitcoind) => {
@@ -551,7 +556,13 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
 			let rpc_user = values.user;
 			let rpc_password = values.password;
-			builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, rpc_user, rpc_password);
+			builder.set_chain_source_bitcoind_rpc(
+				rpc_host,
+				rpc_port,
+				rpc_user,
+				rpc_password,
+				config.wallet_rescan_from_height,
+			);
 		},
 		TestChainSource::BitcoindRestSync(bitcoind) => {
 			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
@@ -568,6 +579,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 				rpc_port,
 				rpc_user,
 				rpc_password,
+				config.wallet_rescan_from_height,
 			);
 		},
 	}
@@ -586,10 +598,6 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 
 	builder.set_async_payments_role(config.async_payments_role).unwrap();
 
-	if config.recovery_mode {
-		builder.set_wallet_recovery_mode();
-	}
-
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
 			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
@@ -600,10 +608,6 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			builder.build_with_fs_store(config.node_entropy.into()).unwrap()
 		},
 	};
-
-	if config.recovery_mode {
-		builder.set_wallet_recovery_mode();
-	}
 
 	node.start().unwrap();
 	assert!(node.status().is_running);

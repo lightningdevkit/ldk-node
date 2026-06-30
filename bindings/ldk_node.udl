@@ -38,8 +38,8 @@ interface Builder {
 	constructor(Config config);
 	void set_chain_source_esplora(string server_url, EsploraSyncConfig? config);
 	void set_chain_source_electrum(string server_url, ElectrumSyncConfig? config);
-	void set_chain_source_bitcoind_rpc(string rpc_host, u16 rpc_port, string rpc_user, string rpc_password);
-	void set_chain_source_bitcoind_rest(string rest_host, u16 rest_port, string rpc_host, u16 rpc_port, string rpc_user, string rpc_password);
+	void set_chain_source_bitcoind_rpc(string rpc_host, u16 rpc_port, string rpc_user, string rpc_password, u32? wallet_rescan_from_height);
+	void set_chain_source_bitcoind_rest(string rest_host, u16 rest_port, string rpc_host, u16 rpc_port, string rpc_user, string rpc_password, u32? wallet_rescan_from_height);
 	void set_gossip_source_p2p();
 	void set_gossip_source_rgs(string rgs_server_url);
 	void set_pathfinding_scores_source(string url);
@@ -59,7 +59,6 @@ interface Builder {
 	void set_node_alias(string node_alias);
 	[Throws=BuildError]
 	void set_async_payments_role(AsyncPaymentsRole? role);
-	void set_wallet_recovery_mode();
 	[Throws=BuildError]
 	Node build(NodeEntropy node_entropy);
 	[Throws=BuildError]
