@@ -126,6 +126,8 @@ pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
+#[cfg(feature = "uniffi")]
+use config::NodeColor;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
 	LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
@@ -551,7 +553,7 @@ impl Node {
 							};
 
 							if let Some(node_alias) = node_alias.as_ref() {
-								bcast_pm.broadcast_node_announcement([0; 3], node_alias.0, addresses);
+								bcast_pm.broadcast_node_announcement(bcast_config.node_color.as_rgb(), node_alias.0, addresses);
 
 								let unix_time_secs_opt =
 									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
@@ -935,6 +937,11 @@ impl Node {
 	/// Returns our node alias.
 	pub fn node_alias(&self) -> Option<NodeAlias> {
 		self.config.node_alias
+	}
+
+	/// Returns our node color.
+	pub fn node_color(&self) -> crate::config::NodeColor {
+		self.config.node_color
 	}
 
 	/// Returns a payment handler allowing to create and pay [BOLT 11] invoices.
