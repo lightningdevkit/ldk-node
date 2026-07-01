@@ -171,7 +171,8 @@ pub struct Config {
 	/// used to send pre-flight probes.
 	pub probing_liquidity_limit_multiplier: u64,
 	/// Configuration options pertaining to Anchor channels, i.e., channels for which the
-	/// `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
+	/// `option_zero_fee_commitments` or `option_anchors_zero_fee_htlc_tx` channel type is
+	/// negotiated.
 	///
 	/// Please refer to [`AnchorChannelsConfig`] for further information on Anchor channels.
 	pub anchor_channels_config: AnchorChannelsConfig,
@@ -270,7 +271,7 @@ impl Default for HumanReadableNamesConfig {
 }
 
 /// Configuration options pertaining to 'Anchor' channels, i.e., channels for which the
-/// `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
+/// `option_zero_fee_commitments` or `option_anchors_zero_fee_htlc_tx` channel type is negotiated.
 ///
 /// Prior to the introduction of Anchor channels, the on-chain fees paying for the transactions
 /// issued on channel closure were pre-determined and locked-in at the time of the channel
@@ -390,6 +391,8 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	// will mostly be relevant for inbound channels.
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+	user_config.channel_handshake_config.negotiate_anchor_zero_fee_commitments =
+		config.anchor_channels_config.enable_zero_fee_commitments;
 	user_config.reject_inbound_splices = false;
 
 	if may_announce_channel(config).is_err() {
