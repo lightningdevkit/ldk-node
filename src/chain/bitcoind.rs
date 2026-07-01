@@ -119,7 +119,7 @@ impl BitcoindChainSource {
 		self.api_client.utxo_source()
 	}
 
-	pub(super) async fn validate_zero_fee_commitments_support(&self) -> Result<(), Error> {
+	pub(super) async fn validate_submit_package_support(&self) -> Result<(), Error> {
 		let node_version_result = tokio::time::timeout(
 			Duration::from_secs(CHAIN_POLLING_TIMEOUT_SECS),
 			self.api_client.get_node_version(),

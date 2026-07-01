@@ -286,17 +286,14 @@ impl Node {
 		})?;
 
 		// Block to ensure we update our fee rate cache once on startup.
-		// Also take this opportunity to make sure our chain source supports 0FC channels
-		// if they are enabled.
+		// Also take this opportunity to make sure our chain source supports submitpackage.
 		//
 		// TODO: drop 0FC chain source validation when support is ubiquitous
 		let chain_source = Arc::clone(&self.chain_source);
 		self.runtime.block_on(async move {
 			tokio::try_join!(
 				chain_source.update_fee_rate_estimates(),
-				chain_source.validate_zero_fee_commitments_support_if_required(
-					self.config.anchor_channels_config.enable_zero_fee_commitments
-				)
+				chain_source.validate_submit_package_support()
 			)
 		})?;
 

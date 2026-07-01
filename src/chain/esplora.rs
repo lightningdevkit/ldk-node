@@ -80,7 +80,7 @@ impl EsploraChainSource {
 		})
 	}
 
-	pub(super) async fn validate_zero_fee_commitments_support(&self) -> Result<(), Error> {
+	pub(super) async fn validate_submit_package_support(&self) -> Result<(), Error> {
 		// This could still accept an Esplora server running against Bitcoin Core v26
 		// through v28, which does not relay ephemeral dust.
 		self.esplora_client.submit_package(&super::dummy_package(), None, None).await.map_err(

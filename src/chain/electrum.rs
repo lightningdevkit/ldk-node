@@ -303,7 +303,7 @@ impl ElectrumChainSource {
 		Ok(())
 	}
 
-	pub(crate) async fn validate_zero_fee_commitments_support(&self) -> Result<(), Error> {
+	pub(crate) async fn validate_submit_package_support(&self) -> Result<(), Error> {
 		let electrum_client: Arc<ElectrumRuntimeClient> = if let Some(client) =
 			self.electrum_runtime_status.read().expect("lock").client().as_ref()
 		{

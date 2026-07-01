@@ -469,22 +469,16 @@ impl ChainSource {
 		}
 	}
 
-	pub(crate) async fn validate_zero_fee_commitments_support_if_required(
-		&self, submit_package_support_required: bool,
-	) -> Result<(), Error> {
-		if !submit_package_support_required {
-			return Ok(());
-		}
-
+	pub(crate) async fn validate_submit_package_support(&self) -> Result<(), Error> {
 		match &self.kind {
 			ChainSourceKind::Esplora(esplora_chain_source) => {
-				esplora_chain_source.validate_zero_fee_commitments_support().await
+				esplora_chain_source.validate_submit_package_support().await
 			},
 			ChainSourceKind::Electrum(electrum_chain_source) => {
-				electrum_chain_source.validate_zero_fee_commitments_support().await
+				electrum_chain_source.validate_submit_package_support().await
 			},
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
-				bitcoind_chain_source.validate_zero_fee_commitments_support().await
+				bitcoind_chain_source.validate_submit_package_support().await
 			},
 		}
 	}
