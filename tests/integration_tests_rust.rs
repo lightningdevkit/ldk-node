@@ -1949,6 +1949,166 @@ async fn splice_payment_reorged_to_unconfirmed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rbf_splice_payment_reverts_after_deep_reorg() {
+	// A graduated RBF splice payment is anchored to the FIRST candidate's id but stamped with the
+	// CONFIRMED (RBF) candidate's txid. Graduation removes its pending-store entry, so a later deep
+	// reorg (deeper than ANTI_REORG_DELAY) that returns the confirmed candidate to the mempool must
+	// still map the event back to the original payment and revert it — not create a duplicate
+	// generic on-chain payment under the confirmed candidate's id.
+
+	// Lower incrementalrelayfee so the RBF feerate bump is relayable (as run_rbf_splice_channel_test).
+	let bitcoind_exe = std::env::var("BITCOIND_EXE")
+		.ok()
+		.or_else(|| corepc_node::downloaded_exe_path().ok())
+		.expect(
+			"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
+		);
+	let mut bitcoind_conf = corepc_node::Conf::default();
+	bitcoind_conf.network = "regtest";
+	bitcoind_conf.args.push("-rest");
+	bitcoind_conf.args.push("-incrementalrelayfee=0.00000100");
+	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
+
+	let electrs_exe = std::env::var("ELECTRS_EXE")
+		.ok()
+		.or_else(electrsd::downloaded_exe_path)
+		.expect("you need to provide env var ELECTRS_EXE or specify an electrsd version feature");
+	let mut electrsd_conf = electrsd::Conf::default();
+	electrsd_conf.http_enabled = true;
+	electrsd_conf.network = "regtest";
+	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// node_b splices in, then RBF-bumps it: the funding payment spans two candidates, its id
+	// anchored to the first (original) candidate's txid.
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	let original_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, original_txo.txid).await;
+	wait_for_classified_funding_payment(&node_b, original_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id()).unwrap();
+	let rbf_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	assert_ne!(original_txo, rbf_txo, "RBF should produce a different funding txo");
+	wait_for_tx(&electrsd.client, rbf_txo.txid).await;
+	wait_for_classified_funding_payment(&node_b, rbf_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Confirm the RBF candidate and graduate it past ANTI_REORG_DELAY (6 confirmations), which
+	// removes the pending-store entry.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let payment_id = PaymentId(original_txo.txid.to_byte_array());
+	let rbf_payment_id = PaymentId(rbf_txo.txid.to_byte_array());
+
+	// Graduated: anchored to the original candidate's id, stamped with the confirmed RBF
+	// candidate's txid, with no separate record under the RBF candidate's id.
+	let payment = node_b.payment(&payment_id).expect("splice payment graduated");
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain {
+			txid,
+			status: ConfirmationStatus::Confirmed { .. },
+			tx_type: Some(TransactionType::InteractiveFunding { .. }),
+		} if txid == rbf_txo.txid
+	));
+	assert!(
+		node_b.payment(&rbf_payment_id).is_none(),
+		"the graduated splice payment must not be duplicated under the RBF candidate's id",
+	);
+
+	// Deep reorg (deeper than ANTI_REORG_DELAY): drop the 6 graduation blocks and build a longer,
+	// transaction-free chain, returning the confirmed RBF candidate to the mempool.
+	let original_height =
+		bitcoind.client.get_blockchain_info().expect("failed to get blockchain info").blocks;
+	invalidate_blocks(&bitcoind.client, 6);
+	let replacement_address = bitcoind.client.new_address().expect("failed to get new address");
+	for _ in 0..7 {
+		let _res: serde_json::Value = bitcoind
+			.client
+			.call("generateblock", &[json!(replacement_address.to_string()), json!([])])
+			.expect("failed to generate empty block");
+	}
+	wait_for_block(&electrsd.client, original_height as usize + 1).await;
+	// Wait for the reorged-out RBF candidate to reappear in the mempool before syncing, so the sync
+	// reliably observes its TxUnconfirmed event rather than racing electrs's reindex.
+	wait_for_tx(&electrsd.client, rbf_txo.txid).await;
+	node_b.sync_wallets().unwrap();
+
+	// The reorg event for the confirmed RBF candidate's txid must map back to the original payment
+	// and revert it to Pending/Unconfirmed, rather than creating a duplicate generic on-chain
+	// payment under the RBF candidate's id.
+	assert!(
+		node_b.payment(&rbf_payment_id).is_none(),
+		"a reorged-out RBF splice must not produce a duplicate generic on-chain payment",
+	);
+	let payment = node_b.payment(&payment_id).expect("splice payment still exists after the reorg");
+	assert_eq!(payment.status, PaymentStatus::Pending);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain {
+			status: ConfirmationStatus::Unconfirmed,
+			tx_type: Some(TransactionType::InteractiveFunding { .. }),
+			..
+		}
+	));
+
+	// The revert re-established the pending-store entry, so once the RBF candidate (still in the
+	// mempool) reconfirms past ANTI_REORG_DELAY the payment re-graduates to Succeeded in place —
+	// without leaving a duplicate behind.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_b.sync_wallets().unwrap();
+	let payment = node_b.payment(&payment_id).expect("splice payment re-graduated");
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain {
+			txid,
+			status: ConfirmationStatus::Confirmed { .. },
+			tx_type: Some(TransactionType::InteractiveFunding { .. }),
+		} if txid == rbf_txo.txid
+	));
+	assert!(
+		node_b.payment(&rbf_payment_id).is_none(),
+		"re-graduation must not create a duplicate payment under the RBF candidate's id",
+	);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn splice_in_rbf_joins_counterparty_splice() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);

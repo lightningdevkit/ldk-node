@@ -392,11 +392,6 @@ impl Wallet {
 						continue;
 					};
 
-					// Collect all conflict txids
-					let mut conflict_txids: Vec<Txid> =
-						conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
-
-					conflict_txids.push(txid);
 					// The payment already exists in the store at this point: `bump_fee_rbf` updates
 					// the payment store with the replacement txid before the next sync cycle, so we
 					// can safely fetch it here.
@@ -407,8 +402,26 @@ impl Wallet {
 					);
 					let payment =
 						self.payment_store.get(&payment_id).ok_or(Error::InvalidPaymentId)?;
+
+					// A graduated funding payment is resolvable here only through
+					// `find_payment_by_txid`'s payment-store fallback. Revert it like the
+					// `TxUnconfirmed`/`TxDropped` arms instead of mirroring a non-`Pending` record
+					// into the pending store, which graduation's pending-only scan would reject.
+					if payment.status != PaymentStatus::Pending
+						&& self.apply_funding_status_update(
+							payment_id,
+							txid,
+							ConfirmationStatus::Unconfirmed,
+						)? {
+						continue;
+					}
+
+					// Collect all conflict txids
+					let mut conflict_txids: Vec<Txid> =
+						conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
+					conflict_txids.push(txid);
 					let pending_payment_details =
-						self.create_pending_payment_from_tx(payment, conflict_txids.clone());
+						self.create_pending_payment_from_tx(payment, conflict_txids);
 
 					self.runtime.block_on(
 						self.pending_payment_store.insert_or_update(pending_payment_details),
@@ -1454,6 +1467,34 @@ impl Wallet {
 			return Some(replaced_details.details.id);
 		}
 
+		// A funding payment graduates out of the pending store, after which only the payment store
+		// retains it — under its first-candidate-anchored id, but stamped with the confirmed
+		// candidate's txid. Map a later event (e.g. a reorg returning the confirmed candidate to the
+		// mempool) back to that funding payment so it is reverted in place rather than duplicated as
+		// a generic on-chain payment under the candidate's txid. Only one funding record carries a
+		// given confirmed txid (its id is anchored to the first candidate and reclassification
+		// merges into it), so the first match is unambiguous.
+		if let Some(funding) = self
+			.payment_store
+			.list_filter(|p| {
+				matches!(
+					p.kind,
+					PaymentKind::Onchain {
+						txid,
+						tx_type:
+							Some(
+								TransactionType::Funding { .. }
+								| TransactionType::InteractiveFunding { .. },
+							),
+						..
+					} if txid == target_txid
+				)
+			})
+			.first()
+		{
+			return Some(funding.id);
+		}
+
 		None
 	}
 
@@ -1489,6 +1530,14 @@ impl Wallet {
 				payment.amount_msat = candidate.amount_msat;
 				payment.fee_paid_msat = candidate.fee_paid_msat;
 			}
+		}
+
+		// A reorg returning the transaction to the mempool reverts the payment to pending so wallet
+		// sync re-graduates it once it reconfirms. This also re-establishes the pending-store entry
+		// below (gated on `Pending`) that graduation removed; without it a graduated payment would
+		// be left `Succeeded` with an `Unconfirmed` kind and no way to re-graduate.
+		if matches!(confirmation_status, ConfirmationStatus::Unconfirmed) {
+			payment.status = PaymentStatus::Pending;
 		}
 
 		payment.kind =
