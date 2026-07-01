@@ -1317,14 +1317,15 @@ where
 				);
 				let mut allow_0conf =
 					self.config.trusted_peers_0conf.contains(&counterparty_node_id);
-				let mut channel_override_config = None;
 
 				// If the peer is a configured LSP node, additionally honor its trust_peer_0conf flag.
-				if let Some(lsp) =
-					self.liquidity_source.get_lsp_config(&counterparty_node_id, 2).await
-				{
-					allow_0conf = allow_0conf || lsp.trust_peer_0conf;
+				if self.liquidity_source.get_lsp_trust_0conf(&counterparty_node_id) == Some(true) {
+					allow_0conf = true;
+				}
 
+				let mut channel_override_config = None;
+
+				if self.liquidity_source.get_lsp_config(&counterparty_node_id, 2).await.is_some() {
 					// When we're an LSPS2 client, allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
 					// check that they don't take too much before claiming.
 					channel_override_config = Some(ChannelConfigOverrides {
