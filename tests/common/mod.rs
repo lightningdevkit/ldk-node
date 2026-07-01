@@ -380,9 +380,6 @@ pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 pub(crate) fn random_config() -> TestConfig {
 	let mut node_config = Config::default();
 
-	let zero_fee_commitments = rand::random_bool(0.5);
-	node_config.anchor_channels_config.enable_zero_fee_commitments = zero_fee_commitments;
-
 	node_config.network = Network::Regtest;
 	println!("Setting network: {}", node_config.network);
 
