@@ -8,15 +8,43 @@
 use std::collections::hash_map::{self, HashMap};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::SocketAddress;
 
-use crate::config::TorConfig;
+use crate::config::{TorConfig, PEER_RECONNECTION_INTERVAL, PEER_RECONNECTION_MAX_INTERVAL};
 use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::types::{KeysManager, PeerManager};
 use crate::Error;
+
+struct PeerReconnectState {
+	consecutive_failures: u32,
+	next_retry_at: Instant,
+	next_backoff: Duration,
+}
+
+impl PeerReconnectState {
+	fn new(now: Instant) -> Self {
+		Self {
+			consecutive_failures: 0,
+			next_retry_at: now,
+			next_backoff: PEER_RECONNECTION_INTERVAL,
+		}
+	}
+
+	/// Bumps the failure count, schedules `next_retry_at` to `now + current backoff`,
+	/// and doubles the backoff for the following failure (capped at
+	/// [`PEER_RECONNECTION_MAX_INTERVAL`]). Returns the backoff that was scheduled.
+	fn record_failure(&mut self, now: Instant) -> Duration {
+		self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+		let scheduled_backoff = self.next_backoff;
+		self.next_retry_at = now + scheduled_backoff;
+		self.next_backoff =
+			std::cmp::min(scheduled_backoff.saturating_mul(2), PEER_RECONNECTION_MAX_INTERVAL);
+		scheduled_backoff
+	}
+}
 
 pub(crate) struct ConnectionManager<L: Deref + Clone + Sync + Send>
 where
@@ -24,6 +52,7 @@ where
 {
 	pending_connections:
 		Mutex<HashMap<PublicKey, Vec<tokio::sync::oneshot::Sender<Result<(), Error>>>>>,
+	reconnect_state: Mutex<HashMap<PublicKey, PeerReconnectState>>,
 	peer_manager: Arc<PeerManager>,
 	tor_proxy_config: Option<TorConfig>,
 	keys_manager: Arc<KeysManager>,
@@ -39,8 +68,60 @@ where
 		keys_manager: Arc<KeysManager>, logger: L,
 	) -> Self {
 		let pending_connections = Mutex::new(HashMap::new());
+		let reconnect_state = Mutex::new(HashMap::new());
 
-		Self { pending_connections, peer_manager, tor_proxy_config, keys_manager, logger }
+		Self {
+			pending_connections,
+			reconnect_state,
+			peer_manager,
+			tor_proxy_config,
+			keys_manager,
+			logger,
+		}
+	}
+
+	/// Returns whether the background reconnection task should attempt to reconnect
+	/// to `node_id` now, based on per-peer exponential backoff state.
+	pub(crate) fn is_reconnect_due(&self, node_id: &PublicKey) -> bool {
+		self.reconnect_state
+			.lock()
+			.expect("lock")
+			.get(node_id)
+			.map_or(true, |state| Instant::now() >= state.next_retry_at)
+	}
+
+	/// Records the outcome of a reconnection attempt and updates per-peer backoff.
+	///
+	/// On success, any existing backoff state is cleared. On failure, the per-peer
+	/// retry interval is doubled (up to [`PEER_RECONNECTION_MAX_INTERVAL`]) and the
+	/// next retry is scheduled accordingly.
+	pub(crate) fn record_reconnect_attempt(&self, node_id: &PublicKey, result: &Result<(), Error>) {
+		let mut state_lock = self.reconnect_state.lock().expect("lock");
+		if result.is_ok() {
+			if state_lock.remove(node_id).is_some() {
+				log_debug!(self.logger, "Cleared reconnection backoff for peer {}", node_id);
+			}
+			return;
+		}
+
+		let now = Instant::now();
+		let state = state_lock.entry(*node_id).or_insert_with(|| PeerReconnectState::new(now));
+		let scheduled_backoff = state.record_failure(now);
+
+		log_debug!(
+			self.logger,
+			"Reconnection to peer {} failed ({} consecutive failures); next retry in {}s",
+			node_id,
+			state.consecutive_failures,
+			scheduled_backoff.as_secs(),
+		);
+	}
+
+	/// Removes any per-peer backoff state for `node_id`, so a subsequent attempt
+	/// is treated as a fresh first try. Called when a peer is removed from the
+	/// persisted peer store.
+	pub(crate) fn clear_reconnect_state(&self, node_id: &PublicKey) {
+		self.reconnect_state.lock().expect("lock").remove(node_id);
 	}
 
 	pub(crate) async fn connect_peer_if_necessary(
@@ -57,6 +138,11 @@ where
 		&self, node_id: PublicKey, addr: SocketAddress,
 	) -> Result<(), Error> {
 		let res = self.do_connect_peer_internal(node_id, addr).await;
+		if res.is_ok() {
+			// Any successful connect (including user-initiated ones) resets backoff so the
+			// background reconnection loop retries promptly if the peer drops again.
+			self.clear_reconnect_state(&node_id);
+		}
 		self.propagate_result_to_subscribers(&node_id, res);
 		res
 	}
@@ -271,5 +357,51 @@ where
 				});
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn reconnect_state_doubles_until_capped() {
+		let start = Instant::now();
+		let mut state = PeerReconnectState::new(start);
+
+		let scheduled = state.record_failure(start);
+		assert_eq!(scheduled, PEER_RECONNECTION_INTERVAL);
+		assert_eq!(state.consecutive_failures, 1);
+		assert_eq!(state.next_retry_at, start + PEER_RECONNECTION_INTERVAL);
+
+		let mut expected = PEER_RECONNECTION_INTERVAL;
+		for failure_count in 2..32 {
+			expected = std::cmp::min(expected.saturating_mul(2), PEER_RECONNECTION_MAX_INTERVAL);
+			let scheduled = state.record_failure(start);
+			assert_eq!(scheduled, expected);
+			assert_eq!(state.consecutive_failures, failure_count);
+			assert_eq!(state.next_retry_at, start + expected);
+			assert!(state.next_backoff <= PEER_RECONNECTION_MAX_INTERVAL);
+		}
+
+		// Once capped, further failures stay at the cap.
+		assert_eq!(state.next_backoff, PEER_RECONNECTION_MAX_INTERVAL);
+		let scheduled = state.record_failure(start);
+		assert_eq!(scheduled, PEER_RECONNECTION_MAX_INTERVAL);
+		assert_eq!(state.next_backoff, PEER_RECONNECTION_MAX_INTERVAL);
+	}
+
+	#[test]
+	fn reconnect_state_schedules_relative_to_failure_time() {
+		let t0 = Instant::now();
+		let mut state = PeerReconnectState::new(t0);
+
+		let _ = state.record_failure(t0);
+		assert_eq!(state.next_retry_at, t0 + PEER_RECONNECTION_INTERVAL);
+
+		let t1 = t0 + Duration::from_secs(5);
+		let scheduled = state.record_failure(t1);
+		assert_eq!(scheduled, PEER_RECONNECTION_INTERVAL * 2);
+		assert_eq!(state.next_retry_at, t1 + PEER_RECONNECTION_INTERVAL * 2);
 	}
 }
