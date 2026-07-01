@@ -184,6 +184,9 @@ pub use types::{
 };
 pub use vss_client;
 
+use crate::config::{
+	LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY_SECS, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY_SECS,
+};
 use crate::ffi::maybe_wrap;
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
@@ -745,6 +748,62 @@ impl Node {
 						}
 					}
 				}
+			}
+		});
+
+		// Background retry for LSPs that failed the initial protocol-discovery batch, so a
+		// transient startup failure doesn't leave a configured LSP permanently unusable.
+		let mut stop_retry = self.stop_sender.subscribe();
+		let retry_ls = Arc::clone(&self.liquidity_source);
+		let retry_logger = Arc::clone(&self.logger);
+		let retry_cm = Arc::clone(&self.connection_manager);
+		self.runtime.spawn_background_task(async move {
+			let mut backoff = LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY_SECS;
+			loop {
+				let undiscovered_lsps = retry_ls.get_undiscovered_lsps();
+				if undiscovered_lsps.is_empty() {
+					tokio::select! {
+						_ = stop_retry.changed() => return,
+						_ = tokio::time::sleep(Duration::from_secs(
+							LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY_SECS,
+						)) => continue,
+					}
+				}
+
+				tokio::select! {
+					_ = stop_retry.changed() => return,
+					_ = tokio::time::sleep(Duration::from_secs(backoff)) => {},
+				}
+
+				for (node_id, address) in undiscovered_lsps {
+					if let Err(e) =
+						retry_cm.connect_peer_if_necessary(node_id, address.clone()).await
+					{
+						log_debug!(
+							retry_logger,
+							"Discovery retry: failed to connect to LSP {}: {}",
+							node_id,
+							e
+						);
+						continue;
+					}
+					match retry_ls.discover_lsp_protocols(&node_id).await {
+						Ok(protocols) => log_info!(
+							retry_logger,
+							"Discovery retry: discovered protocols for LSP {}: {:?}",
+							node_id,
+							protocols
+						),
+						Err(e) => log_debug!(
+							retry_logger,
+							"Discovery retry: failed for LSP {}: {:?}",
+							node_id,
+							e
+						),
+					}
+				}
+
+				backoff = (backoff * 2).min(LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY_SECS);
 			}
 		});
 

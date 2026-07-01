@@ -111,6 +111,12 @@ pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
 // The timeout after which we abort an LNURL-auth operation.
 pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 
+// The initial delay before retrying a failed liquidity protocol discovery operation.
+pub(crate) const LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY_SECS: u64 = 5;
+
+// The maximum delay before retrying a failed liquidity protocol discovery operation.
+pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY_SECS: u64 = 3600;
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 /// Represents the configuration of an [`Node`] instance.
