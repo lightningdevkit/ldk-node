@@ -1271,7 +1271,10 @@ impl Bolt11Invoice {
 
 	/// Recover the payee's public key (only to be used if none was included in the invoice)
 	pub fn recover_payee_pub_key(&self) -> PublicKey {
-		self.inner.recover_payee_pub_key()
+		// Prefer the invoice's explicit payee pubkey, falling back to signature recovery. (Upstream
+		// `recover_payee_pub_key` is now fallible and can return `None` even for a valid invoice
+		// that includes an `n` field, so we use the infallible `get_payee_pub_key` here.)
+		self.inner.get_payee_pub_key()
 	}
 }
 

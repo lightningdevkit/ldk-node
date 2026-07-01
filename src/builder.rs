@@ -2012,6 +2012,10 @@ fn build_with_store_internal(
 				Arc::clone(&channel_manager),
 				Arc::clone(&om_resolver),
 				IgnoringMessageHandler {},
+				// Don't intercept messages addressed to unknown SCIDs: our mailbox can only key by
+				// node id, so we'd be unable to forward them anyway (see the
+				// `OnionMessageIntercepted` handler).
+				false,
 			))
 		} else {
 			Arc::new(OnionMessenger::new(

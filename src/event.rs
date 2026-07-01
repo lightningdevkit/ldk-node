@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, OutPoint};
+use lightning::blinded_path::message::NextMessageHop;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
 use lightning::events::PaidBolt12Invoice;
@@ -29,7 +30,7 @@ use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
-use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
+use lightning::{impl_ser_tlv_based, impl_ser_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
@@ -78,7 +79,7 @@ pub struct HTLCLocator {
 	pub node_id: Option<PublicKey>,
 }
 
-impl_writeable_tlv_based!(HTLCLocator, {
+impl_ser_tlv_based!(HTLCLocator, {
 	(1, channel_id, required),
 	(3, user_channel_id, option),
 	(5, node_id, option),
@@ -294,7 +295,7 @@ pub enum Event {
 	},
 }
 
-impl_writeable_tlv_based_enum!(Event,
+impl_ser_tlv_based_enum!(Event,
 	(0, PaymentSuccessful) => {
 		(0, payment_hash, required),
 		(1, fee_paid_msat, option),
@@ -1721,18 +1722,33 @@ where
 						}
 					},
 					BumpTransactionEvent::HTLCResolution { .. } => {},
+					BumpTransactionEvent::HTLCsClaimTxResolution { .. } => {},
 				}
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
 			},
-			LdkEvent::OnionMessageIntercepted { peer_node_id, message } => {
-				if let Some(om_mailbox) = self.om_mailbox.as_ref() {
-					om_mailbox.onion_message_intercepted(peer_node_id, message);
-				} else {
-					log_trace!(
-						self.logger,
-						"Onion message intercepted, but no onion message mailbox available"
-					);
+			LdkEvent::OnionMessageIntercepted { next_hop, message, .. } => {
+				// We can only mailbox messages addressed to a known node id; messages
+				// addressed to an as-yet-unknown SCID have no peer to key the mailbox
+				// by, so we drop them.
+				match next_hop {
+					NextMessageHop::NodeId(peer_node_id) => {
+						if let Some(om_mailbox) = self.om_mailbox.as_ref() {
+							om_mailbox.onion_message_intercepted(peer_node_id, message);
+						} else {
+							log_trace!(
+								self.logger,
+								"Onion message intercepted, but no onion message mailbox available"
+							);
+						}
+					},
+					NextMessageHop::ShortChannelId(scid) => {
+						log_trace!(
+							self.logger,
+							"Onion message intercepted for unknown SCID {}, dropping as it cannot be mailboxed",
+							scid
+						);
+					},
 				}
 			},
 			LdkEvent::OnionMessagePeerConnected { peer_node_id } => {

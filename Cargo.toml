@@ -41,6 +41,13 @@ postgres = ["dep:tokio-postgres", "dep:native-tls", "dep:postgres-native-tls"]
 #lightning-macros = { version = "0.2.0" }
 #lightning-dns-resolver = { version = "0.3.0" }
 
+# EXPERIMENTAL: these are redirected by the `[patch]` section at the bottom of this manifest to the
+# public `templatehash_antipinning` branch of https://github.com/darosior/rust-lightning (= upstream
+# main + the `option_htlcs_claim_tx` / OP_TEMPLATEHASH anti-pinning commits). The patch targets the
+# git URL so that *all* consumers in the graph (including `bitcoin-payment-instructions`, which also
+# depends on `lightning` from this URL) resolve to the same crate instance. The `rev` below is
+# nominal and overridden by the patch; swap both back to a real published `rev` once the branch
+# lands upstream.
 lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3dfcc4cca1866c5e5d4d4eaf3b82e09584e2ce5c", features = ["std"] }
 lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3dfcc4cca1866c5e5d4d4eaf3b82e09584e2ce5c" }
 lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "3dfcc4cca1866c5e5d4d4eaf3b82e09584e2ce5c", features = ["std"] }
@@ -122,6 +129,39 @@ panic = "abort"
 
 [profile.dev]
 panic = "abort"
+
+# EXPERIMENTAL: the `option_htlcs_claim_tx` channel type relies on the `OP_TEMPLATEHASH`
+# (BIP-446/448) opcode, which is not yet available in a released `bitcoin`. Pull it from a fork
+# that cherry-picks BIP-446/448 onto the same `bitcoin` patch release we otherwise depend on. This
+# mirrors the identical patch in rust-lightning's own Cargo.toml (patch sections only apply from
+# the root workspace, so it must be declared here too).
+[patch.crates-io]
+bitcoin = { git = "https://github.com/darosior/rust-bitcoin", branch = "bip448-0.32.4" }
+# The fork's `bitcoin` pulls its own `bitcoin_hashes`/`bitcoin-units`; patch those to the same fork
+# too so the whole graph (including dev-dependencies like `electrsd`/`corepc-node` that depend on
+# `bitcoin_hashes` directly from crates.io) resolves to a single instance, avoiding "multiple
+# versions of crate bitcoin_hashes" type mismatches (e.g. on `Txid`) when building all targets.
+bitcoin_hashes = { git = "https://github.com/darosior/rust-bitcoin", branch = "bip448-0.32.4" }
+bitcoin-units = { git = "https://github.com/darosior/rust-bitcoin", branch = "bip448-0.32.4" }
+
+# EXPERIMENTAL: redirect the rust-lightning git dependency (used both directly above and
+# transitively by `bitcoin-payment-instructions`) to the public `templatehash_antipinning` branch
+# that carries the `option_htlcs_claim_tx` / OP_TEMPLATEHASH work. Patching the git URL (rather than
+# using path deps directly) keeps the whole dependency graph on a single `lightning` crate instance,
+# avoiding "two versions of crate lightning" type mismatches. Drop this once the branch lands upstream.
+[patch."https://github.com/lightningdevkit/rust-lightning"]
+lightning = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-types = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-invoice = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-net-tokio = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-persister = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-background-processor = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-rapid-gossip-sync = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-block-sync = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-transaction-sync = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-liquidity = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-macros = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
+lightning-dns-resolver = { git = "https://github.com/darosior/rust-lightning", branch = "templatehash_antipinning" }
 
 [lints.rust.unexpected_cfgs]
 level = "forbid"

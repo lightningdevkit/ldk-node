@@ -21,7 +21,7 @@ use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
 use bitcoin::key::Secp256k1;
 use bitcoin::Network;
-use lightning::impl_writeable_tlv_based_enum;
+use lightning::impl_ser_tlv_based_enum;
 use lightning::io::{self, Error, ErrorKind};
 use lightning::sign::{EntropySource as LdkEntropySource, RandomBytes};
 use lightning::util::persist::{
@@ -67,7 +67,7 @@ enum VssSchemaVersion {
 	V1,
 }
 
-impl_writeable_tlv_based_enum!(VssSchemaVersion,
+impl_ser_tlv_based_enum!(VssSchemaVersion,
 	(0, V0) => {},
 	(1, V1) => {},
 );
