@@ -1000,12 +1000,18 @@ async fn onchain_wallet_force_full_scan_rediscovers_esplora_funds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn onchain_wallet_full_scan_stop_gap_recovers_far_esplora_funds() {
+async fn onchain_wallet_full_scan_stop_gap_recovers_far_esplora_and_electrum_funds() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	premine_blocks(&bitcoind.client, &electrsd.client).await;
 
 	do_onchain_wallet_full_scan_stop_gap_recovers_far_funds(
 		TestChainSource::Esplora(&electrsd),
+		&bitcoind,
+		&electrsd,
+	)
+	.await;
+	do_onchain_wallet_full_scan_stop_gap_recovers_far_funds(
+		TestChainSource::Electrum(&electrsd),
 		&bitcoind,
 		&electrsd,
 	)
