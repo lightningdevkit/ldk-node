@@ -128,8 +128,8 @@ pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
-	LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
-	RGS_SYNC_INTERVAL,
+	ForwardedPaymentTrackingMode, LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL,
+	PEER_RECONNECTION_INTERVAL, RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 pub use error::Error as NodeError;
@@ -153,9 +153,11 @@ pub use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
+use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStore;
+pub use lightning::util::persist::PageToken;
 use lightning::util::wallet_utils::{Input, Wallet as LdkWallet};
 use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
@@ -167,15 +169,21 @@ use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use payment::store::{
+	aggregate_channel_pair_stats as aggregate_channel_pair_stats_impl,
+	aggregate_expired_forwarded_payments,
+};
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
-	UnifiedPayment,
+	Bolt11Payment, Bolt12Payment, ChannelForwardingStats, ChannelPairForwardingStats,
+	ForwardedPaymentDetails, ForwardedPaymentId, OnchainPayment, PaymentDetails,
+	SpontaneousPayment, UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
 use runtime::Runtime;
 pub use tokio;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelForwardingStatsStore,
+	ChannelManager, ChannelPairForwardingStatsStore, DynStore, ForwardedPaymentStore, Graph,
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
@@ -244,6 +252,9 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	forwarded_payment_store: Arc<ForwardedPaymentStore>,
+	channel_forwarding_stats_store: Arc<ChannelForwardingStatsStore>,
+	channel_pair_forwarding_stats_store: Arc<ChannelPairForwardingStatsStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
@@ -252,6 +263,36 @@ pub struct Node {
 	hrn_resolver: HRNResolver,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
+}
+
+/// A page of forwarded payments returned from a paginated listing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ForwardedPaymentDetailsPage {
+	/// Forwarded payments in this page.
+	pub payments: Vec<ForwardedPaymentDetails>,
+	/// Token to pass to the next call to continue listing, if another page exists.
+	pub next_page_token: Option<PageToken>,
+}
+
+/// A page of channel forwarding statistics returned from a paginated listing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ChannelForwardingStatsPage {
+	/// Channel forwarding statistics in this page.
+	pub stats: Vec<ChannelForwardingStats>,
+	/// Token to pass to the next call to continue listing, if another page exists.
+	pub next_page_token: Option<PageToken>,
+}
+
+/// A page of channel-pair forwarding statistics returned from a paginated listing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ChannelPairForwardingStatsPage {
+	/// Channel-pair forwarding statistics in this page.
+	pub stats: Vec<ChannelPairForwardingStats>,
+	/// Token to pass to the next call to continue listing, if another page exists.
+	pub next_page_token: Option<PageToken>,
 }
 
 impl Node {
@@ -288,6 +329,38 @@ impl Node {
 		// Block to ensure we update our fee rate cache once on startup
 		let chain_source = Arc::clone(&self.chain_source);
 		self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await })?;
+
+		if let ForwardedPaymentTrackingMode::Detailed { retention_minutes } =
+			self.config.forwarded_payment_tracking_mode
+		{
+			if retention_minutes > 0 {
+				let forwarded_payment_store = Arc::clone(&self.forwarded_payment_store);
+				let channel_pair_stats_store =
+					Arc::clone(&self.channel_pair_forwarding_stats_store);
+				let logger = Arc::clone(&self.logger);
+				self.runtime.block_on(async move {
+					match aggregate_expired_forwarded_payments(
+						&forwarded_payment_store,
+						&channel_pair_stats_store,
+						retention_minutes,
+						&logger,
+					)
+					.await
+					{
+						Ok((pair_count, payment_count)) if pair_count > 0 => {
+							log_info!(
+								logger,
+								"Aggregated {payment_count} forwarded payments into {pair_count} channel pair buckets"
+							);
+						},
+						Err(e) => {
+							log_error!(logger, "Startup forwarded payment aggregation failed: {e}")
+						},
+						_ => {},
+					}
+				});
+			}
+		}
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
@@ -581,6 +654,50 @@ impl Node {
 			chain_source.continuously_process_broadcast_queue(stop_tx_bcast).await
 		});
 
+		if let ForwardedPaymentTrackingMode::Detailed { retention_minutes } =
+			self.config.forwarded_payment_tracking_mode
+		{
+			if retention_minutes > 0 {
+				let stop_aggregation = self.stop_sender.subscribe();
+				let forwarded_payment_store = Arc::clone(&self.forwarded_payment_store);
+				let channel_pair_stats_store =
+					Arc::clone(&self.channel_pair_forwarding_stats_store);
+				let logger = Arc::clone(&self.logger);
+				self.runtime.spawn_cancellable_background_task(async move {
+					let mut interval =
+						tokio::time::interval(Duration::from_secs(retention_minutes * 60));
+					interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+					let mut stop_aggregation = stop_aggregation;
+					loop {
+						tokio::select! {
+							_ = stop_aggregation.changed() => break,
+							_ = interval.tick() => {
+								match aggregate_expired_forwarded_payments(
+									&forwarded_payment_store,
+									&channel_pair_stats_store,
+									retention_minutes,
+									&logger,
+								)
+								.await
+								{
+									Ok((pair_count, payment_count)) if pair_count > 0 => {
+										log_debug!(
+											logger,
+											"Aggregated {} forwarded payments into {} channel pair buckets",
+											payment_count,
+											pair_count
+										);
+									},
+									Err(e) => log_error!(logger, "Periodic forwarded payment aggregation failed: {}", e),
+									_ => {},
+								}
+							}
+						}
+					}
+				});
+			}
+		}
+
 		let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
 			Arc::clone(&self.tx_broadcaster),
 			Arc::new(LdkWallet::new(Arc::clone(&self.wallet), Arc::clone(&self.logger))),
@@ -605,6 +722,8 @@ impl Node {
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.forwarded_payment_store),
+			Arc::clone(&self.channel_forwarding_stats_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.keys_manager),
 			static_invoice_store,
@@ -2135,6 +2254,114 @@ impl Node {
 		self.payment_store.list_filter(|_| true)
 	}
 
+	/// Retrieve the details of a specific forwarded payment with the given id.
+	pub fn forwarded_payment(
+		&self, forwarded_payment_id: &ForwardedPaymentId,
+	) -> Option<ForwardedPaymentDetails> {
+		self.forwarded_payment_store.get(forwarded_payment_id)
+	}
+
+	/// Retrieves all forwarded payments that match the given predicate.
+	pub fn list_forwarded_payments_with_filter<F: FnMut(&&ForwardedPaymentDetails) -> bool>(
+		&self, f: F,
+	) -> Vec<ForwardedPaymentDetails> {
+		self.forwarded_payment_store.list_filter(f)
+	}
+
+	/// Retrieves a page of forwarded payments from the underlying paginated store.
+	pub fn list_forwarded_payments(
+		&self, page_token: Option<PageToken>,
+	) -> Result<ForwardedPaymentDetailsPage, Error> {
+		let (payments, next_page_token) =
+			self.runtime.block_on(self.forwarded_payment_store.list_page(page_token))?;
+		Ok(ForwardedPaymentDetailsPage { payments, next_page_token })
+	}
+
+	/// Returns the configured forwarded payment tracking mode.
+	pub fn forwarded_payment_tracking_mode(&self) -> ForwardedPaymentTrackingMode {
+		self.config.forwarded_payment_tracking_mode
+	}
+
+	/// Retrieve the forwarding statistics for a specific channel.
+	pub fn channel_forwarding_stats(
+		&self, channel_id: &ChannelId,
+	) -> Option<ChannelForwardingStats> {
+		self.channel_forwarding_stats_store.get(channel_id)
+	}
+
+	/// Retrieves a page of channel forwarding statistics from the underlying paginated store.
+	pub fn list_channel_forwarding_stats(
+		&self, page_token: Option<PageToken>,
+	) -> Result<ChannelForwardingStatsPage, Error> {
+		let (stats, next_page_token) =
+			self.runtime.block_on(self.channel_forwarding_stats_store.list_page(page_token))?;
+		Ok(ChannelForwardingStatsPage { stats, next_page_token })
+	}
+
+	/// Retrieves all channel forwarding statistics that match the given predicate.
+	pub fn list_channel_forwarding_stats_with_filter<F: FnMut(&&ChannelForwardingStats) -> bool>(
+		&self, f: F,
+	) -> Vec<ChannelForwardingStats> {
+		self.channel_forwarding_stats_store.list_filter(f)
+	}
+
+	/// Retrieves a page of channel pair forwarding statistics from the underlying paginated store.
+	pub fn list_channel_pair_forwarding_stats(
+		&self, page_token: Option<PageToken>,
+	) -> Result<ChannelPairForwardingStatsPage, Error> {
+		let (stats, next_page_token) = self
+			.runtime
+			.block_on(self.channel_pair_forwarding_stats_store.list_page(page_token))?;
+		Ok(ChannelPairForwardingStatsPage { stats, next_page_token })
+	}
+
+	/// Retrieves all channel pair forwarding statistics that match the given predicate.
+	pub fn list_channel_pair_forwarding_stats_with_filter<
+		F: FnMut(&&ChannelPairForwardingStats) -> bool,
+	>(
+		&self, f: F,
+	) -> Vec<ChannelPairForwardingStats> {
+		self.channel_pair_forwarding_stats_store.list_filter(f)
+	}
+
+	/// Retrieves channel pair forwarding statistics within a specific time range.
+	///
+	/// The page token advances over the underlying channel-pair stats namespace. Filtering is
+	/// applied to the returned page.
+	pub fn list_channel_pair_forwarding_stats_in_range(
+		&self, start_timestamp: u64, end_timestamp: u64, page_token: Option<PageToken>,
+	) -> Result<ChannelPairForwardingStatsPage, Error> {
+		let (stats, next_page_token) = self
+			.runtime
+			.block_on(self.channel_pair_forwarding_stats_store.list_page(page_token))?;
+		let stats = stats
+			.into_iter()
+			.filter(|stats| {
+				stats.bucket_start_timestamp >= start_timestamp
+					&& stats.bucket_start_timestamp < end_timestamp
+			})
+			.collect();
+		Ok(ChannelPairForwardingStatsPage { stats, next_page_token })
+	}
+
+	/// Retrieves all forwarding statistics buckets for a specific channel pair.
+	///
+	/// The page token advances over the underlying channel-pair stats namespace. Filtering is
+	/// applied to the returned page.
+	pub fn list_channel_pair_forwarding_stats_for_pair(
+		&self, prev_channel_id: ChannelId, next_channel_id: ChannelId,
+		page_token: Option<PageToken>,
+	) -> Result<ChannelPairForwardingStatsPage, Error> {
+		let (mut stats, next_page_token) = self
+			.runtime
+			.block_on(self.channel_pair_forwarding_stats_store.list_page(page_token))?;
+		stats.retain(|stats| {
+			stats.prev_channel_id == prev_channel_id && stats.next_channel_id == next_channel_id
+		});
+		stats.sort_by_key(|stats| stats.bucket_start_timestamp);
+		Ok(ChannelPairForwardingStatsPage { stats, next_page_token })
+	}
+
 	/// Retrieves a list of known peers.
 	pub fn list_peers(&self) -> Vec<PeerDetails> {
 		let mut peers = Vec::new();
@@ -2411,6 +2638,13 @@ pub(crate) fn new_channel_anchor_reserve_sats(
 			c.per_channel_reserve_sats
 		}
 	})
+}
+
+/// Aggregates multiple channel pair statistics buckets into cumulative totals.
+pub fn aggregate_channel_pair_stats(
+	buckets: &[ChannelPairForwardingStats],
+) -> ChannelPairForwardingStats {
+	aggregate_channel_pair_stats_impl(buckets)
 }
 
 #[cfg(test)]

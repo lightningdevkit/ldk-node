@@ -149,7 +149,8 @@ pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
 use crate::error::Error;
 pub use crate::liquidity::LSPS1OrderStatus;
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
-use crate::{hex_utils, SocketAddress, UserChannelId};
+use crate::payment::store::{ChannelPairStatsId, ForwardedPaymentId};
+use crate::{hex_utils, PageToken, SocketAddress, UserChannelId};
 
 uniffi::custom_type!(PublicKey, String, {
 	remote,
@@ -909,6 +910,22 @@ uniffi::custom_type!(PaymentId, String, {
 	},
 });
 
+uniffi::custom_type!(ForwardedPaymentId, String, {
+	remote,
+	try_lift: |val| {
+		if let Some(bytes_vec) = hex_utils::to_vec(&val) {
+			let bytes_res = bytes_vec.try_into();
+			if let Ok(bytes) = bytes_res {
+				return Ok(ForwardedPaymentId(bytes));
+			}
+		}
+		Err(Error::InvalidPaymentId.into())
+	},
+	lower: |obj| {
+		hex_utils::to_string(&obj.0)
+	},
+});
+
 uniffi::custom_type!(PaymentHash, String, {
 	remote,
 	try_lift: |val| {
@@ -971,6 +988,33 @@ uniffi::custom_type!(ChannelId, String, {
 	},
 	lower: |obj| {
 		hex_utils::to_string(&obj.0)
+	}
+});
+
+uniffi::custom_type!(ChannelPairStatsId, String, {
+	remote,
+	try_lift: |val| {
+		if let Some(hex_vec) = hex_utils::to_vec(&val) {
+			if hex_vec.len() == 72 {
+				let mut id = [0u8; 72];
+				id.copy_from_slice(&hex_vec[..]);
+				return Ok(ChannelPairStatsId(id));
+			}
+		}
+		Err(Error::InvalidChannelId.into())
+	},
+	lower: |obj| {
+		hex_utils::to_string(&obj.0)
+	}
+});
+
+uniffi::custom_type!(PageToken, String, {
+	remote,
+	try_lift: |val| {
+		Ok(PageToken::new(val))
+	},
+	lower: |obj| {
+		obj.to_string()
 	}
 });
 

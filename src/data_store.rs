@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore};
 use lightning::util::ser::{Readable, Writeable};
 
 use crate::logger::{log_error, LdkLogger};
-use crate::types::DynStore;
+use crate::types::{DynStore, DynStoreRef};
 use crate::Error;
 
 pub(crate) trait StorableObject: Clone + Readable + Writeable {
@@ -177,6 +177,65 @@ where
 	/// caught up to a write in progress.
 	pub(crate) fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
 		self.objects.lock().expect("lock").values().filter(f).cloned().collect::<Vec<SO>>()
+	}
+
+	pub(crate) async fn list_page(
+		&self, page_token: Option<PageToken>,
+	) -> Result<(Vec<SO>, Option<PageToken>), Error> {
+		let response = PaginatedKVStore::list_paginated(
+			&DynStoreRef(Arc::clone(&self.kv_store)),
+			&self.primary_namespace,
+			&self.secondary_namespace,
+			page_token,
+		)
+		.await
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Listing object data under {}/{} failed due to: {}",
+				&self.primary_namespace,
+				&self.secondary_namespace,
+				e
+			);
+			Error::PersistenceFailed
+		})?;
+
+		let mut objects = Vec::with_capacity(response.keys.len());
+		for key in response.keys {
+			let data = KVStore::read(
+				&DynStoreRef(Arc::clone(&self.kv_store)),
+				&self.primary_namespace,
+				&self.secondary_namespace,
+				&key,
+			)
+			.await
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Reading object data for key {}/{}/{} failed due to: {}",
+					&self.primary_namespace,
+					&self.secondary_namespace,
+					key,
+					e
+				);
+				Error::PersistenceFailed
+			})?;
+
+			let object = SO::read(&mut &data[..]).map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to deserialize object data for key {}/{}/{}: {}",
+					&self.primary_namespace,
+					&self.secondary_namespace,
+					key,
+					e
+				);
+				Error::PersistenceFailed
+			})?;
+			objects.push(object);
+		}
+
+		Ok((objects, response.next_page_token))
 	}
 
 	async fn persist(&self, object: &SO) -> Result<(), Error> {

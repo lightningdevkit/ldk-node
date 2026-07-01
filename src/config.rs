@@ -111,6 +111,25 @@ pub(crate) const HRN_RESOLUTION_TIMEOUT_SECS: u64 = 5;
 // The timeout after which we abort an LNURL-auth operation.
 pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 
+/// The mode used for tracking forwarded payments.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum ForwardedPaymentTrackingMode {
+	/// Store individual forwarded payments until they are aggregated into channel-pair buckets.
+	Detailed {
+		/// Number of minutes to retain individual forwarded payments before aggregation.
+		retention_minutes: u64,
+	},
+	/// Track only per-channel aggregate statistics.
+	Stats,
+}
+
+impl Default for ForwardedPaymentTrackingMode {
+	fn default() -> Self {
+		Self::Stats
+	}
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 /// Represents the configuration of an [`Node`] instance.
@@ -130,9 +149,10 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// | `route_parameters`                     | None                                 |
 /// | `tor_config`                           | None                                 |
 /// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
+/// | `forwarded_payment_tracking_mode`      | Stats                               |
 ///
-/// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
-/// respective default values.
+/// See [`AnchorChannelsConfig`], [`RouteParametersConfig`], and
+/// [`ForwardedPaymentTrackingMode`] for more information regarding their respective default values.
 ///
 /// [`Node`]: crate::Node
 pub struct Config {
@@ -205,6 +225,8 @@ pub struct Config {
 	///
 	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 	pub hrn_config: HumanReadableNamesConfig,
+	/// The mode used for tracking forwarded payments.
+	pub forwarded_payment_tracking_mode: ForwardedPaymentTrackingMode,
 }
 
 impl Default for Config {
@@ -221,6 +243,7 @@ impl Default for Config {
 			route_parameters: None,
 			node_alias: None,
 			hrn_config: HumanReadableNamesConfig::default(),
+			forwarded_payment_tracking_mode: ForwardedPaymentTrackingMode::default(),
 		}
 	}
 }
