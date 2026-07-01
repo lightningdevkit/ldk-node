@@ -25,14 +25,17 @@ use lightning::util::ser::Writeable;
 use lightning_transaction_sync::ElectrumSyncClient;
 
 use super::WalletSyncStatus;
-use crate::config::{Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP};
+use crate::config::{
+	clamp_full_scan_stop_gap, Config, ElectrumSyncConfig, MAX_FULL_SCAN_STOP_GAP,
+	MIN_FULL_SCAN_STOP_GAP,
+};
 use crate::error::Error;
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::update_and_persist_node_metrics;
-use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
+use crate::logger::{log_bytes, log_debug, log_error, log_trace, log_warn, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::PersistedNodeMetrics;
@@ -496,11 +499,12 @@ impl ElectrumRuntimeClient {
 	) -> Result<BdkFullScanResponse<BdkKeyChainKind>, Error> {
 		let bdk_electrum_client = Arc::clone(&self.bdk_electrum_client);
 		bdk_electrum_client.populate_tx_cache(cached_txs);
+		let full_scan_stop_gap = self.bounded_full_scan_stop_gap();
 
 		let spawn_fut = self.runtime.spawn_blocking(move || {
 			bdk_electrum_client.full_scan(
 				request,
-				BDK_CLIENT_STOP_GAP,
+				full_scan_stop_gap,
 				BDK_ELECTRUM_CLIENT_BATCH_SIZE,
 				true,
 			)
@@ -524,6 +528,22 @@ impl ElectrumRuntimeClient {
 				log_error!(self.logger, "Sync of on-chain wallet failed: {}", e);
 				Error::WalletOperationFailed
 			})
+	}
+
+	fn bounded_full_scan_stop_gap(&self) -> usize {
+		let configured = self.sync_config.full_scan_stop_gap;
+		let bounded = clamp_full_scan_stop_gap(configured);
+		if bounded != configured {
+			log_warn!(
+				self.logger,
+				"Configured Electrum on-chain wallet full-scan stop gap {} is outside the allowed range {}..={}; using {}.",
+				configured,
+				MIN_FULL_SCAN_STOP_GAP,
+				MAX_FULL_SCAN_STOP_GAP,
+				bounded
+			);
+		}
+		bounded as usize
 	}
 
 	async fn get_incremental_sync_wallet_update(

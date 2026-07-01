@@ -57,9 +57,20 @@ pub const DEFAULT_STORAGE_DIR_PATH: &str = "/tmp/ldk_node";
 // The default Esplora server we're using.
 pub(crate) const DEFAULT_ESPLORA_SERVER_URL: &str = "https://blockstream.info/api";
 
-// The 'stop gap' parameter used by BDK's wallet sync. This seems to configure the threshold
-// number of derivation indexes after which BDK stops looking for new scripts belonging to the wallet.
-pub(crate) const BDK_CLIENT_STOP_GAP: usize = 20;
+/// The default stop gap used for BDK full scans of the on-chain wallet.
+///
+/// The current default is 20.
+pub const DEFAULT_FULL_SCAN_STOP_GAP: u32 = 20;
+
+/// The minimum allowed stop gap used for BDK full scans of the on-chain wallet.
+///
+/// Values below 1 are clamped to 1 when a full scan runs.
+pub const MIN_FULL_SCAN_STOP_GAP: u32 = 1;
+
+/// The maximum allowed stop gap used for BDK full scans of the on-chain wallet.
+///
+/// Values above 1000 are clamped to 1000 when a full scan runs.
+pub const MAX_FULL_SCAN_STOP_GAP: u32 = 1000;
 
 // The number of concurrent requests made against the API provider.
 pub(crate) const BDK_CLIENT_CONCURRENCY: usize = 4;
@@ -506,6 +517,23 @@ pub struct EsploraSyncConfig {
 	pub background_sync_config: Option<BackgroundSyncConfig>,
 	/// Sync timeouts configuration.
 	pub timeouts_config: SyncTimeoutsConfig,
+	/// The stop gap used for BDK full scans of the on-chain wallet.
+	///
+	/// A full scan for each keychain stops after this many consecutive script pubkeys
+	/// with no associated transactions. This value is only used for BDK `full_scan`
+	/// calls, which ldk-node performs on the first on-chain wallet sync or when
+	/// [`Self::force_wallet_full_scan`] is set. Incremental BDK `sync` calls do not use it.
+	///
+	/// **Default:** 20 ([`DEFAULT_FULL_SCAN_STOP_GAP`])
+	///
+	/// **Allowed values:** 1 ([`MIN_FULL_SCAN_STOP_GAP`]) to 1000
+	/// ([`MAX_FULL_SCAN_STOP_GAP`]), inclusive. Values outside this range will be clamped to the
+	/// nearest bound and a warning will be logged when the full scan runs.
+	///
+	/// **Note:** Large values can cause many Esplora requests, hit server rate limits,
+	/// take a long time to complete, or cause syncs to fail with
+	/// [`SyncTimeoutsConfig::onchain_wallet_sync_timeout_secs`].
+	pub full_scan_stop_gap: u32,
 	/// Whether to force BDK full scans until one succeeds.
 	///
 	/// This can be useful when restoring a wallet from seed on a node that has already synced
@@ -518,6 +546,7 @@ impl Default for EsploraSyncConfig {
 		Self {
 			background_sync_config: Some(BackgroundSyncConfig::default()),
 			timeouts_config: SyncTimeoutsConfig::default(),
+			full_scan_stop_gap: DEFAULT_FULL_SCAN_STOP_GAP,
 			force_wallet_full_scan: false,
 		}
 	}
@@ -539,6 +568,23 @@ pub struct ElectrumSyncConfig {
 	pub background_sync_config: Option<BackgroundSyncConfig>,
 	/// Sync timeouts configuration.
 	pub timeouts_config: SyncTimeoutsConfig,
+	/// The stop gap used for BDK full scans of the on-chain wallet.
+	///
+	/// A full scan for each keychain stops after this many consecutive script pubkeys
+	/// with no associated transactions. This value is only used for BDK `full_scan`
+	/// calls, which ldk-node performs on the first on-chain wallet sync or when
+	/// [`Self::force_wallet_full_scan`] is set. Incremental BDK `sync` calls do not use it.
+	///
+	/// **Default:** 20 ([`DEFAULT_FULL_SCAN_STOP_GAP`])
+	///
+	/// **Allowed values:** 1 ([`MIN_FULL_SCAN_STOP_GAP`]) to 1000
+	/// ([`MAX_FULL_SCAN_STOP_GAP`]), inclusive. Values outside this range will be clamped to the
+	/// nearest bound and a warning will be logged when the full scan runs.
+	///
+	/// **Note:** Large values can cause many Electrum requests, hit server rate limits,
+	/// take a long time to complete, or cause syncs to fail with
+	/// [`SyncTimeoutsConfig::onchain_wallet_sync_timeout_secs`].
+	pub full_scan_stop_gap: u32,
 	/// Whether to force BDK full scans until one succeeds.
 	///
 	/// This can be useful when restoring a wallet from seed on a node that has already synced
@@ -551,9 +597,14 @@ impl Default for ElectrumSyncConfig {
 		Self {
 			background_sync_config: Some(BackgroundSyncConfig::default()),
 			timeouts_config: SyncTimeoutsConfig::default(),
+			full_scan_stop_gap: DEFAULT_FULL_SCAN_STOP_GAP,
 			force_wallet_full_scan: false,
 		}
 	}
+}
+
+pub(crate) fn clamp_full_scan_stop_gap(full_scan_stop_gap: u32) -> u32 {
+	full_scan_stop_gap.clamp(MIN_FULL_SCAN_STOP_GAP, MAX_FULL_SCAN_STOP_GAP)
 }
 
 /// Configuration for syncing with Bitcoin Core backend via REST.
@@ -711,7 +762,11 @@ pub enum AsyncPaymentsRole {
 mod tests {
 	use std::str::FromStr;
 
-	use super::{may_announce_channel, AnnounceError, Config, NodeAlias, SocketAddress};
+	use super::{
+		clamp_full_scan_stop_gap, may_announce_channel, AnnounceError, Config, ElectrumSyncConfig,
+		EsploraSyncConfig, NodeAlias, SocketAddress, DEFAULT_FULL_SCAN_STOP_GAP,
+		MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
+	};
 
 	#[test]
 	fn node_announce_channel() {
@@ -757,5 +812,23 @@ mod tests {
 			addresses.push(socket_address);
 		}
 		assert!(may_announce_channel(&node_config).is_ok());
+	}
+
+	#[test]
+	fn full_scan_stop_gap_defaults() {
+		assert_eq!(EsploraSyncConfig::default().full_scan_stop_gap, DEFAULT_FULL_SCAN_STOP_GAP);
+		assert_eq!(ElectrumSyncConfig::default().full_scan_stop_gap, DEFAULT_FULL_SCAN_STOP_GAP);
+	}
+
+	#[test]
+	fn full_scan_stop_gap_is_clamped_to_valid_range() {
+		assert_eq!(clamp_full_scan_stop_gap(MIN_FULL_SCAN_STOP_GAP), MIN_FULL_SCAN_STOP_GAP);
+		assert_eq!(
+			clamp_full_scan_stop_gap(DEFAULT_FULL_SCAN_STOP_GAP),
+			DEFAULT_FULL_SCAN_STOP_GAP
+		);
+		assert_eq!(clamp_full_scan_stop_gap(MAX_FULL_SCAN_STOP_GAP), MAX_FULL_SCAN_STOP_GAP);
+		assert_eq!(clamp_full_scan_stop_gap(0), MIN_FULL_SCAN_STOP_GAP);
+		assert_eq!(clamp_full_scan_stop_gap(MAX_FULL_SCAN_STOP_GAP + 1), MAX_FULL_SCAN_STOP_GAP);
 	}
 }
