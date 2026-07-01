@@ -18,13 +18,16 @@ use lightning::util::ser::Writeable;
 use lightning_transaction_sync::EsploraSyncClient;
 
 use super::WalletSyncStatus;
-use crate::config::{Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY, BDK_CLIENT_STOP_GAP};
+use crate::config::{
+	clamp_full_scan_stop_gap, Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY,
+	MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
+};
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
 	OnchainFeeEstimator,
 };
 use crate::io::utils::update_and_persist_node_metrics;
-use crate::logger::{log_bytes, log_debug, log_error, log_trace, LdkLogger, Logger};
+use crate::logger::{log_bytes, log_debug, log_error, log_trace, log_warn, LdkLogger, Logger};
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
 
@@ -194,13 +197,14 @@ impl EsploraChainSource {
 			get_and_apply_wallet_update!(wallet_sync_timeout_fut)
 		} else {
 			let full_scan_request = onchain_wallet.get_full_scan_request();
+			let full_scan_stop_gap = self.bounded_full_scan_stop_gap();
 			let wallet_sync_timeout_fut = tokio::time::timeout(
 				Duration::from_secs(
 					self.sync_config.timeouts_config.onchain_wallet_sync_timeout_secs,
 				),
 				self.esplora_client.full_scan(
 					full_scan_request,
-					BDK_CLIENT_STOP_GAP,
+					full_scan_stop_gap,
 					BDK_CLIENT_CONCURRENCY,
 				),
 			);
@@ -210,6 +214,22 @@ impl EsploraChainSource {
 			self.force_wallet_full_scan.store(false, Ordering::Release);
 		}
 		res
+	}
+
+	fn bounded_full_scan_stop_gap(&self) -> usize {
+		let configured = self.sync_config.full_scan_stop_gap;
+		let bounded = clamp_full_scan_stop_gap(configured);
+		if bounded != configured {
+			log_warn!(
+				self.logger,
+				"Configured Esplora on-chain wallet full-scan stop gap {} is outside the allowed range {}..={}; using {}.",
+				configured,
+				MIN_FULL_SCAN_STOP_GAP,
+				MAX_FULL_SCAN_STOP_GAP,
+				bounded
+			);
+		}
+		bounded as usize
 	}
 
 	pub(super) async fn sync_lightning_wallet(
