@@ -523,6 +523,15 @@ where
 			.collect()
 	}
 
+	pub(crate) fn get_lsp_trust_0conf(&self, node_id: &PublicKey) -> Option<bool> {
+		self.lsp_nodes
+			.read()
+			.expect("lock")
+			.iter()
+			.find(|n| &n.node_id == node_id)
+			.map(|n| n.trust_peer_0conf)
+	}
+
 	/// Flips the `discovery_done` watch to `true`.
 	///
 	/// Called once after the *initial* batch of LSPs configured at build time has been
