@@ -164,6 +164,40 @@ impl Liquidity {
 		Ok(())
 	}
 
+	/// Re-runs bLIP-50 / LSPS0 protocol discovery for an already-configured LSP.
+	///
+	/// Use this to recover an LSP that failed protocol discovery at startup or to
+	/// pick up newly supported protocols after the LSP has rolled out an upgrade.
+	///
+	/// The `node_id` must belong to an LSP configured at build time or added via
+	/// [`Liquidity::add_liquidity_source`]; otherwise [`Error::LiquiditySourceUnavailable`]
+	/// is returned.
+	pub fn retry_discovery(&self, node_id: PublicKey) -> Result<(), Error> {
+		let (_, address) = self
+			.liquidity_source
+			.get_single_lsp_details(&node_id)
+			.ok_or(Error::LiquiditySourceUnavailable)?;
+
+		let con_cm = Arc::clone(&self.connection_manager);
+		let connect_addr = address.clone();
+		self.runtime.block_on(async move {
+			con_cm.connect_peer_if_necessary(node_id, connect_addr).await
+		})?;
+		log_info!(
+			self.logger,
+			"Connected to LSP {}@{} for protocol re-discovery.",
+			node_id,
+			address
+		);
+
+		let protocols = self
+			.runtime
+			.block_on(async { self.liquidity_source.discover_lsp_protocols(&node_id).await })?;
+		log_info!(self.logger, "Re-discovered protocols for LSP {}: {:?}", node_id, protocols);
+
+		Ok(())
+	}
+
 	/// Returns a liquidity handler allowing to request channels via the [bLIP-51 / LSPS1] protocol.
 	///
 	/// [bLIP-51 / LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
@@ -432,6 +466,17 @@ where
 			.collect()
 	}
 
+	pub(crate) fn get_single_lsp_details(
+		&self, node_id: &PublicKey,
+	) -> Option<(PublicKey, SocketAddress)> {
+		self.lsp_nodes
+			.read()
+			.expect("lock")
+			.iter()
+			.find(|n| &n.node_id == node_id)
+			.map(|n| (n.node_id, n.address.clone()))
+	}
+
 	pub(crate) async fn discover_lsp_protocols(
 		&self, node_id: &PublicKey,
 	) -> Result<Vec<u16>, Error> {
@@ -515,6 +560,25 @@ where
 		}
 
 		select_lsps_for_protocol(&self.lsp_nodes, protocol, Some(node_id))
+	}
+
+	pub(crate) fn get_undiscovered_lsps(&self) -> Vec<(PublicKey, SocketAddress)> {
+		self.lsp_nodes
+			.read()
+			.expect("lock")
+			.iter()
+			.filter(|n| n.supported_protocols.is_none())
+			.map(|n| (n.node_id, n.address.clone()))
+			.collect()
+	}
+
+	pub(crate) fn get_lsp_trust_0conf(&self, node_id: &PublicKey) -> Option<bool> {
+		self.lsp_nodes
+			.read()
+			.expect("lock")
+			.iter()
+			.find(|n| &n.node_id == node_id)
+			.map(|n| n.trust_peer_0conf)
 	}
 
 	/// Flips the `discovery_done` watch to `true`.
