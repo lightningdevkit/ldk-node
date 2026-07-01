@@ -5,6 +5,10 @@
   prior LSPS2 fee-limit state stored in `PaymentKind::Bolt11Jit` is not migrated.
 - Users of the VSS storage backend must upgrade their VSS server to at least version
   `v0.1.0-alpha.0` before upgrading LDK Node.
+- The Bitcoin node used to broadcast transactions must relay TRUC, P2A, and ephemeral dust. Bitcoin
+  Core v29 and above satisfy this requirement. Esplora chain sources also need to support the
+  `/txs/package` endpoint, and Electrum chain sources need to support the `broadcast_package`
+  method added in Electrum protocol v1.6.
 
 ## Feature and API updates
 - The Bitcoin Core RPC and REST chain-source builder methods now accept an optional
