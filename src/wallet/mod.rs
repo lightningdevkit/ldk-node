@@ -56,7 +56,8 @@ use persist::KVStoreWalletPersister;
 use crate::config::Config;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::payment::store::ConfirmationStatus;
+use crate::payment::pending_payment_store::PendingPaymentDetailsUpdate;
+use crate::payment::store::{ConfirmationStatus, PaymentDetailsUpdate};
 use crate::payment::{
 	FundingTxCandidate, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	PendingPaymentDetails, TransactionType,
@@ -1343,9 +1344,28 @@ impl Wallet {
 	async fn persist_funding_payment(
 		&self, details: PaymentDetails, candidates: Vec<FundingTxCandidate>,
 	) -> Result<(), Error> {
-		self.payment_store.insert_or_update(details.clone()).await?;
-		let pending = PendingPaymentDetails::new(details, Vec::new(), candidates);
-		self.pending_payment_store.insert_or_update(pending).await?;
+		if !self.payment_store.contains_key(&details.id) {
+			// First time we record this funding payment: store it and index it for graduation.
+			self.payment_store.insert_or_update(details.clone()).await?;
+			let pending = PendingPaymentDetails::new(details, Vec::new(), candidates);
+			self.pending_payment_store.insert_or_update(pending).await?;
+		} else {
+			// An earlier candidate or a racing wallet sync already recorded this payment. Merge only
+			// the classification (`tx_type`) and our contribution figures, which the wallet can't
+			// recompute; the confirmation state is owned by wallet-sync events, so a late
+			// classification must not move it (which would downgrade an already-Confirmed/Succeeded
+			// record). `update` is a no-op when the entry is absent, so the pending index is not
+			// re-created for a payment the graduation path already removed.
+			let update = PaymentDetailsUpdate::funding_reclassification(details);
+			let pending_update = PendingPaymentDetailsUpdate {
+				id: update.id,
+				payment_update: Some(update.clone()),
+				conflicting_txids: None,
+				candidates,
+			};
+			self.payment_store.update(update).await?;
+			self.pending_payment_store.update(pending_update).await?;
+		}
 		Ok(())
 	}
 
