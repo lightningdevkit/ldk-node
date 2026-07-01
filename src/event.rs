@@ -1722,6 +1722,11 @@ where
 						}
 					},
 					BumpTransactionEvent::HTLCResolution { .. } => {},
+					// `option_htlcs_claim_tx`: resolve an offered HTLC on a counterparty commitment
+					// via the preimage path by broadcasting the zero-fee, template-committed claim
+					// transaction alongside a fee-paying child (a TRUC 1-parent-1-child package).
+					// This recovers our own funds, so unlike `ChannelClose` we never skip it for a
+					// trusted counterparty; we just let the handler build and broadcast the package.
 					BumpTransactionEvent::HTLCsClaimTxResolution { .. } => {},
 				}
 

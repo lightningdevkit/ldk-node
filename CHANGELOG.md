@@ -20,6 +20,17 @@
 - `EsploraSyncConfig` and `ElectrumSyncConfig` now support `force_wallet_full_scan`. When set,
   the on-chain wallet keeps using BDK `full_scan` instead of incremental sync until a full scan
   succeeds, allowing restored wallets to rediscover funds sent to previously-unknown addresses.
+- Experimental support for the `option_htlcs_claim_tx` channel type has been added via a new
+  `AnchorChannelsConfig::negotiate_htlcs_claim_tx` option (default `false`). When enabled, channels
+  negotiate (on top of zero-fee commitments) a channel type that commits, via `OP_TEMPLATEHASH`
+  (BIP-446/448), to a fixed version 3 claim transaction in the preimage spend path of offered HTLC
+  outputs, closing the last on-chain pinning vector in Lightning. On-chain resolution of such an
+  offered HTLC broadcasts the zero-fee, template-committed claim transaction together with a
+  fee-paying child as a TRUC 1-parent-1-child package (via Bitcoin Core's `submitpackage`). It
+  depends on the `OP_TEMPLATEHASH` soft fork, pulled in via a `bitcoin` fork through
+  `[patch.crates-io]`. The zero-fee commitment groundwork this builds on is adapted from ldk-node
+  PR #660. *(This feature was
+  developed with the assistance of Claude, an AI tool.)*
 
 ## Bug Fixes and Improvements
 - Building a fresh node against a Bitcoin Core RPC or REST chain source that fails to return the

@@ -310,6 +310,7 @@ impl Default for HumanReadableNamesConfig {
 /// |----------------------------|--------|
 /// | `trusted_peers_no_reserve` | []     |
 /// | `per_channel_reserve_sats` | 25000  |
+/// | `negotiate_htlcs_claim_tx` | false  |
 ///
 ///
 /// [BOLT 3]: https://github.com/lightning/bolts/blob/master/03-transactions.md#htlc-timeout-and-htlc-success-transactions
@@ -345,6 +346,26 @@ pub struct AnchorChannelsConfig {
 	/// might not suffice to successfully spend the Anchor output and have the HTLC transactions
 	/// confirmed on-chain, i.e., you may want to adjust this value accordingly.
 	pub per_channel_reserve_sats: u64,
+	/// Whether to negotiate the experimental `option_htlcs_claim_tx` channel type on top of
+	/// zero-fee-commitment Anchor channels.
+	///
+	/// `option_htlcs_claim_tx` commits, via `OP_TEMPLATEHASH`, to a fixed version 3 claim
+	/// transaction in the preimage spend path of offered HTLC outputs, closing the last on-chain
+	/// pinning vector in Lightning. It builds on top of `option_zero_fee_commitments` (which is
+	/// already negotiated whenever an [`AnchorChannelsConfig`] is set), so it is only ever
+	/// negotiated alongside that channel type and is silently dropped against counterparties that
+	/// don't support it.
+	///
+	/// When an offered HTLC on such a channel has to be resolved on-chain via the preimage, we
+	/// broadcast the zero-fee, template-committed claim transaction together with a fee-paying
+	/// child as a TRUC (BIP 431) 1-parent-1-child package. Confirming that package requires a
+	/// chain source that can relay it (see [`Config::anchor_channels_config`]); in practice a
+	/// Bitcoin Core (v29+) RPC/REST chain source.
+	///
+	/// Default value: `false`
+	///
+	/// [`Config::anchor_channels_config`]: crate::config::Config::anchor_channels_config
+	pub negotiate_htlcs_claim_tx: bool,
 }
 
 impl Default for AnchorChannelsConfig {
@@ -352,6 +373,7 @@ impl Default for AnchorChannelsConfig {
 		Self {
 			trusted_peers_no_reserve: Vec::new(),
 			per_channel_reserve_sats: DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS,
+			negotiate_htlcs_claim_tx: false,
 		}
 	}
 }
@@ -411,6 +433,11 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 		config.anchor_channels_config.is_some();
 	user_config.channel_handshake_config.negotiate_anchor_zero_fee_commitments =
 		config.anchor_channels_config.is_some();
+	// Negotiate the experimental `option_htlcs_claim_tx` channel type on top of zero-fee
+	// commitments when requested. LDK only advertises it alongside `option_zero_fee_commitments`
+	// (set just above), which it builds on.
+	user_config.channel_handshake_config.negotiate_htlcs_claim_tx =
+		config.anchor_channels_config.as_ref().map_or(false, |acc| acc.negotiate_htlcs_claim_tx);
 	user_config.reject_inbound_splices = false;
 
 	if may_announce_channel(config).is_err() {
