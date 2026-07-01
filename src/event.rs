@@ -1256,25 +1256,7 @@ where
 					}
 				}
 
-				let anchor_channel = channel_type.requires_anchors_zero_fee_htlc_tx();
-				if anchor_channel && self.config.anchor_channels_config.is_none() {
-					log_error!(
-						self.logger,
-						"Rejecting inbound channel from peer {} due to Anchor channels being disabled.",
-						counterparty_node_id,
-					);
-					self.channel_manager
-						.force_close_broadcasting_latest_txn(
-							&temporary_channel_id,
-							&counterparty_node_id,
-							"Channel request rejected".to_string(),
-						)
-						.unwrap_or_else(|e| {
-							log_error!(self.logger, "Failed to reject channel: {:?}", e)
-						});
-					return Ok(());
-				}
-
+				let anchor_channel = crate::requires_anchor_channel_type(&channel_type);
 				let required_reserve_sats = crate::new_channel_anchor_reserve_sats(
 					&self.config,
 					&counterparty_node_id,
@@ -1705,19 +1687,17 @@ where
 						..
 					} => {
 						// Skip bumping channel closes if our counterparty is trusted.
-						if let Some(anchor_channels_config) =
-							self.config.anchor_channels_config.as_ref()
+						if self
+							.config
+							.anchor_channels_config
+							.trusted_peers_no_reserve
+							.contains(counterparty_node_id)
 						{
-							if anchor_channels_config
-								.trusted_peers_no_reserve
-								.contains(counterparty_node_id)
-							{
-								log_debug!(self.logger,
-									"Ignoring BumpTransactionEvent::ChannelClose for channel {} due to trusted counterparty {}",
-									channel_id, counterparty_node_id
-								);
-								return Ok(());
-							}
+							log_debug!(self.logger,
+								"Ignoring BumpTransactionEvent::ChannelClose for channel {} due to trusted counterparty {}",
+								channel_id, counterparty_node_id
+							);
+							return Ok(());
 						}
 					},
 					BumpTransactionEvent::HTLCResolution { .. } => {},

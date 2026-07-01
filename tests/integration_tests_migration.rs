@@ -148,7 +148,7 @@ async fn migrate_node_across_all_backends() {
 	let connection_string = test_connection_string();
 
 	// Set up node B, the Lightning counterparty.
-	let config_b = common::random_config(false);
+	let config_b = common::random_config();
 	let node_b_instance = BackendInstance::new(
 		MigrationBackend::Postgres,
 		&config_b.node_config.storage_dir_path,
@@ -167,7 +167,7 @@ async fn migrate_node_across_all_backends() {
 	// Spin up the node we'll migrate on the first backend. The same node config (storage dir,
 	// listening addresses, identity) is reused across every hop — only the backend changes — so
 	// each backend's store lives in its own subdirectory of the one storage dir.
-	let config = common::random_config(false);
+	let config = common::random_config();
 	let node_entropy = config.node_entropy;
 	let node_config = config.node_config;
 	let base_dir = node_config.storage_dir_path.clone();

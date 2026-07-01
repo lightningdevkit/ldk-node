@@ -326,32 +326,25 @@ impl Wallet {
 						}
 					}
 
-					if !unconfirmed_outbound_txids.is_empty() {
-						let txs_to_broadcast: Vec<Transaction> = unconfirmed_outbound_txids
-							.iter()
-							.filter_map(|txid| {
-								locked_wallet.tx_details(*txid).map(|d| (*d.tx).clone())
-							})
-							.collect();
-
-						if !txs_to_broadcast.is_empty() {
-							let tx_refs: Vec<(
-								&Transaction,
-								lightning::chain::chaininterface::TransactionType,
-							)> =
-								txs_to_broadcast
-									.iter()
-									.map(|tx| {
-										(tx, lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] })
-									})
-									.collect();
-							self.broadcaster.broadcast_transactions(&tx_refs);
-							log_info!(
-								self.logger,
-								"Rebroadcast {} unconfirmed transactions on chain tip change",
-								txs_to_broadcast.len()
-							);
-						}
+					let count: usize = unconfirmed_outbound_txids
+						.into_iter()
+						.filter_map(|txid| {
+							let tx = locked_wallet.tx_details(txid).map(|d| d.tx)?;
+							let transaction_type =
+								lightning::chain::chaininterface::TransactionType::Sweep {
+									channels: vec![],
+								};
+							self.broadcaster
+								.broadcast_transactions(&[(tx.as_ref(), transaction_type)]);
+							Some(())
+						})
+						.count();
+					if count != 0 {
+						log_info!(
+							self.logger,
+							"Rebroadcast {} unconfirmed transactions on chain tip change",
+							count,
+						);
 					}
 				},
 				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
