@@ -1399,6 +1399,15 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			manual_payment_hash,
 		)
 		.unwrap();
+	assert!(matches!(
+		node_b.bolt11_payment().receive_for_hash(
+			invoice_amount_3_msat,
+			&invoice_description.clone().into(),
+			9217,
+			manual_payment_hash,
+		),
+		Err(NodeError::DuplicatePayment)
+	));
 	let manual_payment_id = node_a.bolt11_payment().send(&manual_invoice, None).unwrap();
 
 	let claimable_amount_msat = expect_payment_claimable_event!(
