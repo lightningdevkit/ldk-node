@@ -54,9 +54,11 @@ use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
 use crate::config::Config;
+use crate::data_store::StorableObject;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::payment::store::ConfirmationStatus;
+use crate::payment::pending_payment_store::PendingPaymentDetailsUpdate;
+use crate::payment::store::{ConfirmationStatus, PaymentDetailsUpdate};
 use crate::payment::{
 	FundingTxCandidate, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	PendingPaymentDetails, TransactionType,
@@ -287,30 +289,37 @@ impl Wallet {
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
 					let pending_payments: Vec<PendingPaymentDetails> =
-						self.pending_payment_store.list_filter(|p| {
-							debug_assert!(
-								p.details.status == PaymentStatus::Pending,
-								"Non-pending payment {:?} found in pending store",
-								p.details.id,
-							);
-							p.details.status == PaymentStatus::Pending
-								&& matches!(p.details.kind, PaymentKind::Onchain { .. })
+						self.pending_payment_store.list_filter(|p| match p.details() {
+							// A pre-broadcast splice intent carries no payment yet and cannot graduate.
+							None => false,
+							Some(details) => {
+								debug_assert!(
+									details.status == PaymentStatus::Pending,
+									"Non-pending payment {:?} found in pending store",
+									details.id,
+								);
+								details.status == PaymentStatus::Pending
+									&& matches!(details.kind, PaymentKind::Onchain { .. })
+							},
 						});
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
 
-					for mut payment in pending_payments {
-						match payment.details.kind {
+					for payment in pending_payments {
+						// The filter admits only Tracked funding payments.
+						let PendingPaymentDetails::Tracked { mut details, .. } = payment else {
+							continue;
+						};
+						match details.kind {
 							PaymentKind::Onchain {
 								status: ConfirmationStatus::Confirmed { height, .. },
 								..
 							} => {
-								let payment_id = payment.details.id;
+								let payment_id = details.id;
 								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
-									payment.details.status = PaymentStatus::Succeeded;
-									self.runtime.block_on(
-										self.payment_store.insert_or_update(payment.details),
-									)?;
+									details.status = PaymentStatus::Succeeded;
+									self.runtime
+										.block_on(self.payment_store.insert_or_update(details))?;
 									self.runtime
 										.block_on(self.pending_payment_store.remove(&payment_id))?;
 								}
@@ -319,7 +328,7 @@ impl Wallet {
 								txid,
 								status: ConfirmationStatus::Unconfirmed,
 								..
-							} if payment.details.direction == PaymentDirection::Outbound => {
+							} if details.direction == PaymentDirection::Outbound => {
 								unconfirmed_outbound_txids.push(txid);
 							},
 							_ => {},
@@ -391,11 +400,6 @@ impl Wallet {
 						continue;
 					};
 
-					// Collect all conflict txids
-					let mut conflict_txids: Vec<Txid> =
-						conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
-
-					conflict_txids.push(txid);
 					// The payment already exists in the store at this point: `bump_fee_rbf` updates
 					// the payment store with the replacement txid before the next sync cycle, so we
 					// can safely fetch it here.
@@ -406,8 +410,26 @@ impl Wallet {
 					);
 					let payment =
 						self.payment_store.get(&payment_id).ok_or(Error::InvalidPaymentId)?;
+
+					// A graduated funding payment is resolvable here only through
+					// `find_payment_by_txid`'s payment-store fallback. Revert it like the
+					// `TxUnconfirmed`/`TxDropped` arms instead of mirroring a non-`Pending` record
+					// into the pending store, which graduation's pending-only scan would reject.
+					if payment.status != PaymentStatus::Pending
+						&& self.apply_funding_status_update(
+							payment_id,
+							txid,
+							ConfirmationStatus::Unconfirmed,
+						)? {
+						continue;
+					}
+
+					// Collect all conflict txids
+					let mut conflict_txids: Vec<Txid> =
+						conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
+					conflict_txids.push(txid);
 					let pending_payment_details =
-						self.create_pending_payment_from_tx(payment, conflict_txids.clone());
+						self.create_pending_payment_from_tx(payment, conflict_txids);
 
 					self.runtime.block_on(
 						self.pending_payment_store.insert_or_update(pending_payment_details),
@@ -1245,6 +1267,24 @@ impl Wallet {
 		Ok(())
 	}
 
+	/// Returns the `PaymentId` of a user-initiated splice intent for one of the channels in
+	/// `candidate`, if any, so a classified splice adopts the id chosen at splice time rather than
+	/// deriving one from the first candidate's txid. A fee bump reuses the channel's existing intent,
+	/// so at most one in-flight intent matches and the first is unambiguous.
+	fn find_splice_payment_id(&self, candidate: &FundingCandidate) -> Option<PaymentId> {
+		self.pending_payment_store
+			.list_filter(|p| {
+				p.splice_intent().is_some_and(|intent| {
+					candidate.channels.iter().any(|channel| {
+						channel.channel_id == intent.channel_id
+							&& channel.counterparty_node_id == intent.counterparty_node_id
+					})
+				})
+			})
+			.first()
+			.map(|p| p.id())
+	}
+
 	/// Records an interactive-funding broadcast (splice, or a V2 dual-funded open) as a pending
 	/// on-chain payment, tagged with its transaction type. Amount and fee are this node's share,
 	/// derived from the active candidate's contributions; broadcasts we didn't contribute to, or
@@ -1295,9 +1335,13 @@ impl Wallet {
 			return Ok(());
 		}
 
-		// Anchor the `PaymentId` to the first negotiated candidate so the record stays stable
-		// across RBF replacements.
-		let payment_id = PaymentId(first.txid.to_byte_array());
+		// Adopt the `PaymentId` generated when the splice was initiated so its retry intent, funding
+		// payment, and candidate history share one record. Fall back to the first negotiated
+		// candidate's txid for splices we did not originate (counterparty-initiated or V2 opens),
+		// which keeps that id stable across RBF replacements.
+		let payment_id = self
+			.find_splice_payment_id(active)
+			.unwrap_or_else(|| PaymentId(first.txid.to_byte_array()));
 
 		// Record every candidate's figures (`None` for any round we didn't contribute to, e.g. a
 		// counterparty-initiated splice our `splice_in` later joined via RBF) so the confirmed
@@ -1343,9 +1387,38 @@ impl Wallet {
 	async fn persist_funding_payment(
 		&self, details: PaymentDetails, candidates: Vec<FundingTxCandidate>,
 	) -> Result<(), Error> {
-		self.payment_store.insert_or_update(details.clone()).await?;
-		let pending = PendingPaymentDetails::new(details, Vec::new(), candidates);
-		self.pending_payment_store.insert_or_update(pending).await?;
+		if !self.payment_store.contains_key(&details.id) {
+			// First time we record this funding payment: store it and index it for graduation. A
+			// user-initiated splice already has a pre-broadcast `PendingSplice` intent under this id;
+			// carry its intent into the `Tracked` record so the retrier can still clear it once the
+			// splice locks. This is a variant change, so `insert` (replace) rather than
+			// `insert_or_update` (which would merge in place and drop the details).
+			self.payment_store.insert_or_update(details.clone()).await?;
+			let splice_intent = self
+				.pending_payment_store
+				.get(&details.id)
+				.and_then(|p| p.splice_intent().cloned());
+			let pending =
+				PendingPaymentDetails::tracked(details, Vec::new(), candidates, splice_intent);
+			self.pending_payment_store.insert(pending).await?;
+		} else {
+			// An earlier candidate or a racing wallet sync already recorded this payment. Merge only
+			// the classification (`tx_type`) and our contribution figures, which the wallet can't
+			// recompute; the confirmation state is owned by wallet-sync events, so a late
+			// classification must not move it (which would downgrade an already-Confirmed/Succeeded
+			// record). `update` is a no-op when the entry is absent, so the pending index is not
+			// re-created for a payment the graduation path already removed.
+			let update = PaymentDetailsUpdate::funding_reclassification(details);
+			let pending_update = PendingPaymentDetailsUpdate {
+				id: update.id,
+				payment_update: Some(update.clone()),
+				conflicting_txids: None,
+				candidates,
+				splice_intent: None,
+			};
+			self.payment_store.update(update).await?;
+			self.pending_payment_store.update(pending_update).await?;
+		}
 		Ok(())
 	}
 
@@ -1426,12 +1499,45 @@ impl Wallet {
 		if let Some(replaced_details) = self
 			.pending_payment_store
 			.list_filter(|p| {
-				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
-					|| p.conflicting_txids.contains(&target_txid)
+				p.details().is_some_and(
+					|d| matches!(d.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid),
+				) || p.conflicting_txids().contains(&target_txid)
+					// A splice keyed by a generated PaymentId is not found by the txid-derived id
+					// above, so map any of its candidate txids (an earlier RBF round may confirm)
+					// back to the record.
+					|| p.candidate(target_txid).is_some()
 			})
 			.first()
 		{
-			return Some(replaced_details.details.id);
+			return Some(replaced_details.id());
+		}
+
+		// A funding payment graduates out of the pending store, after which only the payment store
+		// retains it — under its first-candidate-anchored id, but stamped with the confirmed
+		// candidate's txid. Map a later event (e.g. a reorg returning the confirmed candidate to the
+		// mempool) back to that funding payment so it is reverted in place rather than duplicated as
+		// a generic on-chain payment under the candidate's txid. Only one funding record carries a
+		// given confirmed txid (its id is anchored to the first candidate and reclassification
+		// merges into it), so the first match is unambiguous.
+		if let Some(funding) = self
+			.payment_store
+			.list_filter(|p| {
+				matches!(
+					p.kind,
+					PaymentKind::Onchain {
+						txid,
+						tx_type:
+							Some(
+								TransactionType::Funding { .. }
+								| TransactionType::InteractiveFunding { .. },
+							),
+						..
+					} if txid == target_txid
+				)
+			})
+			.first()
+		{
+			return Some(funding.id);
 		}
 
 		None
@@ -1469,6 +1575,14 @@ impl Wallet {
 				payment.amount_msat = candidate.amount_msat;
 				payment.fee_paid_msat = candidate.fee_paid_msat;
 			}
+		}
+
+		// A reorg returning the transaction to the mempool reverts the payment to pending so wallet
+		// sync re-graduates it once it reconfirms. This also re-establishes the pending-store entry
+		// below (gated on `Pending`) that graduation removed; without it a graduated payment would
+		// be left `Succeeded` with an `Unconfirmed` kind and no way to re-graduate.
+		if matches!(confirmation_status, ConfirmationStatus::Unconfirmed) {
+			payment.status = PaymentStatus::Pending;
 		}
 
 		payment.kind =
