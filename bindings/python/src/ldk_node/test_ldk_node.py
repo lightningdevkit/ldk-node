@@ -235,7 +235,7 @@ class TestLdkNode(unittest.TestCase):
         self.assertEqual(received_event.custom_records, custom_tlvs)
 
         sender_payment = node_1.payment(keysend_payment_id)
-        receiver_payment = node_2.payment(keysend_payment_id)
+        receiver_payment = node_2.payment(received_event.payment_id)
 
         self.assertIsNotNone(sender_payment)
         self.assertIsNotNone(receiver_payment)
