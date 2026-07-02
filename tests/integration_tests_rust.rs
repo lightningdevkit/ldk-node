@@ -29,7 +29,7 @@ use common::{
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
-use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig};
+use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig, DEFAULT_FULL_SCAN_STOP_GAP};
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
@@ -996,6 +996,76 @@ async fn onchain_wallet_force_full_scan_rediscovers_esplora_funds() {
 		recovered_node.list_balances().spendable_onchain_balance_sats,
 		premine_amount_sat * 2,
 		"forced full scan should rediscover funds sent to previously-unknown addresses"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_wallet_full_scan_stop_gap_recovers_far_esplora_and_electrum_funds() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	premine_blocks(&bitcoind.client, &electrsd.client).await;
+
+	do_onchain_wallet_full_scan_stop_gap_recovers_far_funds(
+		TestChainSource::Esplora(&electrsd),
+		&bitcoind,
+		&electrsd,
+	)
+	.await;
+	do_onchain_wallet_full_scan_stop_gap_recovers_far_funds(
+		TestChainSource::Electrum(&electrsd),
+		&bitcoind,
+		&electrsd,
+	)
+	.await;
+}
+
+async fn do_onchain_wallet_full_scan_stop_gap_recovers_far_funds(
+	chain_source: TestChainSource<'_>, bitcoind: &BitcoinD, electrsd: &ElectrsD,
+) {
+	let configured_stop_gap = DEFAULT_FULL_SCAN_STOP_GAP + 5;
+
+	let address_source_config = random_config(true);
+	let node_entropy = address_source_config.node_entropy;
+	let address_source_node = setup_node(&chain_source, address_source_config);
+	let mut far_address = None;
+	for _ in 0..configured_stop_gap {
+		far_address = Some(address_source_node.onchain_payment().new_address().unwrap());
+	}
+	address_source_node.stop().unwrap();
+	drop(address_source_node);
+	let far_address = far_address.unwrap();
+
+	let premine_amount_sat = 100_000;
+	let txid = bitcoind
+		.client
+		.send_to_address(&far_address, Amount::from_sat(premine_amount_sat))
+		.unwrap()
+		.0
+		.parse()
+		.unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+
+	let mut default_gap_config = random_config(true);
+	default_gap_config.node_entropy = node_entropy.clone();
+	let default_gap_node = setup_node(&chain_source, default_gap_config);
+	default_gap_node.sync_wallets().unwrap();
+	assert_eq!(
+		default_gap_node.list_balances().spendable_onchain_balance_sats,
+		0,
+		"default full-scan stop gap should not recover funds past its address gap"
+	);
+	default_gap_node.stop().unwrap();
+	drop(default_gap_node);
+
+	let mut configured_gap_config = random_config(true);
+	configured_gap_config.node_entropy = node_entropy;
+	configured_gap_config.full_scan_stop_gap = Some(configured_stop_gap);
+	let configured_gap_node = setup_node(&chain_source, configured_gap_config);
+	configured_gap_node.sync_wallets().unwrap();
+	assert_eq!(
+		configured_gap_node.list_balances().spendable_onchain_balance_sats,
+		premine_amount_sat,
+		"configured full-scan stop gap should recover funds past the default address gap"
 	);
 }
 

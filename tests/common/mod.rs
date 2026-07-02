@@ -437,6 +437,7 @@ pub(crate) struct TestConfig {
 	pub async_payments_role: Option<AsyncPaymentsRole>,
 	pub wallet_rescan_from_height: Option<u32>,
 	pub force_wallet_full_scan: bool,
+	pub full_scan_stop_gap: Option<u32>,
 }
 
 impl Default for TestConfig {
@@ -450,6 +451,7 @@ impl Default for TestConfig {
 		let async_payments_role = None;
 		let wallet_rescan_from_height = None;
 		let force_wallet_full_scan = false;
+		let full_scan_stop_gap = None;
 		TestConfig {
 			node_config,
 			log_writer,
@@ -458,6 +460,7 @@ impl Default for TestConfig {
 			async_payments_role,
 			wallet_rescan_from_height,
 			force_wallet_full_scan,
+			full_scan_stop_gap,
 		}
 	}
 }
@@ -541,6 +544,9 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			let mut sync_config = EsploraSyncConfig::default();
 			sync_config.background_sync_config = None;
 			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
+			if let Some(full_scan_stop_gap) = config.full_scan_stop_gap {
+				sync_config.full_scan_stop_gap = full_scan_stop_gap;
+			}
 			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 		},
 		TestChainSource::Electrum(electrsd) => {
@@ -548,6 +554,9 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			let mut sync_config = ElectrumSyncConfig::default();
 			sync_config.background_sync_config = None;
 			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
+			if let Some(full_scan_stop_gap) = config.full_scan_stop_gap {
+				sync_config.full_scan_stop_gap = full_scan_stop_gap;
+			}
 			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
 		},
 		TestChainSource::BitcoindRpcSync(bitcoind) => {
