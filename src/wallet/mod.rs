@@ -54,6 +54,7 @@ use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
 use crate::config::Config;
+use crate::data_store::StorableObject;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::pending_payment_store::PendingPaymentDetailsUpdate;
@@ -288,30 +289,37 @@ impl Wallet {
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
 					let pending_payments: Vec<PendingPaymentDetails> =
-						self.pending_payment_store.list_filter(|p| {
-							debug_assert!(
-								p.details.status == PaymentStatus::Pending,
-								"Non-pending payment {:?} found in pending store",
-								p.details.id,
-							);
-							p.details.status == PaymentStatus::Pending
-								&& matches!(p.details.kind, PaymentKind::Onchain { .. })
+						self.pending_payment_store.list_filter(|p| match p.details() {
+							// A pre-broadcast splice intent carries no payment yet and cannot graduate.
+							None => false,
+							Some(details) => {
+								debug_assert!(
+									details.status == PaymentStatus::Pending,
+									"Non-pending payment {:?} found in pending store",
+									details.id,
+								);
+								details.status == PaymentStatus::Pending
+									&& matches!(details.kind, PaymentKind::Onchain { .. })
+							},
 						});
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
 
-					for mut payment in pending_payments {
-						match payment.details.kind {
+					for payment in pending_payments {
+						// The filter admits only Tracked funding payments.
+						let PendingPaymentDetails::Tracked { mut details, .. } = payment else {
+							continue;
+						};
+						match details.kind {
 							PaymentKind::Onchain {
 								status: ConfirmationStatus::Confirmed { height, .. },
 								..
 							} => {
-								let payment_id = payment.details.id;
+								let payment_id = details.id;
 								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
-									payment.details.status = PaymentStatus::Succeeded;
-									self.runtime.block_on(
-										self.payment_store.insert_or_update(payment.details),
-									)?;
+									details.status = PaymentStatus::Succeeded;
+									self.runtime
+										.block_on(self.payment_store.insert_or_update(details))?;
 									self.runtime
 										.block_on(self.pending_payment_store.remove(&payment_id))?;
 								}
@@ -320,7 +328,7 @@ impl Wallet {
 								txid,
 								status: ConfirmationStatus::Unconfirmed,
 								..
-							} if payment.details.direction == PaymentDirection::Outbound => {
+							} if details.direction == PaymentDirection::Outbound => {
 								unconfirmed_outbound_txids.push(txid);
 							},
 							_ => {},
@@ -1375,6 +1383,7 @@ impl Wallet {
 				payment_update: Some(update.clone()),
 				conflicting_txids: None,
 				candidates,
+				splice_intent: None,
 			};
 			self.payment_store.update(update).await?;
 			self.pending_payment_store.update(pending_update).await?;
@@ -1459,12 +1468,13 @@ impl Wallet {
 		if let Some(replaced_details) = self
 			.pending_payment_store
 			.list_filter(|p| {
-				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
-					|| p.conflicting_txids.contains(&target_txid)
+				p.details().is_some_and(
+					|d| matches!(d.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid),
+				) || p.conflicting_txids().contains(&target_txid)
 			})
 			.first()
 		{
-			return Some(replaced_details.details.id);
+			return Some(replaced_details.id());
 		}
 
 		// A funding payment graduates out of the pending store, after which only the payment store
