@@ -57,7 +57,7 @@ use crate::config::Config;
 use crate::data_store::StorableObject;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::payment::pending_payment_store::PendingPaymentDetailsUpdate;
+use crate::payment::pending_payment_store::{PendingPaymentDetailsUpdate, SpliceKind};
 use crate::payment::store::{ConfirmationStatus, PaymentDetailsUpdate};
 use crate::payment::{
 	FundingTxCandidate, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
@@ -258,7 +258,7 @@ impl Wallet {
 					};
 
 					let payment_id = self
-						.find_payment_by_txid(txid)
+						.find_payment_for_tx(&tx, txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
@@ -360,7 +360,7 @@ impl Wallet {
 				},
 				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
 					let payment_id = self
-						.find_payment_by_txid(txid)
+						.find_payment_for_tx(&tx, txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
@@ -417,7 +417,7 @@ impl Wallet {
 				},
 				WalletEvent::TxDropped { txid, tx } => {
 					let payment_id = self
-						.find_payment_by_txid(txid)
+						.find_payment_for_tx(&tx, txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
@@ -1609,6 +1609,36 @@ impl Wallet {
 		}
 
 		None
+	}
+
+	/// Like [`Self::find_payment_by_txid`], but additionally recognizes the transaction of a
+	/// user-initiated splice that has no payment record yet: it spends the funding outpoint a
+	/// live splice intent was created for. Wallet sync can see the transaction before the
+	/// broadcast-time classification records it — the counterparty broadcasts it too — and must
+	/// adopt the splice-time `PaymentId` so both writers converge on one record.
+	fn find_payment_for_tx(&self, tx: &Transaction, txid: Txid) -> Option<PaymentId> {
+		self.find_payment_by_txid(txid).or_else(|| {
+			self.pending_payment_store
+				.list_filter(|p| {
+					p.splice_intent().is_some_and(|intent| {
+						// A cooperative or force close also spends the funding outpoint, and a
+						// cooperative close pays a wallet address. A splice-in always adds wallet
+						// inputs while a close never has more than the funding input, so a second
+						// input disambiguates `SpliceKind::In`. A splice-out or fee bump can share
+						// the close's single-input shape; misattributing a close that races a
+						// still-live intent only affects which id keys its record.
+						let input_shape_matches = match intent.kind {
+							SpliceKind::In { .. } => tx.input.len() > 1,
+							SpliceKind::Out { .. } | SpliceKind::Rbf {} => true,
+						};
+						let funding_txo = intent.pre_splice_funding_txo.into_bitcoin_outpoint();
+						input_shape_matches
+							&& tx.input.iter().any(|input| input.previous_output == funding_txo)
+					})
+				})
+				.first()
+				.map(|p| p.id())
+		})
 	}
 
 	/// If `payment_id` refers to a classified funding payment, refreshes its confirmation status
