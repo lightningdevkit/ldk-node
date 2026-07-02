@@ -11,17 +11,53 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use bitcoin::secp256k1::PublicKey;
+use bitcoin::{Amount, OutPoint};
+use lightning::events::NegotiationFailureReason;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::FundingContribution;
 use lightning::ln::types::ChannelId;
 
 use crate::data_store::StorableObject;
 use crate::event::{Event, EventQueue};
+use crate::fee_estimator::{
+	max_funding_feerate, ConfirmationTarget, FeeEstimator, OnchainFeeEstimator,
+};
 use crate::logger::{log_error, log_info, LdkLogger};
 use crate::payment::pending_payment_store::{
-	PendingPaymentDetailsUpdate, SpliceIntent, SpliceKind, MAX_SPLICE_ATTEMPTS,
+	PendingPaymentDetails, PendingPaymentDetailsUpdate, SpliceIntent, SpliceKind,
+	MAX_SPLICE_ATTEMPTS,
 };
-use crate::types::{ChannelManager, PendingPaymentStore};
+use crate::types::{ChannelManager, PendingPaymentStore, UserChannelId, Wallet};
 use crate::Error;
+
+/// The action to take on a `SpliceNegotiationFailed` for a splice intent we track, decided purely
+/// from the failure `reason` and the intent's attempt count so the decision matrix can be
+/// unit-tested without a live channel. A failure for a splice we don't track is surfaced directly
+/// (see [`SpliceRetrier::on_negotiation_failed`]) and never reaches here.
+#[derive(Debug, PartialEq, Eq)]
+enum RetryDecision {
+	/// Give up: clear the intent and surface the failure to the user.
+	Abandon,
+	/// Resubmit the stored contribution unchanged (a transient failure such as a disconnect).
+	ResubmitStored,
+	/// Rebuild a fresh contribution from the original parameters (the stored one went stale).
+	Rebuild,
+}
+
+fn decide_retry(reason: &NegotiationFailureReason, attempts: u8) -> RetryDecision {
+	if !reason.is_retriable() || attempts >= MAX_SPLICE_ATTEMPTS {
+		return RetryDecision::Abandon;
+	}
+	match reason {
+		// The stored contribution is still valid after a transient failure.
+		NegotiationFailureReason::PeerDisconnected | NegotiationFailureReason::Unknown => {
+			RetryDecision::ResubmitStored
+		},
+		// The remaining retriable reasons (`FeeRateTooLow`, `ContributionInvalid`) mean the stored
+		// contribution went stale.
+		_ => RetryDecision::Rebuild,
+	}
+}
 
 /// Resubmits user-initiated splices that LDK dropped before durably recording them.
 ///
@@ -40,6 +76,8 @@ where
 	L::Target: LdkLogger,
 {
 	channel_manager: Arc<ChannelManager>,
+	wallet: Arc<Wallet>,
+	fee_estimator: Arc<OnchainFeeEstimator>,
 	pending_payment_store: Arc<PendingPaymentStore>,
 	event_queue: Arc<EventQueue<L>>,
 	logger: L,
@@ -50,10 +88,11 @@ where
 	L::Target: LdkLogger,
 {
 	pub(crate) fn new(
-		channel_manager: Arc<ChannelManager>, pending_payment_store: Arc<PendingPaymentStore>,
+		channel_manager: Arc<ChannelManager>, wallet: Arc<Wallet>,
+		fee_estimator: Arc<OnchainFeeEstimator>, pending_payment_store: Arc<PendingPaymentStore>,
 		event_queue: Arc<EventQueue<L>>, logger: L,
 	) -> Self {
-		Self { channel_manager, pending_payment_store, event_queue, logger }
+		Self { channel_manager, wallet, fee_estimator, pending_payment_store, event_queue, logger }
 	}
 
 	/// Reconciles persisted splice intents against live channel state. Run once at startup to pick
@@ -198,5 +237,187 @@ where
 		if let Err(e) = self.event_queue.add_event(event).await {
 			log_error!(self.logger, "Failed to push to event queue: {}", e);
 		}
+	}
+
+	/// Applies a `SpliceNegotiationFailed` to any matching splice intent, retrying recoverable
+	/// failures. Returns whether the failure should be surfaced to the user (i.e. the splice is
+	/// given up on).
+	pub(crate) async fn on_negotiation_failed(
+		&self, user_channel_id: UserChannelId, reason: NegotiationFailureReason,
+		contribution: Option<FundingContribution>,
+	) -> bool {
+		let Some(record) = self.record_for_channel(user_channel_id) else {
+			return true;
+		};
+		let id = record.id();
+		let has_payment = record.details().is_some();
+		let Some(intent) = record.splice_intent().cloned() else {
+			return true;
+		};
+
+		// Only act on failures of the splice we are tracking. A mismatch means the failure concerns
+		// some other attempt (e.g. a stale event replayed after a newer splice was initiated).
+		if contribution.as_ref() != Some(&intent.contribution) {
+			return true;
+		}
+
+		let channel_id = intent.channel_id;
+		let counterparty_node_id = intent.counterparty_node_id;
+		match decide_retry(&reason, intent.attempts) {
+			RetryDecision::Abandon => {
+				self.clear_intent(id, has_payment).await;
+				true
+			},
+			RetryDecision::ResubmitStored => {
+				// The same contribution remains valid; resubmit it. Skip if LDK already has a splice
+				// in flight for this channel (e.g. the startup reconciler resubmitted first).
+				if self.channel_manager.splice_channel(&channel_id, &counterparty_node_id).is_err()
+				{
+					return false;
+				}
+				log_info!(
+					self.logger,
+					"Resubmitting splice for channel {} with counterparty {} after a recoverable failure",
+					channel_id,
+					counterparty_node_id,
+				);
+				let _ = self.submit(id, &channel_id, &counterparty_node_id, intent).await;
+				false
+			},
+			RetryDecision::Rebuild => {
+				// The stored contribution went stale; rebuild a fresh one from the original params.
+				match self
+					.rebuild_contribution(&channel_id, &counterparty_node_id, &intent.kind)
+					.await
+				{
+					Ok(contribution) => {
+						log_info!(
+							self.logger,
+							"Resubmitting rebuilt splice for channel {} with counterparty {}",
+							channel_id,
+							counterparty_node_id,
+						);
+						let mut intent = intent;
+						intent.contribution = contribution;
+						let _ = self.submit(id, &channel_id, &counterparty_node_id, intent).await;
+						false
+					},
+					Err(e) => {
+						log_error!(
+							self.logger,
+							"Abandoning splice for channel {}: failed to rebuild contribution: {:?}",
+							channel_id,
+							e,
+						);
+						self.clear_intent(id, has_payment).await;
+						true
+					},
+				}
+			},
+		}
+	}
+
+	/// Clears any splice intent made obsolete by a newly locked funding transaction.
+	pub(crate) async fn on_channel_ready(
+		&self, user_channel_id: UserChannelId, funding_txo: Option<OutPoint>,
+	) {
+		let Some(record) = self.record_for_channel(user_channel_id) else {
+			return;
+		};
+		let id = record.id();
+		let has_payment = record.details().is_some();
+		let Some(intent) = record.splice_intent() else {
+			return;
+		};
+		// Only clear an intent that predates the locked funding. An intent whose pre-splice outpoint
+		// still matches the newly locked funding was created after this lock and is still pending.
+		let clear = match funding_txo {
+			Some(funding_txo) => {
+				intent.pre_splice_funding_txo.into_bitcoin_outpoint() != funding_txo
+			},
+			None => false,
+		};
+		if clear {
+			self.clear_intent(id, has_payment).await;
+		}
+	}
+
+	/// Clears any splice intent for a closed channel, as there is nothing left to splice.
+	pub(crate) async fn on_channel_closed(&self, user_channel_id: UserChannelId) {
+		if let Some(record) = self.record_for_channel(user_channel_id) {
+			self.clear_intent(record.id(), record.details().is_some()).await;
+		}
+	}
+
+	/// Returns the pending record carrying a splice intent for the given channel, if any.
+	fn record_for_channel(&self, user_channel_id: UserChannelId) -> Option<PendingPaymentDetails> {
+		self.pending_payment_store
+			.list_filter(|p| {
+				p.splice_intent().is_some_and(|i| i.user_channel_id == user_channel_id)
+			})
+			.into_iter()
+			.next()
+	}
+
+	/// Builds a fresh contribution from the parameters of the originating API call, mirroring the
+	/// corresponding [`Node`] method.
+	///
+	/// [`Node`]: crate::Node
+	async fn rebuild_contribution(
+		&self, channel_id: &ChannelId, counterparty_node_id: &PublicKey, kind: &SpliceKind,
+	) -> Result<FundingContribution, Error> {
+		let template = self
+			.channel_manager
+			.splice_channel(channel_id, counterparty_node_id)
+			.map_err(|_| Error::ChannelSplicingFailed)?;
+
+		let est_feerate = self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+		let max_feerate = max_funding_feerate(est_feerate);
+		let feerate = match template.min_rbf_feerate() {
+			Some(min_rbf_feerate) if min_rbf_feerate <= max_feerate => {
+				est_feerate.max(min_rbf_feerate)
+			},
+			_ => est_feerate,
+		};
+
+		match kind {
+			SpliceKind::In { amount_sats } => template
+				.splice_in(
+					Amount::from_sat(*amount_sats),
+					feerate,
+					max_feerate,
+					Arc::clone(&self.wallet),
+				)
+				.await
+				.map_err(|_| Error::ChannelSplicingFailed),
+			SpliceKind::Out { outputs } => template
+				.splice_out(outputs.clone(), feerate, max_feerate)
+				.map_err(|_| Error::ChannelSplicingFailed),
+			SpliceKind::Rbf {} => template
+				.rbf_prior_contribution(None, max_feerate, Arc::clone(&self.wallet))
+				.await
+				.map_err(|_| Error::ChannelSplicingFailed),
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn decide_retry_matrix() {
+		use NegotiationFailureReason::*;
+
+		// A non-retriable reason gives up regardless of attempts.
+		assert_eq!(decide_retry(&LocallyCanceled, 0), RetryDecision::Abandon);
+		// Retriable, but the resubmission budget is exhausted -> give up.
+		assert_eq!(decide_retry(&PeerDisconnected, MAX_SPLICE_ATTEMPTS), RetryDecision::Abandon);
+		// Transient failures resubmit the stored contribution.
+		assert_eq!(decide_retry(&PeerDisconnected, 0), RetryDecision::ResubmitStored);
+		assert_eq!(decide_retry(&Unknown, MAX_SPLICE_ATTEMPTS - 1), RetryDecision::ResubmitStored);
+		// A stale contribution is rebuilt from the original parameters.
+		assert_eq!(decide_retry(&FeeRateTooLow, 0), RetryDecision::Rebuild);
+		assert_eq!(decide_retry(&ContributionInvalid, 0), RetryDecision::Rebuild);
 	}
 }
