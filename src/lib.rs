@@ -1904,6 +1904,10 @@ impl Node {
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
 	///
+	/// The splice is retried automatically, including across restarts, until it either completes or
+	/// fails for a reason retrying cannot address, at which point [`Event::SpliceNegotiationFailed`]
+	/// is emitted.
+	///
 	/// # Experimental API
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
@@ -1928,6 +1932,10 @@ impl Node {
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
 	///
+	/// The splice is retried automatically, including across restarts, until it either completes or
+	/// fails for a reason retrying cannot address, at which point [`Event::SpliceNegotiationFailed`]
+	/// is emitted.
+	///
 	/// # Experimental API
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
@@ -1943,6 +1951,10 @@ impl Node {
 	/// This provides for decreasing a channel's outbound liquidity without re-balancing or closing
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
+	///
+	/// The splice is retried automatically, including across restarts, until it either completes or
+	/// fails for a reason retrying cannot address, at which point [`Event::SpliceNegotiationFailed`]
+	/// is emitted.
 	///
 	/// # Experimental API
 	///
@@ -2041,6 +2053,10 @@ impl Node {
 	/// Fee-bumps the pending splice on a channel by replacing its in-flight funding transaction
 	/// (RBF). The splice's amount and destination are preserved; only the fee rate is raised.
 	/// Errors if the channel has no pending splice to bump.
+	///
+	/// The fee bump is retried automatically, including across restarts, until it either completes
+	/// or fails for a reason retrying cannot address, at which point
+	/// [`Event::SpliceNegotiationFailed`] is emitted.
 	pub fn bump_channel_funding_fee(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
