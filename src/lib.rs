@@ -661,6 +661,8 @@ impl Node {
 
 		let splice_retrier = Arc::new(SpliceRetrier::new(
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.fee_estimator),
 			Arc::clone(&self.pending_payment_store),
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.logger),
@@ -682,6 +684,7 @@ impl Node {
 			Arc::clone(&self.onion_messenger),
 			self.om_mailbox.clone(),
 			self.prober.clone(),
+			Arc::clone(&splice_retrier),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
