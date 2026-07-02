@@ -57,7 +57,7 @@ use crate::config::{Config, ADDRESS_POOL_SIZE};
 use crate::data_store::StorableObject;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::payment::pending_payment_store::PendingPaymentDetailsUpdate;
+use crate::payment::pending_payment_store::{PendingPaymentDetailsUpdate, SpliceKind};
 use crate::payment::store::{ConfirmationStatus, PaymentDetailsUpdate};
 use crate::payment::{
 	FundingTxCandidate, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
@@ -342,7 +342,7 @@ impl Wallet {
 					let guard = self.funding_payment_update_lock.lock().await;
 
 					let payment_id = self
-						.find_payment_by_txid(txid)
+						.find_payment_for_tx(&tx, txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
@@ -485,7 +485,7 @@ impl Wallet {
 					let guard = self.funding_payment_update_lock.lock().await;
 
 					let payment_id = self
-						.find_payment_by_txid(txid)
+						.find_payment_for_tx(&tx, txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
@@ -555,7 +555,7 @@ impl Wallet {
 					let guard = self.funding_payment_update_lock.lock().await;
 
 					let payment_id = self
-						.find_payment_by_txid(txid)
+						.find_payment_for_tx(&tx, txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
@@ -1576,9 +1576,12 @@ impl Wallet {
 
 		// A user-initiated splice's record is keyed by the PaymentId chosen at splice time, not
 		// by its funding txid — e.g. LDK re-broadcasts a promoted-but-unconfirmed 0conf splice
-		// through this generic funding path. Resolve to the existing record so the rebroadcast
-		// merges into it rather than minting a duplicate under the txid-derived id.
-		let payment_id = self.find_payment_by_txid(txid).unwrap_or(PaymentId(txid.to_byte_array()));
+		// through this generic funding path. Resolve to the existing record — or, when a crash
+		// left only the pre-broadcast intent behind, to the intent whose funding outpoint this
+		// transaction spends — so the broadcast merges into the splice's record rather than
+		// minting a duplicate under the txid-derived id.
+		let payment_id =
+			self.find_payment_for_tx(tx, txid).unwrap_or(PaymentId(txid.to_byte_array()));
 
 		// A promoted-but-unconfirmed 0conf splice comes back through this generic path re-typed
 		// and carrying wallet-view figures; `funding_reclassification_update` declines the
@@ -1600,7 +1603,6 @@ impl Wallet {
 				);
 			}
 		}
-
 		let details = PaymentDetails::new(
 			payment_id,
 			PaymentKind::Onchain {
@@ -2017,6 +2019,36 @@ impl Wallet {
 		}
 
 		None
+	}
+
+	/// Like [`Self::find_payment_by_txid`], but additionally recognizes the transaction of a
+	/// user-initiated splice that has no payment record yet: it spends the funding outpoint a
+	/// live splice intent was created for. Wallet sync can see the transaction before the
+	/// broadcast-time classification records it — the counterparty broadcasts it too — and must
+	/// adopt the splice-time `PaymentId` so both writers converge on one record.
+	fn find_payment_for_tx(&self, tx: &Transaction, txid: Txid) -> Option<PaymentId> {
+		self.find_payment_by_txid(txid).or_else(|| {
+			self.pending_payment_store
+				.list_filter(|p| {
+					p.splice_intent().is_some_and(|intent| {
+						// A cooperative or force close also spends the funding outpoint, and a
+						// cooperative close pays a wallet address. A splice-in always adds wallet
+						// inputs while a close never has more than the funding input, so a second
+						// input disambiguates `SpliceKind::In`. A splice-out or fee bump can share
+						// the close's single-input shape; misattributing a close that races a
+						// still-live intent only affects which id keys its record.
+						let input_shape_matches = match intent.kind {
+							SpliceKind::In { .. } => tx.input.len() > 1,
+							SpliceKind::Out { .. } | SpliceKind::Rbf {} => true,
+						};
+						let funding_txo = intent.pre_splice_funding_txo.into_bitcoin_outpoint();
+						input_shape_matches
+							&& tx.input.iter().any(|input| input.previous_output == funding_txo)
+					})
+				})
+				.first()
+				.map(|p| p.id())
+		})
 	}
 
 	/// If `payment_id` refers to a classified funding payment, refreshes its confirmation status
@@ -4208,6 +4240,70 @@ mod tests {
 		assert_eq!(payments[0].id, payment_id);
 		assert_eq!(payments[0].amount_msat, Some(1_000_000));
 		assert_eq!(payments[0].fee_paid_msat, Some(500));
+	}
+
+	/// A crash between persisting a splice intent and classifying its broadcast leaves the intent
+	/// as the only trace of the splice-time PaymentId. The generic funding path must still
+	/// resolve the funding transaction — it spends the outpoint the intent was created for —
+	/// rather than keying the record by its txid, which the splice's own classification would
+	/// then duplicate.
+	#[tokio::test]
+	async fn classify_funding_resolves_a_pre_broadcast_splice_intent() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel_id = ChannelId([7u8; 32]);
+		let pre_splice_funding_txo = lightning::chain::transaction::OutPoint {
+			txid: Txid::from_byte_array([3u8; 32]),
+			index: 0,
+		};
+
+		let payment_id = PaymentId([21u8; 32]);
+		let intent = crate::payment::pending_payment_store::SpliceIntent {
+			user_channel_id: crate::types::UserChannelId(42),
+			counterparty_node_id,
+			channel_id,
+			pre_splice_funding_txo,
+			contribution: crate::payment::pending_payment_store::test_funding_contribution(),
+			kind: SpliceKind::Rbf {},
+			attempts: 0,
+		};
+		wallet
+			.pending_payment_store
+			.insert(PendingPaymentDetails::pending_splice(payment_id, intent))
+			.await
+			.unwrap();
+
+		let script_pubkey = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::External)
+			.address
+			.script_pubkey();
+		let tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: vec![bitcoin::TxIn {
+				previous_output: pre_splice_funding_txo.into_bitcoin_outpoint(),
+				script_sig: bitcoin::ScriptBuf::new(),
+				sequence: bitcoin::Sequence::MAX,
+				witness: bitcoin::Witness::new(),
+			}],
+			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
+		};
+
+		let channels = vec![(counterparty_node_id, channel_id)];
+		let tx_type = TransactionType::Funding { channels: vec![] };
+		wallet.classify_funding(&tx, &channels, tx_type).await.unwrap();
+
+		let payments = wallet.payment_store.list_filter(|_| true);
+		assert_eq!(payments.len(), 1);
+		assert_eq!(payments[0].id, payment_id, "the record must adopt the splice-time PaymentId");
 	}
 
 	/// Barrier test, classification-first ordering: wallet sync's confirmation handling must

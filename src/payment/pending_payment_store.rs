@@ -18,6 +18,10 @@ use crate::payment::store::PaymentDetailsUpdate;
 use crate::payment::{PaymentDetails, PaymentKind};
 use crate::types::UserChannelId;
 
+/// The number of times a splice intent is resubmitted to LDK before it is abandoned and the
+/// failure is surfaced to the user.
+pub(crate) const MAX_SPLICE_ATTEMPTS: u8 = 3;
+
 /// One candidate transaction in an interactive-funding (splice) RBF history, holding this node's
 /// share of the funding amount and fee for that candidate. Both are `None` for a candidate this
 /// node did not contribute to — e.g. a counterparty-initiated round before our `splice_in` joined
@@ -165,6 +169,10 @@ impl PendingPaymentDetails {
 		splice_intent: Option<SpliceIntent>,
 	) -> Self {
 		Self::Tracked { details, conflicting_txids, candidates, splice_intent }
+	}
+
+	pub(crate) fn pending_splice(id: PaymentId, intent: SpliceIntent) -> Self {
+		Self::PendingSplice { id, intent }
 	}
 
 	/// The full payment details, or `None` for a splice not yet broadcast.
@@ -325,16 +333,37 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 				} else {
 					Some(conflicting_txids.clone())
 				};
+				// Leave the splice intent unchanged: it is owned by the splice entry points and the
+				// retrier, never by a payment-tracking merge. Emitting the current value here would
+				// let an `insert_or_update` of a payment record (e.g. from wallet sync, built without
+				// an intent) clobber a live intent to `None`.
+				let _ = splice_intent;
 				Self {
 					id: details.id,
 					payment_update: Some(details.to_update()),
 					conflicting_txids,
 					candidates: candidates.clone(),
-					splice_intent: Some(splice_intent.clone()),
+					splice_intent: None,
 				}
 			},
 		}
 	}
+}
+
+/// Builds a [`FundingContribution`] for tests through its `Readable` impl — the only path open
+/// outside `rust-lightning`, which keeps its builder private. The length-prefixed stream holds
+/// just the required TLV records: estimated fee, feerate, max feerate, and the is-splice flag.
+#[cfg(test)]
+pub(crate) fn test_funding_contribution() -> FundingContribution {
+	let tlv_bytes = [
+		33u8, // BigSize length prefix over the TLV records below
+		1, 8, 0, 0, 0, 0, 0, 0, 0, 0, // (1, estimated_fee: 0 sat)
+		9, 8, 0, 0, 0, 0, 0, 0, 0, 253, // (9, feerate: 253 sat/kwu)
+		11, 8, 0, 0, 0, 0, 0, 0, 0, 253, // (11, max_feerate: 253 sat/kwu)
+		13, 1, 1, // (13, is_splice: true)
+	];
+	lightning::util::ser::Readable::read(&mut &tlv_bytes[..])
+		.expect("hand-built TLV stream must decode")
 }
 
 #[cfg(test)]
