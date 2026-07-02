@@ -34,6 +34,7 @@ use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
+use crate::channel::SpliceRetrier;
 use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
@@ -295,9 +296,13 @@ pub enum Event {
 		/// The outpoint of the channel's splice funding transaction.
 		new_funding_txo: OutPoint,
 	},
-	/// A channel splice negotiation round with local inputs or outputs has failed.
+	/// A channel splice has failed and is no longer being pursued.
 	///
 	/// This event is not emitted when only the counterparty contributes to a splice.
+	///
+	/// A recoverable failure of a user-initiated splice (e.g. the peer disconnecting
+	/// mid-negotiation) is retried automatically, including across restarts; this event is emitted
+	/// only once the splice is given up on.
 	SpliceNegotiationFailed {
 		/// The `channel_id` of the channel.
 		channel_id: ChannelId,
@@ -557,6 +562,7 @@ where
 	onion_messenger: Arc<OnionMessenger>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	prober: Option<Arc<Prober>>,
+	splice_retrier: Arc<SpliceRetrier<L>>,
 	runtime: Arc<Runtime>,
 	logger: L,
 	config: Arc<Config>,
@@ -575,7 +581,8 @@ where
 		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		splice_retrier: Arc<SpliceRetrier<L>>, runtime: Arc<Runtime>, logger: L,
+		config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -593,6 +600,7 @@ where
 			onion_messenger,
 			om_mailbox,
 			prober,
+			splice_retrier,
 			runtime,
 			logger,
 			config,
@@ -1896,6 +1904,10 @@ where
 					.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
 					.await;
 
+				self.splice_retrier
+					.on_channel_ready(UserChannelId(user_channel_id), funding_txo)
+					.await;
+
 				let event = Event::ChannelReady {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
@@ -1918,6 +1930,8 @@ where
 				..
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
+
+				self.splice_retrier.on_channel_closed(UserChannelId(user_channel_id)).await;
 
 				// `counterparty_node_id` has been set on every `ChannelClosed` since LDK 0.0.117.
 				let counterparty_node_id = counterparty_node_id
@@ -2230,14 +2244,26 @@ where
 				channel_id,
 				user_channel_id,
 				counterparty_node_id,
-				..
+				reason,
+				contribution,
 			} => {
 				log_info!(
 					self.logger,
-					"Channel {} with counterparty {} splice negotiation failed",
+					"Channel {} with counterparty {} splice negotiation failed: {}",
 					channel_id,
 					counterparty_node_id,
+					reason,
 				);
+
+				// A user-initiated splice is retried automatically, including across restarts;
+				// surface the failure only once it is given up on.
+				let surface = self
+					.splice_retrier
+					.on_negotiation_failed(UserChannelId(user_channel_id), reason, contribution)
+					.await;
+				if !surface {
+					return Ok(());
+				}
 
 				let event = Event::SpliceNegotiationFailed {
 					channel_id,
