@@ -169,6 +169,14 @@ impl PendingPaymentDetails {
 		}
 	}
 
+	/// The splice intent this record carries, if it is a splice that has not yet locked.
+	pub(crate) fn splice_intent(&self) -> Option<&SpliceIntent> {
+		match self {
+			Self::PendingSplice { intent, .. } => Some(intent),
+			Self::Tracked { splice_intent, .. } => splice_intent.as_ref(),
+		}
+	}
+
 	/// Returns this node's recorded funding figures for the candidate with the given txid, if any.
 	pub(crate) fn candidate(&self, txid: Txid) -> Option<&FundingTxCandidate> {
 		match self {
