@@ -33,6 +33,7 @@ use lightning::util::persist::{KVStore, MonitorUpdatingPersisterAsync};
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
+use lightning_liquidity::lsps2::router::LSPS2Router;
 use lightning_liquidity::utils::time::DefaultTimeProvider;
 use lightning_net_tokio::SocketDescriptor;
 
@@ -215,7 +216,7 @@ pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<
 pub(crate) type Wallet = crate::wallet::Wallet;
 pub(crate) type KeysManager = crate::wallet::WalletKeysManager;
 
-pub(crate) type Router = DefaultRouter<
+pub(crate) type InnerRouter = DefaultRouter<
 	Arc<Graph>,
 	Arc<Logger>,
 	Arc<KeysManager>,
@@ -223,6 +224,7 @@ pub(crate) type Router = DefaultRouter<
 	ProbabilisticScoringFeeParameters,
 	Scorer,
 >;
+pub(crate) type Router = LSPS2Router<InnerRouter, Arc<KeysManager>, Arc<DynStore>>;
 pub(crate) type Scorer = CombinedScorer<Arc<Graph>, Arc<Logger>>;
 
 pub(crate) type Graph = gossip::NetworkGraph<Arc<Logger>>;

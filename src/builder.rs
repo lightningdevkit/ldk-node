@@ -43,6 +43,7 @@ use lightning::util::persist::{
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
 use lightning_dns_resolver::OMDomainResolver;
+use lightning_liquidity::lsps2::router::LSPS2Router;
 use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
@@ -70,7 +71,7 @@ use crate::io::{
 };
 use crate::liquidity::{LSPS2ServiceConfig, LiquiditySourceBuilder, LspConfig};
 use crate::lnurl_auth::LnurlAuth;
-use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::peer_store::PeerStore;
@@ -1762,13 +1763,17 @@ fn build_with_store_internal(
 	}
 
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
-	let router = Arc::new(DefaultRouter::new(
+	let inner_router = DefaultRouter::new(
 		Arc::clone(&network_graph),
 		Arc::clone(&logger),
 		Arc::clone(&keys_manager),
 		Arc::clone(&scorer),
 		scoring_fee_params,
-	));
+	);
+	// Wrap the default router to inject LSPS2 JIT-channel blinded payment paths into BOLT12
+	// invoices based on the latest invoice parameters negotiated with our configured LSPs. The
+	// LSPS2 client handler is wired up below, once the liquidity source is built.
+	let router = Arc::new(LSPS2Router::new(inner_router));
 
 	let mut user_config = default_user_config(&config);
 
@@ -1992,6 +1997,50 @@ fn build_with_store_internal(
 			.block_on(async move { liquidity_source_builder.build().await.map(Arc::new) })?;
 		let custom_message_handler =
 			Arc::new(NodeCustomMessageHandler::new(Arc::clone(&liquidity_source)));
+
+		// Wire up the LSPS2 client handler, having the router inject JIT-channel blinded payment
+		// paths based on the latest invoice parameters negotiated with our configured LSPs.
+		//
+		// Beforehand, wipe any parameters previously negotiated with LSPs that are no longer
+		// configured, making sure the router won't have payments routed through them anymore.
+		if let Some(lsps2_client_handler) =
+			liquidity_source.liquidity_manager().lsps2_client_handler_arc()
+		{
+			let stale_lsp_node_ids = lsps2_client_handler
+				.latest_invoice_params()
+				.into_iter()
+				.map(|invoice_params| invoice_params.counterparty_node_id)
+				.filter(|counterparty_node_id| {
+					!liquidity_source_config.map_or(false, |lsc| {
+						lsc.lsp_nodes.iter().any(|n| n.node_id == *counterparty_node_id)
+					})
+				})
+				.collect::<Vec<_>>();
+
+			for counterparty_node_id in stale_lsp_node_ids {
+				let wipe_handler = Arc::clone(&lsps2_client_handler);
+				let wipe_logger = Arc::clone(&logger);
+				runtime.spawn_background_task(async move {
+					log_info!(
+						wipe_logger,
+						"Wiping LSPS2 invoice parameters previously negotiated with now-unconfigured LSP {}",
+						counterparty_node_id,
+					);
+					if let Err(e) =
+						wipe_handler.clear_latest_invoice_params(&counterparty_node_id).await
+					{
+						log_error!(
+							wipe_logger,
+							"Failed to wipe LSPS2 invoice parameters for LSP {}: {:?}",
+							counterparty_node_id,
+							e
+						);
+					}
+				});
+			}
+
+			router.set_lsps2_client_handler(lsps2_client_handler);
+		}
 
 		(liquidity_source, custom_message_handler)
 	};

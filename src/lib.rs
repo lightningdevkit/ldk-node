@@ -746,6 +746,49 @@ impl Node {
 			}
 		});
 
+		// If we have configured liquidity sources, negotiate LSPS2 JIT-channel invoice parameters
+		// with the cheapest LSP once at startup. The negotiated parameters are stored in the
+		// LSPS2 client handler and will be used by our router to inject JIT-channel blinded
+		// payment paths into all BOLT12 invoices going forward.
+		if !self.liquidity_source.get_all_lsp_details().is_empty() {
+			let negotiation_liquidity_source = Arc::clone(&self.liquidity_source);
+			let negotiation_cm = Arc::clone(&self.connection_manager);
+			let negotiation_chan_man = Arc::clone(&self.channel_manager);
+			let negotiation_peer_store = Arc::clone(&self.peer_store);
+			let negotiation_logger = Arc::clone(&self.logger);
+			self.runtime.spawn_background_task(async move {
+				match negotiation_liquidity_source
+					.lsps2_client()
+					.lsps2_negotiate_variable_amount_jit_invoice_params(None, negotiation_cm)
+					.await
+				{
+					Ok((_, _, chosen_lsp)) => {
+						let peer_info =
+							PeerInfo { node_id: chosen_lsp.node_id, address: chosen_lsp.address };
+						if let Err(e) = negotiation_peer_store.add_peer(peer_info).await {
+							log_error!(
+								negotiation_logger,
+								"Failed to add LSP to peer store: {}",
+								e
+							);
+						}
+
+						// Any static invoices stored with a static invoice server were built
+						// before the newly-negotiated parameters were available. Force a refresh
+						// so they include the JIT-channel payment paths going forward.
+						negotiation_chan_man.refresh_static_invoices();
+					},
+					Err(e) => {
+						log_error!(
+							negotiation_logger,
+							"Failed to negotiate LSPS2 JIT-channel parameters for BOLT12 receives: {}",
+							e
+						);
+					},
+				}
+			});
+		}
+
 		log_info!(self.logger, "Startup complete.");
 		*is_running_lock = true;
 		Ok(())

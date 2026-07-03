@@ -61,14 +61,86 @@ where
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
+		let (min_total_fee_msat, buy_response, cheapest_lsp) = Arc::clone(&self)
+			.lsps2_negotiate_jit_invoice_params(
+				amount_msat,
+				max_total_lsp_fee_limit_msat,
+				connection_manager,
+			)
+			.await?;
+
+		let lsps2_parameters = LSPS2Parameters {
+			max_total_opening_fee_msat: Some(min_total_fee_msat),
+			max_proportional_opening_fee_ppm_msat: None,
+		};
+
+		let invoice = self.lsps2_create_jit_invoice(
+			buy_response,
+			Some(amount_msat),
+			description,
+			expiry_secs,
+			payment_hash,
+			lsps2_parameters,
+			Some(&cheapest_lsp.node_id),
+		)?;
+
+		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
+		Ok((invoice, cheapest_lsp))
+	}
+
+	pub(crate) async fn lsps2_receive_variable_amount_to_jit_channel(
+		self: Arc<Self>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
+		connection_manager: Arc<ConnectionManager<L>>,
+	) -> Result<(Bolt11Invoice, LspConfig), Error> {
+		let (min_prop_fee_ppm_msat, buy_response, cheapest_lsp) = Arc::clone(&self)
+			.lsps2_negotiate_variable_amount_jit_invoice_params(
+				max_proportional_lsp_fee_limit_ppm_msat,
+				connection_manager,
+			)
+			.await?;
+
+		let lsps2_parameters = LSPS2Parameters {
+			max_total_opening_fee_msat: None,
+			max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
+		};
+
+		let invoice = self.lsps2_create_jit_invoice(
+			buy_response,
+			None,
+			description,
+			expiry_secs,
+			payment_hash,
+			lsps2_parameters,
+			Some(&cheapest_lsp.node_id),
+		)?;
+
+		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
+		Ok((invoice, cheapest_lsp))
+	}
+
+	/// Negotiates JIT-channel invoice parameters for receiving the given amount with the cheapest
+	/// of our configured LSPs.
+	///
+	/// Upon success, the negotiated parameters are stored in the LSPS2 client handler. For BOLT11
+	/// they can be used in a route hint via [`Self::lsps2_receive_to_jit_channel`], while for
+	/// BOLT12 they will be used by the [`LSPS2Router`] to inject JIT-channel blinded payment
+	/// paths when creating invoices.
+	///
+	/// Returns the maximum total opening fee we agreed to pay, the LSP's buy response, and the
+	/// chosen LSP.
+	///
+	/// [`LSPS2Router`]: lightning_liquidity::lsps2::router::LSPS2Router
+	pub(crate) async fn lsps2_negotiate_jit_invoice_params(
+		self: Arc<Self>, amount_msat: u64, max_total_lsp_fee_limit_msat: Option<u64>,
+		connection_manager: Arc<ConnectionManager<L>>,
+	) -> Result<(u64, LSPS2BuyResponse, LspConfig), Error> {
 		// Connect to all candidate LSPs before querying fees.
 		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
 		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
 			.into_iter()
 			.flat_map(|(lsp, resp)| {
-				resp.opening_fee_params_menu
-					.into_iter()
-					.map(move |params| (lsp.clone(), params))
+				resp.opening_fee_params_menu.into_iter().map(move |params| (lsp.clone(), params))
 			})
 			.filter_map(|(lsp, params)| {
 				if amount_msat < params.min_payment_size_msat
@@ -117,30 +189,26 @@ where
 				Some(&cheapest_lsp.node_id),
 			)
 			.await?;
-		let lsps2_parameters = LSPS2Parameters {
-			max_total_opening_fee_msat: Some(min_total_fee_msat),
-			max_proportional_opening_fee_ppm_msat: None,
-		};
 
-		let invoice = self.lsps2_create_jit_invoice(
-			buy_response,
-			Some(amount_msat),
-			description,
-			expiry_secs,
-			payment_hash,
-			lsps2_parameters,
-			Some(&cheapest_lsp.node_id),
-		)?;
-
-		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
-		Ok((invoice, cheapest_lsp))
+		Ok((min_total_fee_msat, buy_response, cheapest_lsp))
 	}
 
-	pub(crate) async fn lsps2_receive_variable_amount_to_jit_channel(
-		self: Arc<Self>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
+	/// Negotiates JIT-channel invoice parameters for receiving a variable amount with the
+	/// cheapest of our configured LSPs.
+	///
+	/// Upon success, the negotiated parameters are stored in the LSPS2 client handler. For BOLT11
+	/// they can be used in a route hint via
+	/// [`Self::lsps2_receive_variable_amount_to_jit_channel`], while for BOLT12 they will be used
+	/// by the [`LSPS2Router`] to inject JIT-channel blinded payment paths when creating invoices.
+	///
+	/// Returns the maximum proportional opening fee we agreed to pay, the LSP's buy response, and
+	/// the chosen LSP.
+	///
+	/// [`LSPS2Router`]: lightning_liquidity::lsps2::router::LSPS2Router
+	pub(crate) async fn lsps2_negotiate_variable_amount_jit_invoice_params(
+		self: Arc<Self>, max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 		connection_manager: Arc<ConnectionManager<L>>,
-	) -> Result<(Bolt11Invoice, LspConfig), Error> {
+	) -> Result<(u64, LSPS2BuyResponse, LspConfig), Error> {
 		// Connect to all candidate LSPs before querying fees.
 		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
 		let (cheapest_lsp, min_prop_fee_ppm_msat, min_opening_params) = all_offers
@@ -181,22 +249,8 @@ where
 		let buy_response = self
 			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
 			.await?;
-		let lsps2_parameters = LSPS2Parameters {
-			max_total_opening_fee_msat: None,
-			max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
-		};
-		let invoice = self.lsps2_create_jit_invoice(
-			buy_response,
-			None,
-			description,
-			expiry_secs,
-			payment_hash,
-			lsps2_parameters,
-			Some(&cheapest_lsp.node_id),
-		)?;
 
-		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
-		Ok((invoice, cheapest_lsp))
+		Ok((min_prop_fee_ppm_msat, buy_response, cheapest_lsp))
 	}
 
 	async fn gather_lsps2_offers(

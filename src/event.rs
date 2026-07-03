@@ -7,7 +7,7 @@
 
 use core::future::Future;
 use core::task::{Poll, Waker};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +30,8 @@ use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
 use lightning::{impl_ser_tlv_based, impl_ser_tlv_based_enum};
+use lightning_liquidity::lsps2::client::LSPS2InvoiceParameters;
+use lightning_liquidity::lsps2::router::LSPS2_PAYMENT_METADATA_KEY;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
@@ -611,6 +613,21 @@ where
 		})
 	}
 
+	fn lsps2_max_total_opening_fee_msat_from_bolt12_metadata(
+		payment_metadata: Option<&BTreeMap<u64, Vec<u8>>>, payment_size_msat: u64,
+	) -> Option<u64> {
+		// For BOLT12 payments, the router encoded the negotiated LSPS2 invoice parameters in the
+		// payment metadata of any JIT-channel blinded payment paths it constructed. Recompute the
+		// maximum acceptable opening fee from the negotiated opening fee parameters.
+		let encoded_params = payment_metadata?.get(&LSPS2_PAYMENT_METADATA_KEY)?;
+		let invoice_params = LSPS2InvoiceParameters::read(&mut &encoded_params[..]).ok()?;
+		compute_opening_fee(
+			payment_size_msat,
+			invoice_params.opening_fee_params.min_fee_msat,
+			invoice_params.opening_fee_params.proportional as u64,
+		)
+	}
+
 	pub async fn handle_event(&self, event: LdkEvent) -> Result<(), ReplayEvent> {
 		match event {
 			LdkEvent::FundingGenerationReady {
@@ -798,13 +815,19 @@ where
 							.and_then(|metadata| {
 								Self::lsps2_max_total_opening_fee_msat(metadata, amount_msat)
 							}),
+						PaymentPurpose::Bolt12OfferPayment { payment_context, .. } => {
+							Self::lsps2_max_total_opening_fee_msat_from_bolt12_metadata(
+								payment_context.payment_metadata.as_ref(),
+								amount_msat + counterparty_skimmed_fee_msat,
+							)
+						},
 						_ => None,
 					};
 
 					let Some(max_total_opening_fee_msat) = max_total_opening_fee_msat else {
 						log_info!(
 							self.logger,
-							"Refusing inbound payment with hash {} as the counterparty withheld {}msat without valid BOLT11 LSPS2 payment metadata",
+							"Refusing inbound payment with hash {} as the counterparty withheld {}msat without valid LSPS2 payment metadata",
 							hex_utils::to_string(&payment_hash.0),
 							counterparty_skimmed_fee_msat,
 						);
@@ -828,18 +851,24 @@ where
 						match &info.kind {
 							PaymentKind::Bolt11 { .. } => {
 								let update = PaymentDetailsUpdate {
-									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
+									counterparty_skimmed_fee_msat: Some(Some(
+										counterparty_skimmed_fee_msat,
+									)),
 									..PaymentDetailsUpdate::new(payment_id)
 								};
 								match self.payment_store.update(update).await {
 									Ok(_) => (),
 									Err(e) => {
-										log_error!(self.logger, "Failed to access payment store: {}", e);
+										log_error!(
+											self.logger,
+											"Failed to access payment store: {}",
+											e
+										);
 										return Err(ReplayEvent());
 									},
 								};
 							},
-							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for BOLT11 payments."),
+							_ => {},
 						}
 					}
 				}
@@ -1945,6 +1974,72 @@ mod tests {
 				100_000
 			),
 			Some(42_000)
+		);
+	}
+
+	#[test]
+	fn lsps2_bolt12_payment_metadata_decodes_fee_limit() {
+		use lightning_liquidity::lsps0::ser::LSPSDateTime;
+		use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
+
+		use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+		use std::str::FromStr;
+
+		let counterparty_node_id = PublicKey::from_secret_key(
+			&Secp256k1::new(),
+			&SecretKey::from_slice(&[42; 32]).unwrap(),
+		);
+		let invoice_params = LSPS2InvoiceParameters {
+			counterparty_node_id,
+			intercept_scid: 42,
+			cltv_expiry_delta: 144,
+			opening_fee_params: LSPS2OpeningFeeParams {
+				min_fee_msat: 21_000,
+				proportional: 10_000,
+				valid_until: LSPSDateTime::from_str("2035-05-20T08:30:45Z").unwrap(),
+				min_lifetime: 144,
+				max_client_to_self_delay: 128,
+				min_payment_size_msat: 1,
+				max_payment_size_msat: 100_000_000,
+				promise: "promise".to_string(),
+			},
+		};
+
+		let mut payment_metadata = BTreeMap::new();
+		payment_metadata.insert(LSPS2_PAYMENT_METADATA_KEY, invoice_params.encode());
+
+		// max(min_fee_msat, proportional * payment_size / 1_000_000) = max(21_000, 10_000_000)
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat_from_bolt12_metadata(
+				Some(&payment_metadata),
+				1_000_000_000,
+			),
+			Some(10_000_000)
+		);
+
+		// Missing metadata, missing key, or malformed parameters are rejected.
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat_from_bolt12_metadata(
+				None, 1_000_000,
+			),
+			None
+		);
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat_from_bolt12_metadata(
+				Some(&BTreeMap::new()),
+				1_000_000,
+			),
+			None
+		);
+		let mut malformed_metadata = BTreeMap::new();
+		malformed_metadata.insert(LSPS2_PAYMENT_METADATA_KEY, vec![0xff]);
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat_from_bolt12_metadata(
+				Some(&malformed_metadata),
+				1_000_000,
+			),
+			None
 		);
 	}
 
