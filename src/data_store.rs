@@ -223,7 +223,7 @@ where
 
 #[cfg(test)]
 mod tests {
-	use lightning::impl_writeable_tlv_based;
+	use lightning::impl_ser_tlv_based as impl_writeable_tlv_based;
 	use lightning::io;
 	use lightning::util::persist::{PageToken, PaginatedKVStore, PaginatedListResponse};
 	use lightning::util::test_utils::TestLogger;
