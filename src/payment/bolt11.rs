@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, OptionalBolt11PaymentParams, PaymentId,
 };
@@ -55,7 +55,7 @@ pub(crate) struct PaymentMetadata {
 	pub(crate) lsps2_parameters: Option<LSPS2Parameters>,
 }
 
-impl_writeable_tlv_based!(PaymentMetadata, {
+impl_ser_tlv_based!(PaymentMetadata, {
 	(0, lsps2_parameters, option),
 });
 
@@ -309,7 +309,7 @@ impl Bolt11Payment {
 				let payee_pubkey = invoice.recover_payee_pub_key();
 				let amt_msat =
 					invoice.amount_milli_satoshis().expect("invoice amount should be set");
-				log_info!(self.logger, "Initiated sending {}msat to {}", amt_msat, payee_pubkey);
+				log_info!(self.logger, "Initiated sending {}msat to {:?}", amt_msat, payee_pubkey);
 
 				let kind = PaymentKind::Bolt11 {
 					hash: payment_hash,
@@ -422,7 +422,7 @@ impl Bolt11Payment {
 				let payee_pubkey = invoice.recover_payee_pub_key();
 				log_info!(
 					self.logger,
-					"Initiated sending {} msat to {}",
+					"Initiated sending {} msat to {:?}",
 					amount_msat,
 					payee_pubkey
 				);

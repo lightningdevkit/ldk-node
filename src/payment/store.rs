@@ -13,8 +13,8 @@ use lightning::ln::msgs::DecodeError;
 use lightning::offers::offer::OfferId;
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{
-	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
-	impl_writeable_tlv_based_enum, write_tlv_fields,
+	_init_and_read_len_prefixed_tlv_fields, impl_ser_tlv_based, impl_ser_tlv_based_enum,
+	write_tlv_fields,
 };
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning_types::string::UntrustedString;
@@ -307,7 +307,7 @@ pub enum PaymentDirection {
 	Outbound,
 }
 
-impl_writeable_tlv_based_enum!(PaymentDirection,
+impl_ser_tlv_based_enum!(PaymentDirection,
 	(0, Inbound) => {},
 	(1, Outbound) => {}
 );
@@ -324,7 +324,7 @@ pub enum PaymentStatus {
 	Failed,
 }
 
-impl_writeable_tlv_based_enum!(PaymentStatus,
+impl_ser_tlv_based_enum!(PaymentStatus,
 	(0, Pending) => {},
 	(2, Succeeded) => {},
 	(4, Failed) => {}
@@ -420,7 +420,7 @@ pub enum PaymentKind {
 	},
 }
 
-impl_writeable_tlv_based_enum!(PaymentKind,
+impl_ser_tlv_based_enum!(PaymentKind,
 	(0, Onchain) => {
 		(0, txid, required),
 		(2, status, required),
@@ -479,7 +479,7 @@ pub enum ConfirmationStatus {
 	Unconfirmed,
 }
 
-impl_writeable_tlv_based_enum!(ConfirmationStatus,
+impl_ser_tlv_based_enum!(ConfirmationStatus,
 	(0, Confirmed) => {
 		(0, block_hash, required),
 		(2, height, required),
@@ -504,7 +504,7 @@ pub struct LSPS2Parameters {
 	pub max_proportional_opening_fee_ppm_msat: Option<u64>,
 }
 
-impl_writeable_tlv_based!(LSPS2Parameters, {
+impl_ser_tlv_based!(LSPS2Parameters, {
 	(0, max_total_opening_fee_msat, option),
 	(2, max_proportional_opening_fee_ppm_msat, option),
 });
@@ -604,7 +604,7 @@ mod tests {
 		pub status: PaymentStatus,
 	}
 
-	impl_writeable_tlv_based!(OldPaymentDetails, {
+	impl_ser_tlv_based!(OldPaymentDetails, {
 		(0, hash, required),
 		(2, preimage, required),
 		(4, secret, required),
@@ -706,7 +706,7 @@ mod tests {
 		lsp_fee_limits: LSPS2Parameters,
 	}
 
-	impl_writeable_tlv_based!(LegacyBolt11JitKind, {
+	impl_ser_tlv_based!(LegacyBolt11JitKind, {
 		(0, hash, required),
 		(1, counterparty_skimmed_fee_msat, option),
 		(2, preimage, option),
