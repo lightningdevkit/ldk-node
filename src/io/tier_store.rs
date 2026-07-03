@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex};
 
 use lightning::util::persist::{
 	KVStore, PageToken, PaginatedKVStore, PaginatedListResponse, NETWORK_GRAPH_PERSISTENCE_KEY,
-	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
+	SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 };
 use lightning::{io, log_error};
 use tokio::sync::Mutex as TokioMutex;
@@ -494,23 +494,12 @@ impl TierStoreInner {
 			"list",
 		)?;
 
-		match (primary_namespace.as_str(), secondary_namespace.as_str()) {
-			(
-				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-			)
-			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _) => {
-				if let Some(eph_store) = self.ephemeral_store.as_ref() {
-					// We don't retry ephemeral-store lists here. Local failures are treated as
-					// terminal for this access path rather than falling back to another store.
-					KVStore::list(eph_store.as_ref(), &primary_namespace, &secondary_namespace)
-						.await
-				} else {
-					self.list_primary(&primary_namespace, &secondary_namespace).await
-				}
-			},
-			_ => self.list_primary(&primary_namespace, &secondary_namespace).await,
-		}
+		let mut keys = self.list_primary(&primary_namespace, &secondary_namespace).await?;
+
+		self.apply_ephemeral_overlay(&primary_namespace, &secondary_namespace, &mut keys, true)
+			.await?;
+
+		Ok(keys)
 	}
 
 	async fn list_paginated_internal(
@@ -524,34 +513,89 @@ impl TierStoreInner {
 			"list_paginated",
 		)?;
 
-		match (primary_namespace.as_str(), secondary_namespace.as_str()) {
-			(
-				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
-				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-			)
-			| (SCORER_PERSISTENCE_PRIMARY_NAMESPACE, _) => {
-				if let Some(eph_store) = self.ephemeral_store.as_ref() {
-					// We don't retry ephemeral-store lists here. Local failures are treated as
-					// terminal for this access path rather than falling back to another store.
-					return PaginatedKVStore::list_paginated(
-						eph_store.as_ref(),
-						&primary_namespace,
-						&secondary_namespace,
-						page_token,
-					)
-					.await;
-				}
-			},
-			_ => {},
-		}
-
-		PaginatedKVStore::list_paginated(
+		let mut response = PaginatedKVStore::list_paginated(
 			self.primary_store.as_ref(),
 			&primary_namespace,
 			&secondary_namespace,
 			page_token,
 		)
-		.await
+		.await?;
+
+		// Filter stale primary copies of ephemeral-cached keys from every page, and append the
+		// live ephemeral overlay only once primary pagination is exhausted (`next_page_token`
+		// is `None`).
+		//
+		// Because filtering can drop entries from a full page, a non-terminal page can come back
+		// shorter than the nominal page size: callers must not treat `next_page_token.is_some()`
+		// as a guarantee of a full page. Conversely, appending the overlay onto an already
+		// full-sized terminal page can make it up to `MAX_EPHEMERAL_CACHED_KEYS_PER_NAMESPACE`
+		// entries larger than the nominal page size. Both effects are bounded by that constant.
+		let append_live = response.next_page_token.is_none();
+		self.apply_ephemeral_overlay(
+			&primary_namespace,
+			&secondary_namespace,
+			&mut response.keys,
+			append_live,
+		)
+		.await?;
+
+		Ok(response)
+	}
+
+	/// Reconciles a set of keys already listed from the primary store with the ephemeral store.
+	///
+	/// This keeps `list`/`list_paginated` consistent with the key-level routing in
+	/// `read`/`write`/`remove`: once an ephemeral store is configured it is authoritative for
+	/// ephemeral-cached keys (`network_graph`/`scorer`). Any copy of such a key still held by the
+	/// primary store is a stale leftover from before the ephemeral store was configured, so we
+	/// drop it here; when `append_live` is set we then append the live ephemeral copy.
+	///
+	/// The ephemeral store is only consulted for namespaces that can actually contain an
+	/// ephemeral-cached key (see [`namespace_may_hold_ephemeral_cached_key`]). For every other
+	/// namespace this is a no-op, so listing durable, primary-backed data never depends on the
+	/// optional ephemeral backend being reachable.
+	async fn apply_ephemeral_overlay(
+		&self, primary_namespace: &str, secondary_namespace: &str, keys: &mut Vec<String>,
+		append_live: bool,
+	) -> io::Result<()> {
+		let Some(eph_store) = self.ephemeral_store.as_ref() else {
+			return Ok(());
+		};
+
+		if !namespace_may_hold_ephemeral_cached_key(primary_namespace) {
+			return Ok(());
+		}
+
+		keys.retain(|key| !is_ephemeral_cached_key(primary_namespace, secondary_namespace, key));
+
+		if !append_live {
+			return Ok(());
+		}
+
+		// We don't retry ephemeral-store lists here. Local failures are treated as terminal for
+		// this access path rather than falling back to another store.
+		let cached_keys: Vec<String> =
+			KVStore::list(eph_store.as_ref(), primary_namespace, secondary_namespace)
+				.await?
+				.into_iter()
+				.filter(|key| is_ephemeral_cached_key(primary_namespace, secondary_namespace, key))
+				.collect();
+
+		debug_assert!(
+			cached_keys.len() <= MAX_EPHEMERAL_CACHED_KEYS_PER_NAMESPACE,
+			"ephemeral-cached key overlay ({} keys) exceeded the bound this pagination \
+			 design assumes -- see MAX_EPHEMERAL_CACHED_KEYS_PER_NAMESPACE",
+			cached_keys.len(),
+		);
+
+		for key in cached_keys {
+			// Guards against `list` on the ephemeral store itself returning a duplicate entry.
+			if !keys.contains(&key) {
+				keys.push(key);
+			}
+		}
+
+		Ok(())
 	}
 
 	fn handle_primary_backup_results(
@@ -603,6 +647,18 @@ impl TierStoreInner {
 	}
 }
 
+/// The maximum number of distinct keys [`is_ephemeral_cached_key`] can ever match for a
+/// single namespace pair -- one per matched key literal (`network_graph`, `scorer`).
+///
+/// `apply_ephemeral_overlay` reads the ephemeral-cached overlay unpaginated and appends
+/// it onto the terminal primary page in a single shot, reusing primary's own page token
+/// unmodified rather than tracking a cross-store cursor. That's only sound while this
+/// stays small. If a future key is added to `is_ephemeral_cached_key`, bump this constant
+/// to match, and re-examine whether `list_paginated_internal` still needs revisiting -- a
+/// larger or unbounded ephemeral-cached set can silently blow past the nominal page size
+/// and can't correctly report `next_page_token` for a partial overlay.
+const MAX_EPHEMERAL_CACHED_KEYS_PER_NAMESPACE: usize = 2;
+
 fn is_ephemeral_cached_key(pn: &str, sn: &str, key: &str) -> bool {
 	matches!(
 		(pn, sn, key),
@@ -611,8 +667,19 @@ fn is_ephemeral_cached_key(pn: &str, sn: &str, key: &str) -> bool {
 	)
 }
 
+/// Whether a primary namespace can ever contain a key that [`is_ephemeral_cached_key`] matches.
+///
+/// Listing paths use this to gate the (optional) ephemeral-store lookup: for any namespace that
+/// cannot hold an ephemeral-cached key, the overlay is skipped entirely, so durable,
+/// primary-backed listings neither pay for an extra ephemeral list nor fail when the ephemeral
+/// backend is unreachable.
+fn namespace_may_hold_ephemeral_cached_key(pn: &str) -> bool {
+	pn == NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE || pn == SCORER_PERSISTENCE_PRIMARY_NAMESPACE
+}
+
 #[cfg(test)]
 mod tests {
+	use std::future::Future;
 	use std::panic::RefUnwindSafe;
 	use std::path::PathBuf;
 	use std::sync::Arc;
@@ -623,11 +690,14 @@ mod tests {
 		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 		CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
 		CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
 	use lightning_persister::fs_store::v2::FilesystemStoreV2;
 
 	use super::*;
-	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
+	use crate::io::test_utils::{
+		do_read_write_remove_list_persist, random_storage_path, InMemoryStore, IN_MEMORY_PAGE_SIZE,
+	};
 	use crate::io::tier_store::TierStore;
 	use crate::logger::Logger;
 	use crate::types::{DynStore, DynStoreWrapper};
@@ -643,6 +713,51 @@ mod tests {
 
 	fn setup_tier_store(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> TierStore {
 		TierStore::new(primary_store, logger)
+	}
+
+	/// A store whose `list`/`list_paginated` always fail while every other operation is delegated
+	/// to an inner [`InMemoryStore`]. Used to prove that a failing ephemeral list does not sink a
+	/// listing for a namespace that can never hold an ephemeral-cached key.
+	struct FailingListStore {
+		inner: InMemoryStore,
+	}
+
+	impl FailingListStore {
+		fn new() -> Self {
+			Self { inner: InMemoryStore::new() }
+		}
+	}
+
+	impl KVStore for FailingListStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			KVStore::read(&self.inner, primary_namespace, secondary_namespace, key)
+		}
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::write(&self.inner, primary_namespace, secondary_namespace, key, buf)
+		}
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::remove(&self.inner, primary_namespace, secondary_namespace, key, lazy)
+		}
+		fn list(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "list failed")) }
+		}
+	}
+
+	impl PaginatedKVStore for FailingListStore {
+		fn list_paginated(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+			_page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "list_paginated failed")) }
+		}
 	}
 
 	#[tokio::test]
@@ -734,6 +849,84 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn list_discovers_durable_keys_alongside_ephemeral_cache() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+
+		let ephemeral_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("ephemeral")).unwrap()));
+		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+
+		// A durable root-namespace key, routed to primary since it isn't ephemeral-cached.
+		tier.write(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			vec![1u8; 32],
+		)
+		.await
+		.unwrap();
+
+		// The ephemeral-cached key, routed to the ephemeral store.
+		tier.write(
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+			vec![2u8; 32],
+		)
+		.await
+		.unwrap();
+
+		// A decoy sitting in the ephemeral store under an unrelated namespace. This must
+		// never leak into a listing for that namespace just because an ephemeral
+		// store happens to be configured.
+		ephemeral_store
+			.write(
+				CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+				"ephemeral-decoy",
+				vec![3u8; 32],
+			)
+			.await
+			.unwrap();
+
+		// This is `list("", "")`: CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE and
+		// NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE are the same empty string, so both
+		// keys live in the exact namespace.
+		let root_keys = KVStore::list(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		)
+		.await
+		.unwrap();
+
+		// The durable primary-backed key and the ephemeral-cached key must both be
+		// discoverable from a single call.
+		assert!(root_keys.contains(&CHANNEL_MANAGER_PERSISTENCE_KEY.to_string()));
+		assert!(root_keys.contains(&NETWORK_GRAPH_PERSISTENCE_KEY.to_string()));
+
+		let monitor_keys = KVStore::list(
+			&tier,
+			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+		)
+		.await
+		.unwrap();
+
+		// The unrelated-namespace decoy sitting in the ephemeral store must not leak
+		// into a listing for a namespace it was never routed to.
+		assert!(!monitor_keys.contains(&"ephemeral-decoy".to_string()));
+	}
+
+	#[tokio::test]
 	async fn list_paginated_routes_to_selected_tier() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
@@ -770,13 +963,16 @@ mod tests {
 			.await
 			.unwrap();
 
-		// Same decoy check in the other direction: this key should be ignored
-		// because network graph listings route to the ephemeral store when set.
+		// This key shares the network graph's namespace tuple ("", "") but is not
+		// itself an ephemeral-cached key, standing in for durable root-namespace data
+		// such as `manager`/`output_sweeper`/`peers`. It must still be listed even
+		// though the ephemeral store is configured and authoritative for
+		// `network_graph`/`scorer` specifically.
 		primary_store
 			.write(
 				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
 				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
-				"primary-decoy",
+				"other-root-namespace-key",
 				vec![3u8; 32],
 			)
 			.await
@@ -809,7 +1005,225 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		assert_eq!(ephemeral_response.keys, vec![NETWORK_GRAPH_PERSISTENCE_KEY.to_string()]);
+
+		// The durable root-namespace key surfaces from the primary store, and the
+		// ephemeral-cached `network_graph` key is appended once primary's pagination
+		// is exhausted.
+		assert_eq!(
+			ephemeral_response.keys,
+			vec!["other-root-namespace-key".to_string(), NETWORK_GRAPH_PERSISTENCE_KEY.to_string()]
+		);
+	}
+
+	#[tokio::test]
+	async fn list_paginated_filters_stale_primary_copies_across_every_page() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+
+		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+
+		// Exactly IN_MEMORY_PAGE_SIZE unrelated, durable root-namespace keys written
+		// directly to primary, so a single additional entry (the stale copy below)
+		// pushes the namespace to exactly two pages.
+		for i in 0..IN_MEMORY_PAGE_SIZE {
+			primary_store
+				.write(
+					NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+					NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+					&format!("filler-{i:02}"),
+					vec![0u8; 32],
+				)
+				.await
+				.unwrap();
+		}
+
+		// A stale copy of `network_graph`, written directly to primary as if it had
+		// been persisted there before the ephemeral store was configured. Writing it
+		// last gives it the highest creation order, guaranteeing it lands on the
+		// *first* page rather than the last -- filtering only the terminal page
+		// would miss it entirely.
+		primary_store
+			.write(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+				vec![1u8; 32],
+			)
+			.await
+			.unwrap();
+
+		// The live, authoritative copy, written through the tier so it is routed to
+		// the ephemeral store.
+		tier.write(
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+			vec![2u8; 32],
+		)
+		.await
+		.unwrap();
+
+		let page_one = PaginatedKVStore::list_paginated(
+			&tier,
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			None,
+		)
+		.await
+		.unwrap();
+
+		// The stale primary copy must be filtered out of the first page even though
+		// the walk isn't done yet -- it should never be visible once an ephemeral
+		// store is configured.
+		let expected_page_one: Vec<String> =
+			(1..IN_MEMORY_PAGE_SIZE).rev().map(|i| format!("filler-{i:02}")).collect();
+		assert_eq!(page_one.keys, expected_page_one);
+		assert!(page_one.next_page_token.is_some());
+
+		let page_two = PaginatedKVStore::list_paginated(
+			&tier,
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			page_one.next_page_token,
+		)
+		.await
+		.unwrap();
+
+		// The final page carries the one remaining filler key plus the ephemeral
+		// store's live copy, appended exactly once now that primary pagination is
+		// exhausted.
+		assert_eq!(
+			page_two.keys,
+			vec!["filler-00".to_string(), NETWORK_GRAPH_PERSISTENCE_KEY.to_string()]
+		);
+		assert!(page_two.next_page_token.is_none());
+
+		// Across the full walk, `network_graph` appears exactly once -- this is the
+		// property that would have caught the duplicate-key bug.
+		let occurrences = page_one
+			.keys
+			.iter()
+			.chain(page_two.keys.iter())
+			.filter(|k| k.as_str() == NETWORK_GRAPH_PERSISTENCE_KEY)
+			.count();
+		assert_eq!(occurrences, 1);
+	}
+
+	#[tokio::test]
+	async fn list_unrelated_namespace_survives_ephemeral_list_failure() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+
+		// An ephemeral store whose `list`/`list_paginated` always fail.
+		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingListStore::new()));
+		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+
+		// A durable key in a namespace that can never hold an ephemeral-cached key.
+		tier.write(
+			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+			"monitor-key",
+			vec![1u8; 32],
+		)
+		.await
+		.unwrap();
+
+		// Listing that namespace must not consult (or depend on) the ephemeral store, so it
+		// succeeds even though the ephemeral list would fail.
+		let monitor_keys = KVStore::list(
+			&tier,
+			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+		)
+		.await
+		.unwrap();
+		assert_eq!(monitor_keys, vec!["monitor-key".to_string()]);
+
+		// The paginated path is gated identically.
+		let monitor_page = PaginatedKVStore::list_paginated(
+			&tier,
+			CHANNEL_MONITOR_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MONITOR_PERSISTENCE_SECONDARY_NAMESPACE,
+			None,
+		)
+		.await
+		.unwrap();
+		assert_eq!(monitor_page.keys, vec!["monitor-key".to_string()]);
+
+		// Sanity check the fixture: listing a namespace that *can* hold an ephemeral-cached key
+		// still surfaces the ephemeral failure rather than silently swallowing it.
+		assert!(KVStore::list(
+			&tier,
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+		)
+		.await
+		.is_err());
+	}
+
+	#[tokio::test]
+	async fn list_filters_stale_primary_copy_when_ephemeral_missing() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+
+		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+
+		// A durable root-namespace key that must always be discoverable.
+		tier.write(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+			vec![1u8; 32],
+		)
+		.await
+		.unwrap();
+
+		// A stale copy of `network_graph` sitting in primary as if it had been persisted there
+		// before the ephemeral store was configured. The ephemeral store holds no copy, so
+		// `read` routes to ephemeral and would fail for this key.
+		primary_store
+			.write(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+				vec![2u8; 32],
+			)
+			.await
+			.unwrap();
+
+		let root_keys = KVStore::list(
+			&tier,
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+		)
+		.await
+		.unwrap();
+
+		// The durable key is still listed, and the stale primary copy of `network_graph` is
+		// filtered out so `list` cannot report a key that `read` would fail to fetch -- matching
+		// the paginated path.
+		assert!(root_keys.contains(&CHANNEL_MANAGER_PERSISTENCE_KEY.to_string()));
+		assert!(!root_keys.contains(&NETWORK_GRAPH_PERSISTENCE_KEY.to_string()));
 	}
 
 	#[tokio::test]

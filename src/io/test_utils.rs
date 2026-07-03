@@ -159,7 +159,7 @@ impl<K: KVStore + Sync> chainmonitor::Persist<TestChannelSigner>
 
 const EXPECTED_UPDATES_PER_PAYMENT: u64 = 5;
 
-pub(crate) use in_memory_store::InMemoryStore;
+pub(crate) use in_memory_store::{InMemoryStore, IN_MEMORY_PAGE_SIZE};
 
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();
