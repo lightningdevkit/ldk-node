@@ -16,8 +16,8 @@ use lightning::ln::types::ChannelId;
 use lightning::offers::offer::OfferId;
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{
-	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
-	impl_writeable_tlv_based_enum, write_tlv_fields,
+	_init_and_read_len_prefixed_tlv_fields, impl_ser_tlv_based as impl_writeable_tlv_based,
+	impl_ser_tlv_based_enum as impl_writeable_tlv_based_enum, write_tlv_fields,
 };
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning_types::string::UntrustedString;

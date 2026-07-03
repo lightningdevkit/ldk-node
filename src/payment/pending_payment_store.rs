@@ -6,7 +6,7 @@
 // accordance with one or both of these licenses.
 
 use bitcoin::Txid;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based as impl_writeable_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
 
 use crate::data_store::{StorableObject, StorableObjectUpdate};

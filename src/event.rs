@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, OutPoint};
+use lightning::blinded_path::message::NextMessageHop;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
 use lightning::events::PaidBolt12Invoice;
@@ -29,7 +30,10 @@ use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
-use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
+use lightning::{
+	impl_ser_tlv_based as impl_writeable_tlv_based,
+	impl_ser_tlv_based_enum as impl_writeable_tlv_based_enum,
+};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
@@ -1725,7 +1729,11 @@ where
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
 			},
-			LdkEvent::OnionMessageIntercepted { peer_node_id, message } => {
+			LdkEvent::OnionMessageIntercepted {
+				next_hop: NextMessageHop::NodeId(peer_node_id),
+				message,
+				..
+			} => {
 				if let Some(om_mailbox) = self.om_mailbox.as_ref() {
 					om_mailbox.onion_message_intercepted(peer_node_id, message);
 				} else {
@@ -1734,6 +1742,12 @@ where
 						"Onion message intercepted, but no onion message mailbox available"
 					);
 				}
+			},
+			LdkEvent::OnionMessageIntercepted {
+				next_hop: NextMessageHop::ShortChannelId(_),
+				..
+			} => {
+				log_trace!(self.logger, "Ignoring onion message intercepted for unknown SCID");
 			},
 			LdkEvent::OnionMessagePeerConnected { peer_node_id } => {
 				if let Some(om_mailbox) = self.om_mailbox.as_ref() {

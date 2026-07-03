@@ -13,7 +13,7 @@ use std::time::Duration;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use lightning::blinded_path::message::BlindedMessagePath;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based as impl_writeable_tlv_based;
 use lightning::offers::static_invoice::StaticInvoice;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable};

@@ -19,7 +19,7 @@ use bitcoin_payment_instructions::hrn_resolution::{
 };
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::chainmonitor;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based as impl_writeable_tlv_based;
 use lightning::ln::channel_state::{
 	ChannelDetails as LdkChannelDetails, ChannelShutdownState, CounterpartyForwardingInfo,
 };
