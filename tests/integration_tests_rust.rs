@@ -2128,6 +2128,312 @@ async fn drop_in_async_context() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_bolt12_payment_succeeds_after_lsp_restart() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm: 10_000,
+		channel_over_provisioning_ppm: 100_000,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: true,
+		disable_client_reserve: false,
+	};
+
+	let service_config = random_config(true);
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(lsps2_service_config);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	let payer_config = random_config(true);
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url, Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	let service_onchain_addr = service_node.onchain_payment().new_address().unwrap();
+	let client_onchain_addr = client_node.onchain_payment().new_address().unwrap();
+	let payer_onchain_addr = payer_node.onchain_payment().new_address().unwrap();
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_onchain_addr, client_onchain_addr, payer_onchain_addr],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	let jit_amount_msat = 100_000_000;
+	let offer = client_node
+		.bolt12_payment()
+		.receive(jit_amount_msat, "lsps2-bolt12-after-restart", None, Some(1))
+		.unwrap();
+
+	service_node.stop().unwrap();
+	service_node.start().unwrap();
+
+	// Ensure peers are connected after the restart before paying the offer.
+	let _ = payer_node.connect(service_node_id, service_addr.clone(), false);
+	let _ = client_node.connect(service_node_id, service_addr, false);
+
+	let payment_id = payer_node
+		.bolt12_payment()
+		.send(&offer, Some(1), Some("restart".to_string()), None)
+		.unwrap();
+
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+
+	let service_fee_msat = (jit_amount_msat * 10_000) / 1_000_000;
+	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
+
+	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+	expect_payment_received_event!(client_node, expected_received_amount_msat);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_bolt12_jit_channel_opens_successfully() {
+	// Verify the full BOLT12 + LSPS2 JIT channel flow: a client with no pre-existing channels
+	// creates a plain BOLT12 offer, a payer pays it, and the LSP opens a channel just-in-time.
+	// The LSPS2 parameters negotiated at startup are injected into the offer's invoices as
+	// JIT-channel blinded payment paths by the client's router.
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm: 10_000,
+		channel_over_provisioning_ppm: 100_000,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: true,
+		disable_client_reserve: false,
+	};
+
+	let service_config = random_config(true);
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(lsps2_service_config);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config(true);
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	let payer_config = random_config(true);
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url, Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	let service_onchain_addr = service_node.onchain_payment().new_address().unwrap();
+	let client_onchain_addr = client_node.onchain_payment().new_address().unwrap();
+	let payer_onchain_addr = payer_node.onchain_payment().new_address().unwrap();
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_onchain_addr, client_onchain_addr, payer_onchain_addr],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	assert_eq!(
+		service_node.list_channels().len(),
+		1,
+		"Only payer-service channel should exist before JIT flow"
+	);
+
+	let jit_amount_msat = 100_000_000;
+	let offer = client_node
+		.bolt12_payment()
+		.receive(jit_amount_msat, "jit-payment", None, Some(1))
+		.unwrap();
+
+	let payment_id =
+		payer_node.bolt12_payment().send(&offer, Some(1), Some("pay".to_string()), None).unwrap();
+
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+
+	let service_fee_msat = (jit_amount_msat * 10_000) / 1_000_000;
+	let expected_received = jit_amount_msat - service_fee_msat;
+	expect_payment_successful_event!(payer_node, Some(payment_id), None);
+	expect_payment_received_event!(client_node, expected_received);
+
+	// The LSP should now have two channels: payer<->service and service<->client.
+	assert_eq!(
+		service_node.list_channels().len(),
+		2,
+		"JIT channel should have been opened alongside the payer channel"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_bolt12_params_wiped_for_unconfigured_lsp() {
+	// Verify that the LSPS2 invoice parameters negotiated at startup are persisted, and wiped
+	// early on restart if the LSP is no longer configured as a liquidity source.
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm: 10_000,
+		channel_over_provisioning_ppm: 100_000,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: true,
+		disable_client_reserve: false,
+	};
+
+	let service_config = random_config(true);
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(lsps2_service_config);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config(true);
+	let client_store =
+		TestSyncStore::new(client_config.node_config.storage_dir_path.clone().into());
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
+	let client_node = client_builder
+		.build_with_store(client_config.node_entropy.into(), client_store.clone())
+		.unwrap();
+	client_node.start().unwrap();
+
+	let params_key = service_node_id.to_string();
+	let read_params_blob = || async {
+		use ldk_node::lightning::util::persist::KVStore;
+		use ldk_node::lightning_liquidity::persist::{
+			LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			LSPS2_CLIENT_PERSISTENCE_SECONDARY_NAMESPACE,
+		};
+		client_store
+			.read(
+				LIQUIDITY_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				LSPS2_CLIENT_PERSISTENCE_SECONDARY_NAMESPACE,
+				&params_key,
+			)
+			.await
+			.ok()
+	};
+
+	// Wait until the parameters negotiated at startup were persisted.
+	let mut negotiated_params_blob = None;
+	for _ in 0..100 {
+		if let Some(blob) = read_params_blob().await {
+			negotiated_params_blob = Some(blob);
+			break;
+		}
+		tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+	}
+	let negotiated_params_blob =
+		negotiated_params_blob.expect("LSPS2 params should be negotiated and persisted at startup");
+	assert!(!negotiated_params_blob.is_empty());
+
+	client_node.stop().unwrap();
+	drop(client_node);
+
+	// Restart the client without the LSP configured as a liquidity source. The previously
+	// negotiated parameters must be wiped during build, before the node starts up.
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url, Some(sync_config));
+	let client_node = client_builder
+		.build_with_store(client_config.node_entropy.into(), client_store.clone())
+		.unwrap();
+
+	// The stored blob is rewritten with the parameters removed (the now-empty entry itself is
+	// garbage collected later). As the parameters make up virtually all of the encoded peer
+	// state, check the remaining blob is just a few bytes of empty TLV stream. Note the wipe
+	// happens in a background task, so we might need to wait for it briefly.
+	let mut wiped = false;
+	for _ in 0..100 {
+		let wiped_params_blob = read_params_blob().await.unwrap();
+		if wiped_params_blob.len() < 10 {
+			assert!(wiped_params_blob.len() < negotiated_params_blob.len());
+			wiped = true;
+			break;
+		}
+		tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+	}
+	assert!(wiped, "expected stale LSPS2 params to be wiped during node building");
+
+	client_node.start().unwrap();
+	client_node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn lsps2_client_trusts_lsp() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 
