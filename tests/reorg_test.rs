@@ -2,17 +2,110 @@ mod common;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use bitcoin::Amount;
+use bitcoin::{Amount, BlockHash};
+use electrsd::corepc_node::Client as BitcoindClient;
+use electrsd::ElectrsD;
 use ldk_node::payment::{PaymentDirection, PaymentKind};
 use ldk_node::{Event, LightningBalance, PendingSweepBalance};
 use proptest::prelude::prop;
 use proptest::proptest;
+use serde_json::{json, Value};
 
 use crate::common::{
-	expect_event, generate_blocks_and_wait, invalidate_blocks, open_channel,
-	premine_and_distribute_funds, random_chain_source, random_config, setup_bitcoind_and_electrsd,
-	setup_node, stop_nodes_concurrently, wait_for_outpoint_spend,
+	expect_channel_ready_event, expect_event, generate_blocks_and_wait, invalidate_blocks,
+	open_channel, premine_and_distribute_funds, random_chain_source, random_config,
+	setup_bitcoind_and_electrsd, setup_node, stop_node, stop_nodes_concurrently, wait_for_block,
+	wait_for_outpoint_spend, TestChainSource, TestStoreType,
 };
+
+#[derive(Clone, Copy)]
+enum TransactionChainSource {
+	Esplora,
+	Electrum,
+}
+
+fn transaction_chain_source<'a>(
+	source: TransactionChainSource, electrsd: &'a ElectrsD,
+) -> TestChainSource<'a> {
+	match source {
+		TransactionChainSource::Esplora => TestChainSource::Esplora(electrsd),
+		TransactionChainSource::Electrum => TestChainSource::Electrum(electrsd),
+	}
+}
+
+fn best_block(bitcoind: &BitcoindClient) -> (BlockHash, u32) {
+	let block_hash = bitcoind
+		.call::<String>("getbestblockhash", &[])
+		.expect("failed to get best block hash")
+		.parse()
+		.expect("best block hash should parse");
+	let height = bitcoind.get_blockchain_info().expect("failed to get blockchain info").blocks;
+	(block_hash, height as u32)
+}
+
+fn assert_node_synced_to_tip(node: &ldk_node::Node, bitcoind: &BitcoindClient) {
+	let (block_hash, height) = best_block(bitcoind);
+	let node_best_block = node.status().current_best_block;
+	assert_eq!(node_best_block.block_hash, block_hash);
+	assert_eq!(node_best_block.height, height);
+}
+
+async fn wait_for_node_to_reach_tip(node: &ldk_node::Node, bitcoind: &BitcoindClient) -> bool {
+	let (block_hash, height) = best_block(bitcoind);
+	for _ in 0..80 {
+		let node_best_block = node.status().current_best_block;
+		if node_best_block.block_hash == block_hash && node_best_block.height == height {
+			return true;
+		}
+
+		tokio::time::sleep(Duration::from_millis(250)).await;
+	}
+	false
+}
+
+async fn assert_node_reaches_tip(
+	node: ldk_node::Node, bitcoind: &BitcoindClient,
+) -> ldk_node::Node {
+	if wait_for_node_to_reach_tip(&node, bitcoind).await {
+		node
+	} else {
+		let expected = best_block(bitcoind);
+		let actual = node.status().current_best_block;
+		stop_node(node).await;
+		panic!(
+			"source-switch sync did not reach backend tip: expected {:?}, actual {:?}",
+			expected, actual
+		);
+	}
+}
+
+async fn copy_active_chain(
+	source: &BitcoindClient, target: &BitcoindClient, target_electrsd: &ElectrsD,
+) {
+	let source_height =
+		source.get_blockchain_info().expect("failed to get blockchain info").blocks as usize;
+	for height in 1..=source_height {
+		let block_hash = source
+			.get_block_hash(height as u64)
+			.expect("failed to get block hash")
+			.block_hash()
+			.expect("block hash should be present");
+		let block_hex = source
+			.call::<String>("getblock", &[json!(block_hash.to_string()), json!(0)])
+			.expect("failed to get raw block");
+		let submit_res = target
+			.call::<Value>("submitblock", &[json!(block_hex)])
+			.expect("failed to submit block");
+		assert!(
+			submit_res.is_null() || submit_res == json!("inconclusive"),
+			"submitblock failed at height {}: {}",
+			height,
+			submit_res
+		);
+	}
+	wait_for_block(&target_electrsd.client, source_height).await;
+	assert_eq!(best_block(source), best_block(target));
+}
 
 async fn wait_for_pending_sweep_balance<F>(node: &ldk_node::Node, mut matches_pending_balance: F)
 where
@@ -37,6 +130,100 @@ where
 			delay = delay.mul_f32(2.0);
 		}
 	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn chain_source_switch_reorg_esplora() {
+	do_chain_source_switch_reorg_test(TransactionChainSource::Esplora).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn chain_source_switch_reorg_electrum() {
+	do_chain_source_switch_reorg_test(TransactionChainSource::Electrum).await;
+}
+
+async fn do_chain_source_switch_reorg_test(source_kind: TransactionChainSource) {
+	let (confirm_bitcoind, confirm_electrsd) = setup_bitcoind_and_electrsd();
+	let (listen_bitcoind, listen_electrsd) = setup_bitcoind_and_electrsd();
+	let confirm_source = transaction_chain_source(source_kind, &confirm_electrsd);
+
+	let mut node_a_config = random_config(true);
+	node_a_config.store_type = TestStoreType::Sqlite;
+	let node_b_config = random_config(true);
+
+	let node_a = setup_node(&confirm_source, node_a_config.clone());
+	let node_b = setup_node(&confirm_source, node_b_config);
+
+	let amount_sat = 2_100_000;
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&confirm_bitcoind.client,
+		&confirm_electrsd.client,
+		vec![addr_a],
+		Amount::from_sat(amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 2_000_000, true, &confirm_electrsd).await;
+	generate_blocks_and_wait(&confirm_bitcoind.client, &confirm_electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// At this point both backend clusters share the same active chain tip. The
+	// channel funding transaction is in this shared prefix, so later divergent
+	// suffixes only exercise tip switching and reorg handling.
+	copy_active_chain(&confirm_bitcoind.client, &listen_bitcoind.client, &listen_electrsd).await;
+	assert_node_synced_to_tip(&node_a, &confirm_bitcoind.client);
+
+	// The Confirm backend now has a five-block private suffix unknown to the
+	// Listen backend. Syncing through Esplora/Electrum persists Node A at this
+	// Confirm-only tip.
+	generate_blocks_and_wait(&confirm_bitcoind.client, &confirm_electrsd.client, 5).await;
+	node_a.sync_wallets().unwrap();
+	assert_node_synced_to_tip(&node_a, &confirm_bitcoind.client);
+	let confirm_private_tip = best_block(&confirm_bitcoind.client);
+	stop_node(node_a).await;
+
+	// The Listen backend gets a different five-block suffix from the same shared
+	// ancestor. This is a reorg within the six-confirmation safety target, and
+	// the Listen backend cannot resolve the Confirm-only tip by hash.
+	generate_blocks_and_wait(&listen_bitcoind.client, &listen_electrsd.client, 5).await;
+	let listen_private_tip = best_block(&listen_bitcoind.client);
+	assert_ne!(confirm_private_tip.0, listen_private_tip.0);
+	assert_eq!(confirm_private_tip.1, listen_private_tip.1);
+
+	let listen_source = TestChainSource::BitcoindRpcSync(&listen_bitcoind);
+	let node_a = setup_node(&listen_source, node_a_config.clone());
+	// Old LDK would fail to reach the Listen tip here: bitcoind cannot resolve
+	// Node A's stale Confirm-only tip, so block sync needs the persisted
+	// BlockLocator previous hashes to find the shared ancestor and disconnect
+	// the private suffix.
+	let node_a = assert_node_reaches_tip(node_a, &listen_bitcoind.client).await;
+	assert_node_synced_to_tip(&node_a, &listen_bitcoind.client);
+	assert_eq!(node_a.list_channels().len(), 1);
+	stop_node(node_a).await;
+
+	// Switch back from the Listen-only tip to the Confirm chain. The same
+	// persisted node should now process the opposite reorg through the
+	// transaction-based Confirm client.
+	let node_a = setup_node(&confirm_source, node_a_config.clone());
+	node_a.sync_wallets().unwrap();
+	assert_node_synced_to_tip(&node_a, &confirm_bitcoind.client);
+	assert_eq!(node_a.list_channels().len(), 1);
+	stop_node(node_a).await;
+
+	// Finally switch once more to the Listen source, proving the safety property
+	// is repeatable instead of only working for the first source change.
+	let node_a = setup_node(&listen_source, node_a_config);
+	let node_a = assert_node_reaches_tip(node_a, &listen_bitcoind.client).await;
+	assert_node_synced_to_tip(&node_a, &listen_bitcoind.client);
+	assert_eq!(node_a.list_channels().len(), 1);
+
+	stop_nodes_concurrently(vec![node_a, node_b]).await;
 }
 
 proptest! {
