@@ -883,8 +883,9 @@ mod tests {
 
 	#[test]
 	fn onchain_tx_type_deser_compat() {
-		use bitcoin::hashes::Hash;
 		use std::str::FromStr;
+
+		use bitcoin::hashes::Hash;
 
 		let txid = Txid::from_byte_array([7u8; 32]);
 		let status = ConfirmationStatus::Unconfirmed;

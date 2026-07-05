@@ -144,10 +144,11 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 
 #[cfg(test)]
 mod tests {
+	use bitcoin::hashes::Hash;
+
 	use super::*;
 	use crate::payment::store::ConfirmationStatus;
 	use crate::payment::{PaymentDirection, PaymentKind, PaymentStatus};
-	use bitcoin::hashes::Hash;
 
 	#[test]
 	fn pending_payment_candidate_lookup() {

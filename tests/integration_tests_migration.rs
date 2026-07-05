@@ -65,7 +65,7 @@ impl BackendInstance {
 }
 
 macro_rules! with_opened_store {
-	($instance:expr, |$store:ident| $body:expr) => {{
+	($instance:expr, | $store:ident | $body:expr) => {{
 		let instance = $instance;
 		match instance.backend {
 			MigrationBackend::FilesystemStore => {
