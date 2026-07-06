@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
+use lightning::chain::channelmonitor::HTLC_FAIL_BACK_BUFFER;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::RouteParametersConfig;
@@ -168,6 +169,28 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY: Duration = Duration::f
 // The maximum delay the discovery-retry backoff ramps up to, and the interval it keeps retrying at
 // thereafter until every configured LSP has been discovered.
 pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_secs(60 * 60);
+
+// The timeout after which we abort a LSPS5 webhook notification operation.
+pub(crate) const LSPS5_WEBHOOK_TIMEOUT_SECS: u64 = 30;
+
+// The maximum size of a response body we'll accept when delivering an LSPS5 webhook notification.
+pub(crate) const LSPS5_WEBHOOK_MAX_RESPONSE_SIZE: usize = 64 * 1024;
+
+// The time in-between checks for HTLCs approaching expiry on LSPS5 clients' channels.
+pub(crate) const LSPS5_EXPIRY_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+// The number of blocks we wait before notifying a client about the same expiring HTLCs again.
+pub(crate) const LSPS5_EXPIRY_RENOTIFY_INTERVAL_BLOCKS: u32 = 6;
+
+// The number of blocks before an outbound HTLC's expiry at which we start notifying offline
+// LSPS5 clients.
+//
+// A client that doesn't come online and settle before `cltv_expiry` loses the payment, and LDK
+// force-closes the channel shortly after (`cltv_expiry + LATENCY_GRACE_PERIOD_BLOCKS`). We anchor
+// the lead time on `HTLC_FAIL_BACK_BUFFER`, the margin LDK itself treats as too close to expiry to
+// safely handle an HTLC, and double it to leave the client room to receive the notification and
+// act on it.
+pub(crate) const LSPS5_EXPIRY_NOTIFICATION_THRESHOLD_BLOCKS: u32 = HTLC_FAIL_BACK_BUFFER * 2;
 
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
