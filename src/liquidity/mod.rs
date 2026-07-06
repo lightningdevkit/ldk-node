@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 pub use client::lsps1::LSPS1Liquidity;
+pub use client::lsps5::{LSPS5Liquidity, LSPS5ListWebhooksResponse, LSPS5SetWebhookResponse};
 pub use client::LSPS1OrderStatus;
 use lightning::ln::msgs::SocketAddress;
 use lightning_liquidity::events::LiquidityEvent;
@@ -25,6 +26,8 @@ use lightning_liquidity::lsps0::event::LSPS0ClientEvent;
 use lightning_liquidity::lsps1::client::LSPS1ClientConfig as LdkLSPS1ClientConfig;
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
+use lightning_liquidity::lsps5::client::LSPS5ClientConfig as LdkLSPS5ClientConfig;
+use lightning_liquidity::lsps5::service::LSPS5ServiceConfig as LdkLSPS5ServiceConfig;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
 pub use service::lsps2::LSPS2ServiceConfig;
 use tokio::sync::oneshot;
@@ -33,7 +36,9 @@ use crate::builder::BuildError;
 use crate::connection::ConnectionManager;
 use crate::liquidity::client::lsps1::LSPS1Client;
 use crate::liquidity::client::lsps2::LSPS2Client;
+use crate::liquidity::client::lsps5::LSPS5Client;
 use crate::liquidity::service::lsps2::{LSPS2Service, LSPS2ServiceLiquiditySource};
+use crate::liquidity::service::lsps5::LSPS5ServiceLiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChannelManager, DynStore, KeysManager, LiquidityManager, Wallet};
@@ -176,6 +181,22 @@ impl Liquidity {
 			Arc::clone(&self.logger),
 		)
 	}
+
+	/// Returns a liquidity handler for managing webhook registrations via the [bLIP-55 / LSPS5]
+	/// protocol.
+	///
+	/// This allows registering, listing, and removing webhook endpoints with an LSP in order to
+	/// receive push notifications for events such as incoming payments while the client is offline.
+	///
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	pub fn lsps5(&self) -> LSPS5Liquidity {
+		LSPS5Liquidity::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.connection_manager),
+			self.liquidity_source.lsps5_client(),
+			Arc::clone(&self.logger),
+		)
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -201,6 +222,7 @@ where
 {
 	lsp_nodes: Vec<LspConfig>,
 	lsps2_service: Option<LSPS2Service>,
+	lsps5_service: Option<LdkLSPS5ServiceConfig>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
@@ -220,9 +242,11 @@ where
 	) -> Self {
 		let lsp_nodes = Vec::new();
 		let lsps2_service = None;
+		let lsps5_service = None;
 		Self {
 			lsp_nodes,
 			lsps2_service,
+			lsps5_service,
 			wallet,
 			channel_manager,
 			keys_manager,
@@ -246,18 +270,32 @@ where
 		self
 	}
 
+	pub(crate) fn lsps5_service(&mut self, service_config: LdkLSPS5ServiceConfig) -> &mut Self {
+		self.lsps5_service = Some(service_config);
+		self
+	}
+
 	pub(crate) async fn build(self) -> Result<LiquiditySource<L>, BuildError> {
-		let liquidity_service_config = self.lsps2_service.as_ref().map(|s| {
-			let lsps2_service_config = Some(s.ldk_service_config.clone());
-			let lsps5_service_config = None;
-			let advertise_service = s.service_config.advertise_service;
-			LiquidityServiceConfig {
-				lsps1_service_config: None,
-				lsps2_service_config,
-				lsps5_service_config,
-				advertise_service,
-			}
-		});
+		let lsps2_service_config =
+			self.lsps2_service.as_ref().map(|s| s.ldk_service_config.clone());
+		let lsps5_service_config = self.lsps5_service.clone();
+		let advertise_service = self
+			.lsps2_service
+			.as_ref()
+			.map(|s| s.service_config.advertise_service)
+			.unwrap_or(false);
+
+		let liquidity_service_config =
+			if lsps2_service_config.is_some() || lsps5_service_config.is_some() {
+				Some(LiquidityServiceConfig {
+					lsps1_service_config: None,
+					lsps2_service_config,
+					lsps5_service_config,
+					advertise_service,
+				})
+			} else {
+				None
+			};
 
 		let (discovery_done_tx, discovery_done_rx) = tokio::sync::watch::channel(false);
 
@@ -266,7 +304,7 @@ where
 		let liquidity_client_config = Some(LiquidityClientConfig {
 			lsps1_client_config: Some(LdkLSPS1ClientConfig { max_channel_fees_msat: None }),
 			lsps2_client_config: Some(LdkLSPS2ClientConfig {}),
-			lsps5_client_config: None,
+			lsps5_client_config: Some(LdkLSPS5ClientConfig {}),
 		});
 
 		let liquidity_manager = Arc::new(
@@ -328,6 +366,20 @@ where
 				config: self.config.clone(),
 				logger: self.logger.clone(),
 			}),
+			lsps5_client: Arc::new(LSPS5Client {
+				lsp_nodes: Arc::clone(&lsp_nodes),
+				pending_set_webhook_requests: Mutex::new(HashMap::new()),
+				pending_list_webhooks_requests: Mutex::new(HashMap::new()),
+				pending_remove_webhook_requests: Mutex::new(HashMap::new()),
+				discovery_done_rx: discovery_done_rx.clone(),
+				liquidity_manager: Arc::clone(&liquidity_manager),
+				logger: self.logger.clone(),
+			}),
+			lsps5_service: Arc::new(LSPS5ServiceLiquiditySource {
+				liquidity_manager: Arc::clone(&liquidity_manager),
+				peer_manager: RwLock::new(None),
+				logger: self.logger.clone(),
+			}),
 			pending_lsps0_discovery: Mutex::new(HashMap::new()),
 			discovery_done_tx,
 			discovery_done_rx,
@@ -345,6 +397,8 @@ where
 	lsps1_client: Arc<LSPS1Client<L>>,
 	lsps2_client: Arc<LSPS2Client<L>>,
 	lsps2_service: Arc<LSPS2ServiceLiquiditySource<L>>,
+	lsps5_client: Arc<LSPS5Client<L>>,
+	lsps5_service: Arc<LSPS5ServiceLiquiditySource<L>>,
 	pending_lsps0_discovery: Mutex<HashMap<PublicKey, oneshot::Sender<Vec<u16>>>>,
 	discovery_done_tx: tokio::sync::watch::Sender<bool>,
 	discovery_done_rx: tokio::sync::watch::Receiver<bool>,
@@ -372,11 +426,21 @@ where
 		Arc::clone(&self.lsps2_service)
 	}
 
+	pub(crate) fn lsps5_client(&self) -> Arc<LSPS5Client<L>> {
+		Arc::clone(&self.lsps5_client)
+	}
+
+	pub(crate) fn lsps5_service(&self) -> Arc<LSPS5ServiceLiquiditySource<L>> {
+		Arc::clone(&self.lsps5_service)
+	}
+
 	pub(crate) async fn handle_next_event(&self) {
 		match self.liquidity_manager.next_event_async().await {
 			LiquidityEvent::LSPS1Client(event) => self.lsps1_client.handle_event(event).await,
 			LiquidityEvent::LSPS2Client(event) => self.lsps2_client.handle_event(event).await,
 			LiquidityEvent::LSPS2Service(event) => self.lsps2_service.handle_event(event).await,
+			LiquidityEvent::LSPS5Client(event) => self.lsps5_client.handle_event(event).await,
+			LiquidityEvent::LSPS5Service(event) => self.lsps5_service.handle_event(event).await,
 
 			LiquidityEvent::LSPS0Client(LSPS0ClientEvent::ListProtocolsResponse {
 				counterparty_node_id,

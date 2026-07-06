@@ -139,6 +139,12 @@ pub enum Error {
 	InvalidLnurl,
 	/// The configured chain source is not supported.
 	ChainSourceNotSupported,
+	/// Failed to set a webhook with the LSP.
+	LiquiditySetWebhookFailed,
+	/// Failed to remove a webhook with the LSP.
+	LiquidityRemoveWebhookFailed,
+	/// Failed to list webhooks with the LSP.
+	LiquidityListWebhooksFailed,
 }
 
 impl fmt::Display for Error {
@@ -226,6 +232,15 @@ impl fmt::Display for Error {
 			Self::InvalidLnurl => write!(f, "The provided lnurl is invalid."),
 			Self::ChainSourceNotSupported => {
 				write!(f, "The configured chain source is not supported.")
+			},
+			Self::LiquiditySetWebhookFailed => {
+				write!(f, "Failed to set a webhook with the LSP.")
+			},
+			Self::LiquidityRemoveWebhookFailed => {
+				write!(f, "Failed to remove a webhook with the LSP.")
+			},
+			Self::LiquidityListWebhooksFailed => {
+				write!(f, "Failed to list webhooks with the LSP.")
 			},
 		}
 	}
