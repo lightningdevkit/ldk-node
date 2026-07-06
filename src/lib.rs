@@ -197,7 +197,10 @@ pub use types::{
 #[cfg(feature = "storage-vss")]
 pub use vss_client;
 
-use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY};
+use crate::config::{
+	LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY,
+	LSPS5_EXPIRY_CHECK_INTERVAL,
+};
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
@@ -835,6 +838,28 @@ impl Node {
 				backoff = (backoff * 2).min(LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY);
 			}
 		});
+
+		// Regularly notify offline LSPS5 clients about HTLCs approaching their expiry.
+		if self.liquidity_source.liquidity_manager().lsps5_service_handler().is_some() {
+			let expiry_liquidity_source = Arc::clone(&self.liquidity_source);
+			let expiry_liquidy_logger = Arc::clone(&self.logger);
+			let mut stop_expiry = self.stop_sender.subscribe();
+			self.runtime.spawn_cancellable_background_task(async move {
+				let mut interval = tokio::time::interval(LSPS5_EXPIRY_CHECK_INTERVAL);
+				interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+				loop {
+					tokio::select! {
+							_ = stop_expiry.changed() => {
+									log_debug!(expiry_liquidy_logger, "Stopping LSPS5 HTLC expiry checks.");
+									return;
+							}
+							_ = interval.tick() => {
+									expiry_liquidity_source.lsps5_service().check_expiring_htlcs();
+							}
+					}
+				}
+			});
+		}
 
 		log_info!(self.logger, "Startup complete.");
 		*is_running_lock = true;

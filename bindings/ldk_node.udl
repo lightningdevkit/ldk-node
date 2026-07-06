@@ -206,6 +206,15 @@ enum NodeError {
 	"InvalidLnurl",
 	"ChainSourceNotSupported",
 	"InvalidPayerProof",
+	"LiquiditySetWebhookFailed",
+	"LiquidityRemoveWebhookFailed",
+	"LiquidityListWebhooksFailed",
+	"LiquidityNotifyWebhookFailed",
+	"LiquidityNotifyWebhookRateLimited",
+	"LiquidityWebhookLimitExceeded",
+	"LiquidityWebhookNoPriorActivity",
+	"LiquidityWebhookAppNameNotFound",
+	"LiquidityWebhookInvalid"
 };
 
 typedef dictionary NodeStatus;

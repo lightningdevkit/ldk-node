@@ -100,8 +100,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
-	PendingPaymentStore,
+	GossipSync, Graph, KeysManager, LSPS5ServiceConfig, MessageRouter, OnionMessenger,
+	PaymentStore, PeerManager, PendingPaymentStore,
 };
 use crate::wallet::persist::{read_address_pool, KVStoreWalletPersister};
 use crate::wallet::Wallet;
@@ -144,10 +144,14 @@ struct PathfindingScoresSyncConfig {
 
 #[derive(Debug, Clone, Default)]
 struct LiquiditySourceConfig {
-	// Acts for both LSPS1 and LSPS2 clients connecting to the given service.
+	// Acts for LSPS1, LSPS2 and LSPS5 clients connecting to the given service.
 	lsp_nodes: Vec<LspConfig>,
 	// Act as an LSPS2 service.
 	lsps2_service: Option<LSPS2ServiceConfig>,
+	// Act as an LSPS5 service.
+	lsps5_service: Option<LSPS5ServiceConfig>,
+	// Indicates whether the LSPS service will be announced via the gossip network.
+	advertise_service: bool,
 }
 
 #[derive(Clone)]
@@ -532,18 +536,31 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
-	/// channels to clients.
+	/// Configures the [`Node`] instance to provide [bLIP-52 / LSPS2] and/or [bLIP-55 / LSPS5]
+	/// services to clients.
+	///
+	/// [bLIP-52 / LSPS2] issues just-in-time channels to clients, [bLIP-55 / LSPS5] allows clients
+	/// to register webhooks for push notifications.
+	///
+	/// Passing `None` leaves the respective service disabled.
+	///
+	/// `advertise_service` indicates whether we'll announce LSPS support via the gossip network.
+	/// The announced feature bit is shared across all LSPS services, so it applies to every
+	/// service enabled here.
 	///
 	/// **Caution**: LSP service support is in **alpha** and is considered an experimental feature.
 	///
-	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
 	pub fn enable_liquidity_provider(
-		&mut self, lsps2_service_config: LSPS2ServiceConfig,
+		&mut self, lsps2_service_config: Option<LSPS2ServiceConfig>,
+		lsps5_service_config: Option<LSPS5ServiceConfig>, advertise_service: bool,
 	) -> &mut Self {
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		liquidity_source_config.lsps2_service = Some(lsps2_service_config);
+		liquidity_source_config.lsps2_service = lsps2_service_config;
+		liquidity_source_config.lsps5_service = lsps5_service_config;
+		liquidity_source_config.advertise_service = advertise_service;
 		self
 	}
 
@@ -1171,14 +1188,31 @@ impl Builder {
 
 #[cfg(feature = "uniffi")]
 impl ArcedNodeBuilder {
-	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
-	/// channels to clients.
+	/// Configures the [`Node`] instance to provide [bLIP-52 / LSPS2] and/or [bLIP-55 / LSPS5]
+	/// services to clients.
+	///
+	/// [bLIP-52 / LSPS2] issues just-in-time channels to clients, [bLIP-55 / LSPS5] allows clients
+	/// to register webhooks for push notifications.
+	///
+	/// Passing `None` leaves the respective service disabled.
+	///
+	/// `advertise_service` indicates whether we'll announce LSPS support via the gossip network.
+	/// The announced feature bit is shared across all LSPS services, so it applies to every
+	/// service enabled here.
 	///
 	/// **Caution**: LSP service support is in **alpha** and is considered an experimental feature.
 	///
-	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	pub fn enable_liquidity_provider(&self, lsps2_service_config: LSPS2ServiceConfig) {
-		self.inner.write().expect("lock").enable_liquidity_provider(lsps2_service_config);
+	/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	pub fn enable_liquidity_provider(
+		&self, lsps2_service_config: Option<LSPS2ServiceConfig>,
+		lsps5_service_config: Option<LSPS5ServiceConfig>, advertise_service: bool,
+	) {
+		self.inner.write().expect("lock").enable_liquidity_provider(
+			lsps2_service_config,
+			lsps5_service_config,
+			advertise_service,
+		);
 	}
 }
 
@@ -2256,6 +2290,7 @@ fn build_with_store_internal(
 			Arc::clone(&tx_broadcaster),
 			Arc::clone(&kv_store),
 			Arc::clone(&config),
+			Arc::clone(&runtime),
 			Arc::clone(&logger),
 		);
 
@@ -2274,6 +2309,12 @@ fn build_with_store_internal(
 			lsc.lsps2_service.as_ref().map(|config| {
 				liquidity_source_builder.lsps2_service(promise_secret, config.clone())
 			});
+
+			lsc.lsps5_service
+				.as_ref()
+				.map(|config| liquidity_source_builder.lsps5_service(config.clone()));
+
+			liquidity_source_builder.set_advertise_service(lsc.advertise_service);
 		}
 
 		let liquidity_source = runtime
@@ -2333,6 +2374,8 @@ fn build_with_store_internal(
 	}
 
 	liquidity_source.lsps2_service().set_peer_manager(Arc::downgrade(&peer_manager));
+
+	liquidity_source.lsps5_service().set_peer_manager(Arc::downgrade(&peer_manager));
 
 	let connection_manager = Arc::new(ConnectionManager::new(
 		Arc::clone(&peer_manager),

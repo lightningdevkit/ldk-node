@@ -19,10 +19,12 @@ use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
 use lightning::events::PaidBolt12Invoice;
 use lightning::events::{
-	ClosureReason, Event as LdkEvent, FundingInfo, HTLCLocator as LdkHtlcLocator,
-	PaymentFailureReason, PaymentPurpose, ReplayEvent,
+	ClosureReason, Event as LdkEvent, FundingInfo, HTLCHandlingFailureReason,
+	HTLCHandlingFailureType, HTLCLocator as LdkHtlcLocator, PaymentFailureReason, PaymentPurpose,
+	ReplayEvent,
 };
 use lightning::ln::channelmanager::{PaymentId, TrustedChannelFeatures};
+use lightning::ln::onion_utils::LocalHTLCFailureReason;
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
@@ -1499,11 +1501,29 @@ where
 					prober.handle_background_probe_failed(&path, payment_id);
 				}
 			},
-			LdkEvent::HTLCHandlingFailed { failure_type, .. } => {
+			LdkEvent::HTLCHandlingFailed { failure_type, failure_reason, .. } => {
+				// Capture the client's node id before `failure_type` is consumed below. A forward
+				// that failed only because the next-hop peer was offline is our cue to wake an
+				// LSPS5 client. The HTLC is failed back as `temporary_channel_failure`, which is
+				// not permanent, so the sender can retry once the client is online.
+				let offline_node_id = match (&failure_type, &failure_reason) {
+					(
+						HTLCHandlingFailureType::Forward { node_id: Some(node_id), .. },
+						Some(HTLCHandlingFailureReason::Local {
+							reason: LocalHTLCFailureReason::PeerOffline,
+						}),
+					) => Some(*node_id),
+					_ => None,
+				};
+
 				self.liquidity_source
 					.lsps2_service()
 					.handle_htlc_handling_failed(failure_type)
 					.await;
+
+				if let Some(node_id) = offline_node_id {
+					self.liquidity_source.lsps5_service().notify_payment_incoming(node_id);
+				}
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id, counterparty_node_id } => {
 				match self
@@ -1987,6 +2007,8 @@ where
 				debug_assert!(false, "We currently don't handle BOLT12 invoices manually, so this event should never be emitted.");
 			},
 			LdkEvent::ConnectionNeeded { node_id, addresses } => {
+				self.liquidity_source.lsps5_service().notify_onion_message_incoming(node_id);
+
 				let spawn_logger = self.logger.clone();
 				let spawn_cm = Arc::clone(&self.connection_manager);
 				let future = async move {
@@ -2045,6 +2067,9 @@ where
 							"Onion message intercepted, but no onion message mailbox available"
 						);
 					}
+					self.liquidity_source
+						.lsps5_service()
+						.notify_onion_message_incoming(peer_node_id);
 				} else {
 					log_error!(self.logger, "Onion message intercepted for unknown SCID");
 				}
