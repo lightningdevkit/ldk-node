@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
+use lightning::chain::channelmonitor::HTLC_FAIL_BACK_BUFFER;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::RouteParametersConfig;
@@ -168,6 +169,36 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY: Duration = Duration::f
 // The maximum delay the discovery-retry backoff ramps up to, and the interval it keeps retrying at
 // thereafter until every configured LSP has been discovered.
 pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_secs(60 * 60);
+
+// The timeout after which we abort a LSPS5 webhook notification operation.
+pub(crate) const LSPS5_WEBHOOK_TIMEOUT_SECS: u64 = 30;
+
+// The maximum size of a response body we'll accept when delivering an LSPS5 webhook notification.
+pub(crate) const LSPS5_WEBHOOK_MAX_RESPONSE_SIZE: usize = 64 * 1024;
+
+// The time in-between checks for HTLCs approaching expiry on LSPS5 clients' channels.
+pub(crate) const LSPS5_EXPIRY_CHECK_INTERVAL: Duration = Duration::from_secs(60);
+
+// The number of blocks we wait before notifying a client about the same expiring HTLCs again.
+pub(crate) const LSPS5_EXPIRY_RENOTIFY_INTERVAL_BLOCKS: u32 = 6;
+
+// The number of blocks before an HTLC's deadline at which we start notifying offline LSPS5 clients.
+//
+// A client that doesn't come online and settle an HTLC before its deadline costs us the channel.
+// We anchor the lead time on `HTLC_FAIL_BACK_BUFFER`, the margin LDK itself treats as too close to
+// expiry to safely handle an HTLC, and double it to leave the client room to receive the
+// notification and act on it.
+pub(crate) const LSPS5_EXPIRY_NOTIFICATION_THRESHOLD_BLOCKS: u32 = HTLC_FAIL_BACK_BUFFER * 2;
+
+// How long we hold an HTLC intercepted for an offline LSPS5 client while waiting for them to come online.
+//
+// LDK requires intercepted HTLCs to be forwarded or failed within a few seconds, so this is a hard
+// ceiling on the wake-up we can offer: a client that misses it has to be paid by a retry from the
+// sender, which by then will find them online.
+pub(crate) const LSPS5_INTERCEPT_HOLD_TIMEOUT: Duration = Duration::from_secs(10);
+
+// How often we re-check whether a woken LSPS5 client's channel is ready to forward over.
+pub(crate) const LSPS5_INTERCEPT_POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// The mode used for tracking forwarded payments.
 ///
