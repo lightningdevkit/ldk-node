@@ -169,6 +169,12 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY: Duration = Duration::f
 // thereafter until every configured LSP has been discovered.
 pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_secs(60 * 60);
 
+// The timeout after which we abort a LSPS5 webhook notification operation.
+pub(crate) const LSPS5_WEBHOOK_TIMEOUT_SECS: u64 = 30;
+
+// The maximum size of a response body we'll accept when delivering an LSPS5 webhook notification.
+pub(crate) const LSPS5_WEBHOOK_MAX_RESPONSE_SIZE: usize = 64 * 1024;
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 /// Represents the configuration of an [`Node`] instance.
