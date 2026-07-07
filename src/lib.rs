@@ -1919,10 +1919,13 @@ impl Node {
 					})?;
 			}
 
-			// Check if this was the last open channel, if so, forget the peer.
-			if open_channels.len() == 1 {
-				self.runtime.block_on(self.peer_store.remove_peer(&counterparty_node_id))?;
-			}
+			// Peer store cleanup is handled centrally in the `ChannelClosed` event handler,
+			// which drops the peer once its last channel reaches a terminal state that
+			// reconnection cannot recover. We intentionally do nothing here so that a
+			// force-closed peer is retained, letting the background reconnection task keep
+			// firing and drive the `channel_reestablish` recovery flow. This is especially
+			// important against LND peers, which don't always handle force-closure error
+			// messages correctly.
 		}
 
 		Ok(())
