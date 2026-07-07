@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use common::{
 	drop_table, expect_channel_ready_event, expect_payment_received_event,
-	expect_payment_successful_event, test_connection_string,
+	expect_payment_successful_event, test_connection_string, NodePaymentExt,
 };
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::io::postgres_store::PostgresStore;
@@ -224,7 +224,7 @@ async fn migrate_node_across_all_backends() {
 	// Capture the state we expect to survive every migration.
 	let expected_balance_sats = node.list_balances().total_onchain_balance_sats;
 	let expected_ln_balance_sats = node.list_balances().total_lightning_balance_sats;
-	let mut expected_payments = node.list_payments();
+	let mut expected_payments = node.list_all_payments();
 	expected_payments.sort_by_key(|p| p.id.0);
 	assert!(expected_payments.len() >= 4);
 
@@ -249,7 +249,7 @@ async fn migrate_node_across_all_backends() {
 		assert_eq!(node.list_balances().total_onchain_balance_sats, expected_balance_sats);
 		assert_eq!(node.list_balances().total_lightning_balance_sats, expected_ln_balance_sats);
 		assert_eq!(node.list_channels().len(), 1);
-		let mut migrated_payments = node.list_payments();
+		let mut migrated_payments = node.list_all_payments();
 		migrated_payments.sort_by_key(|p| p.id.0);
 		assert_eq!(migrated_payments, expected_payments);
 

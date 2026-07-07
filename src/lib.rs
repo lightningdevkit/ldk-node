@@ -158,6 +158,7 @@ use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStore;
+pub use lightning::util::persist::PageToken;
 use lightning::util::wallet_utils::{Input, Wallet as LdkWallet};
 use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
@@ -2207,15 +2208,44 @@ impl Node {
 	/// # let node = builder.build(node_entropy.into()).unwrap();
 	/// node.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
 	/// ```
+	#[deprecated(
+		note = "Use the paginated list_payments API and filter the returned pages instead."
+	)]
 	pub fn list_payments_with_filter<F: FnMut(&&PaymentDetails) -> bool>(
 		&self, f: F,
 	) -> Vec<PaymentDetails> {
 		self.payment_store.list_filter(f)
 	}
 
-	/// Retrieves all payments.
-	pub fn list_payments(&self) -> Vec<PaymentDetails> {
-		self.payment_store.list_filter(|_| true)
+	/// Retrieves a page of payments from the underlying paginated store, ordered from most
+	/// recently created to least recently created.
+	///
+	/// Pass `None` to start listing from the most recently created payment. If the returned
+	/// [`PaymentDetailsPage::next_page_token`] is `Some`, pass it to a subsequent call to
+	/// retrieve the next page.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn list_payments(
+		&self, page_token: Option<PageToken>,
+	) -> Result<PaymentDetailsPage, Error> {
+		let (payments, next_page_token) =
+			self.runtime.block_on(self.payment_store.list_page(page_token))?;
+		Ok(PaymentDetailsPage { payments, next_page_token })
+	}
+
+	/// Retrieves a page of payments from the underlying paginated store, ordered from most
+	/// recently created to least recently created.
+	///
+	/// Pass `None` to start listing from the most recently created payment. If the returned
+	/// [`PaymentDetailsPage::next_page_token`] is `Some`, pass it to a subsequent call to
+	/// retrieve the next page.
+	#[cfg(feature = "uniffi")]
+	pub fn list_payments(
+		&self, page_token: Option<Arc<PageToken>>,
+	) -> Result<PaymentDetailsPage, Error> {
+		let page_token = page_token.map(|t| (*t).clone());
+		let (payments, next_page_token) =
+			self.runtime.block_on(self.payment_store.list_page(page_token))?;
+		Ok(PaymentDetailsPage { payments, next_page_token: next_page_token.map(Arc::new) })
 	}
 
 	/// Retrieves a list of known peers.
@@ -2331,6 +2361,20 @@ impl Drop for Node {
 	fn drop(&mut self) {
 		let _ = self.stop();
 	}
+}
+
+/// A page of payments returned from a paginated listing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PaymentDetailsPage {
+	/// Payments in this page, ordered from most recently created to least recently created.
+	pub payments: Vec<PaymentDetails>,
+	/// Token to pass to the next call to continue listing, if another page exists.
+	#[cfg(not(feature = "uniffi"))]
+	pub next_page_token: Option<PageToken>,
+	/// Token to pass to the next call to continue listing, if another page exists.
+	#[cfg(feature = "uniffi")]
+	pub next_page_token: Option<Arc<PageToken>>,
 }
 
 /// The best known block as identified by its hash and height.

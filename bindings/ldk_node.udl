@@ -151,7 +151,8 @@ interface Node {
 	[Throws=NodeError]
 	void remove_payment([ByRef]PaymentId payment_id);
 	BalanceDetails list_balances();
-	sequence<PaymentDetails> list_payments();
+	[Throws=NodeError]
+	PaymentDetailsPage list_payments(PageToken? page_token);
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
 	NetworkGraph network_graph();
@@ -276,6 +277,11 @@ enum PaymentFailureReason {
 };
 
 typedef dictionary PaymentDetails;
+
+typedef dictionary PaymentDetailsPage;
+
+[Remote]
+interface PageToken {};
 
 [Remote]
 dictionary RouteParametersConfig {

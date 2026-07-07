@@ -301,8 +301,8 @@ class LibraryTest {
         assert(paymentReceivedEvent is Event.PaymentReceived)
         node2.eventHandled()
 
-        assert(node1.listPayments().size == 3)
-        assert(node2.listPayments().size == 2)
+        assert(node1.listPayments(null).payments.size == 3)
+        assert(node2.listPayments(null).payments.size == 2)
 
         node2.closeChannel(userChannelId, nodeId1)
 

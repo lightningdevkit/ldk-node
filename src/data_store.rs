@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore};
 use lightning::util::ser::{Readable, Writeable};
 
 use crate::logger::{log_error, LdkLogger};
@@ -44,7 +44,7 @@ pub(crate) struct DataStore<SO: StorableObject, L: Deref>
 where
 	L::Target: LdkLogger,
 {
-	objects: Mutex<HashMap<SO::Id, SO>>,
+	objects: Mutex<HashMap<String, SO>>,
 	mutation_lock: tokio::sync::Mutex<()>,
 	primary_namespace: String,
 	secondary_namespace: String,
@@ -60,8 +60,9 @@ where
 		objects: Vec<SO>, primary_namespace: String, secondary_namespace: String,
 		kv_store: Arc<DynStore>, logger: L,
 	) -> Self {
-		let objects =
-			Mutex::new(HashMap::from_iter(objects.into_iter().map(|obj| (obj.id(), obj))));
+		let objects = Mutex::new(HashMap::from_iter(
+			objects.into_iter().map(|obj| (obj.id().encode_to_hex_str(), obj)),
+		));
 		Self {
 			objects,
 			mutation_lock: tokio::sync::Mutex::new(()),
@@ -74,10 +75,11 @@ where
 
 	pub(crate) async fn insert(&self, object: SO) -> Result<bool, Error> {
 		let _guard = self.mutation_lock.lock().await;
+		let store_key = object.id().encode_to_hex_str();
 
 		self.persist(&object).await?;
 		let mut locked_objects = self.objects.lock().expect("lock");
-		let updated = locked_objects.insert(object.id(), object).is_some();
+		let updated = locked_objects.insert(store_key, object).is_some();
 		Ok(updated)
 	}
 
@@ -85,9 +87,10 @@ where
 		let _guard = self.mutation_lock.lock().await;
 
 		let id = object.id();
+		let store_key = id.encode_to_hex_str();
 		let data_to_persist = {
 			let locked_objects = self.objects.lock().expect("lock");
-			if let Some(existing_object) = locked_objects.get(&id) {
+			if let Some(existing_object) = locked_objects.get(&store_key) {
 				let mut updated_object = existing_object.clone();
 				let updated = updated_object.update(object.to_update());
 				if updated {
@@ -104,7 +107,7 @@ where
 			Some(updated_object) => {
 				self.persist(&updated_object).await?;
 				let mut locked_objects = self.objects.lock().expect("lock");
-				locked_objects.insert(id, updated_object);
+				locked_objects.insert(store_key, updated_object);
 				Ok(true)
 			},
 			None => Ok(false),
@@ -113,9 +116,9 @@ where
 
 	pub(crate) async fn remove(&self, id: &SO::Id) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
-		let should_remove = { self.objects.lock().expect("lock").contains_key(id) };
+		let store_key = id.encode_to_hex_str();
+		let should_remove = { self.objects.lock().expect("lock").contains_key(&store_key) };
 		if should_remove {
-			let store_key = id.encode_to_hex_str();
 			KVStore::remove(
 				&*self.kv_store,
 				&self.primary_namespace,
@@ -135,7 +138,7 @@ where
 				);
 				Error::PersistenceFailed
 			})?;
-			self.objects.lock().expect("lock").remove(id);
+			self.objects.lock().expect("lock").remove(&store_key);
 		}
 		Ok(())
 	}
@@ -146,15 +149,16 @@ where
 	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
 	/// caught up to a write in progress.
 	pub(crate) fn get(&self, id: &SO::Id) -> Option<SO> {
-		self.objects.lock().expect("lock").get(id).cloned()
+		self.objects.lock().expect("lock").get(&id.encode_to_hex_str()).cloned()
 	}
 
 	pub(crate) async fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let id = update.id();
+		let store_key = id.encode_to_hex_str();
 		let updated_object = {
 			let locked_objects = self.objects.lock().expect("lock");
-			let Some(object) = locked_objects.get(&id) else {
+			let Some(object) = locked_objects.get(&store_key) else {
 				return Ok(DataStoreUpdateResult::NotFound);
 			};
 			let mut updated_object = object.clone();
@@ -166,7 +170,7 @@ where
 
 		self.persist(&updated_object).await?;
 		let mut locked_objects = self.objects.lock().expect("lock");
-		locked_objects.insert(id, updated_object);
+		locked_objects.insert(store_key, updated_object);
 		Ok(DataStoreUpdateResult::Updated)
 	}
 
@@ -177,6 +181,40 @@ where
 	/// caught up to a write in progress.
 	pub(crate) fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
 		self.objects.lock().expect("lock").values().filter(f).cloned().collect::<Vec<SO>>()
+	}
+
+	/// Returns a page of objects, ordered from most recently created to least recently created,
+	/// together with a token that can be passed to a subsequent call to retrieve the next page.
+	///
+	/// The underlying store is only queried for the page's key order, which the in-memory map
+	/// doesn't track; the objects themselves are served from memory.
+	pub(crate) async fn list_page(
+		&self, page_token: Option<PageToken>,
+	) -> Result<(Vec<SO>, Option<PageToken>), Error> {
+		let _guard = self.mutation_lock.lock().await;
+		let response = PaginatedKVStore::list_paginated(
+			&*self.kv_store,
+			&self.primary_namespace,
+			&self.secondary_namespace,
+			page_token,
+		)
+		.await
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Listing object data under {}/{} failed due to: {}",
+				&self.primary_namespace,
+				&self.secondary_namespace,
+				e
+			);
+			Error::PersistenceFailed
+		})?;
+
+		let locked_objects = self.objects.lock().expect("lock");
+		let objects =
+			response.keys.iter().filter_map(|key| locked_objects.get(key).cloned()).collect();
+
+		Ok((objects, response.next_page_token))
 	}
 
 	async fn persist(&self, object: &SO) -> Result<(), Error> {
@@ -217,7 +255,7 @@ where
 	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
 	/// caught up to a write in progress.
 	pub(crate) fn contains_key(&self, id: &SO::Id) -> bool {
-		self.objects.lock().expect("lock").contains_key(id)
+		self.objects.lock().expect("lock").contains_key(&id.encode_to_hex_str())
 	}
 }
 
@@ -335,6 +373,74 @@ mod tests {
 			store,
 			logger,
 		)
+	}
+
+	#[tokio::test]
+	async fn list_page_paginates_in_reverse_creation_order() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let data_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
+			Vec::new(),
+			"datastore_test_primary".to_string(),
+			"datastore_test_secondary".to_string(),
+			Arc::clone(&store),
+			logger,
+		);
+
+		// Insert more objects than fit in a single page to exercise the pagination loop.
+		let num_objects = 120u32;
+		for i in 0..num_objects {
+			let id = TestObjectId { id: i.to_be_bytes() };
+			data_store.insert(TestObject { id, data: [7u8; 3] }).await.unwrap();
+		}
+
+		let mut listed = Vec::with_capacity(num_objects as usize);
+		let mut page_token = None;
+		loop {
+			let (page, next_page_token) = data_store.list_page(page_token).await.unwrap();
+			assert!(!page.is_empty());
+			listed.extend(page);
+			page_token = next_page_token;
+			if page_token.is_none() {
+				break;
+			}
+		}
+
+		let expected: Vec<TestObject> = (0..num_objects)
+			.rev()
+			.map(|i| TestObject { id: TestObjectId { id: i.to_be_bytes() }, data: [7u8; 3] })
+			.collect();
+		assert_eq!(listed, expected);
+	}
+
+	#[tokio::test]
+	async fn list_page_waits_for_mutations() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let data_store: Arc<DataStore<TestObject, Arc<TestLogger>>> = Arc::new(DataStore::new(
+			Vec::new(),
+			"datastore_test_primary".to_string(),
+			"datastore_test_secondary".to_string(),
+			store,
+			logger,
+		));
+
+		let mutation_guard = data_store.mutation_lock.lock().await;
+		let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+		let task_store = Arc::clone(&data_store);
+		let list_task = tokio::spawn(async move {
+			started_tx.send(()).unwrap();
+			task_store.list_page(None).await
+		});
+
+		started_rx.await.unwrap();
+		tokio::task::yield_now().await;
+		assert!(!list_task.is_finished());
+
+		drop(mutation_guard);
+		let (page, next_page_token) = list_task.await.unwrap().unwrap();
+		assert!(page.is_empty());
+		assert!(next_page_token.is_none());
 	}
 
 	#[tokio::test]
