@@ -139,6 +139,7 @@ interface Node {
 	sequence<PaymentDetails> list_payments();
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
+	sequence<ClosedChannelDetails> list_closed_channels();
 	NetworkGraph network_graph();
 	string sign_message([ByRef]sequence<u8> msg);
 	boolean verify_signature([ByRef]sequence<u8> msg, [ByRef]string sig, [ByRef]PublicKey pkey);
@@ -321,6 +322,8 @@ dictionary OutPoint {
 };
 
 typedef dictionary ChannelDetails;
+
+typedef dictionary ClosedChannelDetails;
 
 typedef dictionary PeerDetails;
 

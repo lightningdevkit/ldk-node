@@ -33,6 +33,10 @@ pub(crate) const PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "pending_payments";
 pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
+/// The closed channel information will be persisted under this prefix.
+pub(crate) const CLOSED_CHANNEL_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "closed_channels";
+pub(crate) const CLOSED_CHANNEL_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
+
 /// The node metrics will be persisted under this key.
 pub(crate) const NODE_METRICS_PRIMARY_NAMESPACE: &str = "";
 pub(crate) const NODE_METRICS_SECONDARY_NAMESPACE: &str = "";
@@ -84,3 +88,7 @@ pub(crate) const BDK_WALLET_INDEXER_KEY: &str = "indexer";
 ///
 /// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
 pub(crate) const STATIC_INVOICE_STORE_PRIMARY_NAMESPACE: &str = "static_invoices";
+
+/// The per-channel records will be persisted under this prefix.
+pub(crate) const CHANNEL_RECORD_PERSISTENCE_PRIMARY_NAMESPACE: &str = "channel_records";
+pub(crate) const CHANNEL_RECORD_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
