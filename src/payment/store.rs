@@ -710,6 +710,33 @@ impl PaymentDetailsUpdate {
 			tx_type: None,
 		}
 	}
+
+	/// Builds an update that merges a freshly-classified funding payment's classification
+	/// (`tx_type`), broadcast txid, and our contribution figures (amount/fee) into an existing
+	/// record, while leaving the top-level [`PaymentStatus`] and the on-chain
+	/// [`ConfirmationStatus`] untouched.
+	///
+	/// Funding classification runs off the broadcaster queue and can land *after* wallet sync has
+	/// already advanced a record's confirmation state (e.g. when LDK re-broadcasts a still-pending
+	/// funding transaction on restart, or when the counterparty's broadcast is observed first).
+	/// Merging only the funding-specific fields keeps such a late classification from downgrading a
+	/// `Confirmed`/`Succeeded` payment back to `Unconfirmed`/`Pending`; the confirmation state is
+	/// owned by the wallet-sync events instead.
+	///
+	/// The txid and figures are taken from the freshly broadcast (active) candidate. LDK only
+	/// re-broadcasts the active/confirmed funding candidate, so for an already-confirmed record
+	/// these equal what graduation stamped and the overwrite is a no-op; we rely on that invariant
+	/// rather than gating the txid/amount/fee merge on the stored confirmation state.
+	pub(crate) fn funding_reclassification(details: PaymentDetails) -> Self {
+		let mut update = Self::new(details.id);
+		update.amount_msat = Some(details.amount_msat);
+		update.fee_paid_msat = Some(details.fee_paid_msat);
+		if let PaymentKind::Onchain { txid, tx_type, .. } = details.kind {
+			update.txid = Some(txid);
+			update.tx_type = Some(tx_type);
+		}
+		update
+	}
 }
 
 impl From<&PaymentDetails> for PaymentDetailsUpdate {
@@ -920,6 +947,94 @@ mod tests {
 			}),
 		};
 		assert_eq!(kind, PaymentKind::read(&mut &*kind.encode()).unwrap());
+	}
+
+	#[test]
+	fn funding_reclassification_does_not_downgrade_an_advanced_record() {
+		use bitcoin::hashes::Hash;
+		use std::str::FromStr;
+
+		// A splice funding payment wallet sync has already advanced to Succeeded/Confirmed.
+		let txid = Txid::from_byte_array([7u8; 32]);
+		let id = PaymentId(txid.to_byte_array());
+		let tx_type = Some(TransactionType::InteractiveFunding {
+			channels: vec![Channel {
+				counterparty_node_id: PublicKey::from_str(
+					"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+				)
+				.unwrap(),
+				channel_id: ChannelId([3u8; 32]),
+			}],
+		});
+		let advanced = PaymentDetails::new(
+			id,
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Confirmed {
+					block_hash: BlockHash::from_byte_array([8u8; 32]),
+					height: 100,
+					timestamp: 1,
+				},
+				tx_type: tx_type.clone(),
+			},
+			Some(2_000_000),
+			Some(999),
+			PaymentDirection::Outbound,
+			PaymentStatus::Succeeded,
+		);
+
+		// A fresh funding classification for the same payment is always Pending/Unconfirmed.
+		let fresh = PaymentDetails::new(
+			id,
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed, tx_type },
+			Some(1_000_000),
+			Some(500),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+
+		// The naive full update `insert_or_update` applied before the fix downgrades both the
+		// top-level status and the on-chain confirmation status — the bug Codex flagged.
+		let mut downgraded = advanced.clone();
+		downgraded.update((&fresh).into());
+		assert_eq!(
+			downgraded.status,
+			PaymentStatus::Pending,
+			"a full update from a fresh classification downgrades the top-level status",
+		);
+		assert!(
+			matches!(
+				downgraded.kind,
+				PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
+			),
+			"a full update from a fresh classification downgrades the confirmation status",
+		);
+
+		// The narrowed reclassification update merges only the funding fields and preserves the
+		// advanced confirmation state that wallet sync owns.
+		let mut merged = advanced.clone();
+		merged.update(PaymentDetailsUpdate::funding_reclassification(fresh));
+		assert_eq!(
+			merged.status,
+			PaymentStatus::Succeeded,
+			"reclassification must not downgrade the top-level status",
+		);
+		assert!(
+			matches!(
+				merged.kind,
+				PaymentKind::Onchain {
+					status: ConfirmationStatus::Confirmed { .. },
+					tx_type: Some(TransactionType::InteractiveFunding { .. }),
+					..
+				}
+			),
+			"reclassification must preserve the confirmation status and keep the funding tx_type",
+		);
+		// The contribution-derived figures from the fresh classification ARE merged in, replacing
+		// the existing record's: they are authoritative (the wallet can't recompute our share of a
+		// shared funding output), so the merge must carry them.
+		assert_eq!(merged.amount_msat, Some(1_000_000));
+		assert_eq!(merged.fee_paid_msat, Some(500));
 	}
 
 	#[derive(Clone, Debug, PartialEq, Eq)]
