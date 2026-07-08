@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, OutPoint};
+use lightning::blinded_path::message::NextMessageHop;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
 use lightning::events::PaidBolt12Invoice;
@@ -1725,14 +1726,18 @@ where
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
 			},
-			LdkEvent::OnionMessageIntercepted { peer_node_id, message } => {
-				if let Some(om_mailbox) = self.om_mailbox.as_ref() {
-					om_mailbox.onion_message_intercepted(peer_node_id, message);
+			LdkEvent::OnionMessageIntercepted { next_hop, message, .. } => {
+				if let NextMessageHop::NodeId(peer_node_id) = next_hop {
+					if let Some(om_mailbox) = self.om_mailbox.as_ref() {
+						om_mailbox.onion_message_intercepted(peer_node_id, message);
+					} else {
+						log_trace!(
+							self.logger,
+							"Onion message intercepted, but no onion message mailbox available"
+						);
+					}
 				} else {
-					log_trace!(
-						self.logger,
-						"Onion message intercepted, but no onion message mailbox available"
-					);
+					log_error!(self.logger, "Onion message intercepted for unknown SCID");
 				}
 			},
 			LdkEvent::OnionMessagePeerConnected { peer_node_id } => {
