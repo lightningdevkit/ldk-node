@@ -66,6 +66,7 @@ use in_memory_store::InMemoryStore;
 /// Shared timeout (in seconds) for waiting on LDK events and external node operations.
 pub(crate) const INTEROP_TIMEOUT_SECS: u64 = 60;
 
+#[macro_export]
 macro_rules! expect_event {
 	($node:expr, $event_type:ident) => {{
 		let event = tokio::time::timeout(
@@ -92,8 +93,7 @@ macro_rules! expect_event {
 	}};
 }
 
-pub(crate) use expect_event;
-
+#[macro_export]
 macro_rules! expect_channel_pending_event {
 	($node:expr, $counterparty_node_id:expr) => {{
 		let event = tokio::time::timeout(
@@ -118,8 +118,7 @@ macro_rules! expect_channel_pending_event {
 	}};
 }
 
-pub(crate) use expect_channel_pending_event;
-
+#[macro_export]
 macro_rules! expect_channel_ready_event {
 	($node:expr, $counterparty_node_id:expr) => {{
 		let event = tokio::time::timeout(
@@ -144,8 +143,7 @@ macro_rules! expect_channel_ready_event {
 	}};
 }
 
-pub(crate) use expect_channel_ready_event;
-
+#[macro_export]
 macro_rules! expect_channel_ready_events {
 	($node:expr, $counterparty_node_id_a:expr, $counterparty_node_id_b:expr) => {{
 		let mut ids = Vec::new();
@@ -180,8 +178,7 @@ macro_rules! expect_channel_ready_events {
 	}};
 }
 
-pub(crate) use expect_channel_ready_events;
-
+#[macro_export]
 macro_rules! expect_splice_negotiated_event {
 	($node:expr, $counterparty_node_id:expr) => {{
 		let event = tokio::time::timeout(
@@ -206,8 +203,7 @@ macro_rules! expect_splice_negotiated_event {
 	}};
 }
 
-pub(crate) use expect_splice_negotiated_event;
-
+#[macro_export]
 macro_rules! expect_payment_received_event {
 	($node:expr, $amount_msat:expr) => {{
 		let event = tokio::time::timeout(
@@ -236,8 +232,7 @@ macro_rules! expect_payment_received_event {
 	}};
 }
 
-pub(crate) use expect_payment_received_event;
-
+#[macro_export]
 macro_rules! expect_payment_claimable_event {
 	($node:expr, $payment_id:expr, $payment_hash:expr, $claimable_amount_msat:expr) => {{
 		let event = tokio::time::timeout(
@@ -272,8 +267,7 @@ macro_rules! expect_payment_claimable_event {
 	}};
 }
 
-pub(crate) use expect_payment_claimable_event;
-
+#[macro_export]
 macro_rules! expect_payment_successful_event {
 	($node:expr, $payment_id:expr, $fee_paid_msat:expr) => {{
 		let event = tokio::time::timeout(
@@ -301,8 +295,6 @@ macro_rules! expect_payment_successful_event {
 		}
 	}};
 }
-
-pub(crate) use expect_payment_successful_event;
 
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let bitcoind_exe =
@@ -465,6 +457,7 @@ impl Default for TestConfig {
 	}
 }
 
+#[macro_export]
 macro_rules! setup_builder {
 	($builder:ident, $config:expr) => {
 		#[cfg(feature = "uniffi")]
@@ -473,8 +466,6 @@ macro_rules! setup_builder {
 		let mut $builder = Builder::from_config($config.clone());
 	};
 }
-
-pub(crate) use setup_builder;
 
 #[cfg(any(cln_test, lnd_test, eclair_test))]
 pub(crate) mod scenarios;

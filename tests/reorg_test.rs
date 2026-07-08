@@ -8,9 +8,9 @@ use proptest::prelude::prop;
 use proptest::proptest;
 
 use crate::common::{
-	expect_event, generate_blocks_and_wait, invalidate_blocks, open_channel,
-	premine_and_distribute_funds, random_chain_source, random_config, setup_bitcoind_and_electrsd,
-	setup_node, wait_for_outpoint_spend,
+	generate_blocks_and_wait, invalidate_blocks, open_channel, premine_and_distribute_funds,
+	random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_node,
+	wait_for_outpoint_spend,
 };
 
 proptest! {

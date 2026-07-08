@@ -18,12 +18,9 @@ use bitcoin::{Address, Amount, ScriptBuf, Txid};
 use common::logging::{init_log_logger, validate_log_entry, MultiNodeLogger, TestLogWriter};
 use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
-	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
-	expect_event, expect_payment_claimable_event, expect_payment_received_event,
-	expect_payment_successful_event, expect_splice_negotiated_event, generate_blocks_and_wait,
-	generate_listening_addresses, invalidate_blocks, open_channel, open_channel_push_amt,
-	open_channel_with_all, premine_and_distribute_funds, premine_blocks, prepare_rbf,
-	random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_builder, setup_node,
+	generate_blocks_and_wait, generate_listening_addresses, invalidate_blocks, open_channel,
+	open_channel_push_amt, open_channel_with_all, premine_and_distribute_funds, premine_blocks,
+	prepare_rbf, random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_node,
 	setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_tx, TestChainSource, TestConfig,
 	TestStoreType, TestSyncStore,
 };

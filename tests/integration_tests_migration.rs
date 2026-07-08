@@ -13,10 +13,7 @@ mod common;
 
 use std::path::PathBuf;
 
-use common::{
-	drop_table, expect_channel_ready_event, expect_payment_received_event,
-	expect_payment_successful_event, test_connection_string,
-};
+use common::{drop_table, test_connection_string};
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::io::postgres_store::PostgresStore;
 use ldk_node::io::sqlite_store::{SqliteStore, KV_TABLE_NAME, SQLITE_DB_FILE_NAME};
