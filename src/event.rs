@@ -1702,12 +1702,12 @@ where
 					.outbound_channel_ids
 					.lock()
 					.expect("Lock poisoned")
-					.remove(&user_channel_id);
+					.contains(&user_channel_id);
 				let is_announced_from_set = self
 					.announced_channel_ids
 					.lock()
 					.expect("Lock poisoned")
-					.remove(&user_channel_id);
+					.contains(&user_channel_id);
 
 				// Primary: use the durably-persisted ChannelRecord written at ChannelPending
 				// time. Falls back to in-memory sets (populated at startup or on
@@ -1776,6 +1776,14 @@ where
 
 				match self.event_queue.add_event(event).await {
 					Ok(_) => {
+						self.outbound_channel_ids
+							.lock()
+							.expect("Lock poisoned")
+							.remove(&user_channel_id);
+						self.announced_channel_ids
+							.lock()
+							.expect("Lock poisoned")
+							.remove(&user_channel_id);
 						if let Err(e) = self.channel_record_store.remove(&user_channel_id).await {
 							log_error!(
 								self.logger,
