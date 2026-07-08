@@ -1997,6 +1997,9 @@ impl Node {
 	/// However, if background syncing is disabled (i.e., `background_sync_config` is set to `None`),
 	/// this method must be called manually to keep wallets in sync with the chain state.
 	///
+	/// When using the CBF chain source, syncing always runs in the background. In that mode this
+	/// method waits until the background sync has applied chain updates through the current tip.
+	///
 	/// [`EsploraSyncConfig::background_sync_config`]: crate::config::EsploraSyncConfig::background_sync_config
 	pub fn sync_wallets(&self) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {

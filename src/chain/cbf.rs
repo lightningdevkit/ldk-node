@@ -5,15 +5,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bip157::chain::ChainState;
 use bip157::{
-	chain::BlockHeaderChanges, error::FetchBlockError, Builder as KyotoBuilder, Client, Event,
-	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Package, Requester, TrustedPeer,
-	Warning,
+	chain::BlockHeaderChanges, Builder as KyotoBuilder, Client, Event, HashCheckpoint, Header,
+	IndexedBlock, Info, Node as KyotoNode, Package, Requester, TrustedPeer, Warning,
 };
 use bitcoin::{BlockHash, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder};
 use lightning::chain::{BlockLocator, Listen, WatchedOutput};
 
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, watch};
 
 use crate::chain::bitcoind::ChainListener;
 use crate::chain::electrum::get_electrum_fee_rate_cache_update;
@@ -50,6 +49,9 @@ const MAX_RESTART_RETRIES: u32 = 5;
 /// Initial backoff delay between restart attempts; doubles each failure.
 const INITIAL_BACKOFF_MS: u64 = 500;
 
+/// Retry matched block downloads before surfacing a CBF sync failure.
+const CBF_BLOCK_FETCH_RETRIES: u8 = 3;
+
 const ESPLORA_TIMEOUT: u64 = 2;
 
 /// Retries and per-request timeout for the fresh Electrum connection opened each fee cycle.
@@ -62,6 +64,12 @@ enum CbfRuntimeStatus {
 	Stopped,
 }
 
+#[derive(Clone, Copy)]
+enum CbfSyncState {
+	Active { applied_tip: Option<u32> },
+	Failed(Error),
+}
+
 /// Struct for holding cbf chain source
 pub struct CbfChainSource {
 	/// Trusted peer addresses for kyoto's `Builder::add_peers`.
@@ -71,6 +79,8 @@ pub struct CbfChainSource {
 	fee_source: FeeSource,
 	/// Tracks whether the kyoto node is running and holds the live requester.
 	cbf_runtime_status: Arc<Mutex<CbfRuntimeStatus>>,
+	/// Highest CBF sync tip whose preceding chain updates have been applied to all listeners.
+	sync_state_tx: watch::Sender<CbfSyncState>,
 	/// Handle used to spawn the background tasks and offload blocking work.
 	runtime: Arc<Runtime>,
 	/// Node configuration (network, storage path).
@@ -83,7 +93,7 @@ pub struct CbfChainSource {
 
 enum ChainOp {
 	ConnectFull {
-		block_rx: oneshot::Receiver<Result<IndexedBlock, FetchBlockError>>,
+		block: IndexedBlock,
 	},
 	ConnectFiltered {
 		header: Header,
@@ -96,15 +106,21 @@ enum ChainOp {
 	Synced {
 		tip_height: u32,
 	},
+	Failed {
+		error: Error,
+	},
 }
 
 struct BlockApplicator {
 	chain_listener: ChainListener,
 	ops_rx: mpsc::UnboundedReceiver<ChainOp>,
 	next_height: u32,
+	sync_state_tx: watch::Sender<CbfSyncState>,
 	/// Present only for the native CBF fee source: lets us cache the fee rate of blocks we download
 	/// here, so the fee estimator doesn't have to re-download them.
 	block_fee_cache: Option<BlockFeeCache>,
+	kv_store: Arc<DynStore>,
+	node_metrics: Arc<PersistedNodeMetrics>,
 	logger: Arc<Logger>,
 }
 
@@ -112,29 +128,25 @@ impl BlockApplicator {
 	async fn run(mut self) {
 		while let Some(op) = self.ops_rx.recv().await {
 			match op {
-				ChainOp::ConnectFull { block_rx } => match block_rx.await {
-					Ok(Ok(ib)) => {
-						if ib.height != self.next_height {
-							log_debug!(
-								self.logger,
-								"CBF skipping out-of-sequence block at height {} (expected {})",
-								ib.height,
-								self.next_height
-							);
-							continue;
-						}
-						self.chain_listener.block_connected(&ib.block, ib.height);
-						self.next_height += 1;
-						if let Some(cache) = &self.block_fee_cache {
-							let fee_rate = coinbase_fee_rate(&ib.block, ib.height);
-							cache
-								.lock()
-								.expect("lock")
-								.insert(ib.height, (ib.block.block_hash(), fee_rate));
-						}
-					},
-					Ok(Err(e)) => log_error!(self.logger, "block fetch failed: {:?}", e),
-					Err(_) => log_error!(self.logger, "block oneshot dropped"),
+				ChainOp::ConnectFull { block: ib } => {
+					if ib.height != self.next_height {
+						log_debug!(
+							self.logger,
+							"CBF skipping out-of-sequence block at height {} (expected {})",
+							ib.height,
+							self.next_height
+						);
+						continue;
+					}
+					self.chain_listener.block_connected(&ib.block, ib.height);
+					self.next_height += 1;
+					if let Some(cache) = &self.block_fee_cache {
+						let fee_rate = coinbase_fee_rate(&ib.block, ib.height);
+						cache
+							.lock()
+							.expect("lock")
+							.insert(ib.height, (ib.block.block_hash(), fee_rate));
+					}
 				},
 				ChainOp::ConnectFiltered { header, height } => {
 					if height != self.next_height {
@@ -152,13 +164,56 @@ impl BlockApplicator {
 				ChainOp::Disconnect { fork_point } => {
 					self.chain_listener.blocks_disconnected(fork_point);
 					self.next_height = fork_point.height + 1;
+					self.sync_state_tx.send_replace(CbfSyncState::Active {
+						applied_tip: Some(fork_point.height),
+					});
 				},
 				ChainOp::Synced { tip_height } => {
 					log_info!(self.logger, "CBF caught up to tip {}", tip_height);
-					// TODO: notify sync-completion waiters (start()/sync_wallets()/tests) once
-					// a notification primitive is plumbed through.
+					if self.next_height > tip_height {
+						self.publish_synced_tip(tip_height).await;
+					} else {
+						log_debug!(
+							self.logger,
+							"CBF waiting to apply blocks through tip {} (next height {})",
+							tip_height,
+							self.next_height
+						);
+					}
+				},
+				ChainOp::Failed { error } => {
+					self.sync_state_tx.send_replace(CbfSyncState::Failed(error));
 				},
 			}
+		}
+	}
+
+	async fn publish_synced_tip(&self, tip_height: u32) {
+		let already_published = {
+			let sync_state = *self.sync_state_tx.borrow();
+			match sync_state {
+				CbfSyncState::Active { applied_tip } => applied_tip,
+				CbfSyncState::Failed(_) => None,
+			}
+		};
+		if already_published.map_or(false, |published_height| published_height >= tip_height) {
+			return;
+		}
+		self.sync_state_tx.send_replace(CbfSyncState::Active { applied_tip: Some(tip_height) });
+		let unix_time_secs_opt =
+			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+		if let Err(e) = update_and_persist_node_metrics(
+			&self.node_metrics,
+			&*self.kv_store,
+			&*self.logger,
+			|m| {
+				m.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
+				m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
+			},
+		)
+		.await
+		{
+			log_error!(self.logger, "Failed to persist CBF sync metrics: {:?}", e);
 		}
 	}
 }
@@ -221,11 +276,13 @@ impl CbfChainSource {
 		};
 		let registered_scripts = Arc::new(Mutex::new(HashSet::new()));
 		let cbf_runtime_status = Arc::new(Mutex::new(CbfRuntimeStatus::Stopped));
+		let (sync_state_tx, _) = watch::channel(CbfSyncState::Active { applied_tip: None });
 		Ok(Self {
 			trusted_peers,
 			fee_source,
 			registered_scripts,
 			cbf_runtime_status,
+			sync_state_tx,
 			runtime,
 			config,
 			fee_estimator,
@@ -285,11 +342,17 @@ impl CbfChainSource {
 			FeeSource::Cbf { block_fee_cache } => Some(Arc::clone(block_fee_cache)),
 			_ => None,
 		};
+		let best_block_height = chain_listener.get_best_block().height;
+		self.sync_state_tx
+			.send_replace(CbfSyncState::Active { applied_tip: Some(best_block_height) });
 		let block_applicator = BlockApplicator {
-			next_height: chain_listener.get_best_block().height + 1,
+			next_height: best_block_height + 1,
+			sync_state_tx: self.sync_state_tx.clone(),
 			chain_listener: chain_listener.clone(),
 			ops_rx,
 			block_fee_cache,
+			kv_store: Arc::clone(&self.kv_store),
+			node_metrics: Arc::clone(&self.node_metrics),
 			logger: Arc::clone(&self.logger),
 		};
 		self.runtime.spawn_background_task(block_applicator.run());
@@ -303,7 +366,7 @@ impl CbfChainSource {
 		let restart_listener = chain_listener;
 		let restart_registered_scripts = Arc::clone(&self.registered_scripts);
 		let restart_cbf_runtime_status = Arc::clone(&self.cbf_runtime_status);
-		// let restart_block_applicator =
+		let restart_sync_state_tx = self.sync_state_tx.clone();
 
 		self.runtime.spawn_background_task(async move {
 			let mut current_node = node;
@@ -336,6 +399,7 @@ impl CbfChainSource {
 					Ok(()) => {
 						log_info!(restart_logger, "CBF node shut down cleanly.");
 						*restart_status.lock().expect("lock") = CbfRuntimeStatus::Stopped;
+						restart_sync_state_tx.send_replace(CbfSyncState::Failed(Error::NotRunning));
 						break;
 					},
 					Err(e) => {
@@ -348,6 +412,8 @@ impl CbfChainSource {
 								e,
 							);
 							*restart_status.lock().expect("lock") = CbfRuntimeStatus::Stopped;
+							restart_sync_state_tx
+								.send_replace(CbfSyncState::Failed(Error::TxSyncFailed));
 							break;
 						}
 						log_error!(
@@ -383,6 +449,8 @@ impl CbfChainSource {
 							let mut status = restart_status.lock().expect("lock");
 							if matches!(*status, CbfRuntimeStatus::Stopped) {
 								let _ = new_requester.shutdown();
+								restart_sync_state_tx
+									.send_replace(CbfSyncState::Failed(Error::NotRunning));
 								log_info!(
 									restart_logger,
 									"CBF restart aborted: stop() called during backoff."
@@ -390,6 +458,9 @@ impl CbfChainSource {
 								break;
 							}
 							*status = CbfRuntimeStatus::Started { requester: new_requester };
+							restart_sync_state_tx.send_replace(CbfSyncState::Active {
+								applied_tip: Some(restart_listener.get_best_block().height),
+							});
 						}
 
 						current_node = new_node;
@@ -420,6 +491,37 @@ impl CbfChainSource {
 				log_error!(self.logger, "Failed to shut down CBF node: {:?}", e);
 			}
 		}
+		self.sync_state_tx.send_replace(CbfSyncState::Failed(Error::NotRunning));
+	}
+
+	pub(crate) async fn wait_until_synced(&self) -> Result<(), Error> {
+		let requester = match &*self.cbf_runtime_status.lock().expect("lock") {
+			CbfRuntimeStatus::Started { requester } => requester.clone(),
+			CbfRuntimeStatus::Stopped => return Err(Error::NotRunning),
+		};
+		let target_tip = requester.chain_tip().await.map_err(|e| {
+			log_error!(self.logger, "Failed to fetch CBF chain tip before syncing: {:?}", e);
+			Error::TxSyncFailed
+		})?;
+		let target_height = target_tip.height;
+		let mut sync_state_rx = self.sync_state_tx.subscribe();
+
+		loop {
+			match *sync_state_rx.borrow() {
+				CbfSyncState::Active { applied_tip } => {
+					if applied_tip.map_or(false, |applied_height| applied_height >= target_height) {
+						return Ok(());
+					}
+				},
+				CbfSyncState::Failed(error) => return Err(error),
+			}
+
+			if let Err(e) = sync_state_rx.changed().await {
+				debug_assert!(false, "Failed to receive CBF sync result: {:?}", e);
+				log_error!(self.logger, "Failed to receive CBF sync result: {:?}", e);
+				return Err(Error::TxSyncFailed);
+			}
+		}
 	}
 
 	async fn process_info_messages(mut info_rx: mpsc::Receiver<Info>, logger: Arc<Logger>) {
@@ -448,8 +550,8 @@ impl CbfChainSource {
 					let requester = match &*cbf_runtime_status.lock().expect("lock") {
 						CbfRuntimeStatus::Started { requester } => requester.clone(),
 						CbfRuntimeStatus::Stopped => {
-							//TODO should we panic here? what do we do if we have no requester?
-							continue;
+							let _ = ops_tx.send(ChainOp::Failed { error: Error::NotRunning });
+							return;
 						},
 					};
 					//registered_scripts contains only LDK scripts, not onchain wallet's scripts,
@@ -464,11 +566,68 @@ impl CbfChainSource {
 					let matched = indexed_filter.contains_any(all_scripts.iter());
 
 					let chop: ChainOp = if matched {
-						if let Ok(handle) = requester.request_block(block_hash) {
-							ChainOp::ConnectFull { block_rx: handle }
-						} else {
-							break;
-						}
+						let mut attempt = 0;
+						let block = loop {
+							attempt += 1;
+							let handle = match requester.request_block(block_hash) {
+								Ok(handle) => handle,
+								Err(_) => {
+									log_error!(
+										logger,
+										"Failed to obtain receiver for matched CBF block {}; node is stopped",
+										block_hash
+									);
+									let _ =
+										ops_tx.send(ChainOp::Failed { error: Error::NotRunning });
+									return;
+								},
+							};
+
+							match handle.await {
+								Ok(Ok(block)) => break block,
+								Ok(Err(e)) if attempt < CBF_BLOCK_FETCH_RETRIES => {
+									log_debug!(
+										logger,
+										"CBF block fetch for {} failed on attempt {}: {:?}; retrying",
+										block_hash,
+										attempt,
+										e
+									);
+								},
+								Ok(Err(e)) => {
+									log_error!(
+										logger,
+										"CBF block fetch for {} failed after {} attempts: {:?}",
+										block_hash,
+										CBF_BLOCK_FETCH_RETRIES,
+										e
+									);
+									let _ =
+										ops_tx.send(ChainOp::Failed { error: Error::TxSyncFailed });
+									return;
+								},
+								Err(_) if attempt < CBF_BLOCK_FETCH_RETRIES => {
+									log_debug!(
+										logger,
+										"CBF block receiver for {} dropped on attempt {}; retrying",
+										block_hash,
+										attempt
+									);
+								},
+								Err(_) => {
+									log_error!(
+										logger,
+										"CBF block receiver for {} dropped after {} attempts",
+										block_hash,
+										CBF_BLOCK_FETCH_RETRIES
+									);
+									let _ =
+										ops_tx.send(ChainOp::Failed { error: Error::TxSyncFailed });
+									return;
+								},
+							}
+						};
+						ChainOp::ConnectFull { block }
 					} else {
 						let height = indexed_filter.height();
 						//TODO we need to recheck that a particular height has not been
@@ -492,10 +651,9 @@ impl CbfChainSource {
 								}
 							},
 							Ok(None) => {
-								//TODO what do we do?
-								todo!();
 								log_error!(logger, "No header at height {}", height,);
-								continue;
+								let _ = ops_tx.send(ChainOp::Failed { error: Error::TxSyncFailed });
+								break;
 							},
 							Err(e) => {
 								log_error!(
@@ -504,8 +662,8 @@ impl CbfChainSource {
 									height,
 									e,
 								);
+								let _ = ops_tx.send(ChainOp::Failed { error: Error::TxSyncFailed });
 								break;
-								// continue;
 							},
 						}
 					};
