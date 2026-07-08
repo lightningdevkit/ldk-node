@@ -128,6 +128,56 @@ async fn channel_full_cycle_force_close_trusted_no_reserve() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn peer_removed_when_counterparty_force_closes_last_channel() {
+	// When we open a channel outbound, we persist the counterparty so the background
+	// reconnection task can reach them. If the counterparty then force-closes what turns out
+	// to be their last channel with us, the channel is terminal and there is nothing left for
+	// `channel_reestablish` to recover, so the peer should be dropped from the store rather
+	// than reconnected to forever.
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, true, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	// node_a opens the channel, so node_a persists node_b in its peer store.
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	assert!(
+		node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
+		"node_a should persist node_b after opening a channel to it"
+	);
+
+	// The counterparty force-closes their last channel with us.
+	node_b.force_close_channel(&user_channel_id_b, node_a.node_id(), None).unwrap();
+
+	expect_event!(node_a, ChannelClosed);
+	expect_event!(node_b, ChannelClosed);
+
+	// node_a should have dropped node_b from its peer store. We assert on `is_persisted` rather
+	// than peer presence so a lingering transient TCP connection doesn't mask the removal.
+	assert!(
+		!node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
+		"node_a should drop node_b from its peer store after node_b force-closed the last channel"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
