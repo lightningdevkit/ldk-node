@@ -683,10 +683,7 @@ impl ChainSource {
 					.await
 			},
 			#[cfg(feature = "chain-cbf")]
-			ChainSourceKind::Cbf { .. } => {
-				return Ok(());
-				todo!();
-			},
+			ChainSourceKind::Cbf(cbf_chain_source) => cbf_chain_source.wait_until_synced().await,
 		}
 	}
 
