@@ -20,10 +20,14 @@ use std::time::Duration;
 use bitcoin::Amount;
 use electrsd::corepc_node::Client as BitcoindClient;
 use electrsd::electrum_client::ElectrumApi;
+use ldk_node::lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use ldk_node::{Event, Node};
 
 use super::external_node::ExternalNode;
-use super::{generate_blocks_and_wait, premine_and_distribute_funds};
+use super::{
+	generate_blocks_and_wait, premine_and_distribute_funds, ExpectOnchainPaymentEvent,
+	OnchainPaymentEvent,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Side {
@@ -107,7 +111,14 @@ pub(crate) async fn setup_interop_test<E: ElectrumApi>(
 ) {
 	let ldk_address = node.onchain_payment().new_address().unwrap();
 	let premine_amount = Amount::from_sat(50_000_000);
-	premine_and_distribute_funds(bitcoind, electrs, vec![ldk_address], premine_amount).await;
+	let premine_txid =
+		premine_and_distribute_funds(bitcoind, electrs, vec![ldk_address], premine_amount).await;
+	generate_blocks_and_wait(bitcoind, electrs, (ANTI_REORG_DELAY - 1) as usize).await;
+	sync_wallets_with_retry(node).await;
+	assert_eq!(
+		node.expect_onchain_payment_event(OnchainPaymentEvent::Received).await,
+		premine_txid,
+	);
 
 	// Fund the peer via the ldk_node_test wallet loaded by premine_and_distribute_funds.
 	let ext_funding_addr_str = peer.get_funding_address().await.unwrap();
