@@ -1500,7 +1500,7 @@ where
 						from_prev_str,
 						next_htlcs.len(),
 						to_next_str,
-						outbound_amount_forwarded_msat.unwrap_or(0),
+						outbound_amount_forwarded_msat,
 						fee_earned,
 					);
 					} else {
@@ -1511,7 +1511,7 @@ where
 							from_prev_str,
 							next_htlcs.len(),
 							to_next_str,
-							outbound_amount_forwarded_msat.unwrap_or(0),
+							outbound_amount_forwarded_msat,
 							fee_earned,
 						);
 					}
@@ -1545,7 +1545,7 @@ where
 					total_fee_earned_msat,
 					skimmed_fee_msat,
 					claim_from_onchain_tx,
-					outbound_amount_forwarded_msat,
+					outbound_amount_forwarded_msat: Some(outbound_amount_forwarded_msat),
 				};
 				self.event_queue.add_event(event).await.map_err(|e| {
 					log_error!(self.logger, "Failed to push to event queue: {}", e);
