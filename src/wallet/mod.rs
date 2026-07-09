@@ -32,7 +32,7 @@ use bitcoin::{
 	WPubkeyHash, Weight, WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::{
-	BroadcasterInterface, FundingCandidate, TransactionType as LdkTransactionType,
+	FundingCandidate, TransactionType as LdkTransactionType,
 	INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
 };
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
@@ -335,21 +335,12 @@ impl Wallet {
 							.collect();
 
 						if !txs_to_broadcast.is_empty() {
-							let tx_refs: Vec<(
-								&Transaction,
-								lightning::chain::chaininterface::TransactionType,
-							)> =
-								txs_to_broadcast
-									.iter()
-									.map(|tx| {
-										(tx, lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] })
-									})
-									.collect();
-							self.broadcaster.broadcast_transactions(&tx_refs);
+							let tx_count = txs_to_broadcast.len();
+							self.broadcaster.broadcast_unclassified_transactions(txs_to_broadcast);
 							log_info!(
 								self.logger,
 								"Rebroadcast {} unconfirmed transactions on chain tip change",
-								txs_to_broadcast.len()
+								tx_count
 							);
 						}
 					}
@@ -889,12 +880,8 @@ impl Wallet {
 			})?
 		};
 
-		self.broadcaster.broadcast_transactions(&[(
-			&tx,
-			lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] },
-		)]);
-
 		let txid = tx.compute_txid();
+		self.broadcaster.broadcast_unclassified_transactions(vec![tx]);
 
 		match send_amount {
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
@@ -1184,9 +1171,8 @@ impl Wallet {
 		Ok(tx)
 	}
 
-	/// Classifies a funding broadcast (channel open or splice) handed to the broadcaster by LDK,
-	/// recording a payment for it before it is sent. Other transaction types are left for wallet
-	/// sync to record normally.
+	/// Classifies an on-chain broadcast handed to the broadcaster by LDK, recording a payment for it
+	/// before it is sent when it affects this node's wallet.
 	pub(crate) async fn classify_broadcast(
 		&self, tx: &Transaction, tx_type: &LdkTransactionType,
 	) -> Result<(), Error> {
@@ -1197,7 +1183,13 @@ impl Wallet {
 			LdkTransactionType::InteractiveFunding { candidates } => {
 				self.classify_interactive_funding(tx, candidates, tx_type.clone().into()).await
 			},
-			_ => Ok(()),
+			LdkTransactionType::CooperativeClose { .. }
+			| LdkTransactionType::UnilateralClose { .. }
+			| LdkTransactionType::AnchorBump { .. }
+			| LdkTransactionType::Claim { .. }
+			| LdkTransactionType::Sweep { .. } => {
+				self.classify_regular_broadcast(tx, tx_type.clone().into()).await
+			},
 		}
 	}
 
@@ -1335,6 +1327,40 @@ impl Wallet {
 			candidates.len(),
 			active.channels.len(),
 		);
+		Ok(())
+	}
+
+	/// Records a non-funding LDK broadcast as an on-chain payment, tagged with its transaction type.
+	/// Wallet sync later refreshes confirmation status while preserving the type.
+	async fn classify_regular_broadcast(
+		&self, tx: &Transaction, tx_type: TransactionType,
+	) -> Result<(), Error> {
+		let txid = tx.compute_txid();
+		let (amount_msat, fee_paid_msat, direction) = self.onchain_payment_fields(tx);
+
+		if amount_msat == Some(0) && fee_paid_msat == Some(0) {
+			log_trace!(
+				self.logger,
+				"Not recording classified broadcast {} as a payment: no wallet-level activity",
+				txid,
+			);
+			return Ok(());
+		}
+
+		let details = PaymentDetails::new(
+			PaymentId(txid.to_byte_array()),
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: Some(tx_type),
+			},
+			amount_msat,
+			fee_paid_msat,
+			direction,
+			PaymentStatus::Pending,
+		);
+		self.payment_store.insert_or_update(details).await?;
+		log_debug!(self.logger, "Recorded classified on-chain broadcast {}", txid);
 		Ok(())
 	}
 
@@ -1719,11 +1745,6 @@ impl Wallet {
 
 		let new_txid = fee_bumped_tx.compute_txid();
 
-		self.broadcaster.broadcast_transactions(&[(
-			&fee_bumped_tx,
-			lightning::chain::chaininterface::TransactionType::Sweep { channels: vec![] },
-		)]);
-
 		let new_payment = self.create_payment_from_tx(
 			&locked_wallet,
 			new_txid,
@@ -1736,9 +1757,11 @@ impl Wallet {
 		let pending_payment_store =
 			self.create_pending_payment_from_tx(new_payment.clone(), Vec::new());
 
+		self.runtime.block_on(self.payment_store.insert_or_update(new_payment))?;
 		self.runtime
 			.block_on(self.pending_payment_store.insert_or_update(pending_payment_store))?;
-		self.runtime.block_on(self.payment_store.insert_or_update(new_payment))?;
+
+		self.broadcaster.broadcast_unclassified_transactions(vec![fee_bumped_tx]);
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
 

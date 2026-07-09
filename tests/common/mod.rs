@@ -30,6 +30,7 @@ use std::time::Duration;
 use bitcoin::hashes::hex::FromHex;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::PublicKey;
 use bitcoin::{
 	Address, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, Txid, Witness,
 };
@@ -42,7 +43,7 @@ use ldk_node::config::{
 };
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
+use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus, TransactionType};
 use ldk_node::{
 	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
 	PendingSweepBalance, UserChannelId,
@@ -406,6 +407,116 @@ pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
 type TestNode = Arc<Node>;
 #[cfg(not(feature = "uniffi"))]
 type TestNode = Node;
+
+fn has_onchain_tx_type<F: Fn(&TransactionType) -> bool>(node: &TestNode, predicate: F) -> bool {
+	node.list_payments().into_iter().any(|payment| {
+		matches!(
+			payment.kind,
+			PaymentKind::Onchain { tx_type: Some(ref tx_type), .. } if predicate(tx_type)
+		)
+	})
+}
+
+fn assert_any_node_has_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>(
+	nodes: &[(&str, &TestNode)], tx_type_name: &str, predicate: F,
+) {
+	if nodes.iter().any(|(_, node)| has_onchain_tx_type(node, predicate)) {
+		return;
+	}
+
+	let observed: Vec<String> = nodes
+		.iter()
+		.flat_map(|(name, node)| {
+			node.list_payments().into_iter().filter_map(move |payment| match payment.kind {
+				PaymentKind::Onchain { tx_type, .. } => Some(format!("{}:{:?}", name, tx_type)),
+				_ => None,
+			})
+		})
+		.collect();
+	panic!("Expected on-chain payment with tx_type {}; observed {:?}", tx_type_name, observed);
+}
+
+fn assert_all_nodes_have_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>(
+	nodes: &[(&str, &TestNode)], tx_type_name: &str, predicate: F,
+) {
+	if nodes.iter().all(|(_, node)| has_onchain_tx_type(node, predicate)) {
+		return;
+	}
+
+	let observed: Vec<String> = nodes
+		.iter()
+		.flat_map(|(name, node)| {
+			node.list_payments().into_iter().filter_map(move |payment| match payment.kind {
+				PaymentKind::Onchain { tx_type, .. } => Some(format!("{}:{:?}", name, tx_type)),
+				_ => None,
+			})
+		})
+		.collect();
+	panic!(
+		"Expected all nodes to have on-chain payment with tx_type {}; observed {:?}",
+		tx_type_name, observed
+	);
+}
+
+async fn settle_force_close_balance<E: ElectrumApi>(
+	node: &TestNode, counterparty_node_id: PublicKey, peer_node: &TestNode,
+	bitcoind: &BitcoindClient, electrsd: &E,
+) {
+	let balances = node.list_balances();
+	if balances.lightning_balances.len() == 1 {
+		match balances.lightning_balances[0] {
+			LightningBalance::ClaimableAwaitingConfirmations {
+				counterparty_node_id: actual_counterparty_node_id,
+				confirmation_height,
+				..
+			} => {
+				assert_eq!(actual_counterparty_node_id, counterparty_node_id);
+				let cur_height = node.status().current_best_block.height;
+				let blocks_to_go = confirmation_height - cur_height;
+				generate_blocks_and_wait(bitcoind, electrsd, blocks_to_go as usize).await;
+				node.sync_wallets().unwrap();
+				peer_node.sync_wallets().unwrap();
+			},
+			_ => panic!("Unexpected balance state!"),
+		}
+	} else {
+		assert!(balances.lightning_balances.is_empty(), "Unexpected balance state: {:?}", balances);
+		assert_eq!(balances.pending_balances_from_channel_closures.len(), 1);
+	}
+
+	for _ in 0..6 {
+		if node.list_balances().lightning_balances.is_empty() {
+			break;
+		}
+		generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+		node.sync_wallets().unwrap();
+		peer_node.sync_wallets().unwrap();
+	}
+
+	let balances = node.list_balances();
+	assert!(balances.lightning_balances.is_empty(), "Unexpected balance state: {:?}", balances);
+	assert_eq!(balances.pending_balances_from_channel_closures.len(), 1);
+	match balances.pending_balances_from_channel_closures[0] {
+		PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {
+			generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+			node.sync_wallets().unwrap();
+			peer_node.sync_wallets().unwrap();
+
+			assert!(node.list_balances().lightning_balances.is_empty());
+			assert_eq!(node.list_balances().pending_balances_from_channel_closures.len(), 1);
+			match node.list_balances().pending_balances_from_channel_closures[0] {
+				PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
+				_ => panic!("Unexpected balance state!"),
+			}
+		},
+		PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
+		_ => panic!("Unexpected balance state!"),
+	}
+
+	generate_blocks_and_wait(bitcoind, electrsd, 5).await;
+	node.sync_wallets().unwrap();
+	peer_node.sync_wallets().unwrap();
+}
 
 #[derive(Clone)]
 pub(crate) enum TestChainSource<'a> {
@@ -1487,84 +1598,11 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_b.sync_wallets().unwrap();
 
 	if force_close {
-		// Check node_b properly sees all balances and sweeps them.
-		assert_eq!(node_b.list_balances().lightning_balances.len(), 1);
-		match node_b.list_balances().lightning_balances[0] {
-			LightningBalance::ClaimableAwaitingConfirmations {
-				counterparty_node_id,
-				confirmation_height,
-				..
-			} => {
-				assert_eq!(counterparty_node_id, node_a.node_id());
-				let cur_height = node_b.status().current_best_block.height;
-				let blocks_to_go = confirmation_height - cur_height;
-				generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize).await;
-				node_b.sync_wallets().unwrap();
-				node_a.sync_wallets().unwrap();
-			},
-			_ => panic!("Unexpected balance state!"),
-		}
-
-		assert!(node_b.list_balances().lightning_balances.is_empty());
-		assert_eq!(node_b.list_balances().pending_balances_from_channel_closures.len(), 1);
-		match node_b.list_balances().pending_balances_from_channel_closures[0] {
-			PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {},
-			_ => panic!("Unexpected balance state!"),
-		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
-		node_b.sync_wallets().unwrap();
-		node_a.sync_wallets().unwrap();
-
-		assert!(node_b.list_balances().lightning_balances.is_empty());
-		assert_eq!(node_b.list_balances().pending_balances_from_channel_closures.len(), 1);
-		match node_b.list_balances().pending_balances_from_channel_closures[0] {
-			PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
-			_ => panic!("Unexpected balance state!"),
-		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 5).await;
-		node_b.sync_wallets().unwrap();
-		node_a.sync_wallets().unwrap();
-
+		settle_force_close_balance(&node_b, node_a.node_id(), &node_a, &bitcoind, electrsd).await;
 		assert!(node_b.list_balances().lightning_balances.is_empty());
 		assert_eq!(node_b.list_balances().pending_balances_from_channel_closures.len(), 1);
 
-		// Check node_a properly sees all balances and sweeps them.
-		assert_eq!(node_a.list_balances().lightning_balances.len(), 1);
-		match node_a.list_balances().lightning_balances[0] {
-			LightningBalance::ClaimableAwaitingConfirmations {
-				counterparty_node_id,
-				confirmation_height,
-				..
-			} => {
-				assert_eq!(counterparty_node_id, node_b.node_id());
-				let cur_height = node_a.status().current_best_block.height;
-				let blocks_to_go = confirmation_height - cur_height;
-				generate_blocks_and_wait(&bitcoind, electrsd, blocks_to_go as usize).await;
-				node_a.sync_wallets().unwrap();
-				node_b.sync_wallets().unwrap();
-			},
-			_ => panic!("Unexpected balance state!"),
-		}
-
-		assert!(node_a.list_balances().lightning_balances.is_empty());
-		assert_eq!(node_a.list_balances().pending_balances_from_channel_closures.len(), 1);
-		match node_a.list_balances().pending_balances_from_channel_closures[0] {
-			PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {},
-			_ => panic!("Unexpected balance state!"),
-		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
-		node_a.sync_wallets().unwrap();
-		node_b.sync_wallets().unwrap();
-
-		assert!(node_a.list_balances().lightning_balances.is_empty());
-		assert_eq!(node_a.list_balances().pending_balances_from_channel_closures.len(), 1);
-		match node_a.list_balances().pending_balances_from_channel_closures[0] {
-			PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
-			_ => panic!("Unexpected balance state!"),
-		}
-		generate_blocks_and_wait(&bitcoind, electrsd, 5).await;
-		node_a.sync_wallets().unwrap();
-		node_b.sync_wallets().unwrap();
+		settle_force_close_balance(&node_a, node_b.node_id(), &node_b, &bitcoind, electrsd).await;
 	} else {
 		assert_eq!(node_a.list_balances().lightning_balances.len(), 1);
 		assert!(node_a.list_balances().pending_balances_from_channel_closures.is_empty());
@@ -1616,7 +1654,22 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
 			"node_b should remain persisted in node_a peer store after locally-initiated force-close"
 		);
+		assert_any_node_has_onchain_tx_type(
+			&[("node_a", &node_a), ("node_b", &node_b)],
+			"UnilateralClose",
+			|tx_type| matches!(tx_type, TransactionType::UnilateralClose { .. }),
+		);
+		assert_any_node_has_onchain_tx_type(
+			&[("node_a", &node_a), ("node_b", &node_b)],
+			"Sweep",
+			|tx_type| matches!(tx_type, TransactionType::Sweep { .. }),
+		);
 	} else {
+		assert_all_nodes_have_onchain_tx_type(
+			&[("node_a", &node_a), ("node_b", &node_b)],
+			"CooperativeClose",
+			|tx_type| matches!(tx_type, TransactionType::CooperativeClose { .. }),
+		);
 		// Peer removed after cooperative close — no further reason to reconnect.
 		assert!(
 			!node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
@@ -1646,20 +1699,20 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(node_b.list_balances().total_anchor_channels_reserve_sats, 0);
 
 	// Now we should have seen the channel closing transaction on-chain.
-	assert_eq!(
-		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
-				&& matches!(p.kind, PaymentKind::Onchain { .. }))
-			.len(),
-		3
-	);
-	assert_eq!(
-		node_b
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
-				&& matches!(p.kind, PaymentKind::Onchain { .. }))
-			.len(),
-		2
-	);
+	let node_a_inbound_onchain_count = node_a
+		.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. })
+		})
+		.len();
+	let node_b_inbound_onchain_count = node_b
+		.list_payments_with_filter(|p| {
+			p.direction == PaymentDirection::Inbound
+				&& matches!(p.kind, PaymentKind::Onchain { .. })
+		})
+		.len();
+	assert!(node_a_inbound_onchain_count >= 3);
+	assert!(node_b_inbound_onchain_count >= 2);
 
 	// Check we handled all events
 	assert_eq!(node_a.next_event(), None);

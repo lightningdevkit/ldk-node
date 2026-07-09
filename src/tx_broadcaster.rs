@@ -9,7 +9,9 @@ use std::ops::Deref;
 use std::sync::{Mutex as StdMutex, Weak};
 
 use bitcoin::Transaction;
-use lightning::chain::chaininterface::{BroadcasterInterface, TransactionType};
+use lightning::chain::chaininterface::{
+	BroadcasterInterface, TransactionType as LdkTransactionType,
+};
 use tokio::sync::{mpsc, Mutex, MutexGuard};
 
 use crate::logger::{log_error, LdkLogger};
@@ -22,16 +24,21 @@ const BCAST_PACKAGE_QUEUE_SIZE: usize = 50;
 /// call, along with each transaction's type. Queued until the background task classifies and
 /// broadcasts it. Built only via [`BroadcastPackage::new`] from such a call, so unrelated
 /// transactions can't be grouped into one package by accident.
-pub(crate) struct BroadcastPackage(Vec<(Transaction, TransactionType)>);
+pub(crate) struct BroadcastPackage(Vec<(Transaction, Option<LdkTransactionType>)>);
 
 impl BroadcastPackage {
 	/// Builds a package from the transactions of a single `broadcast_transactions` call.
-	fn new(txs: &[(&Transaction, TransactionType)]) -> Self {
-		Self(txs.iter().map(|(tx, tx_type)| ((*tx).clone(), tx_type.clone())).collect())
+	fn new(txs: &[(&Transaction, LdkTransactionType)]) -> Self {
+		Self(txs.iter().map(|(tx, tx_type)| ((*tx).clone(), Some(tx_type.clone()))).collect())
+	}
+
+	/// Builds a package for wallet-originated broadcasts that have no LDK classification.
+	fn unclassified(txs: Vec<Transaction>) -> Self {
+		Self(txs.into_iter().map(|tx| (tx, None)).collect())
 	}
 
 	/// The packaged transactions and their types, for classification.
-	fn transactions(&self) -> &[(Transaction, TransactionType)] {
+	fn transactions(&self) -> &[(Transaction, Option<LdkTransactionType>)] {
 		&self.0
 	}
 
@@ -91,10 +98,18 @@ where
 		let wallet_opt = self.wallet.lock().expect("lock").as_ref().and_then(Weak::upgrade);
 		if let Some(wallet) = wallet_opt {
 			for (tx, tx_type) in package.transactions() {
-				wallet.classify_broadcast(tx, tx_type).await?;
+				if let Some(tx_type) = tx_type {
+					wallet.classify_broadcast(tx, tx_type).await?;
+				}
 			}
 		}
 		Ok(package)
+	}
+
+	pub(crate) fn broadcast_unclassified_transactions(&self, txs: Vec<Transaction>) {
+		self.queue_sender.try_send(BroadcastPackage::unclassified(txs)).unwrap_or_else(|e| {
+			log_error!(self.logger, "Failed to broadcast transactions: {}", e);
+		});
 	}
 }
 
@@ -102,7 +117,7 @@ impl<L: Deref> BroadcasterInterface for TransactionBroadcaster<L>
 where
 	L::Target: LdkLogger,
 {
-	fn broadcast_transactions(&self, txs: &[(&Transaction, TransactionType)]) {
+	fn broadcast_transactions(&self, txs: &[(&Transaction, LdkTransactionType)]) {
 		self.queue_sender.try_send(BroadcastPackage::new(txs)).unwrap_or_else(|e| {
 			log_error!(self.logger, "Failed to broadcast transactions: {}", e);
 		});
