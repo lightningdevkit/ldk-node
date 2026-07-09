@@ -3,6 +3,8 @@
 ## Compatibility Notes
 - Pending JIT-channel payments created before upgrading may fail after upgrade because the
   prior LSPS2 fee-limit state stored in `PaymentKind::Bolt11Jit` is not migrated.
+- Upgrading from LDK Node v0.1 is no longer supported if the event queue still contains
+  a persisted `ChannelClosed` event.
 - Users of the VSS storage backend must upgrade their VSS server to at least version
   `v0.1.0-alpha.0` before upgrading LDK Node.
 

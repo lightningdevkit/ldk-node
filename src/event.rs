@@ -266,9 +266,7 @@ pub enum Event {
 		/// The `user_channel_id` of the channel.
 		user_channel_id: UserChannelId,
 		/// The `node_id` of the channel counterparty.
-		///
-		/// This will be `None` for events serialized by LDK Node v0.1.0 and prior.
-		counterparty_node_id: Option<PublicKey>,
+		counterparty_node_id: PublicKey,
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
 		reason: Option<ClosureReason>,
 	},
@@ -329,7 +327,7 @@ impl_writeable_tlv_based_enum!(Event,
 	},
 	(5, ChannelClosed) => {
 		(0, channel_id, required),
-		(1, counterparty_node_id, option),
+		(1, counterparty_node_id, required),
 		(2, user_channel_id, required),
 		(3, reason, upgradable_option),
 	},
@@ -1652,7 +1650,7 @@ where
 				let event = Event::ChannelClosed {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
-					counterparty_node_id: Some(counterparty_node_id),
+					counterparty_node_id,
 					reason: Some(reason),
 				};
 
@@ -1951,6 +1949,8 @@ where
 
 #[cfg(test)]
 mod tests {
+	use std::collections::VecDeque;
+	use std::str::FromStr;
 	use std::sync::atomic::{AtomicU16, Ordering};
 	use std::time::Duration;
 
@@ -2046,6 +2046,84 @@ mod tests {
 
 		event_queue.event_handled().await.unwrap();
 		assert_eq!(event_queue.next_event(), None);
+	}
+
+	#[derive(Clone, Debug, PartialEq, Eq)]
+	enum LegacyEvent {
+		ChannelClosed {
+			channel_id: ChannelId,
+			user_channel_id: UserChannelId,
+			counterparty_node_id: Option<PublicKey>,
+			reason: Option<ClosureReason>,
+		},
+	}
+
+	impl_writeable_tlv_based_enum!(LegacyEvent,
+		(5, ChannelClosed) => {
+			(0, channel_id, required),
+			(1, counterparty_node_id, option),
+			(2, user_channel_id, required),
+			(3, reason, upgradable_option),
+		},
+	);
+
+	fn encode_legacy_event_queue(event: LegacyEvent) -> Vec<u8> {
+		let mut queue = VecDeque::new();
+		queue.push_back(event);
+
+		let mut bytes = Vec::new();
+		(queue.len() as u16).write(&mut bytes).unwrap();
+		for event in queue.iter() {
+			event.write(&mut bytes).unwrap();
+		}
+		bytes
+	}
+
+	#[test]
+	fn event_queue_reads_legacy_channel_closed_with_counterparty() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel_id = ChannelId([42u8; 32]);
+		let user_channel_id = UserChannelId(4242);
+		let legacy_event = LegacyEvent::ChannelClosed {
+			channel_id,
+			user_channel_id,
+			counterparty_node_id: Some(counterparty_node_id),
+			reason: None,
+		};
+		let persisted_bytes = encode_legacy_event_queue(legacy_event);
+
+		let event_queue =
+			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
+		assert_eq!(
+			event_queue.next_event(),
+			Some(Event::ChannelClosed {
+				channel_id,
+				user_channel_id,
+				counterparty_node_id,
+				reason: None,
+			})
+		);
+	}
+
+	#[test]
+	fn event_queue_rejects_legacy_channel_closed_without_counterparty() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let legacy_event = LegacyEvent::ChannelClosed {
+			channel_id: ChannelId([42u8; 32]),
+			user_channel_id: UserChannelId(4242),
+			counterparty_node_id: None,
+			reason: None,
+		};
+		let persisted_bytes = encode_legacy_event_queue(legacy_event);
+
+		let res = EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger));
+		assert!(res.is_err());
 	}
 
 	#[tokio::test]
