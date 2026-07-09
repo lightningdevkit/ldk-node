@@ -7,6 +7,7 @@
 
 //! Objects for configuring the node.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
@@ -14,8 +15,9 @@ use std::time::Duration;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use lightning::ln::msgs::SocketAddress;
-use lightning::routing::gossip::NodeAlias;
+use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+use lightning::routing::scoring::ProbabilisticScoringFeeParameters as LdkProbabilisticScoringFeeParameters;
 use lightning::util::config::{
 	ChannelConfig as LdkChannelConfig, MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
 };
@@ -139,11 +141,13 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// | `probing_liquidity_limit_multiplier`   | 3                                    |
 /// | `anchor_channels_config`               | Some(..)                             |
 /// | `route_parameters`                     | None                                 |
+/// | `scoring_fee_parameters`               | ProbabilisticScoringFeeParameters::default()  |
 /// | `tor_config`                           | None                                 |
 /// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
 ///
-/// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
-/// respective default values.
+/// See [`AnchorChannelsConfig`], [`RouteParametersConfig`], and
+/// [`ProbabilisticScoringFeeParameters`] for more information regarding their respective default
+/// values.
 ///
 /// [`Node`]: crate::Node
 pub struct Config {
@@ -205,6 +209,11 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// Configuration options for scoring candidate routes during pathfinding.
+	///
+	/// These parameters configure the channel penalties applied by LDK's probabilistic scorer,
+	/// influencing which routes are preferred when sending payments.
+	pub scoring_fee_parameters: ProbabilisticScoringFeeParameters,
 	/// Configuration options for enabling peer connections via the Tor network.
 	///
 	/// Setting [`TorConfig`] enables connecting to peers with OnionV3 addresses. No other connections
@@ -230,8 +239,91 @@ impl Default for Config {
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
 			tor_config: None,
 			route_parameters: None,
+			scoring_fee_parameters: ProbabilisticScoringFeeParameters::default(),
 			node_alias: None,
 			hrn_config: HumanReadableNamesConfig::default(),
+		}
+	}
+}
+
+/// Parameters for configuring channel penalties applied during payment pathfinding.
+///
+/// See [`LdkProbabilisticScoringFeeParameters`] for more information on how these values affect
+/// route selection.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ProbabilisticScoringFeeParameters {
+	/// A fixed penalty in msats to apply to each channel.
+	pub base_penalty_msat: u64,
+	/// A multiplier used with the payment amount to calculate an additional fixed penalty.
+	pub base_penalty_amount_multiplier_msat: u64,
+	/// A multiplier used with the estimated success probability to determine the liquidity penalty.
+	pub liquidity_penalty_multiplier_msat: u64,
+	/// A multiplier used with payment amount and estimated success probability to determine the
+	/// liquidity amount penalty.
+	pub liquidity_penalty_amount_multiplier_msat: u64,
+	/// A multiplier used with historical liquidity estimates to determine a penalty.
+	pub historical_liquidity_penalty_multiplier_msat: u64,
+	/// A multiplier used with payment amount and historical liquidity estimates to determine a
+	/// penalty.
+	pub historical_liquidity_penalty_amount_multiplier_msat: u64,
+	/// Manual penalties used for the given nodes.
+	pub manual_node_penalties: HashMap<NodeId, u64>,
+	/// Penalty applied when a channel's `htlc_maximum_msat` is at least half of its capacity.
+	pub anti_probing_penalty_msat: u64,
+	/// Penalty applied when the total amount flowing over a channel exceeds our current estimate of
+	/// the channel's available liquidity.
+	pub considered_impossible_penalty_msat: u64,
+	/// If set, a linear probability density function is used for channel liquidity.
+	pub linear_success_probability: bool,
+	/// Maximum penalty applied when choosing probing paths based on recent liquidity updates.
+	pub probing_diversity_penalty_msat: u64,
+}
+
+impl Default for ProbabilisticScoringFeeParameters {
+	fn default() -> Self {
+		LdkProbabilisticScoringFeeParameters::default().into()
+	}
+}
+
+impl From<LdkProbabilisticScoringFeeParameters> for ProbabilisticScoringFeeParameters {
+	fn from(value: LdkProbabilisticScoringFeeParameters) -> Self {
+		Self {
+			base_penalty_msat: value.base_penalty_msat,
+			base_penalty_amount_multiplier_msat: value.base_penalty_amount_multiplier_msat,
+			liquidity_penalty_multiplier_msat: value.liquidity_penalty_multiplier_msat,
+			liquidity_penalty_amount_multiplier_msat: value
+				.liquidity_penalty_amount_multiplier_msat,
+			historical_liquidity_penalty_multiplier_msat: value
+				.historical_liquidity_penalty_multiplier_msat,
+			historical_liquidity_penalty_amount_multiplier_msat: value
+				.historical_liquidity_penalty_amount_multiplier_msat,
+			manual_node_penalties: value.manual_node_penalties.into_iter().collect(),
+			anti_probing_penalty_msat: value.anti_probing_penalty_msat,
+			considered_impossible_penalty_msat: value.considered_impossible_penalty_msat,
+			linear_success_probability: value.linear_success_probability,
+			probing_diversity_penalty_msat: value.probing_diversity_penalty_msat,
+		}
+	}
+}
+
+impl From<ProbabilisticScoringFeeParameters> for LdkProbabilisticScoringFeeParameters {
+	fn from(value: ProbabilisticScoringFeeParameters) -> Self {
+		Self {
+			base_penalty_msat: value.base_penalty_msat,
+			base_penalty_amount_multiplier_msat: value.base_penalty_amount_multiplier_msat,
+			liquidity_penalty_multiplier_msat: value.liquidity_penalty_multiplier_msat,
+			liquidity_penalty_amount_multiplier_msat: value
+				.liquidity_penalty_amount_multiplier_msat,
+			historical_liquidity_penalty_multiplier_msat: value
+				.historical_liquidity_penalty_multiplier_msat,
+			historical_liquidity_penalty_amount_multiplier_msat: value
+				.historical_liquidity_penalty_amount_multiplier_msat,
+			manual_node_penalties: value.manual_node_penalties.into_iter().collect(),
+			anti_probing_penalty_msat: value.anti_probing_penalty_msat,
+			considered_impossible_penalty_msat: value.considered_impossible_penalty_msat,
+			linear_success_probability: value.linear_success_probability,
+			probing_diversity_penalty_msat: value.probing_diversity_penalty_msat,
 		}
 	}
 }
