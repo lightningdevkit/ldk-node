@@ -161,6 +161,33 @@ const EXPECTED_UPDATES_PER_PAYMENT: u64 = 5;
 
 pub(crate) use in_memory_store::InMemoryStore;
 
+#[cfg(test)]
+mod tests {
+	use super::InMemoryStore;
+	use lightning::util::persist::{KVStore, MigratableKVStore};
+
+	#[tokio::test]
+	async fn in_memory_store_list_all_keys() {
+		let store = InMemoryStore::new();
+
+		KVStore::write(&store, "ns_a", "sub_a", "key_a", vec![1u8]).await.unwrap();
+		KVStore::write(&store, "ns_a", "sub_b", "key_b", vec![2u8]).await.unwrap();
+		KVStore::write(&store, "ns_b", "", "key_c", vec![3u8]).await.unwrap();
+
+		let mut keys = MigratableKVStore::list_all_keys(&store).await.unwrap();
+		keys.sort();
+
+		assert_eq!(
+			keys,
+			vec![
+				("ns_a".to_string(), "sub_a".to_string(), "key_a".to_string()),
+				("ns_a".to_string(), "sub_b".to_string(), "key_b".to_string()),
+				("ns_b".to_string(), "".to_string(), "key_c".to_string()),
+			]
+		);
+	}
+}
+
 pub(crate) fn random_storage_path() -> PathBuf {
 	let mut temp_path = std::env::temp_dir();
 	let mut rng = rng();
