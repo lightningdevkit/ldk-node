@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore};
 use lightning::util::ser::{Readable, Writeable};
 
 use crate::logger::{log_error, LdkLogger};
-use crate::types::DynStore;
+use crate::types::{DynStore, DynStoreRef};
 use crate::Error;
 
 pub(crate) trait StorableObject: Clone + Readable + Writeable {
@@ -27,6 +27,12 @@ pub(crate) trait StorableObject: Clone + Readable + Writeable {
 
 pub(crate) trait StorableObjectId: std::hash::Hash + PartialEq + Eq {
 	fn encode_to_key(&self) -> String;
+}
+
+impl StorableObjectId for String {
+	fn encode_to_key(&self) -> String {
+		self.clone()
+	}
 }
 
 pub(crate) trait StorableObjectUpdate<SO: StorableObject> {
@@ -73,7 +79,18 @@ where
 	}
 
 	pub(crate) async fn insert(&self, object: SO) -> Result<bool, Error> {
+		self.insert_with(|| object).await
+	}
+
+	/// Builds and inserts an object while holding the mutation lock.
+	///
+	/// This is useful when fields on the object, such as a timestamp, must be assigned atomically
+	/// with respect to other store mutations.
+	pub(crate) async fn insert_with<F: FnOnce() -> SO>(
+		&self, build_object: F,
+	) -> Result<bool, Error> {
 		let _guard = self.mutation_lock.lock().await;
+		let object = build_object();
 
 		self.persist(&object).await?;
 		let mut locked_objects = self.objects.lock().expect("lock");
@@ -179,6 +196,76 @@ where
 		self.objects.lock().expect("lock").values().filter(f).cloned().collect::<Vec<SO>>()
 	}
 
+	pub(crate) fn is_empty(&self) -> bool {
+		self.objects.lock().expect("lock").is_empty()
+	}
+
+	pub(crate) async fn list_page(
+		&self, page_token: Option<PageToken>,
+	) -> Result<(Vec<SO>, Option<PageToken>), Error> {
+		// Keep removals from invalidating keys between listing the page and reading its objects.
+		let _guard = self.mutation_lock.lock().await;
+		let response = PaginatedKVStore::list_paginated(
+			&DynStoreRef(Arc::clone(&self.kv_store)),
+			&self.primary_namespace,
+			&self.secondary_namespace,
+			page_token,
+		)
+		.await
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Listing object data under {}/{} failed due to: {}",
+				&self.primary_namespace,
+				&self.secondary_namespace,
+				e
+			);
+			Error::PersistenceFailed
+		})?;
+
+		let mut objects = Vec::with_capacity(response.keys.len());
+		for key in response.keys {
+			let data = KVStore::read(
+				&DynStoreRef(Arc::clone(&self.kv_store)),
+				&self.primary_namespace,
+				&self.secondary_namespace,
+				&key,
+			)
+			.await
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Reading object data for key {}/{}/{} failed due to: {}",
+					&self.primary_namespace,
+					&self.secondary_namespace,
+					key,
+					e
+				);
+				Error::PersistenceFailed
+			})?;
+
+			let object = SO::read(&mut &data[..]).map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to deserialize object data for key {}/{}/{}: {}",
+					&self.primary_namespace,
+					&self.secondary_namespace,
+					key,
+					e
+				);
+				Error::PersistenceFailed
+			})?;
+			objects.push(object);
+		}
+
+		Ok((objects, response.next_page_token))
+	}
+
+	/// Prevents mutations to this store until the returned guard is dropped.
+	pub(crate) async fn mutation_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+		self.mutation_lock.lock().await
+	}
+
 	async fn persist(&self, object: &SO) -> Result<(), Error> {
 		let (store_key, data) = Self::encode_object(object);
 		self.persist_encoded(store_key, data).await
@@ -223,6 +310,8 @@ where
 
 #[cfg(test)]
 mod tests {
+	use std::sync::atomic::{AtomicBool, Ordering};
+
 	use lightning::util::persist::{PageToken, PaginatedKVStore, PaginatedListResponse};
 	use lightning::util::test_utils::TestLogger;
 	use lightning::{impl_writeable_tlv_based, io};
@@ -401,6 +490,39 @@ mod tests {
 		let mut new_iou_object = iou_object;
 		new_iou_object.data[0] += 1;
 		assert_eq!(Ok(true), data_store.insert_or_update(new_iou_object).await);
+	}
+
+	#[tokio::test]
+	async fn insert_with_builds_object_while_mutations_are_locked() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let data_store: Arc<DataStore<TestObject, Arc<TestLogger>>> = Arc::new(DataStore::new(
+			Vec::new(),
+			"datastore_test_primary".to_string(),
+			"datastore_test_secondary".to_string(),
+			store,
+			logger,
+		));
+		let guard = data_store.mutation_guard().await;
+		let build_called = Arc::new(AtomicBool::new(false));
+		let insert_handle = {
+			let data_store = Arc::clone(&data_store);
+			let build_called = Arc::clone(&build_called);
+			tokio::spawn(async move {
+				data_store
+					.insert_with(|| {
+						build_called.store(true, Ordering::Relaxed);
+						TestObject { id: TestObjectId { id: [42; 4] }, data: [23; 3] }
+					})
+					.await
+			})
+		};
+
+		tokio::task::yield_now().await;
+		assert!(!build_called.load(Ordering::Relaxed));
+		drop(guard);
+		assert_eq!(insert_handle.await.unwrap(), Ok(false));
+		assert!(build_called.load(Ordering::Relaxed));
 	}
 
 	#[tokio::test]

@@ -158,6 +158,7 @@ use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStore;
+pub use lightning::util::persist::PageToken;
 use lightning::util::wallet_utils::{Input, Wallet as LdkWallet};
 use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
@@ -171,9 +172,13 @@ use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use payment::store::{
+	aggregate_channel_pair_stats as aggregate_channel_pair_stats_impl,
+	aggregate_expired_forwarded_payments, run_forwarded_payment_aggregation,
+};
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
-	UnifiedPayment,
+	Bolt11Payment, Bolt12Payment, ChannelPairForwardingStats, Forwarding, OnchainPayment,
+	PaymentDetails, SpontaneousPayment, UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
 #[cfg(feature = "uniffi")]
@@ -182,7 +187,8 @@ use probing::{run_prober, Prober};
 use runtime::Runtime;
 pub use tokio;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelForwardingStatsStore,
+	ChannelManager, ChannelPairForwardingStatsStore, DynStore, ForwardedPaymentStore, Graph,
 	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
 	Wallet,
 };
@@ -265,6 +271,10 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	forwarded_payment_store: Arc<ForwardedPaymentStore>,
+	channel_forwarding_stats_store: Arc<ChannelForwardingStatsStore>,
+	channel_pair_forwarding_stats_store: Arc<ChannelPairForwardingStatsStore>,
+	forwarded_payment_aggregation_retention_secs: Option<u64>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
@@ -344,6 +354,39 @@ impl Node {
 				)
 			)
 		})?;
+
+		if let Some(retention_secs) = self.forwarded_payment_aggregation_retention_secs {
+			let forwarded_payment_store = Arc::clone(&self.forwarded_payment_store);
+			let channel_pair_stats_store = Arc::clone(&self.channel_pair_forwarding_stats_store);
+			let logger = Arc::clone(&self.logger);
+			self.runtime.block_on(async move {
+				match aggregate_expired_forwarded_payments(
+					&forwarded_payment_store,
+					&channel_pair_stats_store,
+					retention_secs,
+					&logger,
+				)
+				.await
+				{
+					Ok((pair_count, payment_count)) if pair_count > 0 => {
+						log_info!(
+							logger,
+							"Aggregated {payment_count} forwarded payments into {pair_count} channel pair buckets"
+						);
+					},
+					Ok((0, payment_count)) if payment_count > 0 => {
+						log_info!(
+							logger,
+							"Removed {payment_count} forwarded payment details from previously aggregated buckets"
+						);
+					},
+					Err(e) => {
+						log_error!(logger, "Startup forwarded payment aggregation failed: {e}")
+					},
+					_ => {},
+				}
+			});
+		}
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
@@ -637,6 +680,23 @@ impl Node {
 			chain_source.continuously_process_broadcast_queue(stop_tx_bcast).await
 		});
 
+		if let Some(retention_secs) = self.forwarded_payment_aggregation_retention_secs {
+			let stop_aggregation = self.stop_sender.subscribe();
+			let forwarded_payment_store = Arc::clone(&self.forwarded_payment_store);
+			let channel_pair_stats_store = Arc::clone(&self.channel_pair_forwarding_stats_store);
+			let logger = Arc::clone(&self.logger);
+			self.runtime.spawn_cancellable_background_task(async move {
+				run_forwarded_payment_aggregation(
+					stop_aggregation,
+					forwarded_payment_store,
+					channel_pair_stats_store,
+					retention_secs,
+					logger,
+				)
+				.await;
+			});
+		}
+
 		let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
 			Arc::clone(&self.tx_broadcaster),
 			Arc::new(LdkWallet::new(Arc::clone(&self.wallet), Arc::clone(&self.logger))),
@@ -661,6 +721,8 @@ impl Node {
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.forwarded_payment_store),
+			Arc::clone(&self.channel_forwarding_stats_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.keys_manager),
 			static_invoice_store,
@@ -1171,6 +1233,30 @@ impl Node {
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 			self.hrn_resolver.clone(),
+		))
+	}
+
+	/// Returns a handler allowing to query forwarded payments and forwarding statistics.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn forwarding(&self) -> Forwarding {
+		Forwarding::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.forwarded_payment_store),
+			Arc::clone(&self.channel_forwarding_stats_store),
+			Arc::clone(&self.channel_pair_forwarding_stats_store),
+			Arc::clone(&self.config),
+		)
+	}
+
+	/// Returns a handler allowing to query forwarded payments and forwarding statistics.
+	#[cfg(feature = "uniffi")]
+	pub fn forwarding(&self) -> Arc<Forwarding> {
+		Arc::new(Forwarding::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.forwarded_payment_store),
+			Arc::clone(&self.channel_forwarding_stats_store),
+			Arc::clone(&self.channel_pair_forwarding_stats_store),
+			Arc::clone(&self.config),
 		))
 	}
 
@@ -2508,6 +2594,18 @@ async fn connect_and_discover_lsp(
 		},
 		Err(e) => log_debug!(logger, "Protocol discovery failed for LSP {}: {:?}", node_id, e),
 	}
+}
+
+/// Aggregates multiple channel-pair statistics buckets into cumulative totals.
+///
+/// The returned bucket spans from the earliest input bucket start through the latest input bucket
+/// end, including any gaps between buckets.
+///
+/// Returns `None` if `buckets` is empty or contains statistics for different channel pairs.
+pub fn aggregate_channel_pair_stats(
+	buckets: &[ChannelPairForwardingStats],
+) -> Option<ChannelPairForwardingStats> {
+	aggregate_channel_pair_stats_impl(buckets)
 }
 
 #[cfg(test)]
