@@ -149,7 +149,7 @@ impl Readable for PaymentDetails {
 }
 
 impl StorableObjectId for PaymentId {
-	fn encode_to_hex_str(&self) -> String {
+	fn encode_to_key(&self) -> String {
 		hex_utils::to_string(&self.0)
 	}
 }

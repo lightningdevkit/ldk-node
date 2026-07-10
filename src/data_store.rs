@@ -26,7 +26,7 @@ pub(crate) trait StorableObject: Clone + Readable + Writeable {
 }
 
 pub(crate) trait StorableObjectId: std::hash::Hash + PartialEq + Eq {
-	fn encode_to_hex_str(&self) -> String;
+	fn encode_to_key(&self) -> String;
 }
 
 pub(crate) trait StorableObjectUpdate<SO: StorableObject> {
@@ -115,7 +115,7 @@ where
 		let _guard = self.mutation_lock.lock().await;
 		let should_remove = { self.objects.lock().expect("lock").contains_key(id) };
 		if should_remove {
-			let store_key = id.encode_to_hex_str();
+			let store_key = id.encode_to_key();
 			KVStore::remove(
 				&*self.kv_store,
 				&self.primary_namespace,
@@ -185,7 +185,7 @@ where
 	}
 
 	fn encode_object(object: &SO) -> (String, Vec<u8>) {
-		(object.id().encode_to_hex_str(), object.encode())
+		(object.id().encode_to_key(), object.encode())
 	}
 
 	async fn persist_encoded(&self, store_key: String, data: Vec<u8>) -> Result<(), Error> {
@@ -238,7 +238,7 @@ mod tests {
 	}
 
 	impl StorableObjectId for TestObjectId {
-		fn encode_to_hex_str(&self) -> String {
+		fn encode_to_key(&self) -> String {
 			hex_utils::to_string(&self.id)
 		}
 	}
@@ -354,7 +354,7 @@ mod tests {
 		let id = TestObjectId { id: [42u8; 4] };
 		assert!(data_store.get(&id).is_none());
 
-		let store_key = id.encode_to_hex_str();
+		let store_key = id.encode_to_key();
 
 		// Check we start empty.
 		assert!(KVStore::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
