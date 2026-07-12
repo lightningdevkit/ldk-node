@@ -644,14 +644,13 @@ impl NodeBuilder {
 	/// # #[cfg(not(feature = "uniffi"))]
 	/// # {
 	/// use std::time::Duration;
-	/// use ldk_node::Builder;
+	///
 	/// use ldk_node::probing::ProbingConfigBuilder;
+	/// use ldk_node::Builder;
 	///
 	/// let mut builder = Builder::new();
 	/// builder.set_probing_config(
-	///     ProbingConfigBuilder::high_degree(100)
-	///         .interval(Duration::from_secs(30))
-	///         .build()
+	/// 	ProbingConfigBuilder::high_degree(100).interval(Duration::from_secs(30)).build(),
 	/// );
 	/// # }
 	/// ```

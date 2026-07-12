@@ -926,8 +926,9 @@ mod tests {
 
 	#[test]
 	fn known_onchain_tx_type_survives_unknown_update() {
-		use bitcoin::hashes::Hash;
 		use std::str::FromStr;
+
+		use bitcoin::hashes::Hash;
 
 		let txid = Txid::from_byte_array([8u8; 32]);
 		let payment_id = PaymentId(txid.to_byte_array());
