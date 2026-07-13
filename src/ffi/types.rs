@@ -28,6 +28,7 @@ pub use lightning::events::{ClosureReason, PaymentFailureReason};
 use lightning::ln::channel_state::{ChannelShutdownState, CounterpartyForwardingInfo};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
+pub use lightning::ln::outbound_payment::Retry;
 pub use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
 pub use lightning::offers::offer::OfferId;
@@ -1438,6 +1439,18 @@ pub enum ChannelShutdownState {
 	/// We've successfully negotiated a closing_signed dance. At this point `ChannelManager` is about
 	/// to drop the channel.
 	ShutdownComplete,
+}
+
+/// Strategies available to retry payment path failures.
+///
+/// See [`lightning::ln::outbound_payment::Retry`] for more details.
+#[uniffi::remote(Enum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Retry {
+	/// Max number of attempts to retry payment.
+	Attempts(u32),
+	/// Time elapsed before abandoning retries for a payment.
+	Timeout(Duration),
 }
 
 /// The reason the channel was closed. See individual variants for more details.

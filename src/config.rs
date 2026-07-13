@@ -14,6 +14,7 @@ use std::time::Duration;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use lightning::ln::msgs::SocketAddress;
+use lightning::ln::outbound_payment::Retry;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::RouteParametersConfig;
 use lightning::util::config::{
@@ -35,6 +36,7 @@ pub(crate) const DEFAULT_MAX_PROBE_LOCKED_MSAT: u64 = 100_000_000; // 100k sats
 pub(crate) const DEFAULT_MIN_PROBE_AMOUNT_MSAT: u64 = 1_000_000; // 1k sats
 pub(crate) const DEFAULT_MAX_PROBE_AMOUNT_MSAT: u64 = 10_000_000; // 10k sats
 const DEFAULT_ANCHOR_PER_CHANNEL_RESERVE_SATS: u64 = 25_000;
+const DEFAULT_PAYMENT_RETRY_TIMEOUT_SECS: u64 = 10;
 
 // The default timeout after which we abort a wallet syncing operation.
 const DEFAULT_BDK_WALLET_SYNC_TIMEOUT_SECS: u64 = 60;
@@ -80,9 +82,6 @@ pub const MAX_FULL_SCAN_STOP_GAP: u32 = 1000;
 
 // The number of concurrent requests made against the API provider.
 pub(crate) const BDK_CLIENT_CONCURRENCY: usize = 4;
-
-// The timeout after which we abandon retrying failed payments.
-pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 
 // The time in-between peer reconnection attempts.
 pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(60);
@@ -134,7 +133,7 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 ///
 /// ### Defaults
 ///
-/// | Parameter                              | Value              |
+/// | Parameter                              | Value                                |
 /// |----------------------------------------|--------------------------------------|
 /// | `storage_dir_path`                     | /tmp/ldk_node/                       |
 /// | `network`                              | Bitcoin                              |
@@ -144,6 +143,7 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// | `trusted_peers_0conf`                  | []                                   |
 /// | `probing_liquidity_limit_multiplier`   | 3                                    |
 /// | `anchor_channels_config`               | Some(..)                             |
+/// | `payment_retry_strategy`               | Timeout(10s)                         |
 /// | `route_parameters`                     | None                                 |
 /// | `tor_config`                           | None                                 |
 /// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
@@ -203,6 +203,12 @@ pub struct Config {
 	/// closure. We *will* however still try to get the Anchor spending transactions confirmed
 	/// on-chain with the funds available.
 	pub anchor_channels_config: Option<AnchorChannelsConfig>,
+	/// The strategy used when retrying failed payments.
+	///
+	/// When a payment fails to route, LDK will automatically retry according to this strategy.
+	///
+	/// See [`Retry`] for available options.
+	pub payment_retry_strategy: Retry,
 	/// Configuration options for payment routing and pathfinding.
 	///
 	/// Setting the [`RouteParametersConfig`] provides flexibility to customize how payments are routed,
@@ -234,6 +240,9 @@ impl Default for Config {
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			anchor_channels_config: Some(AnchorChannelsConfig::default()),
+			payment_retry_strategy: Retry::Timeout(Duration::from_secs(
+				DEFAULT_PAYMENT_RETRY_TIMEOUT_SECS,
+			)),
 			tor_config: None,
 			route_parameters: None,
 			node_alias: None,
