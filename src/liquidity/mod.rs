@@ -32,7 +32,7 @@ use tokio::sync::oneshot;
 use crate::builder::BuildError;
 use crate::connection::ConnectionManager;
 use crate::liquidity::client::lsps1::LSPS1Client;
-use crate::liquidity::client::lsps2::LSPS2Client;
+use crate::liquidity::client::lsps2::{LSPS2Client, LSPS2FeeResponseCache};
 use crate::liquidity::service::lsps2::{LSPS2Service, LSPS2ServiceLiquiditySource};
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
@@ -311,6 +311,10 @@ where
 				lsp_nodes: Arc::clone(&lsp_nodes),
 				pending_lsps2_fee_requests: Mutex::new(HashMap::new()),
 				pending_buy_requests: Mutex::new(HashMap::new()),
+				fee_response_cache: LSPS2FeeResponseCache::new(
+					Arc::clone(&self.kv_store),
+					self.keys_manager.get_node_secret_key().secret_bytes(),
+				),
 				channel_manager: self.channel_manager.clone(),
 				keys_manager: self.keys_manager.clone(),
 				discovery_done_rx: discovery_done_rx.clone(),

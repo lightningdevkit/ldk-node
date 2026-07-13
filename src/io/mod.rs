@@ -33,6 +33,10 @@ pub(crate) const PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "pending_payments";
 pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
+/// LSPS2 client `get_info` responses will be cached under this prefix.
+pub(crate) const LSPS2_GET_INFO_CACHE_PRIMARY_NAMESPACE: &str = "lsps2_get_info";
+pub(crate) const LSPS2_GET_INFO_CACHE_SECONDARY_NAMESPACE: &str = "";
+
 /// The node metrics will be persisted under this key.
 pub(crate) const NODE_METRICS_PRIMARY_NAMESPACE: &str = "";
 pub(crate) const NODE_METRICS_SECONDARY_NAMESPACE: &str = "";

@@ -10,11 +10,15 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
+use chrono::Utc;
+use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
 use lightning::log_warn;
 use lightning::routing::router::{RouteHint, RouteHintHop};
-use lightning::util::ser::Writeable;
+use lightning::util::persist::KVStore;
+use lightning::util::ser::{Readable, Writeable};
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::lsps0::ser::LSPSRequestId;
 use lightning_liquidity::lsps2::event::LSPS2ClientEvent;
@@ -25,6 +29,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
 use crate::connection::ConnectionManager;
+use crate::io::{LSPS2_GET_INFO_CACHE_PRIMARY_NAMESPACE, LSPS2_GET_INFO_CACHE_SECONDARY_NAMESPACE};
 use crate::liquidity::{
 	select_all_lsps_for_protocol, select_lsps_for_protocol, LspConfig, LspNode,
 	LIQUIDITY_REQUEST_TIMEOUT_SECS, LSPS_DISCOVERY_WAIT_TIMEOUT_SECS,
@@ -32,7 +37,7 @@ use crate::liquidity::{
 use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::payment::store::LSPS2Parameters;
 use crate::payment::PaymentMetadata;
-use crate::types::{ChannelManager, KeysManager, LiquidityManager};
+use crate::types::{ChannelManager, DynStore, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
 pub(crate) struct LSPS2Client<L: Deref>
@@ -44,6 +49,7 @@ where
 		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2FeeResponse>>>,
 	pub(crate) pending_buy_requests:
 		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2BuyResponse>>>,
+	pub(crate) fee_response_cache: LSPS2FeeResponseCache,
 	pub(crate) channel_manager: Arc<ChannelManager>,
 	pub(crate) keys_manager: Arc<KeysManager>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
@@ -62,7 +68,7 @@ where
 		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
 		// Connect to all candidate LSPs before querying fees.
-		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
+		let all_offers = self.gather_lsps2_offers(&connection_manager, expiry_secs).await?;
 		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
 			.into_iter()
 			.flat_map(|(lsp, resp)| {
@@ -142,7 +148,7 @@ where
 		connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
 		// Connect to all candidate LSPs before querying fees.
-		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
+		let all_offers = self.gather_lsps2_offers(&connection_manager, expiry_secs).await?;
 		let (cheapest_lsp, min_prop_fee_ppm_msat, min_opening_params) = all_offers
 			.into_iter()
 			.flat_map(|(lsp, resp)| {
@@ -200,7 +206,7 @@ where
 	}
 
 	async fn gather_lsps2_offers(
-		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>, expiry_secs: u32,
 	) -> Result<Vec<(LspConfig, LSPS2FeeResponse)>, Error> {
 		let lsps2_nodes = self.get_lsps2_nodes().await?;
 
@@ -226,7 +232,8 @@ where
 			let lsp = lsp_node.clone();
 			let client = Arc::clone(self);
 			fee_set.spawn(async move {
-				let res = client.lsps2_request_opening_fee_params(Some(&lsp.node_id)).await;
+				let res =
+					client.lsps2_request_opening_fee_params(Some(&lsp.node_id), expiry_secs).await;
 				(lsp, res)
 			});
 		}
@@ -251,10 +258,36 @@ where
 	L::Target: LdkLogger,
 {
 	async fn lsps2_request_opening_fee_params(
-		&self, node_id: Option<&PublicKey>,
+		&self, node_id: Option<&PublicKey>, invoice_expiry_secs: u32,
 	) -> Result<LSPS2FeeResponse, Error> {
 		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, node_id)
 			.ok_or(Error::LiquiditySourceUnavailable)?;
+		let required_validity = Duration::from_secs(
+			u64::from(invoice_expiry_secs).saturating_add(LSPS2_GET_INFO_CACHE_EXPIRY_BUFFER_SECS),
+		);
+		match self
+			.fee_response_cache
+			.get(&lsps2_node.node_id, lsps2_node.token.as_deref(), required_validity)
+			.await
+		{
+			Ok(Some(response)) => {
+				log_debug!(
+					self.logger,
+					"Using cached LSPS2 fee response from {}",
+					lsps2_node.node_id
+				);
+				return Ok(response);
+			},
+			Ok(None) => {},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to read cached LSPS2 fee response from {}: {}",
+					lsps2_node.node_id,
+					e
+				);
+			},
+		}
 
 		let client_handler = self.liquidity_manager.lsps2_client_handler().ok_or_else(|| {
 			log_error!(self.logger, "Liquidity client was not configured.",);
@@ -270,7 +303,7 @@ where
 			pending_fee_requests_lock.insert(request_id, fee_request_sender);
 		}
 
-		tokio::time::timeout(
+		let response = tokio::time::timeout(
 			Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS),
 			fee_request_receiver,
 		)
@@ -281,6 +314,28 @@ where
 		})?
 		.map_err(|e| {
 			log_error!(self.logger, "Failed to handle response from liquidity service: {}", e);
+			Error::LiquidityRequestFailed
+		})?;
+
+		if let Err(e) = self
+			.fee_response_cache
+			.put(lsps2_node.node_id, lsps2_node.token.as_deref(), &response)
+			.await
+		{
+			log_error!(
+				self.logger,
+				"Failed to persist LSPS2 fee response from {}: {}",
+				lsps2_node.node_id,
+				e
+			);
+		}
+
+		filter_valid_offers(&response.opening_fee_params_menu, required_validity).ok_or_else(|| {
+			log_error!(
+				self.logger,
+				"LSPS2 fee response from {} has no offers valid for the requested invoice expiry",
+				lsps2_node.node_id
+			);
 			Error::LiquidityRequestFailed
 		})
 	}
@@ -313,7 +368,7 @@ where
 			pending_buy_requests_lock.insert(request_id, buy_request_sender);
 		}
 
-		let buy_response = tokio::time::timeout(
+		let buy_result = tokio::time::timeout(
 			Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS),
 			buy_request_receiver,
 		)
@@ -321,13 +376,33 @@ where
 		.map_err(|e| {
 			log_error!(self.logger, "Liquidity request timed out: {}", e);
 			Error::LiquidityRequestFailed
-		})?
-		.map_err(|e| {
-			log_error!(self.logger, "Failed to handle response from liquidity service: {:?}", e);
-			Error::LiquidityRequestFailed
-		})?;
+		})
+		.and_then(|res| {
+			res.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to handle response from liquidity service: {:?}",
+					e
+				);
+				Error::LiquidityRequestFailed
+			})
+		});
 
-		Ok(buy_response)
+		if buy_result.is_err() {
+			// The buy request might have failed because our cached opening fee params became
+			// invalid, e.g., if the LSP rotated its promise secret. Evict the cache entry so
+			// that fresh params will be requested on retry.
+			if let Err(e) = self.fee_response_cache.remove(&lsps2_node.node_id).await {
+				log_error!(
+					self.logger,
+					"Failed to evict cached LSPS2 fee response for {}: {}",
+					lsps2_node.node_id,
+					e
+				);
+			}
+		}
+
+		buy_result
 	}
 
 	fn lsps2_create_jit_invoice(
@@ -506,8 +581,76 @@ where
 					);
 				}
 			},
-			_ => {
-				log_error!(self.logger, "Received unexpected LSPS2Client liquidity event!");
+			LSPS2ClientEvent::GetInfoFailed { request_id, counterparty_node_id, error } => {
+				if self
+					.lsp_nodes
+					.read()
+					.expect("lock")
+					.iter()
+					.any(|n| n.node_id == counterparty_node_id)
+				{
+					if self
+						.pending_lsps2_fee_requests
+						.lock()
+						.expect("lock")
+						.remove(&request_id)
+						.is_some()
+					{
+						log_error!(
+							self.logger,
+							"LSPS2 get_info request {:?} failed: {:?}",
+							request_id,
+							error
+						);
+					} else {
+						debug_assert!(
+							false,
+							"Received failure from liquidity service for unknown request."
+						);
+						log_error!(
+							self.logger,
+							"Received failure from liquidity service for unknown request."
+						);
+					}
+				} else {
+					log_error!(
+						self.logger,
+						"Received unexpected LSPS2Client::GetInfoFailed event!"
+					);
+				}
+			},
+			LSPS2ClientEvent::BuyRequestFailed { request_id, counterparty_node_id, error } => {
+				if self
+					.lsp_nodes
+					.read()
+					.expect("lock")
+					.iter()
+					.any(|n| n.node_id == counterparty_node_id)
+				{
+					if self.pending_buy_requests.lock().expect("lock").remove(&request_id).is_some()
+					{
+						log_error!(
+							self.logger,
+							"LSPS2 buy request {:?} failed: {:?}",
+							request_id,
+							error
+						);
+					} else {
+						debug_assert!(
+							false,
+							"Received failure from liquidity service for unknown request."
+						);
+						log_error!(
+							self.logger,
+							"Received failure from liquidity service for unknown request."
+						);
+					}
+				} else {
+					log_error!(
+						self.logger,
+						"Received unexpected LSPS2Client::BuyRequestFailed event!"
+					);
+				}
 			},
 		}
 	}
@@ -550,4 +693,373 @@ pub(crate) struct LSPS2FeeResponse {
 pub(crate) struct LSPS2BuyResponse {
 	intercept_scid: u64,
 	cltv_expiry_delta: u32,
+}
+
+const LSPS2_GET_INFO_CACHE_EXPIRY_BUFFER_SECS: u64 = 60;
+
+#[derive(Clone)]
+struct PersistedLSPS2FeeResponse {
+	node_id: PublicKey,
+	token_hash: Option<[u8; 32]>,
+	opening_fee_params_menu: Vec<LSPS2OpeningFeeParams>,
+}
+
+impl_writeable_tlv_based!(PersistedLSPS2FeeResponse, {
+	(0, node_id, required),
+	(2, token_hash, option),
+	(4, opening_fee_params_menu, required_vec),
+});
+
+impl PersistedLSPS2FeeResponse {
+	fn new(node_id: PublicKey, token_hash: Option<[u8; 32]>, response: &LSPS2FeeResponse) -> Self {
+		Self {
+			node_id,
+			token_hash,
+			opening_fee_params_menu: response.opening_fee_params_menu.clone(),
+		}
+	}
+
+	fn matches_request(&self, node_id: &PublicKey, token_hash: Option<[u8; 32]>) -> bool {
+		self.node_id == *node_id && self.token_hash == token_hash
+	}
+
+	fn response_valid_for(&self, required_validity: Duration) -> Option<LSPS2FeeResponse> {
+		filter_valid_offers(&self.opening_fee_params_menu, required_validity)
+	}
+}
+
+fn filter_valid_offers(
+	opening_fee_params_menu: &[LSPS2OpeningFeeParams], required_validity: Duration,
+) -> Option<LSPS2FeeResponse> {
+	let minimum_valid_until = Utc::now() + required_validity;
+	let opening_fee_params_menu = opening_fee_params_menu
+		.iter()
+		.filter(|params| params.valid_until.0 > minimum_valid_until)
+		.cloned()
+		.collect::<Vec<_>>();
+	if opening_fee_params_menu.is_empty() {
+		None
+	} else {
+		Some(LSPS2FeeResponse { opening_fee_params_menu })
+	}
+}
+
+#[derive(Debug)]
+enum LSPS2FeeResponseCacheError {
+	Store(bitcoin::io::Error),
+	Decode(lightning::ln::msgs::DecodeError),
+}
+
+impl std::fmt::Display for LSPS2FeeResponseCacheError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Store(e) => write!(f, "store error: {e}"),
+			Self::Decode(e) => write!(f, "decode error: {e}"),
+		}
+	}
+}
+
+pub(crate) struct LSPS2FeeResponseCache {
+	entries: Mutex<HashMap<PublicKey, PersistedLSPS2FeeResponse>>,
+	kv_store: Arc<DynStore>,
+	token_hash_key: [u8; 32],
+}
+
+impl LSPS2FeeResponseCache {
+	pub(crate) fn new(kv_store: Arc<DynStore>, node_secret: [u8; 32]) -> Self {
+		let mut engine = HmacEngine::<sha256::Hash>::new(&node_secret);
+		engine.input(b"LDK Node LSPS2 get_info cache token hash");
+		let token_hash_key = Hmac::<sha256::Hash>::from_engine(engine).to_byte_array();
+		Self { entries: Mutex::new(HashMap::new()), kv_store, token_hash_key }
+	}
+
+	fn hash_token(&self, token: Option<&str>) -> Option<[u8; 32]> {
+		token.map(|token| {
+			let mut engine = HmacEngine::<sha256::Hash>::new(&self.token_hash_key);
+			engine.input(token.as_bytes());
+			Hmac::<sha256::Hash>::from_engine(engine).to_byte_array()
+		})
+	}
+
+	async fn get(
+		&self, node_id: &PublicKey, token: Option<&str>, required_validity: Duration,
+	) -> Result<Option<LSPS2FeeResponse>, LSPS2FeeResponseCacheError> {
+		let token_hash = self.hash_token(token);
+		let cached_entry = self.entries.lock().expect("lock").get(node_id).cloned();
+		if let Some(entry) = cached_entry {
+			return Ok(if entry.matches_request(node_id, token_hash) {
+				entry.response_valid_for(required_validity)
+			} else {
+				None
+			});
+		}
+
+		let key = node_id.to_string();
+		let bytes = match KVStore::read(
+			&*self.kv_store,
+			LSPS2_GET_INFO_CACHE_PRIMARY_NAMESPACE,
+			LSPS2_GET_INFO_CACHE_SECONDARY_NAMESPACE,
+			&key,
+		)
+		.await
+		{
+			Ok(bytes) => bytes,
+			Err(e) if e.kind() == bitcoin::io::ErrorKind::NotFound => return Ok(None),
+			Err(e) => return Err(LSPS2FeeResponseCacheError::Store(e)),
+		};
+		let entry = PersistedLSPS2FeeResponse::read(&mut &*bytes)
+			.map_err(LSPS2FeeResponseCacheError::Decode)?;
+		let response = if entry.matches_request(node_id, token_hash) {
+			entry.response_valid_for(required_validity)
+		} else {
+			None
+		};
+		self.entries.lock().expect("lock").insert(*node_id, entry);
+		Ok(response)
+	}
+
+	async fn remove(&self, node_id: &PublicKey) -> Result<(), LSPS2FeeResponseCacheError> {
+		self.entries.lock().expect("lock").remove(node_id);
+		KVStore::remove(
+			&*self.kv_store,
+			LSPS2_GET_INFO_CACHE_PRIMARY_NAMESPACE,
+			LSPS2_GET_INFO_CACHE_SECONDARY_NAMESPACE,
+			&node_id.to_string(),
+			false,
+		)
+		.await
+		.map_err(LSPS2FeeResponseCacheError::Store)
+	}
+
+	async fn put(
+		&self, node_id: PublicKey, token: Option<&str>, response: &LSPS2FeeResponse,
+	) -> Result<(), LSPS2FeeResponseCacheError> {
+		let mut entry = PersistedLSPS2FeeResponse::new(node_id, self.hash_token(token), response);
+		let minimum_valid_until =
+			Utc::now() + Duration::from_secs(LSPS2_GET_INFO_CACHE_EXPIRY_BUFFER_SECS);
+		entry.opening_fee_params_menu.retain(|params| params.valid_until.0 > minimum_valid_until);
+		let key = node_id.to_string();
+
+		if entry.opening_fee_params_menu.is_empty() {
+			return self.remove(&node_id).await;
+		}
+
+		let encoded_entry = entry.encode();
+		self.entries.lock().expect("lock").insert(node_id, entry);
+		KVStore::write(
+			&*self.kv_store,
+			LSPS2_GET_INFO_CACHE_PRIMARY_NAMESPACE,
+			LSPS2_GET_INFO_CACHE_SECONDARY_NAMESPACE,
+			&key,
+			encoded_entry,
+		)
+		.await
+		.map_err(LSPS2FeeResponseCacheError::Store)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	use bitcoin::secp256k1::SecretKey;
+	use lightning::io;
+	use lightning::util::persist::{PageToken, PaginatedKVStore, PaginatedListResponse};
+	use lightning_liquidity::lsps0::ser::LSPSDateTime;
+
+	use crate::io::test_utils::InMemoryStore;
+	use crate::types::DynStoreWrapper;
+
+	fn test_node_id() -> PublicKey {
+		let secret_key = SecretKey::from_slice(&[42; 32]).unwrap();
+		PublicKey::from_secret_key(&Secp256k1::new(), &secret_key)
+	}
+
+	fn fee_params(min_fee_msat: u64, valid_for: Duration) -> LSPS2OpeningFeeParams {
+		LSPS2OpeningFeeParams {
+			min_fee_msat,
+			proportional: 100,
+			valid_until: LSPSDateTime(Utc::now() + valid_for),
+			min_lifetime: 144,
+			max_client_to_self_delay: 144,
+			min_payment_size_msat: 1,
+			max_payment_size_msat: 1_000_000,
+			promise: "promise".to_string(),
+		}
+	}
+
+	fn test_store() -> Arc<DynStore> {
+		Arc::new(DynStoreWrapper(InMemoryStore::new()))
+	}
+
+	fn test_cache(store: Arc<DynStore>) -> LSPS2FeeResponseCache {
+		LSPS2FeeResponseCache::new(store, [43; 32])
+	}
+
+	struct FailingStore;
+
+	#[allow(clippy::manual_async_fn)]
+	impl KVStore for FailingStore {
+		fn read(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str,
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "read failed")) }
+		}
+
+		fn write(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _buf: Vec<u8>,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "write failed")) }
+		}
+
+		fn remove(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _lazy: bool,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "remove failed")) }
+		}
+
+		fn list(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "list failed")) }
+		}
+	}
+
+	#[allow(clippy::manual_async_fn)]
+	impl PaginatedKVStore for FailingStore {
+		fn list_paginated(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+			_page_token: Option<PageToken>,
+		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
+			async { Err(io::Error::new(io::ErrorKind::Other, "list_paginated failed")) }
+		}
+	}
+
+	#[tokio::test]
+	async fn persists_and_restores_get_info_response() {
+		let node_id = test_node_id();
+		let store = test_store();
+		let cache = test_cache(Arc::clone(&store));
+		let response = LSPS2FeeResponse {
+			opening_fee_params_menu: vec![
+				fee_params(1_000, Duration::from_secs(30)),
+				fee_params(2_000, Duration::from_secs(7_200)),
+			],
+		};
+
+		cache.put(node_id, Some("token"), &response).await.unwrap();
+
+		let restored_cache = test_cache(store);
+		let restored = restored_cache
+			.get(&node_id, Some("token"), Duration::from_secs(3_600))
+			.await
+			.unwrap()
+			.unwrap();
+		assert_eq!(restored.opening_fee_params_menu.len(), 1);
+		assert_eq!(restored.opening_fee_params_menu[0].min_fee_msat, 2_000);
+	}
+
+	#[tokio::test]
+	async fn rejects_cache_for_changed_token_or_insufficient_validity() {
+		let node_id = test_node_id();
+		let store = test_store();
+		let cache = test_cache(Arc::clone(&store));
+		let response = LSPS2FeeResponse {
+			opening_fee_params_menu: vec![fee_params(1_000, Duration::from_secs(7_200))],
+		};
+		cache.put(node_id, Some("token"), &response).await.unwrap();
+
+		let restored_cache = test_cache(store);
+		assert!(restored_cache
+			.get(&node_id, Some("other-token"), Duration::from_secs(60))
+			.await
+			.unwrap()
+			.is_none());
+		assert!(restored_cache
+			.get(&node_id, Some("token"), Duration::from_secs(10_800))
+			.await
+			.unwrap()
+			.is_none());
+	}
+
+	#[tokio::test]
+	async fn removes_cache_without_reusable_offers() {
+		let node_id = test_node_id();
+		let store = test_store();
+		let cache = test_cache(Arc::clone(&store));
+		let response = LSPS2FeeResponse {
+			opening_fee_params_menu: vec![fee_params(1_000, Duration::from_secs(7_200))],
+		};
+		cache.put(node_id, None, &response).await.unwrap();
+
+		let empty_response = LSPS2FeeResponse { opening_fee_params_menu: Vec::new() };
+		cache.put(node_id, None, &empty_response).await.unwrap();
+
+		let restored_cache = test_cache(store);
+		assert!(restored_cache
+			.get(&node_id, None, Duration::from_secs(60))
+			.await
+			.unwrap()
+			.is_none());
+	}
+
+	#[tokio::test]
+	async fn remove_evicts_persisted_and_in_memory_entries() {
+		let node_id = test_node_id();
+		let store = test_store();
+		let cache = test_cache(Arc::clone(&store));
+		let response = LSPS2FeeResponse {
+			opening_fee_params_menu: vec![fee_params(1_000, Duration::from_secs(7_200))],
+		};
+		cache.put(node_id, None, &response).await.unwrap();
+		assert!(cache.get(&node_id, None, Duration::from_secs(60)).await.unwrap().is_some());
+
+		cache.remove(&node_id).await.unwrap();
+
+		assert!(cache.get(&node_id, None, Duration::from_secs(60)).await.unwrap().is_none());
+		let restored_cache = test_cache(store);
+		assert!(restored_cache
+			.get(&node_id, None, Duration::from_secs(60))
+			.await
+			.unwrap()
+			.is_none());
+	}
+
+	#[tokio::test]
+	async fn reports_corrupt_persisted_response() {
+		let node_id = test_node_id();
+		let store = test_store();
+		KVStore::write(
+			&*store,
+			LSPS2_GET_INFO_CACHE_PRIMARY_NAMESPACE,
+			LSPS2_GET_INFO_CACHE_SECONDARY_NAMESPACE,
+			&node_id.to_string(),
+			vec![0xff],
+		)
+		.await
+		.unwrap();
+
+		let cache = test_cache(store);
+		assert!(matches!(
+			cache.get(&node_id, None, Duration::from_secs(60)).await,
+			Err(LSPS2FeeResponseCacheError::Decode(_))
+		));
+	}
+
+	#[tokio::test]
+	async fn keeps_in_memory_response_when_persistence_fails() {
+		let node_id = test_node_id();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let cache = test_cache(store);
+		let response = LSPS2FeeResponse {
+			opening_fee_params_menu: vec![fee_params(1_000, Duration::from_secs(7_200))],
+		};
+
+		assert!(matches!(
+			cache.put(node_id, None, &response).await,
+			Err(LSPS2FeeResponseCacheError::Store(_))
+		));
+		assert!(cache.get(&node_id, None, Duration::from_secs(60)).await.unwrap().is_some());
+	}
 }
