@@ -67,7 +67,7 @@ where
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
-		// Connect to all candidate LSPs before querying fees.
+		// Gather fee offers from all candidate LSPs.
 		let all_offers = self.gather_lsps2_offers(&connection_manager, expiry_secs).await?;
 		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
 			.into_iter()
@@ -115,6 +115,9 @@ where
 			cheapest_lsp.node_id,
 			min_total_fee_msat
 		);
+		connection_manager
+			.connect_peer_if_necessary(cheapest_lsp.node_id, cheapest_lsp.address.clone())
+			.await?;
 
 		let buy_response = self
 			.lsps2_send_buy_request(
@@ -147,7 +150,7 @@ where
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
 		connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
-		// Connect to all candidate LSPs before querying fees.
+		// Gather fee offers from all candidate LSPs.
 		let all_offers = self.gather_lsps2_offers(&connection_manager, expiry_secs).await?;
 		let (cheapest_lsp, min_prop_fee_ppm_msat, min_opening_params) = all_offers
 			.into_iter()
@@ -183,6 +186,9 @@ where
 			cheapest_lsp.node_id,
 			min_prop_fee_ppm_msat
 		);
+		connection_manager
+			.connect_peer_if_necessary(cheapest_lsp.node_id, cheapest_lsp.address.clone())
+			.await?;
 
 		let buy_response = self
 			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
@@ -210,28 +216,25 @@ where
 	) -> Result<Vec<(LspConfig, LSPS2FeeResponse)>, Error> {
 		let lsps2_nodes = self.get_lsps2_nodes().await?;
 
-		// Connect to all candidate LSPs in parallel.
-		let mut connect_set = JoinSet::new();
-		for lsp_node in &lsps2_nodes {
-			let cm = Arc::clone(connection_manager);
-			let node_id = lsp_node.node_id;
-			let addr = lsp_node.address.clone();
-			let logger = self.logger.clone();
-			connect_set.spawn(async move {
-				if let Err(e) = cm.connect_peer_if_necessary(node_id, addr).await {
-					log_warn!(logger, "Failed to connect to LSP {} for fee query: {}", node_id, e);
-				}
-			});
-		}
-		while connect_set.join_next().await.is_some() {}
-
 		let mut all_offers: Vec<(LspConfig, LSPS2FeeResponse)> =
 			Vec::with_capacity(lsps2_nodes.len());
 		let mut fee_set: JoinSet<(LspConfig, Result<LSPS2FeeResponse, Error>)> = JoinSet::new();
 		for lsp_node in &lsps2_nodes {
 			let lsp = lsp_node.clone();
 			let client = Arc::clone(self);
+			let cm = Arc::clone(connection_manager);
 			fee_set.spawn(async move {
+				if let Some(response) =
+					client.lsps2_get_cached_opening_fee_params(&lsp, expiry_secs).await
+				{
+					return (lsp, Ok(response));
+				}
+
+				if let Err(e) = cm.connect_peer_if_necessary(lsp.node_id, lsp.address.clone()).await
+				{
+					return (lsp, Err(e));
+				}
+
 				let res =
 					client.lsps2_request_opening_fee_params(Some(&lsp.node_id), expiry_secs).await;
 				(lsp, res)
@@ -257,14 +260,10 @@ impl<L: Deref> LSPS2Client<L>
 where
 	L::Target: LdkLogger,
 {
-	async fn lsps2_request_opening_fee_params(
-		&self, node_id: Option<&PublicKey>, invoice_expiry_secs: u32,
-	) -> Result<LSPS2FeeResponse, Error> {
-		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, node_id)
-			.ok_or(Error::LiquiditySourceUnavailable)?;
-		let required_validity = Duration::from_secs(
-			u64::from(invoice_expiry_secs).saturating_add(LSPS2_GET_INFO_CACHE_EXPIRY_BUFFER_SECS),
-		);
+	async fn lsps2_get_cached_opening_fee_params(
+		&self, lsps2_node: &LspConfig, invoice_expiry_secs: u32,
+	) -> Option<LSPS2FeeResponse> {
+		let required_validity = lsps2_fee_response_required_validity(invoice_expiry_secs);
 		match self
 			.fee_response_cache
 			.get(&lsps2_node.node_id, lsps2_node.token.as_deref(), required_validity)
@@ -276,9 +275,9 @@ where
 					"Using cached LSPS2 fee response from {}",
 					lsps2_node.node_id
 				);
-				return Ok(response);
+				Some(response)
 			},
-			Ok(None) => {},
+			Ok(None) => None,
 			Err(e) => {
 				log_error!(
 					self.logger,
@@ -286,8 +285,17 @@ where
 					lsps2_node.node_id,
 					e
 				);
+				None
 			},
 		}
+	}
+
+	async fn lsps2_request_opening_fee_params(
+		&self, node_id: Option<&PublicKey>, invoice_expiry_secs: u32,
+	) -> Result<LSPS2FeeResponse, Error> {
+		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, node_id)
+			.ok_or(Error::LiquiditySourceUnavailable)?;
+		let required_validity = lsps2_fee_response_required_validity(invoice_expiry_secs);
 
 		let client_handler = self.liquidity_manager.lsps2_client_handler().ok_or_else(|| {
 			log_error!(self.logger, "Liquidity client was not configured.",);
@@ -696,6 +704,12 @@ pub(crate) struct LSPS2BuyResponse {
 }
 
 const LSPS2_GET_INFO_CACHE_EXPIRY_BUFFER_SECS: u64 = 60;
+
+fn lsps2_fee_response_required_validity(invoice_expiry_secs: u32) -> Duration {
+	Duration::from_secs(
+		u64::from(invoice_expiry_secs).saturating_add(LSPS2_GET_INFO_CACHE_EXPIRY_BUFFER_SECS),
+	)
+}
 
 #[derive(Clone)]
 struct PersistedLSPS2FeeResponse {
