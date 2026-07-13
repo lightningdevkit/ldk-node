@@ -33,8 +33,8 @@ impl BroadcastPackage {
 	}
 
 	/// Builds a package for wallet-originated broadcasts that have no LDK classification.
-	fn unclassified(txs: Vec<Transaction>) -> Self {
-		Self(txs.into_iter().map(|tx| (tx, None)).collect())
+	fn unclassified(tx: Transaction) -> Self {
+		Self(vec![(tx, None)])
 	}
 
 	/// The packaged transactions and their types, for classification.
@@ -106,8 +106,8 @@ where
 		Ok(package)
 	}
 
-	pub(crate) fn broadcast_unclassified_transactions(&self, txs: Vec<Transaction>) {
-		self.queue_sender.try_send(BroadcastPackage::unclassified(txs)).unwrap_or_else(|e| {
+	pub(crate) fn broadcast_unclassified_transaction(&self, tx: Transaction) {
+		self.queue_sender.try_send(BroadcastPackage::unclassified(tx)).unwrap_or_else(|e| {
 			log_error!(self.logger, "Failed to broadcast transactions: {}", e);
 		});
 	}

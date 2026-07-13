@@ -330,7 +330,7 @@ impl Wallet {
 						.into_iter()
 						.filter_map(|txid| {
 							let tx = locked_wallet.tx_details(txid).map(|d| (*d.tx).clone())?;
-							self.broadcaster.broadcast_unclassified_transactions(vec![tx]);
+							self.broadcaster.broadcast_unclassified_transaction(tx);
 							Some(())
 						})
 						.count();
@@ -878,7 +878,7 @@ impl Wallet {
 		};
 
 		let txid = tx.compute_txid();
-		self.broadcaster.broadcast_unclassified_transactions(vec![tx]);
+		self.broadcaster.broadcast_unclassified_transaction(tx);
 
 		match send_amount {
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
@@ -1758,7 +1758,7 @@ impl Wallet {
 		self.runtime
 			.block_on(self.pending_payment_store.insert_or_update(pending_payment_store))?;
 
-		self.broadcaster.broadcast_unclassified_transactions(vec![fee_bumped_tx]);
+		self.broadcaster.broadcast_unclassified_transaction(fee_bumped_tx);
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
 
