@@ -11,9 +11,8 @@ mod common;
 
 use bitcoin::Amount;
 use common::{
-	expect_channel_ready_event, expect_payment_successful_event, generate_blocks_and_wait,
-	open_channel, premine_and_distribute_funds, random_chain_source, setup_bitcoind_and_electrsd,
-	setup_two_nodes, TestChainSource,
+	generate_blocks_and_wait, open_channel, premine_and_distribute_funds, random_chain_source,
+	setup_bitcoind_and_electrsd, setup_two_nodes, TestChainSource,
 };
 use ldk_node::payment::UnifiedPaymentResult;
 use ldk_node::Event;
