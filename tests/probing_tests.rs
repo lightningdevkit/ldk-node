@@ -21,21 +21,18 @@
 
 mod common;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use common::{
 	expect_channel_ready_event, expect_event, generate_blocks_and_wait, open_channel,
 	premine_and_distribute_funds, random_chain_source, random_config, setup_bitcoind_and_electrsd,
 	setup_node, wait_for_channel_ready_to_send, TestNode, TestStoreType,
 };
-
 use ldk_node::bitcoin::Amount;
 use ldk_node::probing::{ProbingConfigBuilder, ProbingStrategy};
 use ldk_node::Event;
-
 use lightning::routing::router::Path;
-
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 const PROBE_AMOUNT_MSAT: u64 = 1_000_000;
 const PROBING_INTERVAL_MILLISECONDS: u64 = 100;

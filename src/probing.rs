@@ -34,14 +34,15 @@
 //! # #[cfg(not(feature = "uniffi"))]
 //! # {
 //! use std::time::Duration;
-//! use ldk_node::Builder;
+//!
 //! use ldk_node::probing::ProbingConfigBuilder;
+//! use ldk_node::Builder;
 //!
 //! let probing_config = ProbingConfigBuilder::high_degree(100)
-//!     .interval(Duration::from_secs(30))
-//!     .max_locked_msat(500_000)
-//!     .diversity_penalty_msat(250)
-//!     .build();
+//! 	.interval(Duration::from_secs(30))
+//! 	.max_locked_msat(500_000)
+//! 	.diversity_penalty_msat(250)
+//! 	.build();
 //!
 //! let mut builder = Builder::new();
 //! builder.set_probing_config(probing_config);
@@ -70,9 +71,9 @@ use std::time::{Duration, Instant};
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::{PaymentId, RecentPaymentDetails};
 use lightning::routing::gossip::NodeId;
-use lightning::routing::router::Router as LdkRouter;
 use lightning::routing::router::{
-	Path, PaymentParameters, RouteHop, RouteParameters, MAX_PATH_LENGTH_ESTIMATE,
+	Path, PaymentParameters, RouteHop, RouteParameters, Router as LdkRouter,
+	MAX_PATH_LENGTH_ESTIMATE,
 };
 use lightning_invoice::DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA;
 use lightning_types::features::{ChannelFeatures, NodeFeatures};
@@ -123,14 +124,15 @@ impl fmt::Debug for ProbingStrategyKind {
 /// # #[cfg(not(feature = "uniffi"))]
 /// # {
 /// use std::time::Duration;
-/// use ldk_node::Builder;
+///
 /// use ldk_node::probing::ProbingConfigBuilder;
+/// use ldk_node::Builder;
 ///
 /// let config = ProbingConfigBuilder::high_degree(100)
-///     .interval(Duration::from_secs(30))
-///     .max_locked_msat(500_000)
-///     .diversity_penalty_msat(250)
-///     .build();
+/// 	.interval(Duration::from_secs(30))
+/// 	.max_locked_msat(500_000)
+/// 	.diversity_penalty_msat(250)
+/// 	.build();
 ///
 /// let mut builder = Builder::new();
 /// builder.set_probing_config(config);
@@ -143,16 +145,16 @@ impl fmt::Debug for ProbingStrategyKind {
 /// use ldk_node::probing::ProbingStrategy;
 ///
 /// struct FixedPathStrategy {
-///     path: Path,
+/// 	path: Path,
 /// }
 /// impl ProbingStrategy for FixedPathStrategy {
-///     fn next_probe(&self) -> Option<Path> {
-///         if self.path.hops.len() > 1 {
-///             Some(self.path.clone())
-///         } else {
-///             None
-///         }
-///     }
+/// 	fn next_probe(&self) -> Option<Path> {
+/// 		if self.path.hops.len() > 1 {
+/// 			Some(self.path.clone())
+/// 		} else {
+/// 			None
+/// 		}
+/// 	}
 /// }
 /// ```
 #[derive(Clone, Debug)]
