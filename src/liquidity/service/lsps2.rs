@@ -22,6 +22,7 @@ use lightning_liquidity::lsps2::msgs::LSPS2RawOpeningFeeParams;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_types::payment::PaymentHash;
 
+use crate::config::MaxDustHTLCExposure;
 use crate::logger::{log_error, LdkLogger};
 use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
 use crate::{total_anchor_channels_reserve_sats, Config};
@@ -106,6 +107,31 @@ pub struct LSPS2ServiceConfig {
 	///
 	/// [`Node::open_0reserve_channel`]: crate::Node::open_0reserve_channel
 	pub disable_client_reserve: bool,
+	/// The channel config we'll apply to the JIT channels we open to clients, allowing to
+	/// configure them separately from regular channels.
+	///
+	/// Any unset fields, or if set to `None` entirely, fall back to the node-wide config.
+	pub channel_config: Option<LSPS2ChannelConfig>,
+}
+
+/// A subset of channel configuration options applied to the JIT channels opened towards
+/// clients when acting as an LSPS2 service.
+///
+/// Any fields set to `None` fall back to the node-wide config.
+///
+/// Note that the forwarding fees of JIT channels are always set to zero, as we're
+/// compensated via the channel opening fee.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct LSPS2ChannelConfig {
+	/// The difference in the CLTV value between incoming HTLCs and an outbound HTLC forwarded
+	/// over the channel.
+	pub cltv_expiry_delta: Option<u16>,
+	/// The total exposure we're willing to allow to potential loss due to dust HTLCs.
+	pub max_dust_htlc_exposure: Option<MaxDustHTLCExposure>,
+	/// The additional fee we're willing to pay to avoid waiting for the counterparty's
+	/// `to_self_delay` to reclaim funds.
+	pub force_close_avoidance_max_fee_satoshis: Option<u64>,
 }
 
 impl<L: Deref> LSPS2ServiceLiquiditySource<L>
@@ -487,11 +513,27 @@ where
 				debug_assert!(!config.channel_handshake_config.announce_for_forwarding);
 				debug_assert!(config.accept_forwards_to_priv_channels);
 
-				// We set the forwarding fee to 0 for now as we're getting paid by the channel fee.
-				//
-				// TODO: revisit this decision eventually.
+				// We set the forwarding fees to 0 as we're getting paid by the channel opening
+				// fee.
 				config.channel_config.forwarding_fee_base_msat = 0;
 				config.channel_config.forwarding_fee_proportional_millionths = 0;
+
+				if let Some(jit_channel_config) = service_config.channel_config.as_ref() {
+					if let Some(cltv_expiry_delta) = jit_channel_config.cltv_expiry_delta {
+						config.channel_config.cltv_expiry_delta = cltv_expiry_delta;
+					}
+					if let Some(max_dust_htlc_exposure) = jit_channel_config.max_dust_htlc_exposure
+					{
+						config.channel_config.max_dust_htlc_exposure =
+							max_dust_htlc_exposure.into();
+					}
+					if let Some(force_close_avoidance_max_fee_satoshis) =
+						jit_channel_config.force_close_avoidance_max_fee_satoshis
+					{
+						config.channel_config.force_close_avoidance_max_fee_satoshis =
+							force_close_avoidance_max_fee_satoshis;
+					}
+				}
 
 				let result = if service_config.disable_client_reserve {
 					self.channel_manager.create_channel_to_trusted_peer_0reserve(
