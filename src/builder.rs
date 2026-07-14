@@ -622,6 +622,14 @@ impl NodeBuilder {
 		Ok(self)
 	}
 
+	/// Sets the RGB color that will be used when broadcasting announcements to the gossip network.
+	pub fn set_node_color(&mut self, red: u8, green: u8, blue: u8) -> &mut Self {
+		self.config.node_color.red = red;
+		self.config.node_color.green = green;
+		self.config.node_color.blue = blue;
+		self
+	}
+
 	/// Sets the role of the node in an asynchronous payments context.
 	///
 	/// See <https://github.com/lightning/bolts/pull/1149> for more information about the async payments protocol.
@@ -1190,6 +1198,11 @@ impl ArcedNodeBuilder {
 	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
 	pub fn set_node_alias(&self, node_alias: String) -> Result<(), BuildError> {
 		self.inner.write().expect("lock").set_node_alias(node_alias).map(|_| ())
+	}
+
+	/// Sets the RGB color that will be used when broadcasting announcements to the gossip network.
+	pub fn set_node_color(&self, red: u8, green: u8, blue: u8) {
+		self.inner.write().expect("lock").set_node_color(red, green, blue);
 	}
 
 	/// Sets the role of the node in an asynchronous payments context.
@@ -2426,7 +2439,15 @@ pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 
 #[cfg(test)]
 mod tests {
-	use super::{sanitize_alias, BuildError, NodeAlias};
+	use super::{sanitize_alias, BuildError, NodeAlias, NodeBuilder};
+
+	#[test]
+	fn set_node_color_updates_config() {
+		let mut builder = NodeBuilder::new();
+		builder.set_node_color(1, 2, 3);
+
+		assert_eq!(builder.config.node_color.as_rgb(), [1, 2, 3]);
+	}
 
 	#[test]
 	fn sanitize_empty_node_alias() {
