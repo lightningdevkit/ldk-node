@@ -1183,8 +1183,8 @@ impl Wallet {
 			LdkTransactionType::InteractiveFunding { candidates } => {
 				self.classify_interactive_funding(tx, candidates, tx_type.clone().into()).await
 			},
+			LdkTransactionType::UnilateralClose { .. } => Ok(()),
 			LdkTransactionType::CooperativeClose { .. }
-			| LdkTransactionType::UnilateralClose { .. }
 			| LdkTransactionType::AnchorBump { .. }
 			| LdkTransactionType::Claim { .. }
 			| LdkTransactionType::Sweep { .. } => {

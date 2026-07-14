@@ -438,7 +438,7 @@ fn assert_any_node_has_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>(
 }
 
 fn assert_all_nodes_have_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>(
-	nodes: &[(&str, &TestNode)], tx_type_name: &str, predicate: F,
+	nodes: &[(&str, &TestNode)], panic_msg: &str, tx_type_name: &str, predicate: F,
 ) {
 	if nodes.iter().all(|(_, node)| has_onchain_tx_type(node, predicate)) {
 		return;
@@ -454,8 +454,8 @@ fn assert_all_nodes_have_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>
 		})
 		.collect();
 	panic!(
-		"Expected all nodes to have on-chain payment with tx_type {}; observed {:?}",
-		tx_type_name, observed
+		"Expected {}nodes to have on-chain payment with tx_type {}; observed {:?}",
+		panic_msg, tx_type_name, observed
 	);
 }
 
@@ -1707,10 +1707,11 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
 			"node_b should remain persisted in node_a peer store after locally-initiated force-close"
 		);
-		assert_any_node_has_onchain_tx_type(
+		assert_all_nodes_have_onchain_tx_type(
 			&[("node_a", &node_a), ("node_b", &node_b)],
+			"no ",
 			"UnilateralClose",
-			|tx_type| matches!(tx_type, TransactionType::UnilateralClose { .. }),
+			|tx_type| !matches!(tx_type, TransactionType::UnilateralClose { .. }),
 		);
 		assert_any_node_has_onchain_tx_type(
 			&[("node_a", &node_a), ("node_b", &node_b)],
@@ -1720,6 +1721,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	} else {
 		assert_all_nodes_have_onchain_tx_type(
 			&[("node_a", &node_a), ("node_b", &node_b)],
+			"all ",
 			"CooperativeClose",
 			|tx_type| matches!(tx_type, TransactionType::CooperativeClose { .. }),
 		);
