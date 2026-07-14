@@ -34,7 +34,7 @@ use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
-use crate::config::{may_announce_channel, Config};
+use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
 use crate::fee_estimator::ConfirmationTarget;
@@ -581,6 +581,68 @@ where
 			logger,
 			config,
 		}
+	}
+
+	fn remove_peer_after_reconnect(&self, peer_info: PeerInfo, closed_channel_id: ChannelId) {
+		let channel_manager = Arc::clone(&self.channel_manager);
+		let connection_manager = Arc::clone(&self.connection_manager);
+		let peer_store = Arc::clone(&self.peer_store);
+		let logger = self.logger.clone();
+		self.runtime.spawn_cancellable_background_task(async move {
+			let has_other_channels = || {
+				channel_manager
+					.list_channels_with_counterparty(&peer_info.node_id)
+					.iter()
+					.any(|c| c.channel_id != closed_channel_id)
+			};
+
+			if peer_store.get_peer(&peer_info.node_id).is_none() || has_other_channels() {
+				return;
+			}
+
+			// Ensure a connected peer cannot be mistaken for a completed recovery reconnect.
+			// With no other channels left, reconnecting once gives `channel_reestablish` a chance
+			// to retransmit the force-close error before we stop persisting the peer.
+			connection_manager.disconnect_peer(peer_info.node_id);
+
+			loop {
+				if peer_store.get_peer(&peer_info.node_id).is_none() || has_other_channels() {
+					return;
+				}
+
+				match connection_manager
+					.connect_peer_if_necessary(peer_info.node_id, peer_info.address.clone())
+					.await
+				{
+					Ok(()) => {
+						if peer_store.get_peer(&peer_info.node_id).is_none() || has_other_channels()
+						{
+							return;
+						}
+						if let Err(e) = peer_store.remove_peer(&peer_info.node_id).await {
+							log_error!(
+								logger,
+								"Failed to remove peer {} from peer store: {}",
+								peer_info.node_id,
+								e
+							);
+						} else {
+							return;
+						}
+					},
+					Err(e) => {
+						log_debug!(
+							logger,
+							"Failed to reconnect peer {} before removing from peer store: {}",
+							peer_info.node_id,
+							e
+						);
+					},
+				}
+
+				tokio::time::sleep(PEER_RECONNECTION_INTERVAL).await;
+			}
+		});
 	}
 
 	async fn fail_claimable_payment(
@@ -1627,25 +1689,24 @@ where
 				let counterparty_node_id = counterparty_node_id
 					.expect("counterparty_node_id is always set since LDK 0.0.117");
 
-				// Drop the peer once its last channel with us has reached a terminal state
-				// that reconnection cannot recover. Every closure reason is terminal except
-				// `HolderForceClosed`: when *we* force-close, we keep reconnecting so that
-				// `channel_reestablish` can drive recovery (see `Node::close_channel_internal`).
+				// Drop the peer once its last channel with us has reached a terminal state.
+				// For `HolderForceClosed`, retain it through one recovery reconnect so that
+				// `channel_reestablish` can retransmit the force-close error before cleanup.
 				// This also cleans up peers persisted for a channel that closed before funding
 				// (e.g. `CounterpartyCoopClosedUnfundedChannel`), which would otherwise be
 				// retried forever.
 				// We exclude `channel_id` from the count because LDK emits `ChannelClosed`
 				// before removing it from its internal list.
-				let dont_reconnect = !matches!(reason, ClosureReason::HolderForceClosed { .. });
+				let has_other_channels = self
+					.channel_manager
+					.list_channels_with_counterparty(&counterparty_node_id)
+					.iter()
+					.any(|c| c.channel_id != channel_id);
 
-				if dont_reconnect {
-					let has_other_channels = self
-						.channel_manager
-						.list_channels_with_counterparty(&counterparty_node_id)
-						.iter()
-						.any(|c| c.channel_id != channel_id);
-
-					if !has_other_channels {
+				let peer_to_reconnect = if !has_other_channels {
+					if matches!(reason, ClosureReason::HolderForceClosed { .. }) {
+						self.peer_store.get_peer(&counterparty_node_id)
+					} else {
 						if let Err(e) = self.peer_store.remove_peer(&counterparty_node_id).await {
 							log_error!(
 								self.logger,
@@ -1655,8 +1716,11 @@ where
 							);
 							return Err(ReplayEvent());
 						}
+						None
 					}
-				}
+				} else {
+					None
+				};
 
 				let event = Event::ChannelClosed {
 					channel_id,
@@ -1672,6 +1736,10 @@ where
 						return Err(ReplayEvent());
 					},
 				};
+
+				if let Some(peer_info) = peer_to_reconnect {
+					self.remove_peer_after_reconnect(peer_info, channel_id);
+				}
 			},
 			LdkEvent::DiscardFunding { channel_id, funding_info } => {
 				if let FundingInfo::Contribution { inputs: _, outputs } = funding_info {

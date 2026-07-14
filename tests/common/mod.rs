@@ -1702,10 +1702,11 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	}
 
 	if force_close {
-		// Peer retained after local force-close to allow channel_reestablish recovery.
+		// The recovery reconnect completed while the force-close settled, so the peer no longer
+		// needs to remain persisted.
 		assert!(
-			node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
-			"node_b should remain persisted in node_a peer store after locally-initiated force-close"
+			!node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
+			"node_b should be removed from node_a peer store after the recovery reconnect"
 		);
 		assert_any_node_has_onchain_tx_type(
 			&[("node_a", &node_a), ("node_b", &node_b)],
