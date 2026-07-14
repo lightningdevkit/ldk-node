@@ -26,7 +26,7 @@ pub fn setup_background_pathfinding_scores_sync(
 
 	let logger = Arc::clone(&logger);
 
-	runtime.spawn_background_processor_task(async move {
+	runtime.spawn_cancellable_background_task(async move {
 		let mut interval = tokio::time::interval(EXTERNAL_PATHFINDING_SCORES_SYNC_INTERVAL);
 		loop {
 			tokio::select! {
