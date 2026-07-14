@@ -63,7 +63,7 @@ use serde_json::{json, Value};
 
 #[path = "../../src/io/in_memory_store.rs"]
 mod in_memory_store;
-use in_memory_store::InMemoryStore;
+pub(crate) use in_memory_store::InMemoryStore;
 
 /// Shared timeout (in seconds) for waiting on LDK events and external node operations.
 pub(crate) const INTEROP_TIMEOUT_SECS: u64 = 60;

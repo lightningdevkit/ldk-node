@@ -488,7 +488,7 @@ impl LSPS1Liquidity {
 
 		log_info!(self.logger, "Connected to LSP {}@{}. ", lsps1_node.node_id, lsps1_node.address);
 
-		let refund_address = self.wallet.get_new_address()?;
+		let refund_address = self.runtime.block_on(self.wallet.get_new_address())?;
 
 		let liquidity_source = Arc::clone(&self.liquidity_source);
 		let response = self.runtime.block_on(async move {

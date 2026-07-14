@@ -182,7 +182,7 @@ impl ElectrumChainSource {
 		update_res: Result<BdkUpdate, Error>, now: Instant,
 	) -> Result<(), Error> {
 		match update_res {
-			Ok(update) => match onchain_wallet.apply_update(update) {
+			Ok(update) => match onchain_wallet.apply_update(update).await {
 				Ok(()) => {
 					log_debug!(
 						self.logger,
