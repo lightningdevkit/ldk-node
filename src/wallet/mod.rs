@@ -16,7 +16,9 @@ use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
 #[allow(deprecated)]
 use bdk_wallet::SignOptions;
-use bdk_wallet::{Balance, KeychainKind, LocalOutput, PersistedWallet, Update, WalletEvent};
+use bdk_wallet::{
+	AsyncWalletPersister, Balance, KeychainKind, LocalOutput, PersistedWallet, Update, WalletEvent,
+};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -1823,64 +1825,91 @@ impl Listen for Wallet {
 	}
 
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
-		let mut locked_wallet = self.inner.lock().expect("lock");
+		// Apply the block under the wallet lock, then persist the staged changeset *without* the lock
+		// held: `block_on(persist)` parks the worker on I/O, and holding `self.inner` across it blocks
+		// every other wallet access (a wedge on a single-worker runtime). We clone the staged
+		// changeset rather than taking it, and clear the stage only after the persist succeeds — like
+		// BDK's `persist_async`, a failed persist must leave the changeset staged so the next block
+		// retries it and the on-disk state stays a consistent prefix. Clearing afterwards is safe
+		// because block application is serialized, so nothing else stages in between. Persistence is a
+		// durability barrier, not mutual exclusion: a reader seeing applied-but-unflushed state is
+		// fine, since a crash reverts to the last persisted checkpoint.
+		let staged = {
+			let mut locked_wallet = self.inner.lock().expect("lock");
 
-		let pre_checkpoint = locked_wallet.latest_checkpoint();
-		if pre_checkpoint.height() != height - 1
-			|| pre_checkpoint.hash() != block.header.prev_blockhash
-		{
-			log_debug!(
-				self.logger,
-				"Detected reorg while applying a connected block to on-chain wallet: new block with hash {} at height {}",
-				block.header.block_hash(),
-				height
-			);
-		}
+			let pre_checkpoint = locked_wallet.latest_checkpoint();
+			if pre_checkpoint.height() != height - 1
+				|| pre_checkpoint.hash() != block.header.prev_blockhash
+			{
+				log_debug!(
+					self.logger,
+					"Detected reorg while applying a connected block to on-chain wallet: new block with hash {} at height {}",
+					block.header.block_hash(),
+					height
+				);
+			}
 
-		// In order to be able to reliably calculate fees the `Wallet` needs access to the previous
-		// ouput data. To this end, we here insert any ouputs of transactions that LDK is intersted
-		// in (e.g., funding transaction ouputs) into the wallet's transaction graph when we see
-		// them, so it is reliably able to calculate fees for subsequent spends.
-		//
-		// FIXME: technically, we should also do this for mempool transactions. However, at the
-		// current time fixing the edge case doesn't seem worth the additional conplexity /
-		// additional overhead..
-		let registered_txids = self.chain_source.registered_txids();
-		for tx in &block.txdata {
-			let txid = tx.compute_txid();
-			if registered_txids.contains(&txid) {
-				for (vout, txout) in tx.output.iter().enumerate() {
-					let outpoint = OutPoint { txid, vout: vout as u32 };
-					locked_wallet.insert_txout(outpoint, txout.clone());
+			// In order to be able to reliably calculate fees the `Wallet` needs access to the previous
+			// ouput data. To this end, we here insert any ouputs of transactions that LDK is intersted
+			// in (e.g., funding transaction ouputs) into the wallet's transaction graph when we see
+			// them, so it is reliably able to calculate fees for subsequent spends.
+			//
+			// FIXME: technically, we should also do this for mempool transactions. However, at the
+			// current time fixing the edge case doesn't seem worth the additional conplexity /
+			// additional overhead..
+			let registered_txids = self.chain_source.registered_txids();
+			for tx in &block.txdata {
+				let txid = tx.compute_txid();
+				if registered_txids.contains(&txid) {
+					for (vout, txout) in tx.output.iter().enumerate() {
+						let outpoint = OutPoint { txid, vout: vout as u32 };
+						locked_wallet.insert_txout(outpoint, txout.clone());
+					}
 				}
 			}
-		}
 
-		match locked_wallet.apply_block_events(block, height) {
-			Ok(events) => {
-				if let Err(e) = self.update_payment_store(&mut *locked_wallet, events) {
-					log_error!(self.logger, "Failed to update payment store: {}", e);
+			match locked_wallet.apply_block_events(block, height) {
+				Ok(events) => {
+					if let Err(e) = self.update_payment_store(&mut *locked_wallet, events) {
+						log_error!(self.logger, "Failed to update payment store: {}", e);
+						return;
+					}
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to apply connected block to on-chain wallet: {}",
+						e
+					);
 					return;
-				}
-			},
-			Err(e) => {
-				log_error!(
-					self.logger,
-					"Failed to apply connected block to on-chain wallet: {}",
-					e
-				);
-				return;
-			},
+				},
+			};
+
+			locked_wallet.staged().cloned()
 		};
 
-		let mut locked_persister = self.persister.lock().expect("lock");
-		match self.runtime.block_on(locked_wallet.persist_async(&mut locked_persister)) {
-			Ok(_) => (),
-			Err(e) => {
-				log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
-				return;
-			},
-		};
+		if let Some(change_set) = staged {
+			let persist_result = {
+				let mut locked_persister = self.persister.lock().expect("lock");
+				self.runtime
+					.block_on(AsyncWalletPersister::persist(&mut *locked_persister, &change_set))
+			};
+			match persist_result {
+				// Persisted durably: drop the changeset we just wrote. Every other wallet mutation
+				// stages+persists+clears atomically under this lock, and block application is
+				// serialized, so when we re-acquire the lock the stage is either exactly our
+				// now-durable delta or has already been flushed and cleared by a concurrent writer —
+				// we never drop unpersisted changes.
+				Ok(_) => {
+					let _ = self.inner.lock().expect("lock").take_staged();
+				},
+				// Leave the changeset staged so the next block's persist retries it, keeping the
+				// on-disk state a consistent prefix.
+				Err(e) => {
+					log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
+				},
+			};
+		}
 	}
 
 	fn blocks_disconnected(&self, _fork_point_block: BlockLocator) {
