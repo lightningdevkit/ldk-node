@@ -1380,18 +1380,6 @@ where
 					},
 				}
 
-				if pending_payment.is_some() {
-					if let Err(e) = self.pending_payment_store.remove(&payment_id).await {
-						log_error!(
-							self.logger,
-							"Failed to remove pending payment with ID {}: {}",
-							payment_id,
-							e
-						);
-						return Err(ReplayEvent());
-					}
-				}
-
 				let event = Event::PaymentReceived {
 					payment_id,
 					payment_hash,
@@ -1401,12 +1389,28 @@ where
 						.unwrap_or_default(),
 				};
 				match self.event_queue.add_event(event).await {
-					Ok(_) => return Ok(()),
+					Ok(_) => (),
 					Err(e) => {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						return Err(ReplayEvent());
 					},
 				};
+
+				if pending_payment.is_some() {
+					if let Err(e) = self.pending_payment_store.remove(&payment_id).await {
+						log_error!(
+							self.logger,
+							"Failed to remove pending payment with ID {}: {}",
+							payment_id,
+							e
+						);
+						// The user-visible PaymentReceived event has already been durably queued.
+						// Replaying the LDK event here would risk queuing a duplicate event.
+						return Ok(());
+					}
+				}
+
+				return Ok(());
 			},
 			LdkEvent::PaymentSent {
 				payment_id,
