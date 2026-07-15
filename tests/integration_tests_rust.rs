@@ -807,7 +807,7 @@ async fn reorged_onchain_payment_returns_to_unconfirmed() {
 			.call("generateblock", &[json!(replacement_address.to_string()), json!([])])
 			.expect("failed to generate empty block");
 	}
-	wait_for_block(&electrsd.client, original_height as usize + 1).await;
+	wait_for_block(&bitcoind.client, &electrsd.client, original_height as usize + 1).await;
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
@@ -2056,7 +2056,7 @@ async fn splice_payment_reorged_to_unconfirmed() {
 			.call("generateblock", &[json!(replacement_address.to_string()), json!([])])
 			.expect("failed to generate empty block");
 	}
-	wait_for_block(&electrsd.client, original_height as usize + 1).await;
+	wait_for_block(&bitcoind.client, &electrsd.client, original_height as usize + 1).await;
 	node_b.sync_wallets().unwrap();
 
 	// The funding payment returns to `Unconfirmed` and stays `Pending`, exercising the
