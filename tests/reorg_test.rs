@@ -76,7 +76,9 @@ proptest! {
 				nodes_funding_tx.insert(node.node_id(), funding_txo);
 			}
 
-			generate_blocks_and_wait(bitcoind, electrs, 6).await;
+			// Keep funding confirmed across the deepest reorg. rust-lightning PR #4231 exempts
+			// only trusted zero-conf channels; regular channels still force-close at zero confirmations.
+			generate_blocks_and_wait(bitcoind, electrs, 7).await;
 			sync_wallets!();
 
 			reorg!(reorg_depth);
