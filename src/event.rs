@@ -624,16 +624,9 @@ where
 			.map(|payment| payment.details.id)
 			.collect::<Vec<_>>();
 
-		for payment_id in expired_payment_ids {
-			if let Err(e) = self.pending_payment_store.remove(&payment_id).await {
-				log_error!(
-					self.logger,
-					"Failed to remove expired pending payment with ID {}: {}",
-					payment_id,
-					e
-				);
-				return Err(ReplayEvent());
-			}
+		if let Err(e) = self.pending_payment_store.remove_batch(&expired_payment_ids).await {
+			log_error!(self.logger, "Failed to remove expired pending payments: {}", e);
+			return Err(ReplayEvent());
 		}
 
 		Ok(())

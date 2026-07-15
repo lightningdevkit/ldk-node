@@ -116,11 +116,7 @@ impl Bolt11Payment {
 			.map(|payment| payment.details.id)
 			.collect::<Vec<_>>();
 
-		for payment_id in expired_payment_ids {
-			self.runtime.block_on(self.pending_payment_store.remove(&payment_id))?;
-		}
-
-		Ok(())
+		self.runtime.block_on(self.pending_payment_store.remove_batch(&expired_payment_ids))
 	}
 
 	fn pending_manual_claim_invoice(
