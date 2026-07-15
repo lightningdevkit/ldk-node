@@ -229,6 +229,33 @@ where
 		&self, pending_payment: PendingPaymentDetails,
 	) -> Result<bool, Error> {
 		let _guard = self.mutation_lock.lock().await;
+		self.insert_or_update_locked(pending_payment).await
+	}
+
+	pub(crate) async fn insert_manual_bolt11(
+		&self, pending_payment: PendingPaymentDetails,
+	) -> Result<(), Error> {
+		let _guard = self.mutation_lock.lock().await;
+		let Some(payment_hash) = manual_bolt11_payment_hash(&pending_payment.details) else {
+			debug_assert!(false, "manual BOLT11 insert requires a pending inbound BOLT11 payment");
+			self.insert_or_update_locked(pending_payment).await?;
+			return Ok(());
+		};
+		let duplicate = {
+			let index = self.manual_bolt11_payment_hash_index.lock().expect("lock");
+			index.get(&payment_hash).map_or(false, |ids| !ids.is_empty())
+		};
+		if duplicate {
+			return Err(Error::DuplicatePayment);
+		}
+
+		self.insert_or_update_locked(pending_payment).await?;
+		Ok(())
+	}
+
+	async fn insert_or_update_locked(
+		&self, pending_payment: PendingPaymentDetails,
+	) -> Result<bool, Error> {
 		let id = pending_payment.id();
 		let before = self.inner.get(&id);
 		let updated = self.inner.insert_or_update(pending_payment).await?;
@@ -342,10 +369,14 @@ fn manual_bolt11_payment_hash(payment: &PaymentDetails) -> Option<PaymentHash> {
 #[cfg(test)]
 mod tests {
 	use bitcoin::hashes::Hash;
+	use lightning::util::test_utils::TestLogger;
+	use lightning_types::payment::PaymentSecret;
 
 	use super::*;
+	use crate::io::test_utils::InMemoryStore;
 	use crate::payment::store::ConfirmationStatus;
 	use crate::payment::{PaymentDirection, PaymentKind, PaymentStatus};
+	use crate::types::{DynStore, DynStoreWrapper};
 
 	#[test]
 	fn pending_payment_candidate_lookup() {
@@ -412,6 +443,57 @@ mod tests {
 			PaymentDirection::Outbound,
 			PaymentStatus::Pending,
 		)
+	}
+
+	fn pending_store() -> PendingPaymentStore<Arc<TestLogger>> {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		PendingPaymentStore::new(
+			Vec::new(),
+			"pending_payment_store_test_primary".to_string(),
+			"pending_payment_store_test_secondary".to_string(),
+			store,
+			logger,
+		)
+	}
+
+	fn pending_manual_bolt11_payment(
+		payment_hash: PaymentHash, payment_secret: Option<PaymentSecret>,
+	) -> PendingPaymentDetails {
+		let payment_id = PaymentId(payment_hash.0);
+		let details = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Bolt11 {
+				hash: payment_hash,
+				preimage: None,
+				secret: payment_secret,
+				counterparty_skimmed_fee_msat: None,
+			},
+			Some(1_000),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+		PendingPaymentDetails::new_with_expiry(details, Vec::new(), Some(1_000_000))
+	}
+
+	#[tokio::test]
+	async fn manual_bolt11_insert_rejects_duplicate_hash() {
+		let store = pending_store();
+		let payment_hash = PaymentHash([42; 32]);
+		let pending_payment = pending_manual_bolt11_payment(payment_hash, None);
+		assert_eq!(store.insert_manual_bolt11(pending_payment.clone()).await, Ok(()));
+
+		let duplicate = pending_manual_bolt11_payment(payment_hash, None);
+		assert_eq!(store.insert_manual_bolt11(duplicate).await, Err(Error::DuplicatePayment));
+		assert_eq!(
+			store.get_pending_manual_bolt11_by_payment_hash(&payment_hash),
+			Some(pending_payment)
+		);
+
+		let updated = pending_manual_bolt11_payment(payment_hash, Some(PaymentSecret([43; 32])));
+		assert_eq!(store.insert_or_update(updated.clone()).await, Ok(true));
+		assert_eq!(store.get_pending_manual_bolt11_by_payment_hash(&payment_hash), Some(updated));
 	}
 
 	#[test]

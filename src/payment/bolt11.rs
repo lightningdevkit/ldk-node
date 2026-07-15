@@ -123,19 +123,15 @@ impl Bolt11Payment {
 		Ok(())
 	}
 
-	fn has_pending_inbound_payment(&self, payment_hash: &PaymentHash) -> bool {
-		self.pending_payment_store.get_pending_manual_bolt11_by_payment_hash(payment_hash).is_some()
-	}
-
-	fn register_manual_claim_invoice(
-		&self, payment_hash: PaymentHash, amount_msat: Option<u64>, payment_secret: PaymentSecret,
+	fn pending_manual_claim_invoice(
+		payment_hash: PaymentHash, amount_msat: Option<u64>, payment_secret: Option<PaymentSecret>,
 		expiry_secs: u32,
-	) -> Result<(), Error> {
+	) -> PendingPaymentDetails {
 		let payment_id = PaymentId(payment_hash.0);
 		let kind = PaymentKind::Bolt11 {
 			hash: payment_hash,
 			preimage: None,
-			secret: Some(payment_secret),
+			secret: payment_secret,
 			counterparty_skimmed_fee_msat: None,
 		};
 		let payment = PaymentDetails::new(
@@ -147,10 +143,42 @@ impl Bolt11Payment {
 			PaymentStatus::Pending,
 		);
 		let expires_at = Some(Self::current_time_secs().saturating_add(expiry_secs as u64));
+		PendingPaymentDetails::new_with_expiry(payment, Vec::new(), expires_at)
+	}
+
+	fn reserve_manual_claim_invoice(
+		&self, payment_hash: PaymentHash, amount_msat: Option<u64>, expiry_secs: u32,
+	) -> Result<(), Error> {
 		let pending_payment =
-			PendingPaymentDetails::new_with_expiry(payment, Vec::new(), expires_at);
+			Self::pending_manual_claim_invoice(payment_hash, amount_msat, None, expiry_secs);
+		if let Err(e) =
+			self.runtime.block_on(self.pending_payment_store.insert_manual_bolt11(pending_payment))
+		{
+			if e == Error::DuplicatePayment {
+				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
+			}
+			return Err(e);
+		}
+		Ok(())
+	}
+
+	fn register_manual_claim_invoice(
+		&self, payment_hash: PaymentHash, amount_msat: Option<u64>, payment_secret: PaymentSecret,
+		expiry_secs: u32,
+	) -> Result<(), Error> {
+		let pending_payment = Self::pending_manual_claim_invoice(
+			payment_hash,
+			amount_msat,
+			Some(payment_secret),
+			expiry_secs,
+		);
 		self.runtime.block_on(self.pending_payment_store.insert_or_update(pending_payment))?;
 		Ok(())
+	}
+
+	fn remove_manual_claim_invoice(&self, payment_hash: PaymentHash) -> Result<(), Error> {
+		let payment_id = PaymentId(payment_hash.0);
+		self.runtime.block_on(self.pending_payment_store.remove(&payment_id))
 	}
 
 	pub(crate) fn receive_inner(
@@ -159,10 +187,7 @@ impl Bolt11Payment {
 	) -> Result<LdkBolt11Invoice, Error> {
 		if let Some(payment_hash) = manual_claim_payment_hash {
 			self.prune_expired_pending_payments()?;
-			if self.has_pending_inbound_payment(&payment_hash) {
-				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
-				return Err(Error::DuplicatePayment);
-			}
+			self.reserve_manual_claim_invoice(payment_hash, amount_msat, expiry_secs)?;
 		}
 
 		let invoice = {
@@ -181,6 +206,9 @@ impl Bolt11Payment {
 				},
 				Err(e) => {
 					log_error!(self.logger, "Failed to create invoice: {}", e);
+					if let Some(payment_hash) = manual_claim_payment_hash {
+						self.remove_manual_claim_invoice(payment_hash)?;
+					}
 					return Err(Error::InvoiceCreationFailed);
 				},
 			}
@@ -234,14 +262,11 @@ impl Bolt11Payment {
 	) -> Result<LdkBolt11Invoice, Error> {
 		if let Some(payment_hash) = payment_hash {
 			self.prune_expired_pending_payments()?;
-			if self.has_pending_inbound_payment(&payment_hash) {
-				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
-				return Err(Error::DuplicatePayment);
-			}
+			self.reserve_manual_claim_invoice(payment_hash, amount_msat, expiry_secs)?;
 		}
 
 		let connection_manager = Arc::clone(&self.connection_manager);
-		let (invoice, chosen_lsp) = self.runtime.block_on(async move {
+		let res = self.runtime.block_on(async move {
 			if let Some(amount_msat) = amount_msat {
 				self.liquidity_source
 					.lsps2_client()
@@ -266,7 +291,16 @@ impl Bolt11Payment {
 					)
 					.await
 			}
-		})?;
+		});
+		let (invoice, chosen_lsp) = match res {
+			Ok(res) => res,
+			Err(e) => {
+				if let Some(payment_hash) = payment_hash {
+					self.remove_manual_claim_invoice(payment_hash)?;
+				}
+				return Err(e);
+			},
+		};
 
 		if let Some(payment_hash) = payment_hash {
 			self.register_manual_claim_invoice(
