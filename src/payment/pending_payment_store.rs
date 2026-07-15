@@ -244,14 +244,9 @@ where
 	pub(crate) fn get_pending_manual_bolt11_by_payment_hash(
 		&self, payment_hash: &PaymentHash,
 	) -> Option<PendingPaymentDetails> {
-		let ids = self
-			.manual_bolt11_payment_hash_index
-			.lock()
-			.expect("lock")
-			.get(payment_hash)
-			.cloned()
-			.unwrap_or_default();
-		ids.into_iter().find_map(|id| self.inner.get(&id))
+		let index = self.manual_bolt11_payment_hash_index.lock().expect("lock");
+		let ids = index.get(payment_hash)?;
+		ids.iter().find_map(|id| self.inner.get(id))
 	}
 
 	fn build_manual_bolt11_payment_hash_index(
