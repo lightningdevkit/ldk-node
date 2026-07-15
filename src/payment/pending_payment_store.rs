@@ -240,11 +240,14 @@ where
 	}
 
 	pub(crate) async fn remove(&self, id: &PaymentId) -> Result<(), Error> {
+		self.remove_batch(std::slice::from_ref(id)).await
+	}
+
+	pub(crate) async fn remove_batch(&self, ids: &[PaymentId]) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
-		let before = self.inner.get(id);
-		self.inner.remove(id).await?;
-		if let Some(payment) = before.as_ref() {
-			self.remove_from_index(payment);
+		let removed_payments = self.inner.remove_batch(ids).await?;
+		for payment in removed_payments {
+			self.remove_from_index(&payment);
 		}
 		Ok(())
 	}
