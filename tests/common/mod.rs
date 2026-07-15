@@ -810,15 +810,14 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
 	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
 
-	let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
-	if is_spent {
-		return;
-	}
-
+	// Script history already contains the funding transaction itself, so wait until the exact
+	// funding outpoint leaves the unspent set instead of treating any history as a spend.
 	exponential_backoff_poll(|| {
 		electrs.ping().unwrap();
 
-		let is_spent = !electrs.script_get_history(&txout_script).unwrap().is_empty();
+		let is_spent = !electrs.script_list_unspent(&txout_script).unwrap().iter().any(|output| {
+			output.tx_hash == outpoint.txid && output.tx_pos == outpoint.vout as usize
+		});
 		is_spent.then_some(())
 	})
 	.await;
