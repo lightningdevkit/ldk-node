@@ -753,7 +753,7 @@ pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
-	wait_for_block(electrs, cur_height as usize + num).await;
+	wait_for_block(bitcoind, electrs, cur_height as usize + num).await;
 	print!(" Done!");
 	println!("\n");
 }
@@ -773,27 +773,25 @@ pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
 	assert!(new_cur_height + num_blocks == cur_height);
 }
 
-pub(crate) async fn wait_for_block<E: ElectrumApi>(electrs: &E, min_height: usize) {
-	let mut header = match electrs.block_headers_subscribe() {
-		Ok(header) => header,
-		Err(_) => {
-			// While subscribing should succeed the first time around, we ran into some cases where
-			// it didn't. Since we can't proceed without subscribing, we try again after a delay
-			// and panic if it still fails.
-			tokio::time::sleep(Duration::from_secs(3)).await;
-			electrs.block_headers_subscribe().expect("failed to subscribe to block headers")
-		},
-	};
-	loop {
-		if header.height >= min_height {
-			break;
+pub(crate) async fn wait_for_block<E: ElectrumApi>(
+	bitcoind: &BitcoindClient, electrs: &E, min_height: usize,
+) {
+	let expected_block_hash = exponential_backoff_poll(|| {
+		let bitcoind_height =
+			bitcoind.get_blockchain_info().expect("failed to get blockchain info").blocks as usize;
+		if bitcoind_height < min_height {
+			return None;
 		}
-		header = exponential_backoff_poll(|| {
-			electrs.ping().expect("failed to ping electrs");
-			electrs.block_headers_pop().expect("failed to pop block header")
-		})
-		.await;
-	}
+		bitcoind.get_block_hash(min_height as u64).ok()?.block_hash().ok()
+	})
+	.await;
+	// A height-only wait can return the old header during a same-height reorg. Require the
+	// replacement hash so callers cannot sync against the stale chain by mistake.
+	exponential_backoff_poll(|| {
+		let header = electrs.block_header(min_height).ok()?;
+		(header.block_hash() == expected_block_hash).then_some(())
+	})
+	.await;
 }
 
 pub(crate) async fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
