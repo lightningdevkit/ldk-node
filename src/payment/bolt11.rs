@@ -36,7 +36,7 @@ use crate::payment::store::{
 	LSPS2Parameters, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
 	PaymentStatus,
 };
-use crate::payment::PendingPaymentDetails;
+use crate::payment::{PendingPaymentDetails, PendingPaymentExpiry};
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
 use crate::types::{ChannelManager, PaymentStore, PendingPaymentStore};
@@ -109,9 +109,10 @@ impl Bolt11Payment {
 
 	fn prune_expired_pending_payments(&self) -> Result<(), Error> {
 		let now = Self::current_time_secs();
+		let current_height = self.channel_manager.current_best_block().height;
 		let expired_payment_ids = self
 			.pending_payment_store
-			.list_filter(|payment| payment.has_expired(now))
+			.list_filter(|payment| payment.has_expired(now, current_height))
 			.into_iter()
 			.map(|payment| payment.details.id)
 			.collect::<Vec<_>>();
@@ -138,8 +139,9 @@ impl Bolt11Payment {
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
-		let expires_at = Some(Self::current_time_secs().saturating_add(expiry_secs as u64));
-		PendingPaymentDetails::new_with_expiry(payment, Vec::new(), expires_at)
+		let timestamp = Self::current_time_secs().saturating_add(expiry_secs as u64);
+		let expiry = Some(PendingPaymentExpiry::Time { timestamp });
+		PendingPaymentDetails::new_with_expiry(payment, Vec::new(), expiry)
 	}
 
 	fn reserve_manual_claim_invoice(

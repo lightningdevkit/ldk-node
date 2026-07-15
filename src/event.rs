@@ -52,7 +52,7 @@ use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
-use crate::payment::{PaymentMetadata, PendingPaymentDetails};
+use crate::payment::{PaymentMetadata, PendingPaymentDetails, PendingPaymentExpiry};
 use crate::probing::Prober;
 use crate::runtime::Runtime;
 use crate::types::{
@@ -617,9 +617,10 @@ where
 
 	async fn prune_expired_pending_payments(&self) -> Result<(), ReplayEvent> {
 		let now = Self::current_time_secs();
+		let current_height = self.channel_manager.current_best_block().height;
 		let expired_payment_ids = self
 			.pending_payment_store
-			.list_filter(|payment| payment.has_expired(now))
+			.list_filter(|payment| payment.has_expired(now, current_height))
 			.into_iter()
 			.map(|payment| payment.details.id)
 			.collect::<Vec<_>>();
@@ -932,7 +933,8 @@ where
 					}
 
 					let mut pending_payment = pending_payment.clone();
-					pending_payment.expires_at = None;
+					pending_payment.expiry =
+						claim_deadline.map(|height| PendingPaymentExpiry::Height { height });
 					if let Err(e) =
 						self.pending_payment_store.insert_or_update(pending_payment).await
 					{

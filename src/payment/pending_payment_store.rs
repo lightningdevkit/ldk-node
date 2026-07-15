@@ -474,7 +474,11 @@ mod tests {
 			PaymentDirection::Inbound,
 			PaymentStatus::Pending,
 		);
-		PendingPaymentDetails::new_with_expiry(details, Vec::new(), Some(1_000_000))
+		PendingPaymentDetails::new_with_expiry(
+			details,
+			Vec::new(),
+			Some(PendingPaymentExpiry::Time { timestamp: 1_000_000 }),
+		)
 	}
 
 	#[tokio::test]
