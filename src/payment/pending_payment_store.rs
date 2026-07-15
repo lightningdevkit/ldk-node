@@ -246,6 +246,10 @@ where
 	) -> Option<PendingPaymentDetails> {
 		let index = self.manual_bolt11_payment_hash_index.lock().expect("lock");
 		let ids = index.get(payment_hash)?;
+		debug_assert!(
+			ids.len() <= 1,
+			"manual BOLT11 payment hash maps to multiple pending payment IDs"
+		);
 		ids.iter().find_map(|id| self.inner.get(id))
 	}
 
