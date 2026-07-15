@@ -272,11 +272,11 @@ where
 
 	pub(crate) async fn remove_batch(&self, ids: &[PaymentId]) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
-		let removed_payments = self.inner.remove_batch(ids).await?;
+		let (removed_payments, result) = self.inner.remove_batch_with_partial_result(ids).await;
 		for payment in removed_payments {
 			self.remove_from_index(&payment);
 		}
-		Ok(())
+		result
 	}
 
 	pub(crate) fn get(&self, id: &PaymentId) -> Option<PendingPaymentDetails> {
@@ -368,7 +368,13 @@ fn manual_bolt11_payment_hash(payment: &PaymentDetails) -> Option<PaymentHash> {
 
 #[cfg(test)]
 mod tests {
+	use std::future::Future;
+	use std::pin::Pin;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+
 	use bitcoin::hashes::Hash;
+	use lightning::io;
+	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 	use lightning::util::test_utils::TestLogger;
 	use lightning_types::payment::PaymentSecret;
 
@@ -457,6 +463,83 @@ mod tests {
 		)
 	}
 
+	struct FailSecondRemoveStore {
+		inner: InMemoryStore,
+		remove_calls: AtomicUsize,
+	}
+
+	impl FailSecondRemoveStore {
+		fn new() -> Self {
+			Self { inner: InMemoryStore::new(), remove_calls: AtomicUsize::new(0) }
+		}
+	}
+
+	impl KVStore for FailSecondRemoveStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			KVStore::read(&self.inner, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::write(&self.inner, primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			let remove_call = self.remove_calls.fetch_add(1, Ordering::Relaxed) + 1;
+			let fut: Pin<Box<dyn Future<Output = Result<(), io::Error>> + Send>> =
+				if remove_call == 2 {
+					Box::pin(async { Err(io::Error::new(io::ErrorKind::Other, "remove failed")) })
+				} else {
+					Box::pin(KVStore::remove(
+						&self.inner,
+						primary_namespace,
+						secondary_namespace,
+						key,
+						false,
+					))
+				};
+			fut
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			KVStore::list(&self.inner, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for FailSecondRemoveStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
+			PaginatedKVStore::list_paginated(
+				&self.inner,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+		}
+	}
+
+	fn pending_store_with_fail_second_remove() -> PendingPaymentStore<Arc<TestLogger>> {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailSecondRemoveStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		PendingPaymentStore::new(
+			Vec::new(),
+			"pending_payment_store_test_primary".to_string(),
+			"pending_payment_store_test_secondary".to_string(),
+			store,
+			logger,
+		)
+	}
+
 	fn pending_manual_bolt11_payment(
 		payment_hash: PaymentHash, payment_secret: Option<PaymentSecret>,
 	) -> PendingPaymentDetails {
@@ -481,6 +564,17 @@ mod tests {
 		)
 	}
 
+	async fn prune_expired(
+		store: &PendingPaymentStore<Arc<TestLogger>>, now: u64,
+	) -> Result<(), Error> {
+		let expired_payment_ids = store
+			.list_filter(|payment| payment.has_expired(now, 0))
+			.into_iter()
+			.map(|payment| payment.details.id)
+			.collect::<Vec<_>>();
+		store.remove_batch(&expired_payment_ids).await
+	}
+
 	#[tokio::test]
 	async fn manual_bolt11_insert_rejects_duplicate_hash() {
 		let store = pending_store();
@@ -498,6 +592,36 @@ mod tests {
 		let updated = pending_manual_bolt11_payment(payment_hash, Some(PaymentSecret([43; 32])));
 		assert_eq!(store.insert_or_update(updated.clone()).await, Ok(true));
 		assert_eq!(store.get_pending_manual_bolt11_by_payment_hash(&payment_hash), Some(updated));
+	}
+
+	#[tokio::test]
+	async fn expired_manual_bolt11_entries_can_be_retried_after_partial_prune_failure() {
+		let store = pending_store_with_fail_second_remove();
+		let first_hash = PaymentHash([41; 32]);
+		let second_hash = PaymentHash([42; 32]);
+		assert_eq!(
+			store.insert_manual_bolt11(pending_manual_bolt11_payment(first_hash, None)).await,
+			Ok(())
+		);
+		assert_eq!(
+			store.insert_manual_bolt11(pending_manual_bolt11_payment(second_hash, None)).await,
+			Ok(())
+		);
+
+		assert_eq!(prune_expired(&store, 1_000_001).await, Err(Error::PersistenceFailed));
+		assert_eq!(store.list_filter(|_| true).len(), 1);
+
+		assert_eq!(prune_expired(&store, 1_000_001).await, Ok(()));
+		assert!(store.list_filter(|_| true).is_empty());
+
+		assert_eq!(
+			store.insert_manual_bolt11(pending_manual_bolt11_payment(first_hash, None)).await,
+			Ok(())
+		);
+		assert_eq!(
+			store.insert_manual_bolt11(pending_manual_bolt11_payment(second_hash, None)).await,
+			Ok(())
+		);
 	}
 
 	#[test]

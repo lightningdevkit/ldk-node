@@ -117,6 +117,14 @@ where
 	}
 
 	pub(crate) async fn remove_batch(&self, ids: &[SO::Id]) -> Result<Vec<SO>, Error> {
+		let (removed_objects, result) = self.remove_batch_with_partial_result(ids).await;
+		result?;
+		Ok(removed_objects)
+	}
+
+	pub(crate) async fn remove_batch_with_partial_result(
+		&self, ids: &[SO::Id],
+	) -> (Vec<SO>, Result<(), Error>) {
 		let _guard = self.mutation_lock.lock().await;
 		let mut removed_objects = Vec::new();
 		for id in ids {
@@ -126,7 +134,7 @@ where
 			}
 
 			let store_key = id.encode_to_hex_str();
-			KVStore::remove(
+			let remove_result = KVStore::remove(
 				&*self.kv_store,
 				&self.primary_namespace,
 				&self.secondary_namespace,
@@ -144,13 +152,16 @@ where
 					e
 				);
 				Error::PersistenceFailed
-			})?;
+			});
+			if let Err(e) = remove_result {
+				return (removed_objects, Err(e));
+			}
 
 			if let Some(object) = self.objects.lock().expect("lock").remove(id) {
 				removed_objects.push(object);
 			}
 		}
-		Ok(removed_objects)
+		(removed_objects, Ok(()))
 	}
 
 	/// Returns the current in-memory object for `id`.
