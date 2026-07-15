@@ -1543,8 +1543,9 @@ async fn splice_channel() {
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
 	let opening_transaction_fee_sat = 156;
-	let closing_transaction_fee_sat = 614;
-	let anchor_output_sat = 330;
+	let zero_fee_commitments = node_a.list_channels()[0].feerate_sat_per_1000_weight == 0;
+	let closing_transaction_fee_sat = if zero_fee_commitments { 0 } else { 614 };
+	let anchor_output_sat = if zero_fee_commitments { 0 } else { 330 };
 
 	assert_eq!(
 		node_a.list_balances().total_onchain_balance_sats,

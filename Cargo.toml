@@ -135,6 +135,7 @@ check-cfg = [
 	"cfg(eclair_test)",
 	"cfg(cycle_tests)",
 	"cfg(hrn_tests)",
+	"cfg(zero_fee_commitment_tests)",
 ]
 
 [[bench]]
