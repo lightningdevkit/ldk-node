@@ -10,8 +10,8 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use bitcoin::Txid;
-use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_types::payment::PaymentHash;
 
 use crate::data_store::{DataStore, StorableObject, StorableObjectUpdate};
@@ -44,6 +44,24 @@ impl_writeable_tlv_based!(FundingTxCandidate, {
 	(4, fee_paid_msat, option),
 });
 
+/// The condition after which this pending payment can be pruned.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PendingPaymentExpiry {
+	/// The Unix timestamp after which this pending payment can be pruned.
+	Time { timestamp: u64 },
+	/// The block height after which this pending payment can be pruned.
+	Height { height: u32 },
+}
+
+impl_writeable_tlv_based_enum!(PendingPaymentExpiry,
+	(0, Time) => {
+		(0, timestamp, required),
+	},
+	(2, Height) => {
+		(0, height, required),
+	},
+);
+
 /// Represents a pending payment
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PendingPaymentDetails {
@@ -55,21 +73,21 @@ pub struct PendingPaymentDetails {
 	/// RBF history, keyed by each candidate's txid. Empty for non-funding payments and for
 	/// records written before per-candidate tracking existed.
 	pub(crate) candidates: Vec<FundingTxCandidate>,
-	/// The timestamp after which this pending payment can be pruned.
-	pub expires_at: Option<u64>,
+	/// The condition after which this pending payment can be pruned.
+	pub(crate) expiry: Option<PendingPaymentExpiry>,
 }
 
 impl PendingPaymentDetails {
 	pub(crate) fn new(
 		details: PaymentDetails, conflicting_txids: Vec<Txid>, candidates: Vec<FundingTxCandidate>,
 	) -> Self {
-		Self { details, conflicting_txids, candidates, expires_at: None }
+		Self { details, conflicting_txids, candidates, expiry: None }
 	}
 
 	pub(crate) fn new_with_expiry(
-		details: PaymentDetails, conflicting_txids: Vec<Txid>, expires_at: Option<u64>,
+		details: PaymentDetails, conflicting_txids: Vec<Txid>, expiry: Option<PendingPaymentExpiry>,
 	) -> Self {
-		Self { details, conflicting_txids, candidates: Vec::new(), expires_at }
+		Self { details, conflicting_txids, candidates: Vec::new(), expiry }
 	}
 
 	/// Returns this node's recorded funding figures for the candidate with the given txid, if any.
@@ -77,8 +95,12 @@ impl PendingPaymentDetails {
 		self.candidates.iter().find(|candidate| candidate.txid == txid)
 	}
 
-	pub(crate) fn has_expired(&self, now: u64) -> bool {
-		self.expires_at.map_or(false, |expires_at| expires_at <= now)
+	pub(crate) fn has_expired(&self, now: u64, current_height: u32) -> bool {
+		match self.expiry {
+			Some(PendingPaymentExpiry::Time { timestamp }) => timestamp <= now,
+			Some(PendingPaymentExpiry::Height { height }) => height <= current_height,
+			None => false,
+		}
 	}
 }
 
@@ -86,7 +108,7 @@ impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(0, details, required),
 	(2, conflicting_txids, optional_vec),
 	(4, candidates, optional_vec),
-	(6, expires_at, option),
+	(6, expiry, option),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,7 +117,7 @@ pub(crate) struct PendingPaymentDetailsUpdate {
 	pub payment_update: Option<PaymentDetailsUpdate>,
 	pub conflicting_txids: Option<Vec<Txid>>,
 	pub candidates: Vec<FundingTxCandidate>,
-	pub expires_at: Option<Option<u64>>,
+	pub expiry: Option<Option<PendingPaymentExpiry>>,
 }
 
 impl StorableObject for PendingPaymentDetails {
@@ -134,9 +156,9 @@ impl StorableObject for PendingPaymentDetails {
 			updated = true;
 		}
 
-		if let Some(new_expires_at) = update.expires_at {
-			if self.expires_at != new_expires_at {
-				self.expires_at = new_expires_at;
+		if let Some(new_expiry) = update.expiry {
+			if self.expiry != new_expiry {
+				self.expiry = new_expiry;
 				updated = true;
 			}
 		}
@@ -167,7 +189,7 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 			payment_update: Some(value.details.to_update()),
 			conflicting_txids,
 			candidates: value.candidates.clone(),
-			expires_at: Some(value.expires_at),
+			expiry: Some(value.expiry),
 		}
 	}
 }

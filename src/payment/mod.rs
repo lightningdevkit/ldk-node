@@ -21,7 +21,7 @@ pub(crate) use bolt11::PaymentMetadata;
 pub use bolt12::Bolt12Payment;
 pub use onchain::OnchainPayment;
 pub(crate) use pending_payment_store::{
-	FundingTxCandidate, PendingPaymentDetails, PendingPaymentStore,
+	FundingTxCandidate, PendingPaymentDetails, PendingPaymentExpiry, PendingPaymentStore,
 };
 pub use spontaneous::SpontaneousPayment;
 pub use store::{
