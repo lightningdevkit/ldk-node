@@ -13,7 +13,6 @@ use std::sync::{Arc, RwLock};
 
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
-use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::{
 	Bolt11InvoiceParameters, OptionalBolt11PaymentParams, PaymentId,
 };
@@ -32,8 +31,7 @@ use crate::ffi::{maybe_deref, maybe_try_convert_enum, maybe_wrap};
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{
-	LSPS2Parameters, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind,
-	PaymentStatus,
+	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
@@ -48,16 +46,6 @@ type Bolt11Invoice = Arc<crate::ffi::Bolt11Invoice>;
 type Bolt11InvoiceDescription = LdkBolt11InvoiceDescription;
 #[cfg(feature = "uniffi")]
 type Bolt11InvoiceDescription = crate::ffi::Bolt11InvoiceDescription;
-
-/// Metadata carried in BOLT11 invoice `payment_metadata`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PaymentMetadata {
-	pub(crate) lsps2_parameters: Option<LSPS2Parameters>,
-}
-
-impl_writeable_tlv_based!(PaymentMetadata, {
-	(0, lsps2_parameters, option),
-});
 
 /// A payment handler allowing to create and pay [BOLT 11] invoices.
 ///
@@ -230,37 +218,6 @@ impl Bolt11Payment {
 		self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
 
 		Ok(invoice)
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use lightning::util::ser::{Readable, Writeable};
-
-	use super::*;
-
-	#[test]
-	fn empty_metadata_roundtrips() {
-		let metadata = PaymentMetadata { lsps2_parameters: None };
-
-		let encoded = metadata.encode();
-		let decoded = PaymentMetadata::read(&mut &*encoded).unwrap();
-
-		assert_eq!(metadata, decoded);
-	}
-
-	#[test]
-	fn lsps2_parameters_roundtrip() {
-		let lsps2_parameters = LSPS2Parameters {
-			max_total_opening_fee_msat: Some(42_000),
-			max_proportional_opening_fee_ppm_msat: Some(17_000),
-		};
-		let metadata = PaymentMetadata { lsps2_parameters: Some(lsps2_parameters) };
-
-		let encoded = metadata.encode();
-		let decoded = PaymentMetadata::read(&mut &*encoded).unwrap();
-
-		assert_eq!(metadata, decoded);
 	}
 }
 
