@@ -43,6 +43,7 @@ use lightning::util::persist::{
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
 use lightning_dns_resolver::OMDomainResolver;
+use lightning_liquidity::lsps2::router::LSPS2Router;
 use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
@@ -74,6 +75,7 @@ use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::payment::LSPS2PaymentMetadataDecoder;
 use crate::peer_store::PeerStore;
 use crate::probing::{
 	HighDegreeStrategy, Prober, ProbingConfig, ProbingStrategy, ProbingStrategyKind,
@@ -1900,12 +1902,16 @@ fn build_with_store_internal(
 	}
 
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
-	let router = Arc::new(DefaultRouter::new(
-		Arc::clone(&network_graph),
-		Arc::clone(&logger),
+	let router = Arc::new(LSPS2Router::new_with_payment_metadata_decoder(
+		DefaultRouter::new(
+			Arc::clone(&network_graph),
+			Arc::clone(&logger),
+			Arc::clone(&keys_manager),
+			Arc::clone(&scorer),
+			scoring_fee_params,
+		),
 		Arc::clone(&keys_manager),
-		Arc::clone(&scorer),
-		scoring_fee_params,
+		LSPS2PaymentMetadataDecoder,
 	));
 
 	let mut user_config = default_user_config(&config);
@@ -2270,12 +2276,16 @@ fn build_with_store_internal(
 				if let Some(penalty) = probing_cfg.diversity_penalty_msat {
 					probing_fee_params.probing_diversity_penalty_msat = penalty;
 				}
-				let probing_router = Arc::new(DefaultRouter::new(
-					Arc::clone(&network_graph),
-					Arc::clone(&logger),
+				let probing_router = Arc::new(LSPS2Router::new_with_payment_metadata_decoder(
+					DefaultRouter::new(
+						Arc::clone(&network_graph),
+						Arc::clone(&logger),
+						Arc::clone(&keys_manager),
+						Arc::clone(&scorer),
+						probing_fee_params,
+					),
 					Arc::clone(&keys_manager),
-					Arc::clone(&scorer),
-					probing_fee_params,
+					LSPS2PaymentMetadataDecoder,
 				));
 				Arc::new(HighDegreeStrategy::new(
 					Arc::clone(&network_graph),

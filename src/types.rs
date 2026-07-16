@@ -37,6 +37,7 @@ use lightning::util::persist::{
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
+use lightning_liquidity::lsps2::router::LSPS2Router;
 use lightning_liquidity::utils::time::DefaultTimeProvider;
 use lightning_net_tokio::SocketDescriptor;
 
@@ -48,7 +49,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::{PaymentDetails, PendingPaymentDetails};
+use crate::payment::{LSPS2PaymentMetadataDecoder, PaymentDetails, PendingPaymentDetails};
 use crate::runtime::RuntimeSpawner;
 
 #[cfg(not(feature = "uniffi"))]
@@ -273,7 +274,8 @@ pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<
 pub(crate) type Wallet = crate::wallet::Wallet;
 pub(crate) type KeysManager = crate::wallet::WalletKeysManager;
 
-pub(crate) type Router = DefaultRouter<
+pub(crate) type Router = LSPS2Router<BaseRouter, Arc<KeysManager>, LSPS2PaymentMetadataDecoder>;
+pub(crate) type BaseRouter = DefaultRouter<
 	Arc<Graph>,
 	Arc<Logger>,
 	Arc<KeysManager>,
