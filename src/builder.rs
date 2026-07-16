@@ -2203,6 +2203,12 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
 	));
+	offers_message_handler.initialize_jit_handling(
+		Arc::clone(&runtime),
+		liquidity_source.lsps2_client(),
+		Arc::downgrade(&connection_manager),
+		Arc::downgrade(&onion_messenger),
+	);
 
 	let output_sweeper = match sweeper_bytes_res {
 		Ok(output_sweeper) => Arc::new(output_sweeper),
