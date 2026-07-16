@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::secp256k1::PublicKey;
@@ -9,6 +9,7 @@ use lightning::util::ser::{Readable, Writeable};
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::data_store::{DataStore, StorableObject, StorableObjectId, StorableObjectUpdate};
 use crate::hex_utils;
@@ -258,6 +259,33 @@ fn merge_absolute_expiry(current: Option<u64>, new: Option<u64>) -> Option<u64> 
 	match (current, new) {
 		(None, _) | (_, None) => None,
 		(Some(current), Some(new)) => Some(current.max(new)),
+	}
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum LeaseRequestKey {
+	Fixed(u64),
+	Variable,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingLeaseRequestState {
+	locks: HashMap<LeaseRequestKey, Weak<AsyncMutex<()>>>,
+}
+
+impl PendingLeaseRequestState {
+	pub(crate) fn request_lock(&mut self, key: LeaseRequestKey) -> Arc<AsyncMutex<()>> {
+		self.prune();
+		if let Some(lock) = self.locks.get(&key).and_then(Weak::upgrade) {
+			return lock;
+		}
+		let lock = Arc::new(AsyncMutex::new(()));
+		self.locks.insert(key, Arc::downgrade(&lock));
+		lock
+	}
+
+	pub(crate) fn prune(&mut self) {
+		self.locks.retain(|_, lock| lock.strong_count() > 0);
 	}
 }
 
@@ -639,5 +667,19 @@ mod tests {
 		assert_eq!(state.targets().first().unwrap().absolute_expiry, Some(30));
 		state.register(cache_target(id, None, 3));
 		assert_eq!(state.targets().first().unwrap().absolute_expiry, None);
+	}
+
+	#[test]
+	fn lease_requests_are_serialized_per_key() {
+		let mut state = PendingLeaseRequestState::default();
+
+		let fixed = state.request_lock(LeaseRequestKey::Fixed(1_000));
+		let same_fixed = state.request_lock(LeaseRequestKey::Fixed(1_000));
+		let other_fixed = state.request_lock(LeaseRequestKey::Fixed(2_000));
+		let variable = state.request_lock(LeaseRequestKey::Variable);
+
+		assert!(Arc::ptr_eq(&fixed, &same_fixed));
+		assert!(!Arc::ptr_eq(&fixed, &other_fixed));
+		assert!(!Arc::ptr_eq(&fixed, &variable));
 	}
 }
