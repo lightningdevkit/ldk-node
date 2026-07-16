@@ -39,7 +39,7 @@ use crate::io::{
 use crate::liquidity::client::lsps1::LSPS1Client;
 use crate::liquidity::client::lsps2::state::{
 	is_lease_usable, now_secs, read_lease_cache_targets, LSPS2LeaseState, LeaseCacheTargetState,
-	LeaseCacheTargetStore, PaymentLeaseStore,
+	LeaseCacheTargetStore, PaymentLeaseStore, PendingLeaseRequestState,
 };
 use crate::liquidity::client::lsps2::LSPS2Client;
 use crate::liquidity::service::lsps2::{LSPS2Service, LSPS2ServiceLiquiditySource};
@@ -402,6 +402,7 @@ where
 				lease_store,
 				lease_state: Mutex::new(lease_state),
 				cache_target_store,
+				pending_lease_request_state: Mutex::new(PendingLeaseRequestState::default()),
 				channel_manager: self.channel_manager.clone(),
 				keys_manager: self.keys_manager.clone(),
 				discovery_done_rx: discovery_done_rx.clone(),
