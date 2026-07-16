@@ -31,7 +31,12 @@ use tokio::sync::oneshot;
 
 use crate::builder::BuildError;
 use crate::connection::ConnectionManager;
+use crate::io::utils::read_all_objects;
+use crate::io::{
+	LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE, LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use crate::liquidity::client::lsps1::LSPS1Client;
+use crate::liquidity::client::lsps2::state::{is_lease_usable, LSPS2LeaseState, PaymentLeaseStore};
 use crate::liquidity::client::lsps2::LSPS2Client;
 use crate::liquidity::service::lsps2::{LSPS2Service, LSPS2ServiceLiquiditySource};
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
@@ -247,6 +252,26 @@ where
 	}
 
 	pub(crate) async fn build(self) -> Result<LiquiditySource<L>, BuildError> {
+		let leases = read_all_objects(
+			&*self.kv_store,
+			LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE,
+			LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+			self.logger.clone(),
+		)
+		.await
+		.map_err(|_| BuildError::ReadFailed)?;
+		let lease_store = Arc::new(PaymentLeaseStore::new(
+			leases.clone(),
+			LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&self.kv_store),
+			self.logger.clone(),
+		));
+		for lease in leases.iter().filter(|lease| !is_lease_usable(lease)) {
+			lease_store.remove(&lease.id).await.map_err(|_| BuildError::WriteFailed)?;
+		}
+		let lease_state =
+			LSPS2LeaseState::from_leases(leases.into_iter().filter(is_lease_usable).collect());
 		let liquidity_service_config = self.lsps2_service.as_ref().map(|s| {
 			let lsps2_service_config = Some(s.ldk_service_config.clone());
 			let lsps5_service_config = None;
@@ -311,6 +336,8 @@ where
 				lsp_nodes: Arc::clone(&lsp_nodes),
 				pending_lsps2_fee_requests: Mutex::new(HashMap::new()),
 				pending_buy_requests: Mutex::new(HashMap::new()),
+				lease_store,
+				lease_state: Mutex::new(lease_state),
 				channel_manager: self.channel_manager.clone(),
 				keys_manager: self.keys_manager.clone(),
 				discovery_done_rx: discovery_done_rx.clone(),
