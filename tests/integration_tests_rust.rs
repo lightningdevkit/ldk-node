@@ -2332,12 +2332,14 @@ async fn simple_bolt12_send_receive() {
 			hash,
 			preimage,
 			secret: _,
+			counterparty_skimmed_fee_msat,
 			offer_id,
 			quantity: ref qty,
 			payer_note: ref note,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
+			assert_eq!(counterparty_skimmed_fee_msat, None);
 			assert_eq!(offer_id, offer.id());
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
@@ -2399,12 +2401,14 @@ async fn simple_bolt12_send_receive() {
 			hash,
 			preimage,
 			secret: _,
+			counterparty_skimmed_fee_msat,
 			offer_id,
 			quantity: ref qty,
 			payer_note: ref note,
 		} => {
 			assert!(hash.is_some());
 			assert!(preimage.is_some());
+			assert_eq!(counterparty_skimmed_fee_msat, None);
 			assert_eq!(offer_id, offer.id());
 			assert_eq!(&expected_quantity, qty);
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);

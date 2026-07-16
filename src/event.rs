@@ -7,7 +7,7 @@
 
 use core::future::Future;
 use core::task::{Poll, Waker};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
@@ -664,13 +664,40 @@ where
 		}
 	}
 
-	fn lsps2_max_total_opening_fee_msat(payment_metadata: &[u8], amount_msat: u64) -> Option<u64> {
+	fn lsps2_max_total_opening_fee_msat(
+		payment_metadata: &[u8], amount_msat: u64, counterparty_skimmed_fee_msat: u64,
+	) -> Option<u64> {
 		let metadata = PaymentMetadata::read(&mut &payment_metadata[..]).ok()?;
+		Self::lsps2_max_total_opening_fee_msat_from_metadata(
+			metadata,
+			amount_msat,
+			counterparty_skimmed_fee_msat,
+		)
+	}
+
+	fn lsps2_bolt12_max_total_opening_fee_msat(
+		payment_metadata: &BTreeMap<u64, Vec<u8>>, amount_msat: u64,
+		counterparty_skimmed_fee_msat: u64,
+	) -> Option<u64> {
+		let metadata = PaymentMetadata::decode_from_bolt12_payment_metadata(payment_metadata)?;
+		Self::lsps2_max_total_opening_fee_msat_from_metadata(
+			metadata,
+			amount_msat,
+			counterparty_skimmed_fee_msat,
+		)
+	}
+
+	fn lsps2_max_total_opening_fee_msat_from_metadata(
+		metadata: PaymentMetadata, amount_msat: u64, counterparty_skimmed_fee_msat: u64,
+	) -> Option<u64> {
 		let lsps2_parameters = metadata.lsps2_parameters?;
 		lsps2_parameters.max_total_opening_fee_msat.or_else(|| {
 			lsps2_parameters.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
-				// If it's a variable amount payment, compute the actual fee.
-				compute_opening_fee(amount_msat, 0, max_prop_fee)
+				// `PaymentClaimable::amount_msat` excludes the fee withheld by the LSP. LSPS2
+				// proportional fees are calculated from the amount sent by the payer, so add the
+				// withheld fee back before computing the permitted fee.
+				let payment_size_msat = amount_msat.checked_add(counterparty_skimmed_fee_msat)?;
+				compute_opening_fee(payment_size_msat, 0, max_prop_fee)
 			})
 		})
 	}
@@ -864,15 +891,28 @@ where
 							.as_ref()
 							.and_then(|fields| fields.payment_metadata.as_ref())
 							.and_then(|metadata| {
-								Self::lsps2_max_total_opening_fee_msat(metadata, amount_msat)
+								Self::lsps2_max_total_opening_fee_msat(
+									metadata,
+									amount_msat,
+									counterparty_skimmed_fee_msat,
+								)
 							}),
+						PaymentPurpose::Bolt12OfferPayment { payment_context, .. } => {
+							payment_context.payment_metadata.as_ref().and_then(|metadata| {
+								Self::lsps2_bolt12_max_total_opening_fee_msat(
+									metadata,
+									amount_msat,
+									counterparty_skimmed_fee_msat,
+								)
+							})
+						},
 						_ => None,
 					};
 
 					let Some(max_total_opening_fee_msat) = max_total_opening_fee_msat else {
 						log_info!(
 							self.logger,
-							"Refusing inbound payment with hash {} as the counterparty withheld {}msat without valid BOLT11 LSPS2 payment metadata",
+							"Refusing inbound payment with hash {} as the counterparty withheld {}msat without valid LSPS2 payment metadata",
 							hex_utils::to_string(&payment_hash.0),
 							counterparty_skimmed_fee_msat,
 						);
@@ -894,7 +934,7 @@ where
 
 					if let Some(info) = payment_info.as_ref() {
 						match &info.kind {
-							PaymentKind::Bolt11 { .. } => {
+							PaymentKind::Bolt11 { .. } | PaymentKind::Bolt12Offer { .. } => {
 								let update = PaymentDetailsUpdate {
 									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
 									..PaymentDetailsUpdate::new(payment_id)
@@ -907,7 +947,7 @@ where
 									},
 								};
 							},
-							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for BOLT11 payments."),
+							_ => debug_assert!(false, "We only expect the counterparty to withhold fees for LSPS2 invoice payments."),
 						}
 					}
 				}
@@ -976,6 +1016,8 @@ where
 							hash: Some(payment_hash),
 							preimage: payment_preimage,
 							secret: Some(payment_secret),
+							counterparty_skimmed_fee_msat: (counterparty_skimmed_fee_msat > 0)
+								.then_some(counterparty_skimmed_fee_msat),
 							offer_id,
 							payer_note,
 							quantity,
@@ -2038,9 +2080,30 @@ mod tests {
 		assert_eq!(
 			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
 				&metadata.encode(),
-				100_000
+				100_000,
+				0,
 			),
 			Some(42_000)
+		);
+	}
+
+	#[test]
+	fn lsps2_proportional_fee_uses_gross_payment_amount() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: None,
+				max_proportional_opening_fee_ppm_msat: Some(10_000),
+			}),
+			lsps2_lease_parameters: None,
+		};
+
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+				&metadata.encode(),
+				198_000,
+				2_000,
+			),
+			Some(2_000)
 		);
 	}
 
@@ -2060,21 +2123,61 @@ mod tests {
 		assert_eq!(
 			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
 				&empty_metadata,
-				100_000
+				100_000,
+				0,
 			),
 			None
 		);
 		assert_eq!(
-			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(&[0xff], 100_000),
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(&[0xff], 100_000, 0,),
 			None
 		);
 		assert_eq!(
 			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
 				&metadata_without_fee_limit,
-				100_000
+				100_000,
+				0,
 			),
 			None
 		);
+	}
+
+	#[test]
+	fn bolt12_lsps2_payment_metadata_decodes_fee_limit() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: None,
+				max_proportional_opening_fee_ppm_msat: Some(10_000),
+			}),
+			lsps2_lease_parameters: None,
+		}
+		.encode_as_bolt12_payment_metadata();
+
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_bolt12_max_total_opening_fee_msat(
+				&metadata, 100_000, 0,
+			),
+			Some(1_000)
+		);
+	}
+
+	#[test]
+	fn bolt12_lsps2_payment_metadata_requires_fee_limit() {
+		let empty_metadata = BTreeMap::new();
+		let metadata_without_fee_limit =
+			PaymentMetadata { lsps2_parameters: None, lsps2_lease_parameters: None }
+				.encode_as_bolt12_payment_metadata();
+		let mut malformed_metadata = metadata_without_fee_limit.clone();
+		*malformed_metadata.values_mut().next().unwrap() = vec![0xff];
+
+		for metadata in [empty_metadata, malformed_metadata, metadata_without_fee_limit] {
+			assert_eq!(
+				EventHandler::<Arc<TestLogger>>::lsps2_bolt12_max_total_opening_fee_msat(
+					&metadata, 100_000, 0,
+				),
+				None
+			);
+		}
 	}
 
 	#[tokio::test]
