@@ -185,16 +185,16 @@ harness = false
 #vss-client-ng = { path = "../vss-client" }
 #vss-client-ng = { git = "https://github.com/lightningdevkit/vss-client", branch = "main" }
 #
-#[patch."https://github.com/lightningdevkit/rust-lightning"]
-#lightning = { path = "../rust-lightning/lightning" }
-#lightning-types = { path = "../rust-lightning/lightning-types" }
-#lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
+[patch."https://github.com/lightningdevkit/rust-lightning"]
+lightning = { git = "https://git.rust-bitcoin.org/tnull/rust-lightning", rev = "47dcb88874b11ddcf836bb294f861eb7bbf0d09b" }
+lightning-types = { git = "https://git.rust-bitcoin.org/tnull/rust-lightning", rev = "47dcb88874b11ddcf836bb294f861eb7bbf0d09b" }
+lightning-invoice = { git = "https://git.rust-bitcoin.org/tnull/rust-lightning", rev = "47dcb88874b11ddcf836bb294f861eb7bbf0d09b" }
 #lightning-net-tokio = { path = "../rust-lightning/lightning-net-tokio" }
 #lightning-persister = { path = "../rust-lightning/lightning-persister" }
 #lightning-background-processor = { path = "../rust-lightning/lightning-background-processor" }
 #lightning-rapid-gossip-sync = { path = "../rust-lightning/lightning-rapid-gossip-sync" }
 #lightning-block-sync = { path = "../rust-lightning/lightning-block-sync" }
 #lightning-transaction-sync = { path = "../rust-lightning/lightning-transaction-sync" }
-#lightning-liquidity = { path = "../rust-lightning/lightning-liquidity" }
-#lightning-macros = { path = "../rust-lightning/lightning-macros" }
+lightning-liquidity = { git = "https://git.rust-bitcoin.org/tnull/rust-lightning", rev = "47dcb88874b11ddcf836bb294f861eb7bbf0d09b" }
+lightning-macros = { git = "https://git.rust-bitcoin.org/tnull/rust-lightning", rev = "47dcb88874b11ddcf836bb294f861eb7bbf0d09b" }
 #lightning-dns-resolver = { path = "../rust-lightning/lightning-dns-resolver" }
