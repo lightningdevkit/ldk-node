@@ -3326,6 +3326,10 @@ async fn bolt12_lsps2_client_service_integration() {
 		.bolt12_payment()
 		.receive_variable_amount_via_jit_channel("variable", None, None)
 		.unwrap();
+	service_node.stop().unwrap();
+	service_node.start().unwrap();
+	let _ = payer_node.connect(service_node_id, service_addr.clone(), false);
+	let _ = client_node.connect(service_node_id, service_addr, false);
 	let variable_payment_id = payer_node
 		.bolt12_payment()
 		.send_using_amount(&variable_offer, variable_amount_msat, None, None, None)
