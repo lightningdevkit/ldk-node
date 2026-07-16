@@ -69,6 +69,7 @@ use crate::io::{
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
+use crate::liquidity::client::lsps2::router::LSPS2Router;
 use crate::liquidity::{LSPS2ServiceConfig, LiquiditySourceBuilder, LspConfig};
 use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
@@ -1901,12 +1902,15 @@ fn build_with_store_internal(
 	}
 
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
-	let router = Arc::new(DefaultRouter::new(
-		Arc::clone(&network_graph),
-		Arc::clone(&logger),
+	let router = Arc::new(LSPS2Router::new(
+		DefaultRouter::new(
+			Arc::clone(&network_graph),
+			Arc::clone(&logger),
+			Arc::clone(&keys_manager),
+			Arc::clone(&scorer),
+			scoring_fee_params,
+		),
 		Arc::clone(&keys_manager),
-		Arc::clone(&scorer),
-		scoring_fee_params,
 	));
 
 	let mut user_config = default_user_config(&config);
@@ -2279,12 +2283,15 @@ fn build_with_store_internal(
 				if let Some(penalty) = probing_cfg.diversity_penalty_msat {
 					probing_fee_params.probing_diversity_penalty_msat = penalty;
 				}
-				let probing_router = Arc::new(DefaultRouter::new(
-					Arc::clone(&network_graph),
-					Arc::clone(&logger),
+				let probing_router = Arc::new(LSPS2Router::new(
+					DefaultRouter::new(
+						Arc::clone(&network_graph),
+						Arc::clone(&logger),
+						Arc::clone(&keys_manager),
+						Arc::clone(&scorer),
+						probing_fee_params,
+					),
 					Arc::clone(&keys_manager),
-					Arc::clone(&scorer),
-					probing_fee_params,
 				));
 				Arc::new(HighDegreeStrategy::new(
 					Arc::clone(&network_graph),
