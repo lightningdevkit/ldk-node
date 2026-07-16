@@ -270,6 +270,7 @@ where
 		if let Some((lease, total_fee_msat, lsp)) =
 			self.take_cached_fixed_lease(amount_msat).await?
 		{
+			self.schedule_fixed_lease_refill(amount_msat, connection_manager);
 			return Ok((lease, total_fee_msat, lsp, false));
 		}
 		let request_lock = self
@@ -281,9 +282,20 @@ where
 		if let Some((lease, total_fee_msat, lsp)) =
 			self.take_cached_fixed_lease(amount_msat).await?
 		{
+			self.schedule_fixed_lease_refill(amount_msat, connection_manager);
 			return Ok((lease, total_fee_msat, lsp, false));
 		}
 
+		let (negotiated_lease, min_total_fee_msat, cheapest_lsp) =
+			self.negotiate_fixed_lease(amount_msat, connection_manager).await?;
+		let lease = self.consume_lease(&negotiated_lease.id).await?;
+		self.schedule_fixed_lease_refill(amount_msat, connection_manager);
+		Ok((lease, min_total_fee_msat, cheapest_lsp, true))
+	}
+
+	async fn negotiate_fixed_lease(
+		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
 			.into_iter()
@@ -339,14 +351,14 @@ where
 				Some(&cheapest_lsp.node_id),
 			)
 			.await?;
-		let lease = self.consume_lease(&negotiated_lease.id).await?;
-		Ok((lease, min_total_fee_msat, cheapest_lsp, true))
+		Ok((negotiated_lease, min_total_fee_msat, cheapest_lsp))
 	}
 
 	async fn acquire_variable_lease(
 		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig, bool), Error> {
 		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
+			self.schedule_variable_lease_refill(connection_manager);
 			return Ok((lease, proportional_fee, lsp, false));
 		}
 		let request_lock = self
@@ -356,9 +368,20 @@ where
 			.request_lock(LeaseRequestKey::Variable);
 		let _request_guard = request_lock.lock().await;
 		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
+			self.schedule_variable_lease_refill(connection_manager);
 			return Ok((lease, proportional_fee, lsp, false));
 		}
 
+		let (negotiated_lease, min_prop_fee_ppm_msat, cheapest_lsp) =
+			self.negotiate_variable_lease(connection_manager).await?;
+		let lease = self.consume_lease(&negotiated_lease.id).await?;
+		self.schedule_variable_lease_refill(connection_manager);
+		Ok((lease, min_prop_fee_ppm_msat, cheapest_lsp, true))
+	}
+
+	async fn negotiate_variable_lease(
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let mut rejected_for_fee = false;
 		let (cheapest_lsp, min_prop_fee_ppm_msat, min_opening_params) = all_offers
@@ -400,8 +423,73 @@ where
 		let negotiated_lease = self
 			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
 			.await?;
-		let lease = self.consume_lease(&negotiated_lease.id).await?;
-		Ok((lease, min_prop_fee_ppm_msat, cheapest_lsp, true))
+		Ok((negotiated_lease, min_prop_fee_ppm_msat, cheapest_lsp))
+	}
+
+	fn schedule_fixed_lease_refill(
+		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
+	) {
+		let client = Arc::clone(self);
+		let connection_manager = Arc::clone(connection_manager);
+		tokio::spawn(async move {
+			if let Err(error) = client.cache_fixed_lease(amount_msat, &connection_manager).await {
+				log_warn!(client.logger, "Failed refilling LSPS2 payment lease: {}", error);
+			}
+		});
+	}
+
+	fn schedule_variable_lease_refill(
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) {
+		let client = Arc::clone(self);
+		let connection_manager = Arc::clone(connection_manager);
+		tokio::spawn(async move {
+			if let Err(error) = client.cache_variable_lease(&connection_manager).await {
+				log_warn!(client.logger, "Failed refilling LSPS2 payment lease: {}", error);
+			}
+		});
+	}
+
+	async fn cache_fixed_lease(
+		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(), Error> {
+		let request_lock = self
+			.pending_lease_request_state
+			.lock()
+			.expect("lock")
+			.request_lock(LeaseRequestKey::Fixed(amount_msat));
+		let _request_guard = request_lock.lock().await;
+		if self
+			.lease_state
+			.lock()
+			.expect("lock")
+			.has_fixed_amount(amount_msat, self.config.lsps2_max_total_lsp_fee_limit_msat)
+		{
+			return Ok(());
+		}
+		self.negotiate_fixed_lease(amount_msat, connection_manager).await?;
+		Ok(())
+	}
+
+	async fn cache_variable_lease(
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(), Error> {
+		let request_lock = self
+			.pending_lease_request_state
+			.lock()
+			.expect("lock")
+			.request_lock(LeaseRequestKey::Variable);
+		let _request_guard = request_lock.lock().await;
+		if self
+			.lease_state
+			.lock()
+			.expect("lock")
+			.has_variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat)
+		{
+			return Ok(());
+		}
+		self.negotiate_variable_lease(connection_manager).await?;
+		Ok(())
 	}
 
 	async fn gather_lsps2_offers(

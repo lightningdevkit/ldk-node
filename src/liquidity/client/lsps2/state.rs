@@ -405,6 +405,21 @@ impl LSPS2LeaseState {
 		self.leases.get(&id).cloned().map(|lease| (lease, fee_msat))
 	}
 
+	pub(crate) fn has_fixed_amount(&self, amount_msat: u64, max_fee_msat: Option<u64>) -> bool {
+		self.leases
+			.values()
+			.filter(|lease| lease.payment_size_msat == Some(amount_msat))
+			.filter(|lease| is_lease_usable(lease))
+			.filter_map(|lease| {
+				compute_opening_fee(
+					amount_msat,
+					lease.params.min_fee_msat,
+					lease.params.proportional as u64,
+				)
+			})
+			.any(|fee_msat| max_fee_msat.map_or(true, |max| fee_msat <= max))
+	}
+
 	pub(crate) fn variable_amount(
 		&self, max_total_fee_msat: Option<u64>,
 	) -> Option<(PaymentLease, u64)> {
@@ -419,6 +434,14 @@ impl LSPS2LeaseState {
 			.map(|(id, lease)| (*id, lease.params.proportional as u64))
 			.min_by_key(|(_, fee)| *fee)?;
 		self.leases.get(&id).cloned().map(|lease| (lease, proportional_fee))
+	}
+
+	pub(crate) fn has_variable_amount(&self, max_total_fee_msat: Option<u64>) -> bool {
+		self.leases
+			.values()
+			.filter(|lease| lease.payment_size_msat.is_none())
+			.filter(|lease| is_lease_usable(lease))
+			.any(|lease| max_total_fee_msat.map_or(true, |max| lease.params.min_fee_msat <= max))
 	}
 
 	pub(crate) fn prune(&mut self) {
@@ -561,6 +584,20 @@ mod tests {
 
 		assert!(state.variable_amount(Some(49)).is_none());
 		assert_eq!(state.variable_amount(Some(50)).unwrap().0.id, variable.id);
+	}
+
+	#[test]
+	fn detects_cached_leases_for_refill() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let fixed = lease(2, 46, 100, Some(1_000), valid_until);
+		let variable = lease(3, 47, 50, None, valid_until);
+		let state = LSPS2LeaseState::from_leases(vec![fixed, variable]);
+
+		assert!(state.has_fixed_amount(1_000, Some(100)));
+		assert!(!state.has_fixed_amount(1_000, Some(99)));
+		assert!(!state.has_fixed_amount(2_000, None));
+		assert!(state.has_variable_amount(Some(50)));
+		assert!(!state.has_variable_amount(Some(49)));
 	}
 
 	fn cache_target(
