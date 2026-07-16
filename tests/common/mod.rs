@@ -1621,6 +1621,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
+	// With 0-conf, LDK re-broadcasts the splice as `Funding`, allowing node A to classify it
+	// and suppress the on-chain payment event. Otherwise node A only broadcasts
+	// `InteractiveFunding`, which has no local contribution to classify, so wallet sync emits it.
 	if !allow_0conf {
 		assert_eq!(
 			node_a.expect_onchain_payment_event(OnchainPaymentEvent::Received).await,
