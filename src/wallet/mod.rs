@@ -331,7 +331,9 @@ impl Wallet {
 							unconfirmed_outbound_txids
 								.iter()
 								.filter_map(|txid| {
-									locked_wallet.tx_details(*txid).map(|d| (*d.tx).clone())
+									locked_wallet
+										.get_tx(*txid)
+										.map(|tx| tx.tx_node.tx.as_ref().clone())
 								})
 								.collect()
 						};
