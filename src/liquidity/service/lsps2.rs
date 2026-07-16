@@ -26,7 +26,7 @@ use crate::logger::{log_error, LdkLogger};
 use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
 use crate::{total_anchor_channels_reserve_sats, Config};
 
-const LSPS2_GETINFO_REQUEST_EXPIRY: Duration = Duration::from_secs(60 * 60 * 24);
+const LSPS2_GETINFO_REQUEST_EXPIRY: Duration = Duration::from_secs(60 * 60 * 48);
 const LSPS2_CHANNEL_CLTV_EXPIRY_DELTA: u32 = 72;
 
 pub(crate) struct LSPS2Service {
