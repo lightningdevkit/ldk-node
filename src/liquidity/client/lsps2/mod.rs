@@ -60,6 +60,20 @@ impl<L: Deref + Clone + Send + Sync + 'static> LSPS2Client<L>
 where
 	L::Target: LdkLogger,
 {
+	pub(crate) async fn prune_stale_leases(&self) -> Result<(), Error> {
+		let stale_ids = self
+			.lease_store
+			.list_filter(|lease| !state::is_lease_usable(lease))
+			.into_iter()
+			.map(|lease| lease.id)
+			.collect::<Vec<_>>();
+		for id in stale_ids {
+			self.lease_store.remove(&id).await?;
+		}
+		self.lease_state.lock().expect("lock").prune();
+		Ok(())
+	}
+
 	pub(crate) async fn lsps2_receive_to_jit_channel(
 		self: Arc<Self>, amount_msat: u64, description: &Bolt11InvoiceDescription,
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
