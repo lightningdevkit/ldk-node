@@ -57,6 +57,11 @@ where
 }
 
 const DEFAULT_BOLT12_INVOICE_EXPIRY_SECS: u32 = 2 * 60 * 60;
+const LEASE_NEGOTIATION_MAX_ATTEMPTS: usize = 3;
+
+fn should_retry_lease_negotiation(error: Error, attempt: usize) -> bool {
+	error == Error::LiquidityRequestFailed && attempt < LEASE_NEGOTIATION_MAX_ATTEMPTS
+}
 
 pub(crate) struct JitInvoiceResponse {
 	pub(crate) payment_metadata: BTreeMap<u64, Vec<u8>>,
@@ -313,6 +318,34 @@ where
 	async fn negotiate_fixed_lease(
 		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig), Error> {
+		let mut attempt = 1;
+		loop {
+			let result = self
+				.negotiate_fixed_lease_once(
+					amount_msat,
+					max_total_lsp_fee_limit_msat,
+					connection_manager,
+				)
+				.await;
+			match result {
+				Err(error) if should_retry_lease_negotiation(error, attempt) => {
+					log_warn!(
+						self.logger,
+						"LSPS2 lease negotiation attempt {} failed, retrying: {}",
+						attempt,
+						error
+					);
+					attempt += 1;
+				},
+				result => return result,
+			}
+		}
+	}
+
+	async fn negotiate_fixed_lease_once(
+		self: &Arc<Self>, amount_msat: u64, max_total_lsp_fee_limit_msat: Option<u64>,
+		connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
 			.into_iter()
@@ -398,6 +431,33 @@ where
 
 	async fn negotiate_variable_lease(
 		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(PaymentLease, u64, LspConfig), Error> {
+		let mut attempt = 1;
+		loop {
+			let result = self
+				.negotiate_variable_lease_once(
+					max_proportional_lsp_fee_limit_ppm_msat,
+					connection_manager,
+				)
+				.await;
+			match result {
+				Err(error) if should_retry_lease_negotiation(error, attempt) => {
+					log_warn!(
+						self.logger,
+						"LSPS2 lease negotiation attempt {} failed, retrying: {}",
+						attempt,
+						error
+					);
+					attempt += 1;
+				},
+				result => return result,
+			}
+		}
+	}
+
+	async fn negotiate_variable_lease_once(
+		self: &Arc<Self>, max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+		connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let mut rejected_for_fee = false;
@@ -969,6 +1029,15 @@ mod tests {
 
 		assert_eq!(result, Err(()));
 		assert!(!*consumed.lock().unwrap());
+	}
+
+	#[test]
+	fn lease_negotiation_retries_only_transient_failures() {
+		assert!(should_retry_lease_negotiation(Error::LiquidityRequestFailed, 1));
+		assert!(should_retry_lease_negotiation(Error::LiquidityRequestFailed, 2));
+		assert!(!should_retry_lease_negotiation(Error::LiquidityRequestFailed, 3));
+		assert!(!should_retry_lease_negotiation(Error::LiquidityFeeTooHigh, 1));
+		assert!(!should_retry_lease_negotiation(Error::LiquiditySourceUnavailable, 1));
 	}
 }
 
