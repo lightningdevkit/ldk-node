@@ -328,7 +328,10 @@ impl UnifiedPayment {
 						Error::InvalidAmount
 					})?;
 
-					let txid = self.onchain_payment.send_to_address(&address, amt_sats, None)?;
+					let txid = self
+						.onchain_payment
+						.send_to_address_inner(&address, amt_sats, None)
+						.await?;
 					return Ok(UnifiedPaymentResult::Onchain { txid });
 				},
 			}

@@ -8,8 +8,11 @@
 mod common;
 
 use std::collections::HashSet;
+use std::future::Future;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
+use std::time::Duration;
 
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
@@ -24,8 +27,8 @@ use common::{
 	generate_listening_addresses, invalidate_blocks, open_channel, open_channel_push_amt,
 	open_channel_with_all, premine_and_distribute_funds, premine_blocks, prepare_rbf,
 	random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_builder, setup_node,
-	setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_tx, TestChainSource, TestConfig,
-	TestStoreType, TestSyncStore,
+	setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_tx, InMemoryStore,
+	TestChainSource, TestConfig, TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
@@ -40,6 +43,7 @@ use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
@@ -71,6 +75,145 @@ async fn wait_for_classified_funding_payment(node: &Node, funding_txid: Txid) {
 		.unwrap_or_else(|_| {
 			panic!("timed out waiting for funding broadcast {} to be classified", funding_txid)
 		});
+}
+
+#[derive(Clone)]
+struct ContendedStore {
+	inner: Arc<InMemoryStore>,
+	serializer: Arc<tokio::sync::RwLock<()>>,
+	block_writes: Arc<AtomicBool>,
+	wallet_write_started: Arc<tokio::sync::Notify>,
+}
+
+impl KVStore for ContendedStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, lightning::io::Error>> + 'static + Send {
+		KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		let serializer = Arc::clone(&self.serializer);
+		let block_writes = Arc::clone(&self.block_writes);
+		let wallet_write_started = Arc::clone(&self.wallet_write_started);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			if block_writes.load(Ordering::Acquire) {
+				wallet_write_started.notify_one();
+			}
+			let _guard = serializer.read().await;
+			KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
+		}
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send {
+		KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+	}
+}
+
+impl PaginatedKVStore for ContendedStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, lightning::io::Error>> + 'static + Send
+	{
+		PaginatedKVStore::list_paginated(
+			&*self.inner,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		)
+	}
+}
+
+#[test]
+fn wallet_store_contention_does_not_stall_runtime() {
+	let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+	let (result_sender, result_receiver) = mpsc::sync_channel(1);
+	std::thread::spawn(move || {
+		let runtime = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.expect("test runtime");
+		let result = runtime.block_on(async move {
+			let test_config = random_config();
+			let builder = Builder::from_config(test_config.node_config.clone());
+			let store = ContendedStore {
+				inner: Arc::new(InMemoryStore::new()),
+				serializer: Arc::new(tokio::sync::RwLock::new(())),
+				block_writes: Arc::new(AtomicBool::new(false)),
+				wallet_write_started: Arc::new(tokio::sync::Notify::new()),
+			};
+			let node = builder
+				.build_with_store(test_config.node_entropy.into(), store.clone())
+				.map_err(|e| format!("failed to build node: {e:?}"))?;
+			#[cfg(not(feature = "uniffi"))]
+			let node = Arc::new(node);
+
+			let serializer = Arc::clone(&store.serializer);
+			let release_store = Arc::new(tokio::sync::Notify::new());
+			let release_store_task = Arc::clone(&release_store);
+			let (store_locked_sender, store_locked_receiver) = tokio::sync::oneshot::channel();
+			tokio::spawn(async move {
+				let _guard = serializer.write().await;
+				let _ = store_locked_sender.send(());
+				release_store_task.notified().await;
+			});
+			store_locked_receiver.await.map_err(|e| format!("store lock task failed: {e}"))?;
+			store.block_writes.store(true, Ordering::Release);
+			let _ = ready_sender.send(());
+
+			let address_node = Arc::clone(&node);
+			let (address_sender, address_receiver) = tokio::sync::oneshot::channel();
+			std::thread::spawn(move || {
+				let result = address_node.onchain_payment().new_address().map(|_| ());
+				let _ = address_sender.send(result);
+			});
+			store.wallet_write_started.notified().await;
+
+			let balances_node = Arc::clone(&node);
+			let (balances_started_sender, balances_started_receiver) =
+				tokio::sync::oneshot::channel();
+			let balances_task = tokio::spawn(async move {
+				let _ = balances_started_sender.send(());
+				balances_node.list_balances()
+			});
+			balances_started_receiver
+				.await
+				.map_err(|e| format!("balance task failed to start: {e}"))?;
+			std::thread::spawn(move || {
+				std::thread::sleep(Duration::from_millis(100));
+				release_store.notify_one();
+			});
+			balances_task.await.map_err(|e| format!("balance task failed: {e}"))?;
+			address_receiver
+				.await
+				.map_err(|e| format!("address task failed: {e}"))?
+				.map_err(|e| format!("address generation failed: {e}"))
+		});
+		let _ = result_sender.send(result);
+	});
+
+	ready_receiver
+		.recv_timeout(Duration::from_secs(30))
+		.expect("failed to set up wallet contention test");
+	let result = result_receiver
+		.recv_timeout(Duration::from_secs(3))
+		.expect("wallet contention stalled the single-thread runtime");
+	result.unwrap_or_else(|e| panic!("wallet contention test failed: {e}"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

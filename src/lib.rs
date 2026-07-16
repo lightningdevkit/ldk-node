@@ -1106,6 +1106,7 @@ impl Node {
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
+			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -1118,6 +1119,7 @@ impl Node {
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
+			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 		))
 	}
