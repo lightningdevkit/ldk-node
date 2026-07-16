@@ -664,26 +664,40 @@ where
 		}
 	}
 
-	fn lsps2_max_total_opening_fee_msat(payment_metadata: &[u8], amount_msat: u64) -> Option<u64> {
+	fn lsps2_max_total_opening_fee_msat(
+		payment_metadata: &[u8], amount_msat: u64, counterparty_skimmed_fee_msat: u64,
+	) -> Option<u64> {
 		let metadata = PaymentMetadata::read(&mut &payment_metadata[..]).ok()?;
-		Self::lsps2_max_total_opening_fee_msat_from_metadata(metadata, amount_msat)
+		Self::lsps2_max_total_opening_fee_msat_from_metadata(
+			metadata,
+			amount_msat,
+			counterparty_skimmed_fee_msat,
+		)
 	}
 
 	fn lsps2_bolt12_max_total_opening_fee_msat(
 		payment_metadata: &BTreeMap<u64, Vec<u8>>, amount_msat: u64,
+		counterparty_skimmed_fee_msat: u64,
 	) -> Option<u64> {
 		let metadata = PaymentMetadata::decode_from_bolt12_payment_metadata(payment_metadata)?;
-		Self::lsps2_max_total_opening_fee_msat_from_metadata(metadata, amount_msat)
+		Self::lsps2_max_total_opening_fee_msat_from_metadata(
+			metadata,
+			amount_msat,
+			counterparty_skimmed_fee_msat,
+		)
 	}
 
 	fn lsps2_max_total_opening_fee_msat_from_metadata(
-		metadata: PaymentMetadata, amount_msat: u64,
+		metadata: PaymentMetadata, amount_msat: u64, counterparty_skimmed_fee_msat: u64,
 	) -> Option<u64> {
 		let lsps2_parameters = metadata.lsps2_parameters?;
 		lsps2_parameters.max_total_opening_fee_msat.or_else(|| {
 			lsps2_parameters.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
-				// If it's a variable amount payment, compute the actual fee.
-				compute_opening_fee(amount_msat, 0, max_prop_fee)
+				// `PaymentClaimable::amount_msat` excludes the fee withheld by the LSP. LSPS2
+				// proportional fees are calculated from the amount sent by the payer, so add the
+				// withheld fee back before computing the permitted fee.
+				let payment_size_msat = amount_msat.checked_add(counterparty_skimmed_fee_msat)?;
+				compute_opening_fee(payment_size_msat, 0, max_prop_fee)
 			})
 		})
 	}
@@ -877,11 +891,19 @@ where
 							.as_ref()
 							.and_then(|fields| fields.payment_metadata.as_ref())
 							.and_then(|metadata| {
-								Self::lsps2_max_total_opening_fee_msat(metadata, amount_msat)
+								Self::lsps2_max_total_opening_fee_msat(
+									metadata,
+									amount_msat,
+									counterparty_skimmed_fee_msat,
+								)
 							}),
 						PaymentPurpose::Bolt12OfferPayment { payment_context, .. } => {
 							payment_context.payment_metadata.as_ref().and_then(|metadata| {
-								Self::lsps2_bolt12_max_total_opening_fee_msat(metadata, amount_msat)
+								Self::lsps2_bolt12_max_total_opening_fee_msat(
+									metadata,
+									amount_msat,
+									counterparty_skimmed_fee_msat,
+								)
 							})
 						},
 						_ => None,
@@ -2078,9 +2100,30 @@ mod tests {
 		assert_eq!(
 			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
 				&metadata.encode(),
-				100_000
+				100_000,
+				0,
 			),
 			Some(42_000)
+		);
+	}
+
+	#[test]
+	fn lsps2_proportional_fee_uses_gross_payment_amount() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: None,
+				max_proportional_opening_fee_ppm_msat: Some(10_000),
+			}),
+			lsps2_lease_parameters: None,
+		};
+
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+				&metadata.encode(),
+				198_000,
+				2_000,
+			),
+			Some(2_000)
 		);
 	}
 
@@ -2100,18 +2143,20 @@ mod tests {
 		assert_eq!(
 			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
 				&empty_metadata,
-				100_000
+				100_000,
+				0,
 			),
 			None
 		);
 		assert_eq!(
-			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(&[0xff], 100_000),
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(&[0xff], 100_000, 0,),
 			None
 		);
 		assert_eq!(
 			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
 				&metadata_without_fee_limit,
-				100_000
+				100_000,
+				0,
 			),
 			None
 		);
@@ -2130,7 +2175,7 @@ mod tests {
 
 		assert_eq!(
 			EventHandler::<Arc<TestLogger>>::lsps2_bolt12_max_total_opening_fee_msat(
-				&metadata, 100_000
+				&metadata, 100_000, 0,
 			),
 			Some(1_000)
 		);
@@ -2148,7 +2193,7 @@ mod tests {
 		for metadata in [empty_metadata, malformed_metadata, metadata_without_fee_limit] {
 			assert_eq!(
 				EventHandler::<Arc<TestLogger>>::lsps2_bolt12_max_total_opening_fee_msat(
-					&metadata, 100_000
+					&metadata, 100_000, 0,
 				),
 				None
 			);
