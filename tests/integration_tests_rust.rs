@@ -3148,6 +3148,163 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn bolt12_lsps2_client_service_integration() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let channel_opening_fee_ppm = 10_000;
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm,
+		channel_over_provisioning_ppm: 100_000,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: true,
+		disable_client_reserve: false,
+	};
+
+	let service_config = random_config();
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(lsps2_service_config);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config();
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	let payer_config = random_config();
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	let client_addr = client_node.listening_addresses().unwrap().first().unwrap().clone();
+	payer_node.connect(client_node.node_id(), client_addr, false).unwrap();
+
+	let service_onchain_addr = service_node.onchain_payment().new_address().unwrap();
+	let client_onchain_addr = client_node.onchain_payment().new_address().unwrap();
+	let payer_onchain_addr = payer_node.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_onchain_addr, client_onchain_addr, payer_onchain_addr],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+
+	open_channel(&payer_node, &service_node, 5_000_000, true, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+	while payer_node.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+	}
+	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+	let fixed_amount_msat = 100_000_000;
+	// The recipient has no channel yet, but the connected payer gives the default message router a
+	// peer through which it can construct an offer path. This keeps the long-lived offer addressed
+	// by a blinded node path; the single-use intercept SCID is introduced only in the invoice.
+	assert!(client_node.list_channels().is_empty());
+	let fixed_offer =
+		client_node.bolt12_payment().receive(fixed_amount_msat, "fixed", None, None).unwrap();
+	assert!(!fixed_offer.paths().is_empty());
+	assert_ne!(fixed_offer.issuer_signing_pubkey(), Some(client_node.node_id()));
+	let fixed_payment_id =
+		payer_node.bolt12_payment().send(&fixed_offer, None, None, None).unwrap();
+
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_event!(service_node, PaymentForwarded);
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+	expect_payment_successful_event!(payer_node, Some(fixed_payment_id), None);
+	let fixed_fee_msat = fixed_amount_msat * channel_opening_fee_ppm as u64 / 1_000_000;
+	let fixed_received_msat = fixed_amount_msat - fixed_fee_msat;
+	let fixed_receiver_payment_id =
+		expect_payment_received_event!(client_node, fixed_received_msat).unwrap();
+	match client_node.payment(&fixed_receiver_payment_id).unwrap().kind {
+		PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
+			assert_eq!(counterparty_skimmed_fee_msat, Some(fixed_fee_msat));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+
+	// The over-provisioned part of the first JIT channel can receive this payment in full. The
+	// offers flow must therefore keep the ordinary blinded path and avoid negotiating or exposing a
+	// second intercept SCID.
+	let client_channel_count = client_node.list_channels().len();
+	let service_channel_count = service_node.list_channels().len();
+	let ordinary_amount_msat = 5_000_000;
+	let ordinary_offer = client_node
+		.bolt12_payment()
+		.receive(ordinary_amount_msat, "existing inbound", None, None)
+		.unwrap();
+	let ordinary_payment_id =
+		payer_node.bolt12_payment().send(&ordinary_offer, None, None, None).unwrap();
+
+	expect_event!(service_node, PaymentForwarded);
+	expect_payment_successful_event!(payer_node, Some(ordinary_payment_id), None);
+	let ordinary_receiver_payment_id =
+		expect_payment_received_event!(client_node, ordinary_amount_msat).unwrap();
+	match client_node.payment(&ordinary_receiver_payment_id).unwrap().kind {
+		PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
+			assert_eq!(counterparty_skimmed_fee_msat, None);
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+	assert_eq!(client_node.list_channels().len(), client_channel_count);
+	assert_eq!(service_node.list_channels().len(), service_channel_count);
+
+	// The first JIT channel cannot carry this larger variable payment. The variable offer disables
+	// MPP, so the payer must use the fresh JIT path rather than splitting across both paths.
+	let variable_amount_msat = 200_000_000;
+	let variable_offer =
+		client_node.bolt12_payment().receive_variable_amount("variable", None).unwrap();
+	let variable_payment_id = payer_node
+		.bolt12_payment()
+		.send_using_amount(&variable_offer, variable_amount_msat, None, None, None)
+		.unwrap();
+
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_event!(service_node, PaymentForwarded);
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+	expect_payment_successful_event!(payer_node, Some(variable_payment_id), None);
+	let variable_fee_msat = variable_amount_msat * channel_opening_fee_ppm as u64 / 1_000_000;
+	let variable_received_msat = variable_amount_msat - variable_fee_msat;
+	let variable_receiver_payment_id =
+		expect_payment_received_event!(client_node, variable_received_msat).unwrap();
+	match client_node.payment(&variable_receiver_payment_id).unwrap().kind {
+		PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
+			assert_eq!(counterparty_skimmed_fee_msat, Some(variable_fee_msat));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn facade_logging() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
