@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bitcoin::secp256k1::PublicKey;
 use lightning::impl_writeable_tlv_based;
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
+use lightning_liquidity::lsps2::utils::compute_opening_fee;
 
 use crate::data_store::{DataStore, StorableObject, StorableObjectId, StorableObjectUpdate};
 use crate::hex_utils;
@@ -96,12 +97,52 @@ impl LSPS2LeaseState {
 	}
 
 	pub(crate) fn take_valid(&mut self, id: &PaymentLeaseId) -> Option<PaymentLease> {
-		let lease = self.leases.remove(id)?;
-		if is_lease_usable(&lease) {
-			Some(lease)
+		if self.leases.get(id).map_or(false, is_lease_usable) {
+			self.leases.remove(id)
 		} else {
 			None
 		}
+	}
+
+	/// Selects and removes a fixed-amount lease in one operation.
+	pub(crate) fn fixed_amount(
+		&mut self, amount_msat: u64, max_fee_msat: Option<u64>, available_lsps: &[PublicKey],
+	) -> Option<(PaymentLease, u64)> {
+		let (id, fee_msat) = self
+			.leases
+			.iter()
+			.filter(|(id, _)| available_lsps.contains(&id.lsp_node_id))
+			.filter(|(_, lease)| lease.payment_size_msat == Some(amount_msat))
+			.filter(|(_, lease)| is_lease_usable(lease))
+			.filter_map(|(id, lease)| {
+				compute_opening_fee(
+					amount_msat,
+					lease.params.min_fee_msat,
+					lease.params.proportional as u64,
+				)
+				.map(|fee_msat| (*id, fee_msat))
+			})
+			.filter(|(_, fee_msat)| max_fee_msat.map_or(true, |max| *fee_msat <= max))
+			.min_by_key(|(_, fee_msat)| *fee_msat)?;
+		self.leases.remove(&id).map(|lease| (lease, fee_msat))
+	}
+
+	/// Selects and removes a variable-amount lease in one operation.
+	pub(crate) fn variable_amount(
+		&mut self, max_total_fee_msat: Option<u64>, available_lsps: &[PublicKey],
+	) -> Option<(PaymentLease, u64)> {
+		let (id, proportional_fee) = self
+			.leases
+			.iter()
+			.filter(|(id, _)| available_lsps.contains(&id.lsp_node_id))
+			.filter(|(_, lease)| lease.payment_size_msat.is_none())
+			.filter(|(_, lease)| is_lease_usable(lease))
+			.filter(|(_, lease)| {
+				max_total_fee_msat.map_or(true, |max| lease.params.min_fee_msat <= max)
+			})
+			.map(|(id, lease)| (*id, lease.params.proportional as u64))
+			.min_by_key(|(_, fee)| *fee)?;
+		self.leases.remove(&id).map(|lease| (lease, proportional_fee))
 	}
 
 	pub(crate) fn prune(&mut self) {
@@ -120,58 +161,102 @@ fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
-	#[test]
-	fn leases_are_consumed_once() {
-		let id = PaymentLeaseId {
-			lsp_node_id: PublicKey::from_slice(&[2; 33]).unwrap(),
-			intercept_scid: 42,
-		};
-		let mut state = LSPS2LeaseState::default();
-		state.insert(PaymentLease {
-			id,
+	fn lease(
+		node_key_byte: u8, intercept_scid: u64, min_fee_msat: u64, payment_size_msat: Option<u64>,
+		valid_until: u64,
+	) -> PaymentLease {
+		PaymentLease {
+			id: PaymentLeaseId {
+				lsp_node_id: PublicKey::from_secret_key(
+					&Secp256k1::new(),
+					&SecretKey::from_slice(&[node_key_byte; 32]).unwrap(),
+				),
+				intercept_scid,
+			},
 			params: LSPS2OpeningFeeParams {
-				min_fee_msat: 1,
+				min_fee_msat,
 				proportional: 1,
 				valid_until: "2030-01-01T00:00:00Z".parse().unwrap(),
 				min_lifetime: 1,
 				max_client_to_self_delay: 1,
 				min_payment_size_msat: 1,
-				max_payment_size_msat: 2,
+				max_payment_size_msat: 2_000,
 				promise: String::new(),
 			},
 			cltv_expiry_delta: 18,
-			payment_size_msat: Some(1_000),
-			valid_until: now_secs() + MIN_LEASE_REMAINING_SECS + 60,
-		});
+			payment_size_msat,
+			valid_until,
+		}
+	}
+
+	#[test]
+	fn leases_are_consumed_once() {
+		let lease = lease(2, 42, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS + 60);
+		let id = lease.id;
+		let mut state = LSPS2LeaseState::default();
+		state.insert(lease);
 		assert!(state.take_valid(&id).is_some());
 		assert!(state.take_valid(&id).is_none());
 	}
 
 	#[test]
+	fn selected_leases_cannot_be_consumed_twice() {
+		let lease = lease(2, 52, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS + 60);
+		let available_lsps = [lease.id.lsp_node_id];
+		let mut state = LSPS2LeaseState::from_leases(vec![lease]);
+
+		assert!(state.fixed_amount(1_000, None, &available_lsps).is_some());
+		assert!(
+			state.fixed_amount(1_000, None, &available_lsps).is_none(),
+			"single-use lease was handed out twice"
+		);
+	}
+
+	#[test]
 	fn prunes_leases_close_to_expiry() {
-		let id = PaymentLeaseId {
-			lsp_node_id: PublicKey::from_slice(&[2; 33]).unwrap(),
-			intercept_scid: 43,
-		};
+		let lease = lease(2, 43, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS - 1);
+		let id = lease.id;
 		let mut state = LSPS2LeaseState::default();
-		state.insert(PaymentLease {
-			id,
-			params: LSPS2OpeningFeeParams {
-				min_fee_msat: 1,
-				proportional: 1,
-				valid_until: "2030-01-01T00:00:00Z".parse().unwrap(),
-				min_lifetime: 1,
-				max_client_to_self_delay: 1,
-				min_payment_size_msat: 1,
-				max_payment_size_msat: 2,
-				promise: String::new(),
-			},
-			cltv_expiry_delta: 18,
-			payment_size_msat: Some(1_000),
-			valid_until: now_secs() + MIN_LEASE_REMAINING_SECS - 1,
-		});
+		state.insert(lease);
 		state.prune();
 		assert!(state.take_valid(&id).is_none());
+	}
+
+	#[test]
+	fn selects_cheapest_matching_lease_across_lsps() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let expensive = lease(2, 44, 100, Some(1_000), valid_until);
+		let cheap = lease(3, 45, 50, Some(1_000), valid_until);
+		let mut state = LSPS2LeaseState::from_leases(vec![expensive.clone(), cheap.clone()]);
+
+		let available_lsps = [expensive.id.lsp_node_id, cheap.id.lsp_node_id];
+		let (selected, _) = state.fixed_amount(1_000, None, &available_lsps).unwrap();
+		assert_eq!(selected.id, cheap.id);
+		let (remaining, _) = state.fixed_amount(1_000, None, &available_lsps).unwrap();
+		assert_eq!(remaining.id, expensive.id);
+	}
+
+	#[test]
+	fn ignores_leases_from_unavailable_lsps() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let unavailable = lease(2, 46, 1, Some(1_000), valid_until);
+		let available = lease(3, 47, 2, Some(1_000), valid_until);
+		let mut state = LSPS2LeaseState::from_leases(vec![unavailable, available.clone()]);
+
+		let (selected, _) = state.fixed_amount(1_000, None, &[available.id.lsp_node_id]).unwrap();
+		assert_eq!(selected.id, available.id, "lease selection ignored the set of available LSPs");
+	}
+
+	#[test]
+	fn variable_lease_honors_total_fee_limit() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let variable = lease(2, 46, 50, None, valid_until);
+		let mut state = LSPS2LeaseState::from_leases(vec![variable.clone()]);
+
+		let available_lsps = [variable.id.lsp_node_id];
+		assert!(state.variable_amount(Some(49), &available_lsps).is_none());
+		assert_eq!(state.variable_amount(Some(50), &available_lsps).unwrap().0.id, variable.id);
 	}
 }
