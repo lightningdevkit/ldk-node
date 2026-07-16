@@ -4486,17 +4486,18 @@ async fn lsps2_multi_lsp_rejects_fees_above_limit() {
 async fn do_lsps2_multi_lsp_picks_cheapest(
 	reverse_order: bool, max_total_lsp_fee_limit_msat: Option<u64>,
 ) {
-	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
 	let mut sync_config = EsploraSyncConfig::default();
 	sync_config.background_sync_config = None;
 
 	// Cheap LSP: 10_000 ppm.
+	let cheap_opening_fee_ppm = 10_000;
 	let cheap_cfg = LSPS2ServiceConfig {
 		require_token: None,
 		advertise_service: false,
-		channel_opening_fee_ppm: 10_000,
+		channel_opening_fee_ppm: cheap_opening_fee_ppm,
 		channel_over_provisioning_ppm: 100_000,
 		max_payment_size_msat: 1_000_000_000,
 		min_payment_size_msat: 0,
@@ -4553,12 +4554,47 @@ async fn do_lsps2_multi_lsp_picks_cheapest(
 	let client = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client.start().unwrap();
 
+	let payer_config = random_config();
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer.start().unwrap();
+
+	let client_addr = client.listening_addresses().unwrap().first().unwrap().clone();
+	payer.connect(client.node_id(), client_addr, false).unwrap();
+
+	let cheap_onchain_addr = cheap.onchain_payment().new_address().unwrap();
+	let client_onchain_addr = client.onchain_payment().new_address().unwrap();
+	let payer_onchain_addr = payer.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![cheap_onchain_addr, client_onchain_addr, payer_onchain_addr],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	cheap.sync_wallets().unwrap();
+	client.sync_wallets().unwrap();
+	payer.sync_wallets().unwrap();
+
+	open_channel(&payer, &cheap, 5_000_000, true, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	cheap.sync_wallets().unwrap();
+	payer.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer, cheap.node_id());
+	expect_channel_ready_event!(cheap, payer.node_id());
+	while payer.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+	}
+	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
 	let invoice_description =
 		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap()).into();
 	let jit_invoice_result =
 		client.bolt11_payment().receive_via_jit_channel(100_000_000, &invoice_description, 1024);
 	if max_total_lsp_fee_limit_msat.is_some() {
 		assert!(matches!(jit_invoice_result, Err(NodeError::LiquidityFeeTooHigh)));
+		payer.stop().unwrap();
 		client.stop().unwrap();
 		cheap.stop().unwrap();
 		expensive.stop().unwrap();
@@ -4576,6 +4612,30 @@ async fn do_lsps2_multi_lsp_picks_cheapest(
 	let route_hint_src = first_hop.expect("route hint should have at least one hop").src_node_id;
 	assert_eq!(route_hint_src, cheap_id, "expected cheaper LSP to be selected.");
 
+	// Consuming the BOLT11 lease schedules a replacement. The BOLT12 flow shares that cache and
+	// must retain the same cheapest-LSP selection regardless of registration order.
+	let payment_amount_msat = 100_000_000;
+	let offer =
+		client.bolt12_payment().receive(payment_amount_msat, "multi LSP", None, None).unwrap();
+	let payment_id = payer.bolt12_payment().send(&offer, None, None, None).unwrap();
+
+	expect_channel_pending_event!(cheap, client.node_id());
+	expect_channel_ready_event!(cheap, client.node_id());
+	expect_event!(cheap, PaymentForwarded);
+	expect_channel_pending_event!(client, cheap.node_id());
+	expect_channel_ready_event!(client, cheap.node_id());
+	expect_payment_successful_event!(payer, Some(payment_id), None);
+	let fee_msat = payment_amount_msat * cheap_opening_fee_ppm as u64 / 1_000_000;
+	let receiver_payment_id =
+		expect_payment_received_event!(client, payment_amount_msat - fee_msat).unwrap();
+	match client.payment(&receiver_payment_id).unwrap().kind {
+		PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
+			assert_eq!(counterparty_skimmed_fee_msat, Some(fee_msat));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+
+	payer.stop().unwrap();
 	client.stop().unwrap();
 	cheap.stop().unwrap();
 	expensive.stop().unwrap();
