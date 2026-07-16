@@ -4428,7 +4428,7 @@ async fn open_channel_variants_reserve_funds_for_anchor_peers() {
 		with_all_cases.push((variant, node_a, node_b));
 	}
 
-	premine_and_distribute_funds(
+	let premine_txid = premine_and_distribute_funds(
 		&bitcoind.client,
 		&electrsd.client,
 		addresses,
@@ -4441,6 +4441,20 @@ async fn open_channel_variants_reserve_funds_for_anchor_peers() {
 		node_b.sync_wallets().unwrap();
 		assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 		assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
+	}
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, (ANTI_REORG_DELAY - 1) as usize)
+		.await;
+	for (_, node_a, node_b) in exact_cases.iter().chain(with_all_cases.iter()) {
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+		assert_eq!(
+			node_a.expect_onchain_payment_event(OnchainPaymentEvent::Received).await,
+			premine_txid,
+		);
+		assert_eq!(
+			node_b.expect_onchain_payment_event(OnchainPaymentEvent::Received).await,
+			premine_txid,
+		);
 	}
 
 	for (variant, node_a, node_b) in exact_cases {
