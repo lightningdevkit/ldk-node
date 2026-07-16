@@ -12,6 +12,7 @@
 //! how leases are tracked.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -41,7 +42,25 @@ use crate::payment::PaymentMetadata;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
-use self::state::{LSPS2LeaseState, PaymentLeaseStore};
+use self::state::{LSPS2LeaseState, PaymentLease, PaymentLeaseId, PaymentLeaseStore};
+
+async fn consume_after_persisted_removal<T, E, RF, CF, Fut>(
+	value: T, persist_removal: RF, restore: CF,
+) -> Result<T, E>
+where
+	T: Clone,
+	RF: FnOnce(T) -> Fut,
+	CF: FnOnce(T),
+	Fut: Future<Output = Result<(), E>>,
+{
+	match persist_removal(value.clone()).await {
+		Ok(()) => Ok(value),
+		Err(error) => {
+			restore(value);
+			Err(error)
+		},
+	}
+}
 
 pub(crate) struct LSPS2Client<L: Deref>
 where
@@ -86,8 +105,63 @@ where
 		expiry_secs: u32, payment_hash: Option<PaymentHash>,
 		connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
-		// Connect to all candidate LSPs before querying fees.
-		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
+		let (lease, total_fee_msat, lsp, was_negotiated) =
+			self.acquire_fixed_lease(amount_msat, &connection_manager).await?;
+		let lsps2_parameters = LSPS2Parameters {
+			max_total_opening_fee_msat: Some(total_fee_msat),
+			max_proportional_opening_fee_ppm_msat: None,
+			min_opening_fee_msat: lease.params.min_fee_msat,
+		};
+
+		let invoice = self.lsps2_create_jit_invoice(
+			&lease,
+			description,
+			expiry_secs,
+			payment_hash,
+			lsps2_parameters,
+		)?;
+
+		if was_negotiated {
+			log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
+		}
+		Ok((invoice, lsp))
+	}
+
+	pub(crate) async fn lsps2_receive_variable_amount_to_jit_channel(
+		self: Arc<Self>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
+	) -> Result<(Bolt11Invoice, LspConfig), Error> {
+		let (lease, proportional_fee, lsp, was_negotiated) =
+			self.acquire_variable_lease(&connection_manager).await?;
+		let lsps2_parameters = LSPS2Parameters {
+			max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
+			max_proportional_opening_fee_ppm_msat: Some(proportional_fee),
+			min_opening_fee_msat: lease.params.min_fee_msat,
+		};
+		let invoice = self.lsps2_create_jit_invoice(
+			&lease,
+			description,
+			expiry_secs,
+			payment_hash,
+			lsps2_parameters,
+		)?;
+
+		if was_negotiated {
+			log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
+		}
+		Ok((invoice, lsp))
+	}
+
+	async fn acquire_fixed_lease(
+		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(PaymentLease, u64, LspConfig, bool), Error> {
+		if let Some((lease, total_fee_msat, lsp)) =
+			self.take_cached_fixed_lease(amount_msat).await?
+		{
+			return Ok((lease, total_fee_msat, lsp, false));
+		}
+
+		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
 			.into_iter()
 			.flat_map(|(lsp, resp)| {
@@ -118,8 +192,7 @@ where
 				Error::LiquidityRequestFailed
 			})?;
 
-		let max_total_lsp_fee_limit_msat =
-			self.config.lsps2_max_total_lsp_fee_limit_msat.unwrap_or(amount_msat).min(amount_msat);
+		let max_total_lsp_fee_limit_msat = self.max_fixed_amount_fee_msat(amount_msat);
 		if min_total_fee_msat > max_total_lsp_fee_limit_msat {
 			log_error!(self.logger,
 				"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our fee limit of {}msat",
@@ -135,38 +208,25 @@ where
 			min_total_fee_msat
 		);
 
-		let lsps2_parameters = LSPS2Parameters {
-			max_total_opening_fee_msat: Some(min_total_fee_msat),
-			max_proportional_opening_fee_ppm_msat: None,
-			min_opening_fee_msat: min_opening_params.min_fee_msat,
-		};
-		let buy_response = self
+		let negotiated_lease = self
 			.lsps2_send_buy_request(
 				Some(amount_msat),
 				min_opening_params,
 				Some(&cheapest_lsp.node_id),
 			)
 			.await?;
-		let invoice = self.lsps2_create_jit_invoice(
-			buy_response,
-			Some(amount_msat),
-			description,
-			expiry_secs,
-			payment_hash,
-			lsps2_parameters,
-			Some(&cheapest_lsp.node_id),
-		)?;
-
-		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
-		Ok((invoice, cheapest_lsp))
+		let lease = self.consume_lease(&negotiated_lease.id).await?;
+		Ok((lease, min_total_fee_msat, cheapest_lsp, true))
 	}
 
-	pub(crate) async fn lsps2_receive_variable_amount_to_jit_channel(
-		self: Arc<Self>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
-	) -> Result<(Bolt11Invoice, LspConfig), Error> {
-		// Connect to all candidate LSPs before querying fees.
-		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
+	async fn acquire_variable_lease(
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(PaymentLease, u64, LspConfig, bool), Error> {
+		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
+			return Ok((lease, proportional_fee, lsp, false));
+		}
+
+		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let mut rejected_for_fee = false;
 		let (cheapest_lsp, min_prop_fee_ppm_msat, min_opening_params) = all_offers
 			.into_iter()
@@ -204,26 +264,11 @@ where
 			min_prop_fee_ppm_msat
 		);
 
-		let lsps2_parameters = LSPS2Parameters {
-			max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
-			max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
-			min_opening_fee_msat: min_opening_params.min_fee_msat,
-		};
-		let buy_response = self
+		let negotiated_lease = self
 			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
 			.await?;
-		let invoice = self.lsps2_create_jit_invoice(
-			buy_response,
-			None,
-			description,
-			expiry_secs,
-			payment_hash,
-			lsps2_parameters,
-			Some(&cheapest_lsp.node_id),
-		)?;
-
-		log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
-		Ok((invoice, cheapest_lsp))
+		let lease = self.consume_lease(&negotiated_lease.id).await?;
+		Ok((lease, min_prop_fee_ppm_msat, cheapest_lsp, true))
 	}
 
 	async fn gather_lsps2_offers(
@@ -320,7 +365,7 @@ where
 	async fn lsps2_send_buy_request(
 		&self, amount_msat: Option<u64>, opening_fee_params: LSPS2OpeningFeeParams,
 		node_id: Option<&PublicKey>,
-	) -> Result<LSPS2BuyResponse, Error> {
+	) -> Result<PaymentLease, Error> {
 		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, node_id)
 			.ok_or(Error::LiquiditySourceUnavailable)?;
 
@@ -333,7 +378,7 @@ where
 		let _pending_request = {
 			let mut pending_buy_requests_lock = self.pending_buy_requests.lock().expect("lock");
 			let request_id = client_handler
-				.select_opening_params(lsps2_node.node_id, amount_msat, opening_fee_params)
+				.select_opening_params(lsps2_node.node_id, amount_msat, opening_fee_params.clone())
 				.map_err(|e| {
 					log_error!(
 						self.logger,
@@ -364,16 +409,103 @@ where
 			Error::LiquidityRequestFailed
 		})?;
 
-		Ok(buy_response)
+		let valid_until = opening_fee_params
+			.valid_until
+			.0
+			.timestamp()
+			.try_into()
+			.map_err(|_| Error::LiquidityRequestFailed)?;
+		let lease = PaymentLease {
+			id: PaymentLeaseId {
+				lsp_node_id: lsps2_node.node_id,
+				intercept_scid: buy_response.intercept_scid,
+			},
+			params: opening_fee_params,
+			cltv_expiry_delta: buy_response.cltv_expiry_delta,
+			payment_size_msat: amount_msat,
+			valid_until,
+		};
+		self.lease_store.insert(lease.clone()).await?;
+		self.lease_state.lock().expect("lock").insert(lease.clone());
+		Ok(lease)
+	}
+
+	async fn consume_lease(&self, id: &PaymentLeaseId) -> Result<PaymentLease, Error> {
+		let lease = self
+			.lease_state
+			.lock()
+			.expect("lock")
+			.take_valid(id)
+			.ok_or(Error::LiquidityRequestFailed)?;
+		self.consume_selected_lease(lease).await
+	}
+
+	async fn consume_selected_lease(&self, lease: PaymentLease) -> Result<PaymentLease, Error> {
+		let lease_store = Arc::clone(&self.lease_store);
+		// Selection has already removed the lease from the shared state so no other payment can
+		// reuse its intercept SCID. Restore it only if the durable removal fails, before an invoice
+		// containing the lease can be returned.
+		consume_after_persisted_removal(
+			lease,
+			move |lease| async move { lease_store.remove(&lease.id).await },
+			|lease| {
+				self.lease_state.lock().expect("lock").insert(lease);
+			},
+		)
+		.await
+	}
+
+	/// Fixed-amount opening fees are bounded by the payment amount even without a configured limit.
+	fn max_fixed_amount_fee_msat(&self, amount_msat: u64) -> u64 {
+		self.config.lsps2_max_total_lsp_fee_limit_msat.unwrap_or(amount_msat).min(amount_msat)
+	}
+
+	async fn take_cached_fixed_lease(
+		&self, amount_msat: u64,
+	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
+		let lsps2_nodes = self.get_lsps2_nodes().await?;
+		let available_lsps = lsps2_nodes.iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
+		let Some((lease, fee_msat)) = self.lease_state.lock().expect("lock").fixed_amount(
+			amount_msat,
+			Some(self.max_fixed_amount_fee_msat(amount_msat)),
+			&available_lsps,
+		) else {
+			return Ok(None);
+		};
+		let lsp = lsps2_nodes
+			.into_iter()
+			.find(|lsp| lsp.node_id == lease.id.lsp_node_id)
+			.expect("lease was selected from available LSPs");
+		let lease = self.consume_selected_lease(lease).await?;
+		Ok(Some((lease, fee_msat, lsp)))
+	}
+
+	async fn take_cached_variable_lease(
+		&self,
+	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
+		let lsps2_nodes = self.get_lsps2_nodes().await?;
+		let available_lsps = lsps2_nodes.iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
+		let Some((lease, proportional_fee)) = self
+			.lease_state
+			.lock()
+			.expect("lock")
+			.variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat, &available_lsps)
+		else {
+			return Ok(None);
+		};
+		let lsp = lsps2_nodes
+			.into_iter()
+			.find(|lsp| lsp.node_id == lease.id.lsp_node_id)
+			.expect("lease was selected from available LSPs");
+		let lease = self.consume_selected_lease(lease).await?;
+		Ok(Some((lease, proportional_fee, lsp)))
 	}
 
 	fn lsps2_create_jit_invoice(
-		&self, buy_response: LSPS2BuyResponse, amount_msat: Option<u64>,
-		description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		&self, lease: &PaymentLease, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		payment_hash: Option<PaymentHash>, lsps2_parameters: LSPS2Parameters,
-		node_id: Option<&PublicKey>,
 	) -> Result<Bolt11Invoice, Error> {
-		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, node_id)
+		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
 			.ok_or(Error::LiquiditySourceUnavailable)?;
 
 		// LSPS2 requires min_final_cltv_expiry_delta to be at least 2 more than usual.
@@ -386,7 +518,7 @@ where
 					.channel_manager
 					.create_inbound_payment_for_hash(
 						payment_hash,
-						amount_msat,
+						lease.payment_size_msat,
 						expiry_secs,
 						Some(min_final_cltv_expiry_delta),
 						Some(encoded_payment_metadata),
@@ -400,7 +532,7 @@ where
 			None => self
 				.channel_manager
 				.create_inbound_payment(
-					amount_msat,
+					lease.payment_size_msat,
 					expiry_secs,
 					Some(min_final_cltv_expiry_delta),
 					Some(encoded_payment_metadata),
@@ -413,9 +545,9 @@ where
 
 		let route_hint = RouteHint(vec![RouteHintHop {
 			src_node_id: lsps2_node.node_id,
-			short_channel_id: buy_response.intercept_scid,
+			short_channel_id: lease.id.intercept_scid,
 			fees: RoutingFees { base_msat: 0, proportional_millionths: 0 },
-			cltv_expiry_delta: buy_response.cltv_expiry_delta as u16,
+			cltv_expiry_delta: lease.cltv_expiry_delta as u16,
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]);
@@ -430,7 +562,7 @@ where
 			.expiry_time(Duration::from_secs(expiry_secs.into()))
 			.private_route(route_hint);
 
-		if let Some(amount_msat) = amount_msat {
+		if let Some(amount_msat) = lease.payment_size_msat {
 			invoice_builder = invoice_builder.amount_milli_satoshis(amount_msat).basic_mpp();
 		}
 
@@ -580,4 +712,25 @@ pub(crate) struct LSPS2BuyResponse {
 	intercept_scid: u64,
 	cltv_expiry_delta: u32,
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn failed_persisted_removal_restores_value() {
+		let restored = Arc::new(Mutex::new(None));
+		let restored_ref = Arc::clone(&restored);
+		let result = consume_after_persisted_removal(
+			42,
+			|_| async { Err(()) },
+			move |value| *restored_ref.lock().unwrap() = Some(value),
+		)
+		.await;
+
+		assert_eq!(result, Err(()));
+		assert_eq!(*restored.lock().unwrap(), Some(42));
+	}
+}
+
 pub(crate) mod state;
