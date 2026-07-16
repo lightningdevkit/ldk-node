@@ -558,6 +558,9 @@ impl Node {
 						if let Err(error) = lsps2_client.prune_stale_leases().await {
 							log_error!(prune_logger, "Failed pruning stale LSPS2 leases: {}", error);
 						}
+						if let Err(error) = lsps2_client.prune_stale_pending_offers().await {
+							log_error!(prune_logger, "Failed pruning stale LSPS2 offers: {}", error);
+						}
 					},
 				}
 			}

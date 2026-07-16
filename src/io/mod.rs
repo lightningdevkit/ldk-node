@@ -37,6 +37,10 @@ pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = ""
 pub(crate) const LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE: &str = "lsps2_leases";
 pub(crate) const LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
+/// Pending BOLT12 LSPS2 offers are persisted under this prefix.
+pub(crate) const LSPS2_PENDING_OFFER_PERSISTENCE_PRIMARY_NAMESPACE: &str = "lsps2_pending_offers";
+pub(crate) const LSPS2_PENDING_OFFER_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
+
 /// The node metrics will be persisted under this key.
 pub(crate) const NODE_METRICS_PRIMARY_NAMESPACE: &str = "";
 pub(crate) const NODE_METRICS_SECONDARY_NAMESPACE: &str = "";

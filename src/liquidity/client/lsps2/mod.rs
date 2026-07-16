@@ -36,7 +36,10 @@ use crate::payment::PaymentMetadata;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
-use self::state::{LSPS2LeaseState, PaymentLease, PaymentLeaseId, PaymentLeaseStore};
+use self::state::{
+	now_secs, LSPS2LeaseState, PaymentLease, PaymentLeaseId, PaymentLeaseStore, PendingOffer,
+	PendingOfferId, PendingOfferState, PendingOfferStore,
+};
 
 async fn consume_after_persisted_removal<T, E, RF, CF, Fut>(
 	value: T, persist_removal: RF, consume: CF,
@@ -63,6 +66,8 @@ where
 		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2BuyResponse>>>,
 	pub(crate) lease_store: Arc<PaymentLeaseStore<L>>,
 	pub(crate) lease_state: Mutex<LSPS2LeaseState>,
+	pub(crate) pending_offer_store: Arc<PendingOfferStore<L>>,
+	pub(crate) pending_offer_state: Mutex<PendingOfferState>,
 	pub(crate) channel_manager: Arc<ChannelManager>,
 	pub(crate) keys_manager: Arc<KeysManager>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
@@ -87,6 +92,36 @@ where
 		}
 		self.lease_state.lock().expect("lock").prune();
 		Ok(())
+	}
+
+	pub(crate) async fn prune_stale_pending_offers(&self) -> Result<(), Error> {
+		let stale_ids = self.pending_offer_state.lock().expect("lock").prune(now_secs());
+		for id in stale_ids {
+			self.pending_offer_store.remove(&id).await?;
+		}
+		Ok(())
+	}
+
+	pub(crate) async fn register_pending_offer(&self, offer: PendingOffer) -> Result<(), Error> {
+		self.pending_offer_store.insert_or_update(offer.clone()).await?;
+		let evicted = self.pending_offer_state.lock().expect("lock").register(offer);
+		if let Some(id) = evicted {
+			self.pending_offer_store.remove(&id).await?;
+		}
+		Ok(())
+	}
+
+	pub(crate) async fn pending_offer(
+		&self, offer_id: PendingOfferId,
+	) -> Result<Option<PendingOffer>, Error> {
+		let offer = self.pending_offer_state.lock().expect("lock").get(&offer_id, now_secs());
+		if let Some(offer) = offer {
+			self.pending_offer_store.insert_or_update(offer.clone()).await?;
+			Ok(Some(offer))
+		} else {
+			self.pending_offer_store.remove(&offer_id).await?;
+			Ok(None)
+		}
 	}
 
 	pub(crate) async fn lsps2_receive_to_jit_channel(

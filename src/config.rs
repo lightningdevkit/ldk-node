@@ -28,6 +28,8 @@ const DEFAULT_BDK_WALLET_SYNC_INTERVAL_SECS: u64 = 80;
 const DEFAULT_LDK_WALLET_SYNC_INTERVAL_SECS: u64 = 30;
 const DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS: u64 = 60 * 10;
 const DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER: u64 = 3;
+/// The default maximum number of pending BOLT12 LSPS2 offers.
+pub const DEFAULT_LSPS2_PENDING_OFFER_CACHE_SIZE: usize = 100;
 pub(crate) const DEFAULT_PROBING_INTERVAL_SECS: u64 = 10;
 pub(crate) const MIN_PROBING_INTERVAL: Duration = Duration::from_millis(100);
 pub(crate) const DEFAULT_PROBED_NODE_COOLDOWN_SECS: u64 = 60 * 60; // 1 hour
@@ -146,6 +148,7 @@ pub(crate) const LNURL_AUTH_TIMEOUT_SECS: u64 = 15;
 /// | `probing_liquidity_limit_multiplier`   | 3                                    |
 /// | `anchor_channels_config`               | AnchorChannelsConfig::default()      |
 /// | `route_parameters`                     | None                                 |
+/// | `lsps2_pending_offer_cache_size`        | 100                                  |
 /// | `tor_config`                           | None                                 |
 /// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
 ///
@@ -201,6 +204,11 @@ pub struct Config {
 	/// **Note:** If unset, default parameters will be used, and you will be able to override the
 	/// parameters on a per-payment basis in the corresponding method calls.
 	pub route_parameters: Option<RouteParametersConfig>,
+	/// The maximum number of BOLT12 offers using LSPS2 JIT channels that are retained for future
+	/// invoice requests. Once full, the least recently used offer is evicted.
+	///
+	/// Values below one are treated as one.
+	pub lsps2_pending_offer_cache_size: usize,
 	/// Configuration options for enabling peer connections via the Tor network.
 	///
 	/// Setting [`TorConfig`] enables connecting to peers with OnionV3 addresses. No other connections
@@ -226,6 +234,7 @@ impl Default for Config {
 			anchor_channels_config: AnchorChannelsConfig::default(),
 			tor_config: None,
 			route_parameters: None,
+			lsps2_pending_offer_cache_size: DEFAULT_LSPS2_PENDING_OFFER_CACHE_SIZE,
 			node_alias: None,
 			hrn_config: HumanReadableNamesConfig::default(),
 		}

@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::secp256k1::PublicKey;
-use lightning::impl_writeable_tlv_based;
+use lightning::offers::offer::OfferId;
+use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 
@@ -12,6 +13,192 @@ use crate::hex_utils;
 pub(crate) const MIN_LEASE_REMAINING_SECS: u64 = 24 * 60 * 60;
 
 pub(crate) type PaymentLeaseStore<L> = DataStore<PaymentLease, L>;
+pub(crate) type PendingOfferStore<L> = DataStore<PendingOffer, L>;
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PendingOfferId {
+	offer_id: [u8; 32],
+}
+
+impl From<OfferId> for PendingOfferId {
+	fn from(offer_id: OfferId) -> Self {
+		Self { offer_id: offer_id.0 }
+	}
+}
+
+impl From<PendingOfferId> for OfferId {
+	fn from(offer_id: PendingOfferId) -> Self {
+		Self(offer_id.offer_id)
+	}
+}
+
+impl_writeable_tlv_based!(PendingOfferId, {
+	(0, offer_id, required),
+});
+
+impl StorableObjectId for PendingOfferId {
+	fn encode_to_hex_str(&self) -> String {
+		hex_utils::to_string(&self.offer_id)
+	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum PendingOfferAmount {
+	Fixed { amount_msat: u64, max_total_fee_msat: Option<u64> },
+	Variable { max_proportional_fee_ppm_msat: Option<u64> },
+}
+
+impl_writeable_tlv_based_enum!(PendingOfferAmount,
+	(0, Fixed) => {
+		(0, amount_msat, required),
+		(2, max_total_fee_msat, option),
+	},
+	(2, Variable) => {
+		(0, max_proportional_fee_ppm_msat, option),
+	},
+);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingOffer {
+	pub(crate) id: PendingOfferId,
+	pub(crate) amount: PendingOfferAmount,
+	pub(crate) absolute_expiry: Option<u64>,
+	last_accessed: u64,
+}
+
+impl PendingOffer {
+	pub(crate) fn new(
+		offer_id: OfferId, amount: PendingOfferAmount, absolute_expiry: Option<u64>,
+	) -> Self {
+		Self { id: offer_id.into(), amount, absolute_expiry, last_accessed: now_secs() }
+	}
+}
+
+impl_writeable_tlv_based!(PendingOffer, {
+	(0, id, required),
+	(2, amount, required),
+	(4, absolute_expiry, option),
+	(6, last_accessed, required),
+});
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingOfferUpdate(PendingOffer);
+
+impl StorableObjectUpdate<PendingOffer> for PendingOfferUpdate {
+	fn id(&self) -> PendingOfferId {
+		self.0.id
+	}
+}
+
+impl StorableObject for PendingOffer {
+	type Id = PendingOfferId;
+	type Update = PendingOfferUpdate;
+
+	fn id(&self) -> Self::Id {
+		self.id
+	}
+
+	fn update(&mut self, update: Self::Update) -> bool {
+		if *self == update.0 {
+			false
+		} else {
+			*self = update.0;
+			true
+		}
+	}
+
+	fn to_update(&self) -> Self::Update {
+		PendingOfferUpdate(self.clone())
+	}
+}
+
+pub(crate) struct PendingOfferState {
+	offers: HashMap<PendingOfferId, PendingOffer>,
+	capacity: usize,
+}
+
+impl PendingOfferState {
+	pub(crate) fn from_offers(
+		offers: Vec<PendingOffer>, capacity: usize, now: u64,
+	) -> (Self, Vec<PendingOfferId>) {
+		let mut removed = Vec::new();
+		let mut offers = offers
+			.into_iter()
+			.filter_map(|offer| {
+				if is_pending_offer_expired(&offer, now) {
+					removed.push(offer.id);
+					None
+				} else {
+					Some((offer.id, offer))
+				}
+			})
+			.collect::<HashMap<_, _>>();
+		let capacity = capacity.max(1);
+		while offers.len() > capacity {
+			let id = least_recently_used(&offers).expect("offers are non-empty");
+			offers.remove(&id);
+			removed.push(id);
+		}
+		(Self { offers, capacity }, removed)
+	}
+
+	pub(crate) fn register(&mut self, offer: PendingOffer) -> Option<PendingOfferId> {
+		let is_new = !self.offers.contains_key(&offer.id);
+		let evicted = if is_new && self.offers.len() == self.capacity {
+			let id = least_recently_used(&self.offers).expect("offers are non-empty");
+			self.offers.remove(&id);
+			Some(id)
+		} else {
+			None
+		};
+		self.offers.insert(offer.id, offer);
+		evicted
+	}
+
+	pub(crate) fn get(&mut self, id: &PendingOfferId, now: u64) -> Option<PendingOffer> {
+		if self.offers.get(id).is_some_and(|offer| is_pending_offer_expired(offer, now)) {
+			self.offers.remove(id);
+			return None;
+		}
+		let last_accessed = self.next_access_timestamp(now);
+		let offer = self.offers.get_mut(id)?;
+		offer.last_accessed = last_accessed;
+		Some(offer.clone())
+	}
+
+	pub(crate) fn contains(&self, id: &PendingOfferId) -> bool {
+		self.offers.contains_key(id)
+	}
+
+	pub(crate) fn prune(&mut self, now: u64) -> Vec<PendingOfferId> {
+		let removed = self
+			.offers
+			.iter()
+			.filter(|(_, offer)| is_pending_offer_expired(offer, now))
+			.map(|(id, _)| *id)
+			.collect::<Vec<_>>();
+		for id in &removed {
+			self.offers.remove(id);
+		}
+		removed
+	}
+
+	fn next_access_timestamp(&self, now: u64) -> u64 {
+		self.offers
+			.values()
+			.map(|offer| offer.last_accessed)
+			.max()
+			.map_or(now, |last_accessed| now.max(last_accessed.saturating_add(1)))
+	}
+}
+
+fn least_recently_used(offers: &HashMap<PendingOfferId, PendingOffer>) -> Option<PendingOfferId> {
+	offers.values().min_by_key(|offer| (offer.last_accessed, offer.id)).map(|offer| offer.id)
+}
+
+fn is_pending_offer_expired(offer: &PendingOffer, now: u64) -> bool {
+	offer.absolute_expiry.is_some_and(|expiry| expiry <= now)
+}
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct PaymentLeaseId {
@@ -148,7 +335,7 @@ pub(crate) fn is_lease_usable(lease: &PaymentLease) -> bool {
 	lease.valid_until.saturating_sub(now_secs()) >= MIN_LEASE_REMAINING_SECS
 }
 
-fn now_secs() -> u64 {
+pub(crate) fn now_secs() -> u64 {
 	SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_secs()
 }
 
@@ -156,6 +343,8 @@ fn now_secs() -> u64 {
 mod tests {
 	use super::*;
 	use bitcoin::secp256k1::{Secp256k1, SecretKey};
+	use lightning::offers::offer::OfferId;
+	use lightning::util::ser::{Readable, Writeable};
 
 	fn lease(
 		node_key_byte: u8, intercept_scid: u64, min_fee_msat: u64, payment_size_msat: Option<u64>,
@@ -218,5 +407,95 @@ mod tests {
 		state.remove(&selected.id);
 		let (remaining, _) = state.fixed_amount(1_000, None).unwrap();
 		assert_eq!(remaining.id, expensive.id);
+	}
+
+	fn pending_offer(
+		id_byte: u8, amount: PendingOfferAmount, absolute_expiry: Option<u64>, last_accessed: u64,
+	) -> PendingOffer {
+		PendingOffer {
+			id: PendingOfferId::from(OfferId([id_byte; 32])),
+			amount,
+			absolute_expiry,
+			last_accessed,
+		}
+	}
+
+	#[test]
+	fn pending_offers_roundtrip() {
+		let offer = pending_offer(
+			1,
+			PendingOfferAmount::Fixed { amount_msat: 1_000, max_total_fee_msat: Some(100) },
+			Some(42),
+			7,
+		);
+
+		let encoded = offer.encode();
+		let decoded = PendingOffer::read(&mut &encoded[..]).unwrap();
+		assert_eq!(decoded, offer);
+	}
+
+	#[test]
+	fn pending_offer_registry_evicts_least_recently_used() {
+		let first = pending_offer(
+			1,
+			PendingOfferAmount::Fixed { amount_msat: 1_000, max_total_fee_msat: None },
+			None,
+			1,
+		);
+		let second = pending_offer(
+			2,
+			PendingOfferAmount::Variable { max_proportional_fee_ppm_msat: None },
+			None,
+			2,
+		);
+		let third = pending_offer(
+			3,
+			PendingOfferAmount::Fixed { amount_msat: 3_000, max_total_fee_msat: None },
+			None,
+			3,
+		);
+		let first_id = first.id;
+		let second_id = second.id;
+		let third_id = third.id;
+		let (mut state, removed) = PendingOfferState::from_offers(vec![first, second], 2, 10);
+		assert!(removed.is_empty());
+
+		assert!(state.get(&first_id, 11).is_some());
+		assert_eq!(state.register(third), Some(second_id));
+		assert!(state.get(&first_id, 13).is_some());
+		assert!(state.get(&second_id, 14).is_none());
+		assert!(state.get(&third_id, 15).is_some());
+	}
+
+	#[test]
+	fn pending_offer_registry_prunes_only_expired_offers() {
+		let expired = pending_offer(
+			1,
+			PendingOfferAmount::Fixed { amount_msat: 1_000, max_total_fee_msat: None },
+			Some(9),
+			1,
+		);
+		let unexpired = pending_offer(
+			2,
+			PendingOfferAmount::Fixed { amount_msat: 2_000, max_total_fee_msat: None },
+			Some(11),
+			2,
+		);
+		let long_lived = pending_offer(
+			3,
+			PendingOfferAmount::Variable { max_proportional_fee_ppm_msat: Some(100) },
+			None,
+			3,
+		);
+		let expired_id = expired.id;
+		let unexpired_id = unexpired.id;
+		let long_lived_id = long_lived.id;
+
+		let (state, removed) =
+			PendingOfferState::from_offers(vec![expired, unexpired, long_lived], 3, 10);
+
+		assert_eq!(removed, vec![expired_id]);
+		assert!(state.contains(&unexpired_id));
+		assert!(state.contains(&long_lived_id));
 	}
 }
