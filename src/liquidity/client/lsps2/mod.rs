@@ -150,6 +150,31 @@ where
 		Ok(())
 	}
 
+	pub(crate) async fn refill_pending_offer_leases(
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(), Error> {
+		self.prune_stale_pending_offers().await?;
+		let pending_offers = self.pending_offer_state.lock().expect("lock").offers();
+		for pending_offer in pending_offers {
+			match pending_offer.amount {
+				PendingOfferAmount::Fixed { amount_msat, max_total_fee_msat } => {
+					self.schedule_fixed_lease_refill(
+						amount_msat,
+						max_total_fee_msat,
+						connection_manager,
+					);
+				},
+				PendingOfferAmount::Variable { max_proportional_fee_ppm_msat } => {
+					self.schedule_variable_lease_refill(
+						max_proportional_fee_ppm_msat,
+						connection_manager,
+					);
+				},
+			}
+		}
+		Ok(())
+	}
+
 	pub(crate) async fn pending_offer(
 		&self, offer_id: PendingOfferId,
 	) -> Result<Option<PendingOffer>, Error> {

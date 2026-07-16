@@ -827,6 +827,17 @@ impl Node {
 								liquidity_logger,
 								"LSP protocols discovery complete.",
 							);
+							if let Err(error) = liquidity_handler
+								.lsps2_client()
+								.refill_pending_offer_leases(&discovery_cm)
+								.await
+							{
+								log_error!(
+									liquidity_logger,
+									"Failed scheduling LSPS2 offer lease refills: {}",
+									error
+								);
+							}
 						}
 					}
 				}

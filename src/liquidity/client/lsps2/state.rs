@@ -172,6 +172,10 @@ impl PendingOfferState {
 		self.offers.contains_key(id)
 	}
 
+	pub(crate) fn offers(&self) -> Vec<PendingOffer> {
+		self.offers.values().cloned().collect()
+	}
+
 	pub(crate) fn prune(&mut self, now: u64) -> Vec<PendingOfferId> {
 		let removed = self
 			.offers
@@ -592,6 +596,29 @@ mod tests {
 		assert_eq!(removed, vec![expired_id]);
 		assert!(state.contains(&unexpired_id));
 		assert!(state.contains(&long_lived_id));
+	}
+
+	#[test]
+	fn pending_offer_registry_lists_cached_offers() {
+		let fixed = pending_offer(
+			1,
+			PendingOfferAmount::Fixed { amount_msat: 1_000, max_total_fee_msat: None },
+			None,
+			1,
+		);
+		let variable = pending_offer(
+			2,
+			PendingOfferAmount::Variable { max_proportional_fee_ppm_msat: None },
+			None,
+			2,
+		);
+		let (state, removed) =
+			PendingOfferState::from_offers(vec![fixed.clone(), variable.clone()], 2, 10);
+		assert!(removed.is_empty());
+
+		let mut ids = state.offers().into_iter().map(|offer| offer.id).collect::<Vec<_>>();
+		ids.sort();
+		assert_eq!(ids, vec![fixed.id, variable.id]);
 	}
 
 	#[test]
