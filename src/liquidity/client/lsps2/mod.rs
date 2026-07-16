@@ -79,6 +79,24 @@ where
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
+		if let Some((lease, total_fee_msat, lsp)) =
+			self.take_cached_fixed_lease(amount_msat, max_total_lsp_fee_limit_msat).await?
+		{
+			let invoice = self.lsps2_create_jit_invoice(
+				LSPS2BuyResponse::from(&lease),
+				Some(amount_msat),
+				description,
+				expiry_secs,
+				payment_hash,
+				LSPS2Parameters {
+					max_total_opening_fee_msat: Some(total_fee_msat),
+					max_proportional_opening_fee_ppm_msat: None,
+				},
+				Some(&lsp.node_id),
+			)?;
+			return Ok((invoice, lsp));
+		}
+
 		// Connect to all candidate LSPs before querying fees.
 		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
 		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
@@ -160,6 +178,24 @@ where
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
 		connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
+		if let Some((lease, proportional_fee, lsp)) =
+			self.take_cached_variable_lease(max_proportional_lsp_fee_limit_ppm_msat).await?
+		{
+			let invoice = self.lsps2_create_jit_invoice(
+				LSPS2BuyResponse::from(&lease),
+				None,
+				description,
+				expiry_secs,
+				payment_hash,
+				LSPS2Parameters {
+					max_total_opening_fee_msat: None,
+					max_proportional_opening_fee_ppm_msat: Some(proportional_fee),
+				},
+				Some(&lsp.node_id),
+			)?;
+			return Ok((invoice, lsp));
+		}
+
 		// Connect to all candidate LSPs before querying fees.
 		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
 		let (cheapest_lsp, min_prop_fee_ppm_msat, min_opening_params) = all_offers
@@ -377,6 +413,45 @@ where
 			.ok_or(Error::LiquidityRequestFailed)?;
 		self.lease_store.remove(id).await?;
 		Ok(lease)
+	}
+
+	async fn take_cached_fixed_lease(
+		&self, amount_msat: u64, max_fee_msat: Option<u64>,
+	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
+		loop {
+			let Some((lease, fee_msat)) =
+				self.lease_state.lock().expect("lock").take_fixed_amount(amount_msat, max_fee_msat)
+			else {
+				return Ok(None);
+			};
+			self.lease_store.remove(&lease.id).await?;
+			if let Some(lsp) =
+				select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
+			{
+				return Ok(Some((lease, fee_msat, lsp)));
+			}
+		}
+	}
+
+	async fn take_cached_variable_lease(
+		&self, max_proportional_fee_ppm_msat: Option<u64>,
+	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
+		loop {
+			let Some((lease, proportional_fee)) = self
+				.lease_state
+				.lock()
+				.expect("lock")
+				.take_variable_amount(max_proportional_fee_ppm_msat)
+			else {
+				return Ok(None);
+			};
+			self.lease_store.remove(&lease.id).await?;
+			if let Some(lsp) =
+				select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
+			{
+				return Ok(Some((lease, proportional_fee, lsp)));
+			}
+		}
 	}
 
 	fn lsps2_create_jit_invoice(
