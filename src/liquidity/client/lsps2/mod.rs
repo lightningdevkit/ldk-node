@@ -6,6 +6,7 @@
 // accordance with one or both of these licenses.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -36,6 +37,20 @@ use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
 use self::state::{LSPS2LeaseState, PaymentLease, PaymentLeaseId, PaymentLeaseStore};
+
+async fn consume_after_persisted_removal<T, E, RF, CF, Fut>(
+	value: T, persist_removal: RF, consume: CF,
+) -> Result<T, E>
+where
+	T: Clone,
+	RF: FnOnce(T) -> Fut,
+	CF: FnOnce(&T),
+	Fut: Future<Output = Result<(), E>>,
+{
+	persist_removal(value.clone()).await?;
+	consume(&value);
+	Ok(value)
+}
 
 pub(crate) struct LSPS2Client<L: Deref>
 where
@@ -409,10 +424,21 @@ where
 			.lease_state
 			.lock()
 			.expect("lock")
-			.take_valid(id)
+			.valid(id)
 			.ok_or(Error::LiquidityRequestFailed)?;
-		self.lease_store.remove(id).await?;
-		Ok(lease)
+		self.consume_selected_lease(lease).await
+	}
+
+	async fn consume_selected_lease(&self, lease: PaymentLease) -> Result<PaymentLease, Error> {
+		let lease_store = Arc::clone(&self.lease_store);
+		consume_after_persisted_removal(
+			lease,
+			move |lease| async move { lease_store.remove(&lease.id).await },
+			|lease| {
+				self.lease_state.lock().expect("lock").remove(&lease.id);
+			},
+		)
+		.await
 	}
 
 	async fn take_cached_fixed_lease(
@@ -420,11 +446,11 @@ where
 	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
 		loop {
 			let Some((lease, fee_msat)) =
-				self.lease_state.lock().expect("lock").take_fixed_amount(amount_msat, max_fee_msat)
+				self.lease_state.lock().expect("lock").fixed_amount(amount_msat, max_fee_msat)
 			else {
 				return Ok(None);
 			};
-			self.lease_store.remove(&lease.id).await?;
+			let lease = self.consume_selected_lease(lease).await?;
 			if let Some(lsp) =
 				select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
 			{
@@ -441,11 +467,11 @@ where
 				.lease_state
 				.lock()
 				.expect("lock")
-				.take_variable_amount(max_proportional_fee_ppm_msat)
+				.variable_amount(max_proportional_fee_ppm_msat)
 			else {
 				return Ok(None);
 			};
-			self.lease_store.remove(&lease.id).await?;
+			let lease = self.consume_selected_lease(lease).await?;
 			if let Some(lsp) =
 				select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
 			{
@@ -681,4 +707,24 @@ impl From<&PaymentLease> for LSPS2BuyResponse {
 		Self { intercept_scid: lease.id.intercept_scid, cltv_expiry_delta: lease.cltv_expiry_delta }
 	}
 }
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn failed_persisted_removal_does_not_consume() {
+		let consumed = Arc::new(Mutex::new(false));
+		let consumed_ref = Arc::clone(&consumed);
+		let result = consume_after_persisted_removal(
+			42,
+			|_| async { Err(()) },
+			move |_| *consumed_ref.lock().unwrap() = true,
+		)
+		.await;
+
+		assert_eq!(result, Err(()));
+		assert!(!*consumed.lock().unwrap());
+	}
+}
+
 pub(crate) mod state;

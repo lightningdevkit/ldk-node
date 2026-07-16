@@ -96,17 +96,16 @@ impl LSPS2LeaseState {
 		self.leases.insert(lease.id, lease);
 	}
 
-	pub(crate) fn take_valid(&mut self, id: &PaymentLeaseId) -> Option<PaymentLease> {
-		let lease = self.leases.remove(id)?;
-		if is_lease_usable(&lease) {
-			Some(lease)
-		} else {
-			None
-		}
+	pub(crate) fn valid(&self, id: &PaymentLeaseId) -> Option<PaymentLease> {
+		self.leases.get(id).filter(|lease| is_lease_usable(lease)).cloned()
 	}
 
-	pub(crate) fn take_fixed_amount(
-		&mut self, amount_msat: u64, max_fee_msat: Option<u64>,
+	pub(crate) fn remove(&mut self, id: &PaymentLeaseId) -> Option<PaymentLease> {
+		self.leases.remove(id)
+	}
+
+	pub(crate) fn fixed_amount(
+		&self, amount_msat: u64, max_fee_msat: Option<u64>,
 	) -> Option<(PaymentLease, u64)> {
 		let (id, fee_msat) = self
 			.leases
@@ -123,11 +122,11 @@ impl LSPS2LeaseState {
 			})
 			.filter(|(_, fee_msat)| max_fee_msat.map_or(true, |max| *fee_msat <= max))
 			.min_by_key(|(_, fee_msat)| *fee_msat)?;
-		self.leases.remove(&id).map(|lease| (lease, fee_msat))
+		self.leases.get(&id).cloned().map(|lease| (lease, fee_msat))
 	}
 
-	pub(crate) fn take_variable_amount(
-		&mut self, max_proportional_fee_ppm_msat: Option<u64>,
+	pub(crate) fn variable_amount(
+		&self, max_proportional_fee_ppm_msat: Option<u64>,
 	) -> Option<(PaymentLease, u64)> {
 		let (id, proportional_fee) = self
 			.leases
@@ -137,7 +136,7 @@ impl LSPS2LeaseState {
 			.map(|(id, lease)| (*id, lease.params.proportional as u64))
 			.filter(|(_, fee)| max_proportional_fee_ppm_msat.map_or(true, |max| *fee <= max))
 			.min_by_key(|(_, fee)| *fee)?;
-		self.leases.remove(&id).map(|lease| (lease, proportional_fee))
+		self.leases.get(&id).cloned().map(|lease| (lease, proportional_fee))
 	}
 
 	pub(crate) fn prune(&mut self) {
@@ -192,8 +191,9 @@ mod tests {
 		let id = lease.id;
 		let mut state = LSPS2LeaseState::default();
 		state.insert(lease);
-		assert!(state.take_valid(&id).is_some());
-		assert!(state.take_valid(&id).is_none());
+		assert!(state.valid(&id).is_some());
+		assert!(state.remove(&id).is_some());
+		assert!(state.valid(&id).is_none());
 	}
 
 	#[test]
@@ -203,7 +203,7 @@ mod tests {
 		let mut state = LSPS2LeaseState::default();
 		state.insert(lease);
 		state.prune();
-		assert!(state.take_valid(&id).is_none());
+		assert!(state.valid(&id).is_none());
 	}
 
 	#[test]
@@ -213,9 +213,10 @@ mod tests {
 		let cheap = lease(3, 45, 50, Some(1_000), valid_until);
 		let mut state = LSPS2LeaseState::from_leases(vec![expensive.clone(), cheap.clone()]);
 
-		let (selected, _) = state.take_fixed_amount(1_000, None).unwrap();
+		let (selected, _) = state.fixed_amount(1_000, None).unwrap();
 		assert_eq!(selected.id, cheap.id);
-		let (remaining, _) = state.take_fixed_amount(1_000, None).unwrap();
+		state.remove(&selected.id);
+		let (remaining, _) = state.fixed_amount(1_000, None).unwrap();
 		assert_eq!(remaining.id, expensive.id);
 	}
 }
