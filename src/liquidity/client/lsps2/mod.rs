@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
@@ -33,6 +33,7 @@ use crate::liquidity::{
 use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::payment::store::LSPS2Parameters;
 use crate::payment::PaymentMetadata;
+use crate::runtime::Runtime;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
@@ -105,6 +106,8 @@ where
 	pub(crate) keys_manager: Arc<KeysManager>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
 	pub(crate) liquidity_manager: Arc<LiquidityManager>,
+	// Refill tasks are runtime-owned; keeping this weak avoids extending the runtime's lifetime.
+	pub(crate) runtime: Weak<Runtime>,
 	pub(crate) config: Arc<Config>,
 	pub(crate) logger: L,
 }
@@ -143,12 +146,23 @@ where
 		self.cache_target_store.targets()
 	}
 
-	pub(crate) async fn commit_invoice_cache_target(&self, request: JitInvoiceRequest) {
+	pub(crate) async fn commit_invoice_cache_target(
+		self: &Arc<Self>, request: JitInvoiceRequest,
+		connection_manager: &Arc<ConnectionManager<L>>,
+	) {
 		// Cache targets are only an optimization. A persistence failure must not make the current
 		// invoice request unusable.
 		let (target_id, absolute_expiry) = request.cache_target();
 		if let Err(error) = self.register_cache_target(target_id, absolute_expiry).await {
 			log_warn!(self.logger, "Failed recording LSPS2 lease cache target: {}", error);
+		}
+		match request {
+			JitInvoiceRequest::Fixed { amount_msat, .. } => {
+				self.schedule_fixed_lease_refill(amount_msat, connection_manager);
+			},
+			JitInvoiceRequest::Variable { .. } => {
+				self.schedule_variable_lease_refill(connection_manager);
+			},
 		}
 	}
 
@@ -226,6 +240,7 @@ where
 			payment_hash,
 			lsps2_parameters,
 		)?;
+		self.schedule_fixed_lease_refill(amount_msat, &connection_manager);
 
 		if was_negotiated {
 			log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
@@ -250,6 +265,7 @@ where
 			payment_hash,
 			lsps2_parameters,
 		)?;
+		self.schedule_variable_lease_refill(&connection_manager);
 
 		if was_negotiated {
 			log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
@@ -277,6 +293,15 @@ where
 			return Ok((lease, total_fee_msat, lsp, false));
 		}
 
+		let (negotiated_lease, min_total_fee_msat, cheapest_lsp) =
+			self.negotiate_fixed_lease(amount_msat, connection_manager).await?;
+		let lease = self.consume_lease(&negotiated_lease.id).await?;
+		Ok((lease, min_total_fee_msat, cheapest_lsp, true))
+	}
+
+	async fn negotiate_fixed_lease(
+		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
 			.into_iter()
@@ -332,8 +357,7 @@ where
 				Some(&cheapest_lsp.node_id),
 			)
 			.await?;
-		let lease = self.consume_lease(&negotiated_lease.id).await?;
-		Ok((lease, min_total_fee_msat, cheapest_lsp, true))
+		Ok((negotiated_lease, min_total_fee_msat, cheapest_lsp))
 	}
 
 	async fn acquire_variable_lease(
@@ -352,6 +376,15 @@ where
 			return Ok((lease, proportional_fee, lsp, false));
 		}
 
+		let (negotiated_lease, min_prop_fee_ppm_msat, cheapest_lsp) =
+			self.negotiate_variable_lease(connection_manager).await?;
+		let lease = self.consume_lease(&negotiated_lease.id).await?;
+		Ok((lease, min_prop_fee_ppm_msat, cheapest_lsp, true))
+	}
+
+	async fn negotiate_variable_lease(
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let mut rejected_for_fee = false;
 		let (cheapest_lsp, min_prop_fee_ppm_msat, min_opening_params) = all_offers
@@ -393,8 +426,78 @@ where
 		let negotiated_lease = self
 			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
 			.await?;
-		let lease = self.consume_lease(&negotiated_lease.id).await?;
-		Ok((lease, min_prop_fee_ppm_msat, cheapest_lsp, true))
+		Ok((negotiated_lease, min_prop_fee_ppm_msat, cheapest_lsp))
+	}
+
+	fn schedule_fixed_lease_refill(
+		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
+	) {
+		let Some(runtime) = self.runtime.upgrade() else { return };
+		let client = Arc::clone(self);
+		let connection_manager = Arc::clone(connection_manager);
+		runtime.spawn_cancellable_background_task(async move {
+			if let Err(error) = client.cache_fixed_lease(amount_msat, &connection_manager).await {
+				log_warn!(client.logger, "Failed refilling LSPS2 payment lease: {}", error);
+			}
+		});
+	}
+
+	fn schedule_variable_lease_refill(
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) {
+		let Some(runtime) = self.runtime.upgrade() else { return };
+		let client = Arc::clone(self);
+		let connection_manager = Arc::clone(connection_manager);
+		runtime.spawn_cancellable_background_task(async move {
+			if let Err(error) = client.cache_variable_lease(&connection_manager).await {
+				log_warn!(client.logger, "Failed refilling LSPS2 payment lease: {}", error);
+			}
+		});
+	}
+
+	async fn cache_fixed_lease(
+		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(), Error> {
+		let request_lock = self
+			.pending_lease_request_state
+			.lock()
+			.expect("lock")
+			.request_lock(LeaseRequestKey::Fixed(amount_msat));
+		let _request_guard = request_lock.lock().await;
+		let available_lsps =
+			self.get_lsps2_nodes().await?.into_iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
+		if self.lease_state.lock().expect("lock").has_fixed_amount(
+			amount_msat,
+			self.config.lsps2_max_total_lsp_fee_limit_msat,
+			&available_lsps,
+		) {
+			return Ok(());
+		}
+		self.negotiate_fixed_lease(amount_msat, connection_manager).await?;
+		Ok(())
+	}
+
+	async fn cache_variable_lease(
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(), Error> {
+		let request_lock = self
+			.pending_lease_request_state
+			.lock()
+			.expect("lock")
+			.request_lock(LeaseRequestKey::Variable);
+		let _request_guard = request_lock.lock().await;
+		let available_lsps =
+			self.get_lsps2_nodes().await?.into_iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
+		if self
+			.lease_state
+			.lock()
+			.expect("lock")
+			.has_variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat, &available_lsps)
+		{
+			return Ok(());
+		}
+		self.negotiate_variable_lease(connection_manager).await?;
+		Ok(())
 	}
 
 	async fn gather_lsps2_offers(

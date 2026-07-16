@@ -13,7 +13,7 @@ pub(crate) mod service;
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
@@ -257,6 +257,7 @@ where
 	keys_manager: Arc<KeysManager>,
 	tx_broadcaster: Arc<Broadcaster>,
 	kv_store: Arc<DynStore>,
+	runtime: Weak<Runtime>,
 	config: Arc<Config>,
 	logger: L,
 }
@@ -267,7 +268,8 @@ where
 {
 	pub(crate) fn new(
 		wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>, logger: L,
+		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, runtime: Weak<Runtime>,
+		config: Arc<Config>, logger: L,
 	) -> Self {
 		let lsp_nodes = Vec::new();
 		let lsps2_service = None;
@@ -279,6 +281,7 @@ where
 			keys_manager,
 			tx_broadcaster,
 			kv_store,
+			runtime,
 			config,
 			logger,
 		}
@@ -407,6 +410,7 @@ where
 				keys_manager: self.keys_manager.clone(),
 				discovery_done_rx: discovery_done_rx.clone(),
 				liquidity_manager: Arc::clone(&liquidity_manager),
+				runtime: self.runtime,
 				config: self.config.clone(),
 				logger: self.logger.clone(),
 			}),
