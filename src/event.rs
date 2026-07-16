@@ -2301,6 +2301,7 @@ mod tests {
 				max_total_opening_fee_msat: Some(42_000),
 				max_proportional_opening_fee_ppm_msat: Some(10_000),
 			}),
+			lsps2_lease_parameters: None,
 		};
 
 		assert_eq!(
