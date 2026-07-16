@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
@@ -36,6 +36,7 @@ use crate::payment::PaymentMetadata;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
+use self::router::LSPS2LeaseParameters;
 use self::state::{
 	now_secs, LSPS2LeaseState, LeaseCacheTarget, LeaseCacheTargetId, LeaseCacheTargetStore,
 	PaymentLease, PaymentLeaseId, PaymentLeaseStore,
@@ -53,6 +54,36 @@ where
 	persist_removal(value.clone()).await?;
 	consume(&value);
 	Ok(value)
+}
+
+const DEFAULT_BOLT12_INVOICE_EXPIRY_SECS: u32 = 2 * 60 * 60;
+
+pub(crate) struct JitInvoiceResponse {
+	pub(crate) payment_metadata: BTreeMap<u64, Vec<u8>>,
+	pub(crate) allow_mpp: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum JitInvoiceRequest {
+	Fixed { amount_msat: u64, absolute_expiry: Option<u64> },
+	Variable { amount_msat: u64, absolute_expiry: Option<u64> },
+}
+
+impl JitInvoiceRequest {
+	pub(crate) fn allow_mpp(&self) -> bool {
+		matches!(self, Self::Fixed { .. })
+	}
+
+	fn cache_target(&self) -> (LeaseCacheTargetId, Option<u64>) {
+		match *self {
+			Self::Fixed { amount_msat, absolute_expiry } => {
+				(LeaseCacheTargetId::Fixed { amount_msat }, absolute_expiry)
+			},
+			Self::Variable { absolute_expiry, .. } => {
+				(LeaseCacheTargetId::Variable, absolute_expiry)
+			},
+		}
+	}
 }
 
 pub(crate) struct LSPS2Client<L: Deref>
@@ -106,6 +137,72 @@ where
 
 	pub(crate) fn cache_targets(&self) -> Vec<LeaseCacheTarget> {
 		self.cache_target_store.targets()
+	}
+
+	pub(crate) async fn prepare_invoice_response(
+		self: Arc<Self>, request: JitInvoiceRequest, connection_manager: Arc<ConnectionManager<L>>,
+	) -> Result<JitInvoiceResponse, Error> {
+		// Cache targets are only an optimization. Recording an older, evicted offer again makes it
+		// eligible for startup pre-caching, but a persistence failure must not make the current
+		// invoice request unusable.
+		let (target_id, absolute_expiry) = request.cache_target();
+		if let Err(error) = self.register_cache_target(target_id, absolute_expiry).await {
+			log_warn!(self.logger, "Failed recording LSPS2 lease cache target: {}", error);
+		}
+
+		let allow_mpp = request.allow_mpp();
+		let (lease, fee_parameters) = match request {
+			JitInvoiceRequest::Fixed { amount_msat, .. } => {
+				let (lease, total_fee_msat, _, _) =
+					self.acquire_fixed_lease(amount_msat, &connection_manager).await?;
+				(
+					lease,
+					LSPS2Parameters {
+						max_total_opening_fee_msat: Some(total_fee_msat),
+						max_proportional_opening_fee_ppm_msat: None,
+					},
+				)
+			},
+			JitInvoiceRequest::Variable { .. } => {
+				let (lease, proportional_fee, _, _) =
+					self.acquire_variable_lease(&connection_manager).await?;
+				(
+					lease,
+					LSPS2Parameters {
+						max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
+						max_proportional_opening_fee_ppm_msat: self
+							.config
+							.lsps2_max_total_lsp_fee_limit_msat
+							.is_none()
+							.then_some(proportional_fee),
+					},
+				)
+			},
+		};
+
+		// The offers flow currently uses its two-hour default invoice expiry. Never publish a JIT
+		// path whose intercept SCID may expire before the invoice does.
+		if lease.valid_until.saturating_sub(now_secs()) < DEFAULT_BOLT12_INVOICE_EXPIRY_SECS as u64
+		{
+			return Err(Error::LiquidityRequestFailed);
+		}
+		let lease_parameters = LSPS2LeaseParameters {
+			lsp_node_id: lease.id.lsp_node_id,
+			intercept_scid: lease.id.intercept_scid,
+			cltv_expiry_delta: lease
+				.cltv_expiry_delta
+				.try_into()
+				.map_err(|_| Error::LiquidityRequestFailed)?,
+			payment_size_msat: lease.payment_size_msat,
+			valid_until: lease.valid_until,
+		};
+		let payment_metadata = PaymentMetadata {
+			lsps2_parameters: Some(fee_parameters),
+			lsps2_lease_parameters: Some(lease_parameters),
+		}
+		.encode_as_bolt12_payment_metadata();
+
+		Ok(JitInvoiceResponse { payment_metadata, allow_mpp })
 	}
 
 	pub(crate) async fn lsps2_receive_to_jit_channel(
