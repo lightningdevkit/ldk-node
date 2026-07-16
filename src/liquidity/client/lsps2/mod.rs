@@ -35,6 +35,8 @@ use crate::payment::PaymentMetadata;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
+use self::state::{LSPS2LeaseState, PaymentLeaseStore};
+
 pub(crate) struct LSPS2Client<L: Deref>
 where
 	L::Target: LdkLogger,
@@ -44,6 +46,8 @@ where
 		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2FeeResponse>>>,
 	pub(crate) pending_buy_requests:
 		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2BuyResponse>>>,
+	pub(crate) lease_store: Arc<PaymentLeaseStore<L>>,
+	pub(crate) lease_state: Mutex<LSPS2LeaseState>,
 	pub(crate) channel_manager: Arc<ChannelManager>,
 	pub(crate) keys_manager: Arc<KeysManager>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
