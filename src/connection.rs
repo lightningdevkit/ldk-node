@@ -53,6 +53,10 @@ where
 		self.do_connect_peer(node_id, addr).await
 	}
 
+	pub(crate) fn disconnect_peer(&self, node_id: PublicKey) {
+		self.peer_manager.disconnect_by_node_id(node_id);
+	}
+
 	pub(crate) async fn do_connect_peer(
 		&self, node_id: PublicKey, addr: SocketAddress,
 	) -> Result<(), Error> {

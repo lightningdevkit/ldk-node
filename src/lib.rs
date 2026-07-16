@@ -2030,12 +2030,10 @@ impl Node {
 			}
 
 			// Peer store cleanup is handled centrally in the `ChannelClosed` event handler,
-			// which drops the peer once its last channel reaches a terminal state that
-			// reconnection cannot recover. We intentionally do nothing here so that a
-			// force-closed peer is retained, letting the background reconnection task keep
-			// firing and drive the `channel_reestablish` recovery flow. This is especially
-			// important against LND peers, which don't always handle force-closure error
-			// messages correctly.
+			// which retains a force-closed peer through one recovery reconnect before
+			// dropping it. This lets `channel_reestablish` drive the recovery flow, which is
+			// especially important against LND peers that don't always handle force-closure
+			// error messages correctly.
 		}
 
 		Ok(())

@@ -58,11 +58,14 @@ where
 	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let data = {
-			let mut locked_peers = self.peers.write().expect("lock");
-			locked_peers.remove(node_id);
-			PeerStoreSerWrapper(&locked_peers).encode()
+			let locked_peers = self.peers.read().expect("lock");
+			let mut updated_peers = locked_peers.clone();
+			updated_peers.remove(node_id);
+			PeerStoreSerWrapper(&updated_peers).encode()
 		};
-		self.persist_peers(data).await
+		self.persist_peers(data).await?;
+		self.peers.write().expect("lock").remove(node_id);
+		Ok(())
 	}
 
 	/// Returns the current in-memory peer set.
@@ -170,11 +173,51 @@ mod tests {
 	use std::str::FromStr;
 	use std::sync::Arc;
 
+	use bitcoin::io;
+	use lightning::util::persist::{PageToken, PaginatedKVStore, PaginatedListResponse};
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
 	use crate::io::test_utils::InMemoryStore;
 	use crate::types::DynStoreWrapper;
+
+	struct FailingStore;
+
+	impl KVStore for FailingStore {
+		fn read(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str,
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "read failed")) }
+		}
+
+		fn write(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _buf: Vec<u8>,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "write failed")) }
+		}
+
+		fn remove(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _lazy: bool,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "remove failed")) }
+		}
+
+		fn list(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "list failed")) }
+		}
+	}
+
+	impl PaginatedKVStore for FailingStore {
+		fn list_paginated(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+			_page_token: Option<PageToken>,
+		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
+			async { Err(io::Error::new(io::ErrorKind::Other, "list_paginated failed")) }
+		}
+	}
 
 	#[tokio::test]
 	async fn peer_info_persistence() {
@@ -214,5 +257,24 @@ mod tests {
 		assert_eq!(peers.len(), 1);
 		assert_eq!(peers[0], expected_peer_info);
 		assert_eq!(deser_peer_store.get_peer(&node_id), Some(expected_peer_info));
+	}
+
+	#[tokio::test]
+	async fn remove_peer_does_not_mutate_memory_if_persist_fails() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let logger = Arc::new(TestLogger::new());
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let peer_info =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9738").unwrap() };
+		let mut peers = HashMap::new();
+		peers.insert(node_id, peer_info.clone());
+		let persisted_bytes = PeerStoreSerWrapper(&peers).encode();
+		let peer_store = PeerStore::read(&mut &persisted_bytes[..], (store, logger)).unwrap();
+
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.remove_peer(&node_id).await);
+		assert_eq!(Some(peer_info), peer_store.get_peer(&node_id));
 	}
 }
