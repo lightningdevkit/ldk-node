@@ -947,6 +947,47 @@ async fn onchain_send_receive() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn settled_onchain_payment_not_reemitted_after_restart() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let mut config = random_config();
+	config.store_type = TestStoreType::Sqlite;
+
+	let txid = {
+		let node = setup_node(&chain_source, config.clone());
+		let address = node.onchain_payment().new_address().unwrap();
+		let txid = premine_and_distribute_funds(
+			&bitcoind.client,
+			&electrsd.client,
+			vec![address],
+			Amount::from_sat(100_000),
+		)
+		.await;
+
+		node.sync_wallets().unwrap();
+		generate_blocks_and_wait(
+			&bitcoind.client,
+			&electrsd.client,
+			(ANTI_REORG_DELAY - 1) as usize,
+		)
+		.await;
+		node.sync_wallets().unwrap();
+		assert_eq!(node.expect_onchain_payment_event(OnchainPaymentEvent::Received).await, txid);
+		node.stop().unwrap();
+		txid
+	};
+
+	let restarted_node = setup_node(&chain_source, config);
+	restarted_node.sync_wallets().unwrap();
+	assert_eq!(restarted_node.next_event(), None);
+	assert_eq!(
+		restarted_node.payment(&PaymentId(txid.to_byte_array())).unwrap().status,
+		PaymentStatus::Succeeded,
+	);
+	restarted_node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn reorged_onchain_payment_returns_to_unconfirmed() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);

@@ -351,6 +351,24 @@ class LibraryTest {
         assert(spendableBalance1AfterClose < 100000u)
         assertEquals(102500uL, spendableBalance2AfterClose)
 
+        val externalAddress = bitcoinCli("getnewaddress")
+        val onchainTxid = node1.onchainPayment().sendToAddress(externalAddress, 10000u, null)
+        waitForTx(esploraEndpoint, onchainTxid)
+        mineAndWait(esploraEndpoint, 6u)
+        node1.syncWallets()
+
+        val onchainPaymentSuccessfulEvent = node1.waitNextEvent()
+        println("Got event: $onchainPaymentSuccessfulEvent")
+        when (onchainPaymentSuccessfulEvent) {
+            is Event.OnchainPaymentSuccessful -> {
+                assertEquals(onchainTxid, onchainPaymentSuccessfulEvent.txid)
+                assertEquals(10000000uL, onchainPaymentSuccessfulEvent.amountMsat)
+                assertTrue(onchainPaymentSuccessfulEvent.feePaidMsat != null)
+            }
+            else -> error("Expected successful on-chain payment event")
+        }
+        node1.eventHandled()
+
         assertTrue(logWriter1.getLogMessages().isNotEmpty())
         assertTrue(logWriter2.getLogMessages().isNotEmpty())
 
