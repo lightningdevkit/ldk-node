@@ -6,6 +6,7 @@
 // accordance with one or both of these licenses.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -36,6 +37,20 @@ use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
 use self::state::{LSPS2LeaseState, PaymentLease, PaymentLeaseId, PaymentLeaseStore};
+
+async fn consume_after_persisted_removal<T, E, RF, CF, Fut>(
+	value: T, persist_removal: RF, consume: CF,
+) -> Result<T, E>
+where
+	T: Clone,
+	RF: FnOnce(T) -> Fut,
+	CF: FnOnce(&T),
+	Fut: Future<Output = Result<(), E>>,
+{
+	persist_removal(value.clone()).await?;
+	consume(&value);
+	Ok(value)
+}
 
 pub(crate) struct LSPS2Client<L: Deref>
 where
@@ -79,6 +94,24 @@ where
 		expiry_secs: u32, payment_hash: Option<PaymentHash>,
 		connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
+		if let Some((lease, total_fee_msat, lsp)) =
+			self.take_cached_fixed_lease(amount_msat).await?
+		{
+			let invoice = self.lsps2_create_jit_invoice(
+				LSPS2BuyResponse::from(&lease),
+				Some(amount_msat),
+				description,
+				expiry_secs,
+				payment_hash,
+				LSPS2Parameters {
+					max_total_opening_fee_msat: Some(total_fee_msat),
+					max_proportional_opening_fee_ppm_msat: None,
+				},
+				Some(&lsp.node_id),
+			)?;
+			return Ok((invoice, lsp));
+		}
+
 		// Connect to all candidate LSPs before querying fees.
 		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
 		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
@@ -159,6 +192,26 @@ where
 		self: Arc<Self>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
+		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
+			let invoice = self.lsps2_create_jit_invoice(
+				LSPS2BuyResponse::from(&lease),
+				None,
+				description,
+				expiry_secs,
+				payment_hash,
+				LSPS2Parameters {
+					max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
+					max_proportional_opening_fee_ppm_msat: self
+						.config
+						.lsps2_max_total_lsp_fee_limit_msat
+						.is_none()
+						.then_some(proportional_fee),
+				},
+				Some(&lsp.node_id),
+			)?;
+			return Ok((invoice, lsp));
+		}
+
 		// Connect to all candidate LSPs before querying fees.
 		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
 		let mut rejected_for_fee = false;
@@ -378,10 +431,63 @@ where
 			.lease_state
 			.lock()
 			.expect("lock")
-			.take_valid(id)
+			.valid(id)
 			.ok_or(Error::LiquidityRequestFailed)?;
-		self.lease_store.remove(id).await?;
-		Ok(lease)
+		self.consume_selected_lease(lease).await
+	}
+
+	async fn consume_selected_lease(&self, lease: PaymentLease) -> Result<PaymentLease, Error> {
+		let lease_store = Arc::clone(&self.lease_store);
+		consume_after_persisted_removal(
+			lease,
+			move |lease| async move { lease_store.remove(&lease.id).await },
+			|lease| {
+				self.lease_state.lock().expect("lock").remove(&lease.id);
+			},
+		)
+		.await
+	}
+
+	async fn take_cached_fixed_lease(
+		&self, amount_msat: u64,
+	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
+		loop {
+			let Some((lease, fee_msat)) = self
+				.lease_state
+				.lock()
+				.expect("lock")
+				.fixed_amount(amount_msat, self.config.lsps2_max_total_lsp_fee_limit_msat)
+			else {
+				return Ok(None);
+			};
+			let lease = self.consume_selected_lease(lease).await?;
+			if let Some(lsp) =
+				select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
+			{
+				return Ok(Some((lease, fee_msat, lsp)));
+			}
+		}
+	}
+
+	async fn take_cached_variable_lease(
+		&self,
+	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
+		loop {
+			let Some((lease, proportional_fee)) = self
+				.lease_state
+				.lock()
+				.expect("lock")
+				.variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat)
+			else {
+				return Ok(None);
+			};
+			let lease = self.consume_selected_lease(lease).await?;
+			if let Some(lsp) =
+				select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
+			{
+				return Ok(Some((lease, proportional_fee, lsp)));
+			}
+		}
 	}
 
 	fn lsps2_create_jit_invoice(
@@ -611,4 +717,24 @@ impl From<&PaymentLease> for LSPS2BuyResponse {
 		Self { intercept_scid: lease.id.intercept_scid, cltv_expiry_delta: lease.cltv_expiry_delta }
 	}
 }
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn failed_persisted_removal_does_not_consume() {
+		let consumed = Arc::new(Mutex::new(false));
+		let consumed_ref = Arc::clone(&consumed);
+		let result = consume_after_persisted_removal(
+			42,
+			|_| async { Err(()) },
+			move |_| *consumed_ref.lock().unwrap() = true,
+		)
+		.await;
+
+		assert_eq!(result, Err(()));
+		assert!(!*consumed.lock().unwrap());
+	}
+}
+
 pub(crate) mod state;
