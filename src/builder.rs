@@ -2161,6 +2161,7 @@ fn build_with_store_internal(
 			Arc::clone(&keys_manager),
 			Arc::clone(&tx_broadcaster),
 			Arc::clone(&kv_store),
+			Arc::downgrade(&runtime),
 			Arc::clone(&config),
 			Arc::clone(&logger),
 		);
