@@ -18,6 +18,7 @@ use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId};
 use lightning::ln::outbound_payment::Retry;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
+use lightning::onion_message::messenger::NullMessageRouter;
 use lightning::routing::router::RouteParametersConfig;
 use lightning::sign::EntropySource;
 #[cfg(feature = "uniffi")]
@@ -207,9 +208,15 @@ impl Bolt12Payment {
 	}
 
 	pub(crate) fn receive_inner(
-		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
+		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>,
+		quantity: Option<u64>, address_by_node_id: bool,
 	) -> Result<LdkOffer, Error> {
-		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
+		let offer_builder = if address_by_node_id {
+			self.channel_manager.create_offer_builder_using_router(NullMessageRouter {})
+		} else {
+			self.channel_manager.create_offer_builder()
+		};
+		let mut offer_builder = offer_builder.map_err(|e| {
 			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
 			Error::OfferCreationFailed
 		})?;
@@ -244,9 +251,14 @@ impl Bolt12Payment {
 	}
 
 	fn receive_variable_amount_inner(
-		&self, description: &str, expiry_secs: Option<u32>,
+		&self, description: &str, expiry_secs: Option<u32>, address_by_node_id: bool,
 	) -> Result<LdkOffer, Error> {
-		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
+		let offer_builder = if address_by_node_id {
+			self.channel_manager.create_offer_builder_using_router(NullMessageRouter {})
+		} else {
+			self.channel_manager.create_offer_builder()
+		};
+		let mut offer_builder = offer_builder.map_err(|e| {
 			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
 			Error::OfferCreationFailed
 		})?;
@@ -480,7 +492,7 @@ impl Bolt12Payment {
 	pub fn receive(
 		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
 	) -> Result<Offer, Error> {
-		let offer = self.receive_inner(amount_msat, description, expiry_secs, quantity)?;
+		let offer = self.receive_inner(amount_msat, description, expiry_secs, quantity, false)?;
 		Ok(maybe_wrap(offer))
 	}
 
@@ -489,7 +501,7 @@ impl Bolt12Payment {
 	pub fn receive_variable_amount(
 		&self, description: &str, expiry_secs: Option<u32>,
 	) -> Result<Offer, Error> {
-		let offer = self.receive_variable_amount_inner(description, expiry_secs)?;
+		let offer = self.receive_variable_amount_inner(description, expiry_secs, false)?;
 		Ok(maybe_wrap(offer))
 	}
 
@@ -498,13 +510,14 @@ impl Bolt12Payment {
 	///
 	/// Creating the offer does not contact an LSP. LSPS2 payment parameters are selected only when
 	/// an invoice request for the offer is received, allowing the offer to outlive those parameters.
+	/// The offer contains no blinded message paths and is addressed directly to this node's ID.
 	/// If sufficient inbound liquidity is available over pre-existing channels, the payment may be
 	/// received over those channels without opening a new JIT channel.
 	pub fn receive_via_jit_channel(
 		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>,
 		quantity: Option<u64>, max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Offer, Error> {
-		let offer = self.receive_inner(amount_msat, description, expiry_secs, quantity)?;
+		let offer = self.receive_inner(amount_msat, description, expiry_secs, quantity, true)?;
 		self.register_jit_offer(
 			&offer,
 			PendingOfferAmount::Fixed {
@@ -520,13 +533,14 @@ impl Bolt12Payment {
 	///
 	/// Creating the offer does not contact an LSP. LSPS2 payment parameters are selected only when
 	/// an invoice request for the offer is received, allowing the offer to outlive those parameters.
+	/// The offer contains no blinded message paths and is addressed directly to this node's ID.
 	/// If sufficient inbound liquidity is available over pre-existing channels, the payment may be
 	/// received over those channels without opening a new JIT channel.
 	pub fn receive_variable_amount_via_jit_channel(
 		&self, description: &str, expiry_secs: Option<u32>,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Offer, Error> {
-		let offer = self.receive_variable_amount_inner(description, expiry_secs)?;
+		let offer = self.receive_variable_amount_inner(description, expiry_secs, true)?;
 		self.register_jit_offer(
 			&offer,
 			PendingOfferAmount::Variable {
