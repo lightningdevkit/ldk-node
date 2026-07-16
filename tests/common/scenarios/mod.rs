@@ -90,7 +90,7 @@ pub(crate) async fn wait_for_htlcs_settled(
 /// Build a fresh LDK node configured for interop tests. Uses electrum at the
 /// docker-compose default port and bumps sync timeouts for combo stress.
 pub(crate) fn setup_ldk_node() -> Node {
-	let config = crate::common::random_config(true);
+	let config = crate::common::random_config();
 	let mut builder = ldk_node::Builder::from_config(config.node_config);
 	let mut sync_config = ldk_node::config::ElectrumSyncConfig::default();
 	sync_config.timeouts_config.onchain_wallet_sync_timeout_secs = 180;

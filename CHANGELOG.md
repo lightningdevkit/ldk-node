@@ -18,6 +18,8 @@
 - `EsploraSyncConfig` and `ElectrumSyncConfig` now support `force_wallet_full_scan`. When set,
   the on-chain wallet keeps using BDK `full_scan` instead of incremental sync until a full scan
   succeeds, allowing restored wallets to rediscover funds sent to previously-unknown addresses.
+- `Config::anchor_channels_config` is no longer optional, hence anchor channels can no longer be
+  disabled. We still negotiate legacy channels if the peer does not support anchor channels.
 
 ## Bug Fixes and Improvements
 - Building a fresh node against a Bitcoin Core RPC or REST chain source that fails to return the

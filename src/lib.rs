@@ -163,7 +163,9 @@ use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
 pub use lightning_liquidity;
 pub use lightning_types;
-use lightning_types::features::NodeFeatures as LdkNodeFeatures;
+use lightning_types::features::{
+	ChannelTypeFeatures, InitFeatures, NodeFeatures as LdkNodeFeatures,
+};
 use liquidity::LiquiditySource;
 use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -217,6 +219,19 @@ impl LeakChecker {
 			assert_eq!(weak.strong_count(), 0);
 		}
 	}
+}
+
+fn peer_may_negotiate_anchor_channel_type(
+	config: &Config, their_init_features: &InitFeatures,
+) -> bool {
+	their_init_features.supports_anchors_zero_fee_htlc_tx()
+		|| (config.anchor_channels_config.enable_zero_fee_commitments
+			&& their_init_features.supports_anchor_zero_fee_commitments())
+}
+
+fn requires_anchor_channel_type(channel_type: &ChannelTypeFeatures) -> bool {
+	channel_type.requires_anchors_zero_fee_htlc_tx()
+		|| channel_type.requires_anchor_zero_fee_commitments()
 }
 
 /// The main interface object of LDK Node, wrapping the necessary LDK and BDK functionalities.
@@ -291,9 +306,43 @@ impl Node {
 			e
 		})?;
 
-		// Block to ensure we update our fee rate cache once on startup
+		let manager_owns_any_0fc_channels =
+			self.channel_manager.list_channels().into_iter().any(|channel| {
+				channel
+					.channel_shutdown_state
+					.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
+					&& channel
+						.channel_type
+						.as_ref()
+						.map_or(false, |c| c.requires_anchor_zero_fee_commitments())
+			});
+		let monitor_owns_any_0fc_channels =
+			self.chain_monitor.list_monitors().into_iter().any(|channel_id| {
+				self.chain_monitor
+					.get_monitor(channel_id)
+					.map(|monitor| {
+						monitor.channel_type_features().requires_anchor_zero_fee_commitments()
+					})
+					.unwrap_or(false)
+			});
+		let zero_fee_commitments_support_required = manager_owns_any_0fc_channels
+			|| monitor_owns_any_0fc_channels
+			|| self.config.anchor_channels_config.enable_zero_fee_commitments;
+
+		// Block to ensure we update our fee rate cache once on startup.
+		// Also take this opportunity to make sure our chain source supports 0FC channels
+		// if they are enabled.
+		//
+		// TODO: drop 0FC chain source validation when support is ubiquitous
 		let chain_source = Arc::clone(&self.chain_source);
-		self.runtime.block_on(async move { chain_source.update_fee_rate_estimates().await })?;
+		self.runtime.block_on(async move {
+			tokio::try_join!(
+				chain_source.update_fee_rate_estimates(),
+				chain_source.validate_zero_fee_commitments_support_if_required(
+					zero_fee_commitments_support_required
+				)
+			)
+		})?;
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
@@ -1169,7 +1218,7 @@ impl Node {
 		self.channel_manager
 			.list_channels()
 			.into_iter()
-			.map(|c| ChannelDetails::from_ldk(c, self.config.anchor_channels_config.as_ref()))
+			.map(|c| ChannelDetails::from_ldk(c, &self.config.anchor_channels_config))
 			.collect()
 	}
 
@@ -1251,7 +1300,7 @@ impl Node {
 			FundingAmount::Exact { amount_sats } => {
 				// Check funds availability after connection (includes anchor reserve
 				// calculation).
-				self.check_sufficient_funds_for_channel(amount_sats, &peer_info.node_id)?;
+				self.check_sufficient_onchain_funds(amount_sats, &peer_info.node_id, true)?;
 				amount_sats
 			},
 			FundingAmount::Max => {
@@ -1353,37 +1402,41 @@ impl Node {
 			.peer_by_node_id(peer_node_id)
 			.ok_or(Error::ConnectionFailed)?
 			.init_features;
-		let anchor_channel = init_features.requires_anchors_zero_fee_htlc_tx();
+		let anchor_channel = peer_may_negotiate_anchor_channel_type(&self.config, &init_features);
 		Ok(new_channel_anchor_reserve_sats(&self.config, peer_node_id, anchor_channel))
 	}
 
-	fn check_sufficient_funds_for_channel(
-		&self, amount_sats: u64, peer_node_id: &PublicKey,
+	fn check_sufficient_onchain_funds(
+		&self, amount_sats: u64, peer_node_id: &PublicKey, for_new_channel: bool,
 	) -> Result<(), Error> {
+		let action_str = if for_new_channel { "create channel" } else { "splice-in" };
 		let cur_anchor_reserve_sats =
 			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let spendable_amount_sats =
 			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
 
-		// Fail early if we have less than the channel value available.
 		if spendable_amount_sats < amount_sats {
-			log_error!(self.logger,
-				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
-				spendable_amount_sats, amount_sats
+			log_error!(
+				self.logger,
+				"Unable to {} due to insufficient funds. Available: {}sats, Required: {}sats",
+				action_str,
+				spendable_amount_sats,
+				amount_sats
 			);
 			return Err(Error::InsufficientFunds);
 		}
 
-		// Fail if we have less than the channel value + anchor reserve available (if applicable).
-		let required_funds_sats =
-			amount_sats + self.new_channel_anchor_reserve_sats(peer_node_id)?;
+		if for_new_channel {
+			let required_funds_sats =
+				amount_sats + self.new_channel_anchor_reserve_sats(peer_node_id)?;
 
-		if spendable_amount_sats < required_funds_sats {
-			log_error!(self.logger,
-				"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
-				spendable_amount_sats, required_funds_sats
-			);
-			return Err(Error::InsufficientFunds);
+			if spendable_amount_sats < required_funds_sats {
+				log_error!(self.logger,
+					"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
+					spendable_amount_sats, required_funds_sats
+				);
+				return Err(Error::InsufficientFunds);
+			}
 		}
 
 		Ok(())
@@ -1659,7 +1712,7 @@ impl Node {
 				},
 			};
 
-			self.check_sufficient_funds_for_channel(splice_amount_sats, &counterparty_node_id)?;
+			self.check_sufficient_onchain_funds(splice_amount_sats, &counterparty_node_id, false)?;
 
 			let funding_template = self
 				.channel_manager
@@ -2400,21 +2453,20 @@ impl_writeable_tlv_based!(NodeMetrics, {
 pub(crate) fn total_anchor_channels_reserve_sats(
 	channel_manager: &ChannelManager, config: &Config,
 ) -> u64 {
-	config.anchor_channels_config.as_ref().map_or(0, |anchor_channels_config| {
-		channel_manager
-			.list_channels()
-			.into_iter()
-			.filter(|c| {
-				!anchor_channels_config.trusted_peers_no_reserve.contains(&c.counterparty.node_id)
-					&& c.channel_shutdown_state
-						.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
-					&& c.channel_type
-						.as_ref()
-						.map_or(false, |t| t.requires_anchors_zero_fee_htlc_tx())
-			})
-			.count() as u64
-			* anchor_channels_config.per_channel_reserve_sats
-	})
+	channel_manager
+		.list_channels()
+		.into_iter()
+		.filter(|c| {
+			!config
+				.anchor_channels_config
+				.trusted_peers_no_reserve
+				.contains(&c.counterparty.node_id)
+				&& c.channel_shutdown_state
+					.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
+				&& c.channel_type.as_ref().map_or(false, requires_anchor_channel_type)
+		})
+		.count() as u64
+		* config.anchor_channels_config.per_channel_reserve_sats
 }
 
 pub(crate) fn new_channel_anchor_reserve_sats(
@@ -2424,13 +2476,11 @@ pub(crate) fn new_channel_anchor_reserve_sats(
 		return 0;
 	}
 
-	config.anchor_channels_config.as_ref().map_or(0, |c| {
-		if c.trusted_peers_no_reserve.contains(peer_node_id) {
-			0
-		} else {
-			c.per_channel_reserve_sats
-		}
-	})
+	if config.anchor_channels_config.trusted_peers_no_reserve.contains(peer_node_id) {
+		0
+	} else {
+		config.anchor_channels_config.per_channel_reserve_sats
+	}
 }
 
 #[cfg(test)]

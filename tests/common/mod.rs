@@ -379,11 +379,12 @@ pub(crate) fn random_node_alias() -> Option<NodeAlias> {
 	Some(NodeAlias(bytes))
 }
 
-pub(crate) fn random_config(anchor_channels: bool) -> TestConfig {
+pub(crate) fn random_config() -> TestConfig {
 	let mut node_config = Config::default();
 
-	if !anchor_channels {
-		node_config.anchor_channels_config = None;
+	#[cfg(zero_fee_commitment_tests)]
+	{
+		node_config.anchor_channels_config.enable_zero_fee_commitments = true;
 	}
 
 	node_config.network = Network::Regtest;
@@ -594,24 +595,22 @@ pub(crate) use setup_builder;
 pub(crate) mod scenarios;
 
 pub(crate) fn setup_two_nodes(
-	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
-	anchors_trusted_no_reserve: bool,
+	chain_source: &TestChainSource, allow_0conf: bool, anchors_trusted_no_reserve: bool,
 ) -> (TestNode, TestNode) {
 	setup_two_nodes_with_store(
 		chain_source,
 		allow_0conf,
-		anchor_channels,
 		anchors_trusted_no_reserve,
 		TestStoreType::TestSyncStore,
 	)
 }
 
 pub(crate) fn setup_two_nodes_with_store(
-	chain_source: &TestChainSource, allow_0conf: bool, anchor_channels: bool,
-	anchors_trusted_no_reserve: bool, store_type: TestStoreType,
+	chain_source: &TestChainSource, allow_0conf: bool, anchors_trusted_no_reserve: bool,
+	store_type: TestStoreType,
 ) -> (TestNode, TestNode) {
 	println!("== Node A ==");
-	let mut config_a = random_config(anchor_channels);
+	let mut config_a = random_config();
 	config_a.store_type = store_type;
 
 	if cfg!(hrn_tests) {
@@ -622,7 +621,7 @@ pub(crate) fn setup_two_nodes_with_store(
 	let node_a = setup_node(chain_source, config_a);
 
 	println!("\n== Node B ==");
-	let mut config_b = random_config(anchor_channels);
+	let mut config_b = random_config();
 	config_b.store_type = store_type;
 
 	if cfg!(hrn_tests) {
@@ -637,14 +636,8 @@ pub(crate) fn setup_two_nodes_with_store(
 	if allow_0conf {
 		config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
 	}
-	if anchor_channels && anchors_trusted_no_reserve {
-		config_b
-			.node_config
-			.anchor_channels_config
-			.as_mut()
-			.unwrap()
-			.trusted_peers_no_reserve
-			.push(node_a.node_id());
+	if anchors_trusted_no_reserve {
+		config_b.node_config.anchor_channels_config.trusted_peers_no_reserve.push(node_a.node_id());
 	}
 	let node_b = setup_node(chain_source, config_b);
 	(node_a, node_b)
@@ -1196,7 +1189,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let node_b_anchor_reserve_sat = if node_b
 		.config()
 		.anchor_channels_config
-		.map_or(true, |acc| acc.trusted_peers_no_reserve.contains(&node_a.node_id()))
+		.trusted_peers_no_reserve
+		.contains(&node_a.node_id())
 	{
 		0
 	} else {
@@ -1587,10 +1581,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		let node_a_outbound_capacity_msat = node_a.list_channels()[0].outbound_capacity_msat;
 		let node_a_reserve_msat =
 			node_a.list_channels()[0].unspendable_punishment_reserve.unwrap() * 1000;
-		// TODO: Zero-fee commitment channels are anchor channels, but do not allocate any
-		// funds to the anchor, so this will need to be updated when we ship these channels
-		// in ldk-node.
-		let node_a_anchors_msat = if expect_anchor_channel { 2 * 330 * 1000 } else { 0 };
+		let zero_fee_commitments = node_a.list_channels()[0].feerate_sat_per_1000_weight == 0;
+		let node_a_anchors_msat = if zero_fee_commitments { 0 } else { 2 * 330 * 1000 };
 		let funding_amount_msat = node_a.list_channels()[0].channel_value_sats * 1000;
 		// Node B does not have any reserve, so we only subtract a few items on node A's
 		// side to arrive at node B's capacity

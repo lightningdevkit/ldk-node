@@ -45,17 +45,16 @@ proptest! {
 			let chain_source_c = random_chain_source(&bitcoind, &electrsd);
 
 			macro_rules! config_node {
-				($chain_source: expr, $anchor_channels: expr) => {{
-					let config_a = random_config($anchor_channels);
+				($chain_source: expr) => {{
+					let config_a = random_config();
 					let node = setup_node(&$chain_source, config_a);
 					node
 				}};
 			}
-			let anchor_channels = true;
 			let nodes = vec![
-				config_node!(chain_source_a, anchor_channels),
-				config_node!(chain_source_b, anchor_channels),
-				config_node!(chain_source_c, anchor_channels),
+				config_node!(chain_source_a),
+				config_node!(chain_source_b),
+				config_node!(chain_source_c),
 			];
 
 			let (bitcoind, electrs) = (&bitcoind.client, &electrsd.client);
