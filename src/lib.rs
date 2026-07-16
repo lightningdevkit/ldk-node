@@ -544,6 +544,25 @@ impl Node {
 			}
 		});
 
+		// Periodically prune LSPS2 leases before they expire so stale parameters don't accumulate.
+		let lsps2_client = self.liquidity_source.lsps2_client();
+		let prune_logger = Arc::clone(&self.logger);
+		let mut stop_pruning = self.stop_sender.subscribe();
+		self.runtime.spawn_cancellable_background_task(async move {
+			let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+					_ = stop_pruning.changed() => return,
+					_ = interval.tick() => {
+						if let Err(error) = lsps2_client.prune_stale_leases().await {
+							log_error!(prune_logger, "Failed pruning stale LSPS2 leases: {}", error);
+						}
+					},
+				}
+			}
+		});
+
 		// Regularly broadcast node announcements.
 		let bcast_cm = Arc::clone(&self.channel_manager);
 		let bcast_pm = Arc::clone(&self.peer_manager);
