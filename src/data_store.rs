@@ -473,6 +473,13 @@ mod tests {
 			logger,
 		);
 
+		let inserted = MergingTestObject {
+			id: TestObjectId { id: [43u8; 4] },
+			data: [44u8; 3],
+			preserved_data: [45u8; 3],
+		};
+		assert_eq!(Ok((true, inserted)), data_store.insert_or_update_and_get(inserted).await);
+
 		let supplied = MergingTestObject { id, data: [25u8; 3], preserved_data: [26u8; 3] };
 		let expected = MergingTestObject { data: supplied.data, ..existing };
 		assert_eq!(Ok((true, expected)), data_store.insert_or_update_and_get(supplied).await);
