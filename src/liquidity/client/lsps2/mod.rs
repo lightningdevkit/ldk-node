@@ -42,9 +42,9 @@ use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
 use self::state::{
-	now_secs, LSPS2LeaseState, PaymentLease, PaymentLeaseId, PaymentLeaseStore,
-	PendingInvoiceRequestState, PendingOffer, PendingOfferAmount, PendingOfferId,
-	PendingOfferState, PendingOfferStore,
+	now_secs, LSPS2LeaseState, LeaseRequestKey, PaymentLease, PaymentLeaseId, PaymentLeaseStore,
+	PendingInvoiceRequestState, PendingLeaseRequestState, PendingOffer, PendingOfferAmount,
+	PendingOfferId, PendingOfferState, PendingOfferStore,
 };
 
 async fn consume_after_persisted_removal<T, E, RF, CF, Fut>(
@@ -106,6 +106,7 @@ where
 	pub(crate) pending_offer_store: Arc<PendingOfferStore<L>>,
 	pub(crate) pending_offer_state: Mutex<PendingOfferState>,
 	pub(crate) pending_invoice_request_state: Mutex<PendingInvoiceRequestState>,
+	pub(crate) pending_lease_request_state: Mutex<PendingLeaseRequestState>,
 	pub(crate) channel_manager: Arc<ChannelManager>,
 	pub(crate) keys_manager: Arc<KeysManager>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
@@ -355,6 +356,17 @@ where
 		{
 			return Ok((lease, total_fee_msat, lsp, false));
 		}
+		let request_lock = self
+			.pending_lease_request_state
+			.lock()
+			.expect("lock")
+			.request_lock(LeaseRequestKey::Fixed(amount_msat));
+		let _request_guard = request_lock.lock().await;
+		if let Some((lease, total_fee_msat, lsp)) =
+			self.take_cached_fixed_lease(amount_msat, max_total_lsp_fee_limit_msat).await?
+		{
+			return Ok((lease, total_fee_msat, lsp, false));
+		}
 
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
@@ -419,6 +431,17 @@ where
 		self: &Arc<Self>, max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 		connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig, bool), Error> {
+		if let Some((lease, proportional_fee, lsp)) =
+			self.take_cached_variable_lease(max_proportional_lsp_fee_limit_ppm_msat).await?
+		{
+			return Ok((lease, proportional_fee, lsp, false));
+		}
+		let request_lock = self
+			.pending_lease_request_state
+			.lock()
+			.expect("lock")
+			.request_lock(LeaseRequestKey::Variable);
+		let _request_guard = request_lock.lock().await;
 		if let Some((lease, proportional_fee, lsp)) =
 			self.take_cached_variable_lease(max_proportional_lsp_fee_limit_ppm_msat).await?
 		{

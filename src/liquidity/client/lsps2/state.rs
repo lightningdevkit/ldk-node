@@ -220,6 +220,33 @@ impl PendingInvoiceRequestState {
 	}
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub(crate) enum LeaseRequestKey {
+	Fixed(u64),
+	Variable,
+}
+
+#[derive(Default)]
+pub(crate) struct PendingLeaseRequestState {
+	locks: HashMap<LeaseRequestKey, Weak<AsyncMutex<()>>>,
+}
+
+impl PendingLeaseRequestState {
+	pub(crate) fn request_lock(&mut self, key: LeaseRequestKey) -> Arc<AsyncMutex<()>> {
+		self.prune();
+		if let Some(lock) = self.locks.get(&key).and_then(Weak::upgrade) {
+			return lock;
+		}
+		let lock = Arc::new(AsyncMutex::new(()));
+		self.locks.insert(key, Arc::downgrade(&lock));
+		lock
+	}
+
+	pub(crate) fn prune(&mut self) {
+		self.locks.retain(|_, lock| lock.strong_count() > 0);
+	}
+}
+
 fn least_recently_used(offers: &HashMap<PendingOfferId, PendingOffer>) -> Option<PendingOfferId> {
 	offers.values().min_by_key(|offer| (offer.last_accessed, offer.id)).map(|offer| offer.id)
 }
@@ -547,5 +574,19 @@ mod tests {
 		drop(other_offer);
 		state.prune();
 		assert!(state.is_empty());
+	}
+
+	#[test]
+	fn lease_requests_are_serialized_per_key() {
+		let mut state = PendingLeaseRequestState::default();
+
+		let fixed = state.request_lock(LeaseRequestKey::Fixed(1_000));
+		let same_fixed = state.request_lock(LeaseRequestKey::Fixed(1_000));
+		let other_fixed = state.request_lock(LeaseRequestKey::Fixed(2_000));
+		let variable = state.request_lock(LeaseRequestKey::Variable);
+
+		assert!(Arc::ptr_eq(&fixed, &same_fixed));
+		assert!(!Arc::ptr_eq(&fixed, &other_fixed));
+		assert!(!Arc::ptr_eq(&fixed, &variable));
 	}
 }
