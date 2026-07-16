@@ -59,6 +59,16 @@ pub(crate) enum LeaseCacheTargetId {
 	Variable,
 }
 
+impl LeaseCacheTargetId {
+	/// Returns whether the given lease may be used to serve this target.
+	pub(crate) fn matches(&self, lease: &PaymentLease) -> bool {
+		match self {
+			Self::Fixed { amount_msat } => lease.payment_size_msat == Some(*amount_msat),
+			Self::Variable => lease.payment_size_msat.is_none(),
+		}
+	}
+}
+
 impl_writeable_tlv_based_enum!(LeaseCacheTargetId,
 	(0, Fixed) => {
 		(1, amount_msat, required),
@@ -206,24 +216,29 @@ where
 		}
 	}
 
-	pub(crate) async fn register(&self, target: LeaseCacheTarget) -> Result<(), Error> {
+	/// Registers the given target, returning the target evicted to make room for it, if any.
+	pub(crate) async fn register(
+		&self, target: LeaseCacheTarget,
+	) -> Result<Option<LeaseCacheTargetId>, Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let mut updated_state = self.state.lock().expect("lock").clone();
-		updated_state.register(target);
+		let evicted = updated_state.register(target);
 		self.persist_state(&updated_state).await?;
 		*self.state.lock().expect("lock") = updated_state;
-		Ok(())
+		Ok(evicted)
 	}
 
-	pub(crate) async fn prune(&self, now: u64) -> Result<(), Error> {
+	/// Removes expired targets, returning their identifiers.
+	pub(crate) async fn prune(&self, now: u64) -> Result<Vec<LeaseCacheTargetId>, Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let mut updated_state = self.state.lock().expect("lock").clone();
-		if updated_state.prune(now).is_empty() {
-			return Ok(());
+		let removed = updated_state.prune(now);
+		if removed.is_empty() {
+			return Ok(removed);
 		}
 		self.persist_state(&updated_state).await?;
 		*self.state.lock().expect("lock") = updated_state;
-		Ok(())
+		Ok(removed)
 	}
 
 	pub(crate) async fn persist(&self) -> Result<(), Error> {
@@ -398,6 +413,21 @@ impl LSPS2LeaseState {
 		self.leases.insert(lease.id, lease);
 	}
 
+	pub(crate) fn remove(&mut self, id: &PaymentLeaseId) {
+		self.leases.remove(id);
+	}
+
+	/// Returns the identifiers of all leases that may serve any of the given targets.
+	pub(crate) fn lease_ids_for_targets(
+		&self, target_ids: &[LeaseCacheTargetId],
+	) -> Vec<PaymentLeaseId> {
+		self.leases
+			.values()
+			.filter(|lease| target_ids.iter().any(|target_id| target_id.matches(lease)))
+			.map(|lease| lease.id)
+			.collect()
+	}
+
 	pub(crate) fn take_valid(&mut self, id: &PaymentLeaseId) -> Option<PaymentLease> {
 		if self.leases.get(id).map_or(false, is_lease_usable) {
 			self.leases.remove(id)
@@ -429,6 +459,24 @@ impl LSPS2LeaseState {
 		self.leases.remove(&id).map(|lease| (lease, fee_msat))
 	}
 
+	pub(crate) fn has_fixed_amount(
+		&self, amount_msat: u64, max_fee_msat: Option<u64>, available_lsps: &[PublicKey],
+	) -> bool {
+		self.leases
+			.values()
+			.filter(|lease| available_lsps.contains(&lease.id.lsp_node_id))
+			.filter(|lease| lease.payment_size_msat == Some(amount_msat))
+			.filter(|lease| is_lease_usable(lease))
+			.filter_map(|lease| {
+				compute_opening_fee(
+					amount_msat,
+					lease.params.min_fee_msat,
+					lease.params.proportional as u64,
+				)
+			})
+			.any(|fee_msat| max_fee_msat.map_or(true, |max| fee_msat <= max))
+	}
+
 	/// Selects and removes a variable-amount lease in one operation.
 	pub(crate) fn variable_amount(
 		&mut self, max_total_fee_msat: Option<u64>, available_lsps: &[PublicKey],
@@ -445,6 +493,17 @@ impl LSPS2LeaseState {
 			.map(|(id, lease)| (*id, lease.params.proportional as u64))
 			.min_by_key(|(_, fee)| *fee)?;
 		self.leases.remove(&id).map(|lease| (lease, proportional_fee))
+	}
+
+	pub(crate) fn has_variable_amount(
+		&self, max_total_fee_msat: Option<u64>, available_lsps: &[PublicKey],
+	) -> bool {
+		self.leases
+			.values()
+			.filter(|lease| available_lsps.contains(&lease.id.lsp_node_id))
+			.filter(|lease| lease.payment_size_msat.is_none())
+			.filter(|lease| is_lease_usable(lease))
+			.any(|lease| max_total_fee_msat.map_or(true, |max| lease.params.min_fee_msat <= max))
 	}
 
 	pub(crate) fn prune(&mut self) {
@@ -645,6 +704,47 @@ mod tests {
 		assert_eq!(state.variable_amount(Some(50), &available_lsps).unwrap().0.id, variable.id);
 	}
 
+	#[test]
+	fn detects_cached_leases_for_refill() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let fixed = lease(2, 46, 100, Some(1_000), valid_until);
+		let variable = lease(3, 47, 50, None, valid_until);
+		let available_lsps = [fixed.id.lsp_node_id, variable.id.lsp_node_id];
+		let state = LSPS2LeaseState::from_leases(vec![fixed, variable]);
+
+		assert!(state.has_fixed_amount(1_000, Some(100), &available_lsps));
+		assert!(!state.has_fixed_amount(1_000, Some(99), &available_lsps));
+		assert!(!state.has_fixed_amount(2_000, None, &available_lsps));
+		assert!(state.has_variable_amount(Some(50), &available_lsps));
+		assert!(!state.has_variable_amount(Some(49), &available_lsps));
+	}
+
+	#[test]
+	fn unavailable_fixed_lease_does_not_suppress_refill() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let unavailable = lease(2, 48, 100, Some(1_000), valid_until);
+		let available_lsp = lease(3, 49, 100, Some(1_000), valid_until).id.lsp_node_id;
+		let state = LSPS2LeaseState::from_leases(vec![unavailable]);
+
+		assert!(
+			!state.has_fixed_amount(1_000, Some(100), &[available_lsp]),
+			"a lease from an unavailable LSP suppressed fixed-amount refill"
+		);
+	}
+
+	#[test]
+	fn unavailable_variable_lease_does_not_suppress_refill() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let unavailable = lease(2, 50, 50, None, valid_until);
+		let available_lsp = lease(3, 51, 50, None, valid_until).id.lsp_node_id;
+		let state = LSPS2LeaseState::from_leases(vec![unavailable]);
+
+		assert!(
+			!state.has_variable_amount(Some(50), &[available_lsp]),
+			"a lease from an unavailable LSP suppressed variable-amount refill"
+		);
+	}
+
 	fn cache_target(
 		id: LeaseCacheTargetId, absolute_expiry: Option<u64>, last_accessed: u64,
 	) -> LeaseCacheTarget {
@@ -763,5 +863,85 @@ mod tests {
 		assert!(Arc::ptr_eq(&fixed, &same_fixed));
 		assert!(!Arc::ptr_eq(&fixed, &other_fixed));
 		assert!(!Arc::ptr_eq(&fixed, &variable));
+	}
+
+	#[test]
+	fn startup_drops_leases_of_expired_cache_targets() {
+		use crate::builder::NodeBuilder;
+		use crate::entropy::NodeEntropy;
+		use crate::io::{
+			LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE, LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+		};
+
+		let now = now_secs();
+		let valid_until = now + 7 * 24 * 60 * 60;
+		let expired_target_lease = lease(2, 46, 1, Some(1_000), valid_until);
+		let live_target_lease = lease(3, 47, 1, Some(2_000), valid_until);
+		let untargeted_lease = lease(4, 48, 1, None, valid_until);
+		let targets = vec![
+			LeaseCacheTarget::new(LeaseCacheTargetId::Fixed { amount_msat: 1_000 }, Some(now - 1)),
+			LeaseCacheTarget::new(
+				LeaseCacheTargetId::Fixed { amount_msat: 2_000 },
+				Some(now + 3_600),
+			),
+		];
+
+		let store = InMemoryStore::new();
+		tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+			KVStore::write(
+				&store,
+				LSPS2_CACHE_TARGET_PERSISTENCE_PRIMARY_NAMESPACE,
+				LSPS2_CACHE_TARGET_PERSISTENCE_SECONDARY_NAMESPACE,
+				LSPS2_CACHE_TARGET_PERSISTENCE_KEY,
+				LeaseCacheTargets { targets }.encode(),
+			)
+			.await
+			.unwrap();
+			for lease in [&expired_target_lease, &live_target_lease, &untargeted_lease] {
+				KVStore::write(
+					&store,
+					LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE,
+					LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+					&lease.id.encode_to_hex_str(),
+					lease.encode(),
+				)
+				.await
+				.unwrap();
+			}
+		});
+
+		let mut builder = NodeBuilder::new();
+		builder.set_log_facade_logger();
+		#[cfg(not(feature = "uniffi"))]
+		let entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		let node = builder.build_with_store(entropy, store).unwrap();
+
+		let mut remaining = node
+			.runtime
+			.block_on(KVStore::list(
+				&*node.kv_store,
+				LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE,
+				LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+			))
+			.unwrap();
+		remaining.sort();
+		let mut expected =
+			vec![live_target_lease.id.encode_to_hex_str(), untargeted_lease.id.encode_to_hex_str()];
+		expected.sort();
+		assert_eq!(
+			remaining, expected,
+			"only the leases of cache targets dropped at startup must be removed"
+		);
+		let client = node.liquidity_source.lsps2_client();
+		let lease_state = client.lease_state.lock().unwrap();
+		assert!(lease_state
+			.lease_ids_for_targets(&[LeaseCacheTargetId::Fixed { amount_msat: 1_000 }])
+			.is_empty());
+		assert_eq!(
+			lease_state.lease_ids_for_targets(&[LeaseCacheTargetId::Fixed { amount_msat: 2_000 }]),
+			vec![live_target_lease.id]
+		);
 	}
 }

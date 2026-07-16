@@ -33,6 +33,7 @@ use lightning_types::payment::PaymentPreimage;
 use lightning_types::string::UntrustedString;
 
 use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::connection::ConnectionManager;
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::liquidity::client::lsps2::state::LeaseCacheTargetId;
@@ -103,6 +104,7 @@ pub struct Bolt12Payment {
 	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
+	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore>,
 	config: Arc<Config>,
@@ -114,7 +116,8 @@ pub struct Bolt12Payment {
 impl Bolt12Payment {
 	pub(crate) fn new(
 		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
-		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, keys_manager: Arc<KeysManager>,
+		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
+		connection_manager: Arc<ConnectionManager<Arc<Logger>>>, keys_manager: Arc<KeysManager>,
 		payment_store: Arc<PaymentStore>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
 		logger: Arc<Logger>, async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
@@ -122,6 +125,7 @@ impl Bolt12Payment {
 			runtime,
 			channel_manager,
 			liquidity_source,
+			connection_manager,
 			keys_manager,
 			payment_store,
 			config,
@@ -286,9 +290,18 @@ impl Bolt12Payment {
 
 	fn register_cache_target(&self, offer: &LdkOffer, id: LeaseCacheTargetId) {
 		let absolute_expiry = offer.absolute_expiry().map(|expiry| expiry.as_secs());
-		if let Err(error) = self.runtime.block_on(
-			self.liquidity_source.lsps2_client().register_cache_target(id, absolute_expiry),
-		) {
+		let lsps2_client = self.liquidity_source.lsps2_client();
+		let res = if *self.is_running.read().expect("lock") {
+			self.runtime.block_on(lsps2_client.register_cache_target_and_refill(
+				id,
+				absolute_expiry,
+				&self.connection_manager,
+			))
+		} else {
+			// We cannot negotiate leases while stopped. Invoice requests still negotiate on demand.
+			self.runtime.block_on(lsps2_client.register_cache_target(id, absolute_expiry))
+		};
+		if let Err(error) = res {
 			// Cache targets only reduce invoice-request latency. Failing to persist one must not make a
 			// long-lived offer unusable because the request path can negotiate a lease on demand.
 			log_error!(self.logger, "Failed to cache LSPS2 lease target: {}", error);
