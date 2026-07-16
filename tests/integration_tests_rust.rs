@@ -1044,6 +1044,8 @@ async fn reorged_onchain_payment_returns_to_unconfirmed() {
 
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
+	assert_eq!(node_a.next_event(), None);
+	assert_eq!(node_b.next_event(), None);
 
 	for node in [&node_a, &node_b] {
 		let payment = node.payment(&payment_id).unwrap();
