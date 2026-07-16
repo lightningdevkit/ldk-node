@@ -5,8 +5,9 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::hash::Hash;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -66,6 +67,33 @@ const LEASE_NEGOTIATION_MAX_ATTEMPTS: usize = 3;
 
 fn should_retry_lease_negotiation(error: Error, attempt: usize) -> bool {
 	error == Error::LiquidityRequestFailed && attempt < LEASE_NEGOTIATION_MAX_ATTEMPTS
+}
+
+async fn try_lease_candidates<T, K, R, E, KF, AF, Fut>(
+	candidates: Vec<T>, candidate_key: KF, mut attempt: AF,
+) -> Result<R, E>
+where
+	K: Copy + Eq + Hash,
+	KF: Fn(&T) -> K,
+	AF: FnMut(T) -> Fut,
+	Fut: Future<Output = Result<R, E>>,
+{
+	let mut failed_candidates = HashSet::new();
+	let mut last_error = None;
+	for candidate in candidates {
+		let key = candidate_key(&candidate);
+		if failed_candidates.contains(&key) {
+			continue;
+		}
+		match attempt(candidate).await {
+			Ok(result) => return Ok(result),
+			Err(error) => {
+				failed_candidates.insert(key);
+				last_error = Some(error);
+			},
+		}
+	}
+	Err(last_error.expect("lease candidates are non-empty"))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -453,7 +481,7 @@ where
 		connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
-		let (cheapest_lsp, min_total_fee_msat, min_opening_params) = all_offers
+		let mut candidates = all_offers
 			.into_iter()
 			.flat_map(|(lsp, resp)| {
 				resp.opening_fee_params_menu
@@ -477,11 +505,12 @@ where
 						.map(|fee| (lsp, fee, params))
 				}
 			})
-			.min_by_key(|(_, fee, _)| *fee)
-			.ok_or_else(|| {
-				log_error!(self.logger, "Failed to handle response from liquidity service",);
-				Error::LiquidityRequestFailed
-			})?;
+			.collect::<Vec<_>>();
+		candidates.sort_unstable_by_key(|(_, fee, _)| *fee);
+		let min_total_fee_msat = candidates.first().map(|(_, fee, _)| *fee).ok_or_else(|| {
+			log_error!(self.logger, "Failed to handle response from liquidity service",);
+			Error::LiquidityRequestFailed
+		})?;
 
 		if let Some(max_total_lsp_fee_limit_msat) = max_total_lsp_fee_limit_msat {
 			if min_total_fee_msat > max_total_lsp_fee_limit_msat {
@@ -491,23 +520,44 @@ where
 				);
 				return Err(Error::LiquidityFeeTooHigh);
 			}
+			candidates.retain(|(_, fee, _)| *fee <= max_total_lsp_fee_limit_msat);
 		}
 
-		log_debug!(
-			self.logger,
-			"Choosing cheapest liquidity offer from LSP {}, will pay {}msat in total LSP fees",
-			cheapest_lsp.node_id,
-			min_total_fee_msat
-		);
-
-		let negotiated_lease = self
-			.lsps2_send_buy_request(
-				Some(amount_msat),
-				min_opening_params,
-				Some(&cheapest_lsp.node_id),
-			)
-			.await?;
-		Ok((negotiated_lease, min_total_fee_msat, cheapest_lsp))
+		try_lease_candidates(
+			candidates,
+			|(lsp, _, _)| lsp.node_id,
+			|(lsp, total_fee_msat, opening_params)| {
+				let client = Arc::clone(self);
+				async move {
+					log_debug!(
+						client.logger,
+						"Choosing liquidity offer from LSP {}, will pay {}msat in total LSP fees",
+						lsp.node_id,
+						total_fee_msat
+					);
+					match client
+						.lsps2_send_buy_request(
+							Some(amount_msat),
+							opening_params,
+							Some(&lsp.node_id),
+						)
+						.await
+					{
+						Ok(lease) => Ok((lease, total_fee_msat, lsp)),
+						Err(error) => {
+							log_warn!(
+								client.logger,
+								"Failed negotiating LSPS2 payment lease with LSP {}, trying the next candidate: {}",
+								lsp.node_id,
+								error
+							);
+							Err(error)
+						},
+					}
+				}
+			},
+		)
+		.await
 	}
 
 	async fn acquire_variable_lease(
@@ -582,7 +632,7 @@ where
 		connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
-		let (cheapest_lsp, min_prop_fee_ppm_msat, min_opening_params) = all_offers
+		let mut candidates = all_offers
 			.into_iter()
 			.flat_map(|(lsp, resp)| {
 				resp.opening_fee_params_menu.into_iter().map(move |params| (lsp.clone(), params))
@@ -591,8 +641,10 @@ where
 				let ppm = params.proportional as u64;
 				(lsp, ppm, params)
 			})
-			.min_by_key(|(_, ppm, _)| *ppm)
-			.ok_or_else(|| {
+			.collect::<Vec<_>>();
+		candidates.sort_unstable_by_key(|(_, ppm, _)| *ppm);
+		let min_prop_fee_ppm_msat =
+			candidates.first().map(|(_, ppm, _)| *ppm).ok_or_else(|| {
 				log_error!(self.logger, "Failed to handle response from liquidity service",);
 				Error::LiquidityRequestFailed
 			})?;
@@ -608,19 +660,40 @@ where
 				);
 				return Err(Error::LiquidityFeeTooHigh);
 			}
+			candidates.retain(|(_, ppm, _)| *ppm <= max_proportional_lsp_fee_limit_ppm_msat);
 		}
 
-		log_debug!(
-			self.logger,
-			"Choosing cheapest liquidity offer from LSP {}, will pay {}ppm msat in proportional LSP fees",
-			cheapest_lsp.node_id,
-			min_prop_fee_ppm_msat
-		);
-
-		let negotiated_lease = self
-			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
-			.await?;
-		Ok((negotiated_lease, min_prop_fee_ppm_msat, cheapest_lsp))
+		try_lease_candidates(
+			candidates,
+			|(lsp, _, _)| lsp.node_id,
+			|(lsp, proportional_fee_ppm_msat, opening_params)| {
+				let client = Arc::clone(self);
+				async move {
+					log_debug!(
+						client.logger,
+						"Choosing liquidity offer from LSP {}, will pay {}ppm msat in proportional LSP fees",
+						lsp.node_id,
+						proportional_fee_ppm_msat
+					);
+					match client
+						.lsps2_send_buy_request(None, opening_params, Some(&lsp.node_id))
+						.await
+					{
+						Ok(lease) => Ok((lease, proportional_fee_ppm_msat, lsp)),
+						Err(error) => {
+							log_warn!(
+								client.logger,
+								"Failed negotiating LSPS2 payment lease with LSP {}, trying the next candidate: {}",
+								lsp.node_id,
+								error
+							);
+							Err(error)
+						},
+					}
+				}
+			},
+		)
+		.await
 	}
 
 	fn schedule_fixed_lease_refill(
@@ -1247,6 +1320,32 @@ mod tests {
 		assert!(!should_retry_lease_negotiation(Error::LiquidityRequestFailed, 3));
 		assert!(!should_retry_lease_negotiation(Error::LiquidityFeeTooHigh, 1));
 		assert!(!should_retry_lease_negotiation(Error::LiquiditySourceUnavailable, 1));
+	}
+
+	#[tokio::test]
+	async fn lease_negotiation_fails_over_between_lsps() {
+		let candidates = vec![(1, 10), (1, 20), (2, 30)];
+		let attempted_lsps = Arc::new(Mutex::new(Vec::new()));
+		let attempted_lsps_ref = Arc::clone(&attempted_lsps);
+		let result = try_lease_candidates(
+			candidates,
+			|candidate| candidate.0,
+			move |candidate| {
+				let attempted_lsps = Arc::clone(&attempted_lsps_ref);
+				async move {
+					attempted_lsps.lock().unwrap().push(candidate.0);
+					if candidate.0 == 1 {
+						Err(())
+					} else {
+						Ok(candidate.1)
+					}
+				}
+			},
+		)
+		.await;
+
+		assert_eq!(result, Ok(30));
+		assert_eq!(*attempted_lsps.lock().unwrap(), vec![1, 2]);
 	}
 }
 
