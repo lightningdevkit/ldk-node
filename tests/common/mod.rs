@@ -446,12 +446,12 @@ impl ExpectOnchainPaymentEvent for Node {
 }
 
 pub(crate) fn assert_onchain_payment_event_matches_payment(node: &Node, event: &Event) {
-	let (payment_id, txid, amount_msat, expected_direction) = match event {
-		Event::OnchainPaymentSuccessful { payment_id, txid, amount_msat, .. } => {
-			(*payment_id, *txid, *amount_msat, PaymentDirection::Outbound)
-		},
+	let (payment_id, txid, amount_msat, event_fee_paid_msat, expected_direction) = match event {
+		Event::OnchainPaymentSuccessful {
+			payment_id, txid, amount_msat, fee_paid_msat, ..
+		} => (*payment_id, *txid, *amount_msat, Some(*fee_paid_msat), PaymentDirection::Outbound),
 		Event::OnchainPaymentReceived { payment_id, txid, amount_msat, .. } => {
-			(*payment_id, *txid, *amount_msat, PaymentDirection::Inbound)
+			(*payment_id, *txid, *amount_msat, None, PaymentDirection::Inbound)
 		},
 		_ => panic!("Expected on-chain payment event, got {:?}", event),
 	};
@@ -460,6 +460,9 @@ pub(crate) fn assert_onchain_payment_event_matches_payment(node: &Node, event: &
 	assert_eq!(payment.status, PaymentStatus::Succeeded);
 	assert_eq!(payment.direction, expected_direction);
 	assert_eq!(payment.amount_msat, Some(amount_msat));
+	if let Some(fee_paid_msat) = event_fee_paid_msat {
+		assert_eq!(payment.fee_paid_msat, fee_paid_msat);
+	}
 	match payment.kind {
 		PaymentKind::Onchain {
 			txid: payment_txid,
