@@ -77,4 +77,19 @@ mod tests {
 
 		assert_eq!(metadata, decoded);
 	}
+
+	#[test]
+	fn bolt12_metadata_roundtrips() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: Some(42_000),
+				max_proportional_opening_fee_ppm_msat: None,
+			}),
+			lsps2_lease_parameters: None,
+		};
+
+		let encoded = metadata.encode_as_bolt12_payment_metadata();
+
+		assert_eq!(PaymentMetadata::decode_from_bolt12_payment_metadata(&encoded), Some(metadata));
+	}
 }
