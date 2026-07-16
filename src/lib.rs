@@ -186,6 +186,7 @@ use payment::{HRNResolver, UnifiedPayment};
 use peer_store::{PeerInfo, PeerStore};
 #[cfg(feature = "uniffi")]
 pub use probing::ArcedProbingConfigBuilder as ProbingConfigBuilder;
+pub use probing::ProbingConfigError;
 use probing::{run_prober, Prober};
 use runtime::Runtime;
 pub use tokio;
