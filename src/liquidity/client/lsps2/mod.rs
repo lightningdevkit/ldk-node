@@ -35,7 +35,7 @@ use crate::payment::PaymentMetadata;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
-use self::state::{LSPS2LeaseState, PaymentLeaseStore};
+use self::state::{LSPS2LeaseState, PaymentLease, PaymentLeaseId, PaymentLeaseStore};
 
 pub(crate) struct LSPS2Client<L: Deref>
 where
@@ -128,20 +128,21 @@ where
 			min_total_fee_msat
 		);
 
-		let buy_response = self
+		let negotiated_lease = self
 			.lsps2_send_buy_request(
 				Some(amount_msat),
 				min_opening_params,
 				Some(&cheapest_lsp.node_id),
 			)
 			.await?;
+		let lease = self.consume_lease(&negotiated_lease.id).await?;
 		let lsps2_parameters = LSPS2Parameters {
 			max_total_opening_fee_msat: Some(min_total_fee_msat),
 			max_proportional_opening_fee_ppm_msat: None,
 		};
 
 		let invoice = self.lsps2_create_jit_invoice(
-			buy_response,
+			LSPS2BuyResponse::from(&lease),
 			Some(amount_msat),
 			description,
 			expiry_secs,
@@ -196,15 +197,16 @@ where
 			min_prop_fee_ppm_msat
 		);
 
-		let buy_response = self
+		let negotiated_lease = self
 			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
 			.await?;
+		let lease = self.consume_lease(&negotiated_lease.id).await?;
 		let lsps2_parameters = LSPS2Parameters {
 			max_total_opening_fee_msat: None,
 			max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
 		};
 		let invoice = self.lsps2_create_jit_invoice(
-			buy_response,
+			LSPS2BuyResponse::from(&lease),
 			None,
 			description,
 			expiry_secs,
@@ -306,7 +308,7 @@ where
 	async fn lsps2_send_buy_request(
 		&self, amount_msat: Option<u64>, opening_fee_params: LSPS2OpeningFeeParams,
 		node_id: Option<&PublicKey>,
-	) -> Result<LSPS2BuyResponse, Error> {
+	) -> Result<PaymentLease, Error> {
 		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, node_id)
 			.ok_or(Error::LiquiditySourceUnavailable)?;
 
@@ -319,7 +321,7 @@ where
 		{
 			let mut pending_buy_requests_lock = self.pending_buy_requests.lock().expect("lock");
 			let request_id = client_handler
-				.select_opening_params(lsps2_node.node_id, amount_msat, opening_fee_params)
+				.select_opening_params(lsps2_node.node_id, amount_msat, opening_fee_params.clone())
 				.map_err(|e| {
 					log_error!(
 						self.logger,
@@ -345,7 +347,36 @@ where
 			Error::LiquidityRequestFailed
 		})?;
 
-		Ok(buy_response)
+		let valid_until = opening_fee_params
+			.valid_until
+			.0
+			.timestamp()
+			.try_into()
+			.map_err(|_| Error::LiquidityRequestFailed)?;
+		let lease = PaymentLease {
+			id: PaymentLeaseId {
+				lsp_node_id: lsps2_node.node_id,
+				intercept_scid: buy_response.intercept_scid,
+			},
+			params: opening_fee_params,
+			cltv_expiry_delta: buy_response.cltv_expiry_delta,
+			payment_size_msat: amount_msat,
+			valid_until,
+		};
+		self.lease_store.insert(lease.clone()).await?;
+		self.lease_state.lock().expect("lock").insert(lease.clone());
+		Ok(lease)
+	}
+
+	async fn consume_lease(&self, id: &PaymentLeaseId) -> Result<PaymentLease, Error> {
+		let lease = self
+			.lease_state
+			.lock()
+			.expect("lock")
+			.take_valid(id)
+			.ok_or(Error::LiquidityRequestFailed)?;
+		self.lease_store.remove(id).await?;
+		Ok(lease)
 	}
 
 	fn lsps2_create_jit_invoice(
@@ -568,5 +599,11 @@ pub(crate) struct LSPS2FeeResponse {
 pub(crate) struct LSPS2BuyResponse {
 	intercept_scid: u64,
 	cltv_expiry_delta: u32,
+}
+
+impl From<&PaymentLease> for LSPS2BuyResponse {
+	fn from(lease: &PaymentLease) -> Self {
+		Self { intercept_scid: lease.id.intercept_scid, cltv_expiry_delta: lease.cltv_expiry_delta }
+	}
 }
 pub(crate) mod state;
