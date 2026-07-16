@@ -560,6 +560,9 @@ impl Bolt12Payment {
 	/// If LSPS2 is configured and existing inbound liquidity is insufficient when an invoice is
 	/// requested, the payment may be received through a just-in-time channel. Otherwise, it may be
 	/// received entirely over pre-existing channels.
+	///
+	/// If neither can receive the requested amount, the invoice request is rejected rather than
+	/// answered with an invoice that cannot be paid.
 	pub fn receive(
 		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
 	) -> Result<Offer, Error> {
@@ -573,6 +576,9 @@ impl Bolt12Payment {
 	/// If LSPS2 is configured and existing inbound liquidity is insufficient when an invoice is
 	/// requested, the payment may be received through a just-in-time channel. Otherwise, it may be
 	/// received entirely over pre-existing channels.
+	///
+	/// If neither can receive the requested amount, the invoice request is rejected rather than
+	/// answered with an invoice that cannot be paid.
 	pub fn receive_variable_amount(
 		&self, description: &str, expiry_secs: Option<u32>,
 	) -> Result<Offer, Error> {
@@ -600,6 +606,9 @@ impl Bolt12Payment {
 	///
 	/// The returned [`Bolt12Invoice`] is for informational purposes only (i.e., isn't needed to
 	/// retrieve the refund).
+	///
+	/// Returns an error if our channels cannot receive the refund amount, as such an invoice could
+	/// not be paid. Refunds are never received through LSPS2 just-in-time channels.
 	///
 	/// [`Refund`]: lightning::offers::refund::Refund
 	/// [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
