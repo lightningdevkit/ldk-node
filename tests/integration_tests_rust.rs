@@ -7205,10 +7205,14 @@ async fn bolt12_lsps2_client_service_integration() {
 	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
 
 	let client_config = random_config();
+	let client_store =
+		TestSyncStore::new(client_config.node_config.storage_dir_path.clone().into());
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
-	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
+	let client_node = client_builder
+		.build_with_store(client_config.node_entropy.into(), client_store.clone())
+		.unwrap();
 	client_node.start().unwrap();
 
 	let payer_config = random_config();
@@ -7246,6 +7250,22 @@ async fn bolt12_lsps2_client_service_integration() {
 	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
 	let fixed_amount_msat = 100_000_000;
+	// A unified URI's offer must register a lease target as well, so that its first payer need not
+	// wait for an on-demand negotiation. The client has no channel yet, so a lease is negotiated
+	// in the background right away.
+	assert!(client_node.list_channels().is_empty());
+	assert!(KVStore::list(&client_store, "lsps2_leases", "").await.unwrap().is_empty());
+	let unified_uri =
+		client_node.unified_payment().receive(fixed_amount_msat / 1_000, "unified", 3_600).unwrap();
+	assert!(unified_uri.to_lowercase().contains("lno="), "unified URI should carry an offer");
+	tokio::time::timeout(std::time::Duration::from_secs(common::INTEROP_TIMEOUT_SECS), async {
+		while KVStore::list(&client_store, "lsps2_leases", "").await.unwrap().is_empty() {
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("unified offer should pre-negotiate a lease");
+
 	// The recipient has no channel yet, but the connected payer gives the default message router a
 	// peer through which it can construct an offer path. This keeps the long-lived offer addressed
 	// by a blinded node path; the single-use intercept SCID is introduced only in the invoice.
@@ -7300,8 +7320,93 @@ async fn bolt12_lsps2_client_service_integration() {
 	assert_eq!(client_node.list_channels().len(), client_channel_count);
 	assert_eq!(service_node.list_channels().len(), service_channel_count);
 
-	// The first JIT channel cannot carry this larger variable payment. The variable offer disables
-	// MPP, so the payer must use the fresh JIT path rather than splitting across both paths.
+	let persisted_lease_key =
+		tokio::time::timeout(std::time::Duration::from_secs(common::INTEROP_TIMEOUT_SECS), async {
+			loop {
+				let keys = KVStore::list(&client_store, "lsps2_leases", "").await.unwrap();
+				if let Some(key) = keys.first() {
+					return key.clone();
+				}
+				tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("replacement lease should be persisted");
+	assert!(KVStore::read(&client_store, "lsps2_leases", "", &persisted_lease_key).await.is_ok());
+
+	let client_node_id = client_node.node_id();
+	client_node.stop().unwrap();
+	drop(client_node);
+	tokio::time::timeout(std::time::Duration::from_secs(common::INTEROP_TIMEOUT_SECS), async {
+		while payer_node.list_peers().iter().any(|peer| peer.node_id == client_node_id)
+			|| service_node.list_peers().iter().any(|peer| peer.node_id == client_node_id)
+		{
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("peers should observe the stopped client");
+
+	setup_builder!(restarted_client_builder, client_config.node_config);
+	restarted_client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	restarted_client_builder.add_liquidity_source(
+		service_node_id,
+		service_addr.clone(),
+		None,
+		true,
+	);
+	let client_node = restarted_client_builder
+		.build_with_store(client_config.node_entropy.into(), client_store.clone())
+		.unwrap();
+	assert_eq!(client_node.node_id(), client_node_id);
+	assert!(KVStore::read(&client_store, "lsps2_leases", "", &persisted_lease_key).await.is_ok());
+	client_node.start().unwrap();
+	let client_addr = client_node.listening_addresses().unwrap().first().unwrap().clone();
+	payer_node.connect(client_node.node_id(), client_addr, false).unwrap();
+
+	let restored_payment_id =
+		payer_node.bolt12_payment().send(&fixed_offer, None, None, None).unwrap();
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_event!(service_node, PaymentForwarded);
+	loop {
+		let event = tokio::time::timeout(
+			std::time::Duration::from_secs(common::INTEROP_TIMEOUT_SECS),
+			client_node.next_event_async(),
+		)
+		.await
+		.expect("restored client should receive a payment event");
+		match event {
+			Event::ChannelPending { counterparty_node_id, .. } => {
+				assert_eq!(counterparty_node_id, service_node.node_id());
+				client_node.event_handled().unwrap();
+				break;
+			},
+			Event::PaymentReceived { payment_id, amount_msat, .. } => {
+				assert_eq!(payment_id, ordinary_receiver_payment_id);
+				assert_eq!(amount_msat, ordinary_amount_msat);
+				client_node.event_handled().unwrap();
+			},
+			unexpected => panic!("Unexpected event after restoring client: {unexpected:?}"),
+		}
+	}
+	expect_channel_ready_event!(client_node, service_node.node_id());
+	expect_payment_successful_event!(payer_node, restored_payment_id, None);
+	let restored_receiver_payment_id =
+		expect_payment_received_event!(client_node, fixed_received_msat);
+	match client_node.payment(&restored_receiver_payment_id).unwrap().unwrap().kind {
+		PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
+			assert_eq!(counterparty_skimmed_fee_msat, Some(fixed_fee_msat));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+	assert!(
+		KVStore::read(&client_store, "lsps2_leases", "", &persisted_lease_key).await.is_err(),
+		"the restored lease must be consumed instead of renegotiating"
+	);
+
+	// The fixed JIT channels cannot carry this larger variable payment. The variable offer disables
+	// MPP, so the payer must use the fresh JIT path rather than splitting across the existing paths.
 	let variable_amount_msat = 200_000_000;
 	let variable_offer =
 		client_node.bolt12_payment().receive_variable_amount("variable", None).unwrap();
