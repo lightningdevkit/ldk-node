@@ -193,6 +193,7 @@ impl Bolt12Payment {
 					hash: None,
 					preimage: None,
 					secret: None,
+					counterparty_skimmed_fee_msat: None,
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
@@ -221,6 +222,7 @@ impl Bolt12Payment {
 							hash: None,
 							preimage: None,
 							secret: None,
+							counterparty_skimmed_fee_msat: None,
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
@@ -394,6 +396,7 @@ impl Bolt12Payment {
 					hash: None,
 					preimage: None,
 					secret: None,
+					counterparty_skimmed_fee_msat: None,
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
@@ -422,6 +425,7 @@ impl Bolt12Payment {
 							hash: None,
 							preimage: None,
 							secret: None,
+							counterparty_skimmed_fee_msat: None,
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
@@ -559,7 +563,8 @@ impl Bolt12Payment {
 	///
 	/// If LSPS2 is configured and existing inbound liquidity is insufficient when an invoice is
 	/// requested, the payment may be received through a just-in-time channel. Otherwise, it may be
-	/// received entirely over pre-existing channels.
+	/// received entirely over pre-existing channels. When a just-in-time channel is used, the LSP
+	/// fee is deducted from the amount received.
 	pub fn receive(
 		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
 	) -> Result<Offer, Error> {
@@ -572,7 +577,8 @@ impl Bolt12Payment {
 	///
 	/// If LSPS2 is configured and existing inbound liquidity is insufficient when an invoice is
 	/// requested, the payment may be received through a just-in-time channel. Otherwise, it may be
-	/// received entirely over pre-existing channels.
+	/// received entirely over pre-existing channels. When a just-in-time channel is used, the LSP
+	/// fee is deducted from the amount received.
 	pub fn receive_variable_amount(
 		&self, description: &str, expiry_secs: Option<u32>,
 	) -> Result<Offer, Error> {
