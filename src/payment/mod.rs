@@ -19,7 +19,7 @@ mod unified;
 
 pub use bolt11::Bolt11Payment;
 pub use bolt12::Bolt12Payment;
-pub(crate) use metadata::PaymentMetadata;
+pub(crate) use metadata::{LSPS2PaymentMetadataDecoder, PaymentMetadata};
 pub use onchain::OnchainPayment;
 pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
 pub use spontaneous::SpontaneousPayment;
