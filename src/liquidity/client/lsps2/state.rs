@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::secp256k1::PublicKey;
@@ -6,6 +7,7 @@ use lightning::offers::offer::OfferId;
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::data_store::{DataStore, StorableObject, StorableObjectId, StorableObjectUpdate};
 use crate::hex_utils;
@@ -192,6 +194,32 @@ impl PendingOfferState {
 	}
 }
 
+#[derive(Default)]
+pub(crate) struct PendingInvoiceRequestState {
+	locks: HashMap<PendingOfferId, Weak<AsyncMutex<()>>>,
+}
+
+impl PendingInvoiceRequestState {
+	pub(crate) fn request_lock(&mut self, id: PendingOfferId) -> Arc<AsyncMutex<()>> {
+		self.prune();
+		if let Some(lock) = self.locks.get(&id).and_then(Weak::upgrade) {
+			return lock;
+		}
+		let lock = Arc::new(AsyncMutex::new(()));
+		self.locks.insert(id, Arc::downgrade(&lock));
+		lock
+	}
+
+	pub(crate) fn prune(&mut self) {
+		self.locks.retain(|_, lock| lock.strong_count() > 0);
+	}
+
+	#[cfg(test)]
+	fn is_empty(&self) -> bool {
+		self.locks.is_empty()
+	}
+}
+
 fn least_recently_used(offers: &HashMap<PendingOfferId, PendingOffer>) -> Option<PendingOfferId> {
 	offers.values().min_by_key(|offer| (offer.last_accessed, offer.id)).map(|offer| offer.id)
 }
@@ -341,6 +369,8 @@ pub(crate) fn now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::Arc;
+
 	use super::*;
 	use bitcoin::secp256k1::{Secp256k1, SecretKey};
 	use lightning::offers::offer::OfferId;
@@ -497,5 +527,25 @@ mod tests {
 		assert_eq!(removed, vec![expired_id]);
 		assert!(state.contains(&unexpired_id));
 		assert!(state.contains(&long_lived_id));
+	}
+
+	#[test]
+	fn invoice_requests_are_serialized_per_offer() {
+		let first_id = PendingOfferId::from(OfferId([1; 32]));
+		let second_id = PendingOfferId::from(OfferId([2; 32]));
+		let mut state = PendingInvoiceRequestState::default();
+
+		let first = state.request_lock(first_id);
+		let same_offer = state.request_lock(first_id);
+		let other_offer = state.request_lock(second_id);
+
+		assert!(Arc::ptr_eq(&first, &same_offer));
+		assert!(!Arc::ptr_eq(&first, &other_offer));
+
+		drop(first);
+		drop(same_offer);
+		drop(other_offer);
+		state.prune();
+		assert!(state.is_empty());
 	}
 }

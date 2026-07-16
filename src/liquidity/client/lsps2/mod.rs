@@ -12,14 +12,19 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
+use lightning::blinded_path::message::OffersContext;
 use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
 use lightning::log_warn;
+use lightning::offers::invoice_request::InvoiceRequest;
+use lightning::offers::offer::OfferId;
+use lightning::onion_message::messenger::Responder;
 use lightning::routing::router::{RouteHint, RouteHintHop};
 use lightning::util::ser::Writeable;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
 use lightning_liquidity::lsps0::ser::LSPSRequestId;
 use lightning_liquidity::lsps2::event::LSPS2ClientEvent;
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
+use lightning_liquidity::lsps2::router::PaymentParameters;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::PaymentHash;
 use tokio::sync::oneshot;
@@ -37,8 +42,9 @@ use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
 use self::state::{
-	now_secs, LSPS2LeaseState, PaymentLease, PaymentLeaseId, PaymentLeaseStore, PendingOffer,
-	PendingOfferId, PendingOfferState, PendingOfferStore,
+	now_secs, LSPS2LeaseState, PaymentLease, PaymentLeaseId, PaymentLeaseStore,
+	PendingInvoiceRequestState, PendingOffer, PendingOfferAmount, PendingOfferId,
+	PendingOfferState, PendingOfferStore,
 };
 
 async fn consume_after_persisted_removal<T, E, RF, CF, Fut>(
@@ -55,6 +61,37 @@ where
 	Ok(value)
 }
 
+const DEFAULT_BOLT12_INVOICE_EXPIRY_SECS: u32 = 2 * 60 * 60;
+
+#[derive(Debug, PartialEq, Eq)]
+enum JitInvoiceRequest {
+	Fixed { amount_msat: u64, max_total_fee_msat: Option<u64> },
+	Variable { amount_msat: u64, max_proportional_fee_ppm_msat: Option<u64> },
+}
+
+impl JitInvoiceRequest {
+	fn allow_mpp(&self) -> bool {
+		matches!(self, Self::Fixed { .. })
+	}
+}
+
+fn jit_invoice_request(
+	pending_offer: &PendingOffer, invoice_request: &InvoiceRequest,
+) -> Result<JitInvoiceRequest, Error> {
+	let amount_msat = invoice_request.amount_msats().ok_or(Error::InvalidAmount)?;
+	match pending_offer.amount {
+		PendingOfferAmount::Fixed { amount_msat: offer_amount_msat, max_total_fee_msat } => {
+			if amount_msat < offer_amount_msat {
+				return Err(Error::InvalidAmount);
+			}
+			Ok(JitInvoiceRequest::Fixed { amount_msat, max_total_fee_msat })
+		},
+		PendingOfferAmount::Variable { max_proportional_fee_ppm_msat } => {
+			Ok(JitInvoiceRequest::Variable { amount_msat, max_proportional_fee_ppm_msat })
+		},
+	}
+}
+
 pub(crate) struct LSPS2Client<L: Deref>
 where
 	L::Target: LdkLogger,
@@ -68,6 +105,7 @@ where
 	pub(crate) lease_state: Mutex<LSPS2LeaseState>,
 	pub(crate) pending_offer_store: Arc<PendingOfferStore<L>>,
 	pub(crate) pending_offer_state: Mutex<PendingOfferState>,
+	pub(crate) pending_invoice_request_state: Mutex<PendingInvoiceRequestState>,
 	pub(crate) channel_manager: Arc<ChannelManager>,
 	pub(crate) keys_manager: Arc<KeysManager>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
@@ -122,6 +160,133 @@ where
 			self.pending_offer_store.remove(&offer_id).await?;
 			Ok(None)
 		}
+	}
+
+	pub(crate) async fn respond_to_invoice_request(
+		self: Arc<Self>, offer_id: OfferId, invoice_request: InvoiceRequest,
+		context: Option<OffersContext>, responder: Responder,
+		connection_manager: Arc<ConnectionManager<L>>,
+	) -> Result<(), Error> {
+		let pending_offer_id = offer_id.into();
+		let is_jit_offer =
+			self.pending_offer_state.lock().expect("lock").contains(&pending_offer_id);
+		if !is_jit_offer {
+			let payment_metadata = match context.as_ref() {
+				Some(OffersContext::InvoiceRequest { payment_metadata, .. }) => {
+					payment_metadata.clone()
+				},
+				_ => None,
+			};
+			return self
+				.channel_manager
+				.respond_to_invoice_request(
+					invoice_request,
+					context,
+					responder,
+					payment_metadata,
+					DEFAULT_BOLT12_INVOICE_EXPIRY_SECS,
+					true,
+				)
+				.map_err(|error| {
+					log_error!(
+						self.logger,
+						"Failed responding to BOLT12 invoice request: {}",
+						error
+					);
+					Error::InvoiceCreationFailed
+				});
+		}
+
+		let request_lock =
+			self.pending_invoice_request_state.lock().expect("lock").request_lock(pending_offer_id);
+		let result = {
+			let _guard = request_lock.lock().await;
+			self.respond_to_jit_invoice_request(
+				pending_offer_id,
+				invoice_request,
+				context,
+				responder,
+				&connection_manager,
+			)
+			.await
+		};
+		drop(request_lock);
+		self.pending_invoice_request_state.lock().expect("lock").prune();
+		result
+	}
+
+	async fn respond_to_jit_invoice_request(
+		self: &Arc<Self>, pending_offer_id: PendingOfferId, invoice_request: InvoiceRequest,
+		context: Option<OffersContext>, responder: Responder,
+		connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(), Error> {
+		let pending_offer =
+			self.pending_offer(pending_offer_id).await?.ok_or(Error::InvalidOffer)?;
+		let request = jit_invoice_request(&pending_offer, &invoice_request)?;
+		let allow_mpp = request.allow_mpp();
+		let (lease, fee_parameters) = match request {
+			JitInvoiceRequest::Fixed { amount_msat, max_total_fee_msat } => {
+				let (lease, total_fee_msat, _, _) = self
+					.acquire_fixed_lease(amount_msat, max_total_fee_msat, connection_manager)
+					.await?;
+				(
+					lease,
+					LSPS2Parameters {
+						max_total_opening_fee_msat: Some(total_fee_msat),
+						max_proportional_opening_fee_ppm_msat: None,
+					},
+				)
+			},
+			JitInvoiceRequest::Variable { amount_msat: _, max_proportional_fee_ppm_msat } => {
+				let (lease, proportional_fee, _, _) = self
+					.acquire_variable_lease(max_proportional_fee_ppm_msat, connection_manager)
+					.await?;
+				(
+					lease,
+					LSPS2Parameters {
+						max_total_opening_fee_msat: None,
+						max_proportional_opening_fee_ppm_msat: Some(proportional_fee),
+					},
+				)
+			},
+		};
+
+		let remaining_validity_secs = lease
+			.valid_until
+			.checked_sub(now_secs())
+			.filter(|remaining| *remaining > 0)
+			.ok_or(Error::LiquidityRequestFailed)?;
+		let relative_expiry_secs = DEFAULT_BOLT12_INVOICE_EXPIRY_SECS
+			.min(remaining_validity_secs.try_into().unwrap_or(u32::MAX));
+		let lease_parameters = PaymentParameters {
+			lsp_node_id: lease.id.lsp_node_id,
+			intercept_scid: lease.id.intercept_scid,
+			cltv_expiry_delta: lease
+				.cltv_expiry_delta
+				.try_into()
+				.map_err(|_| Error::LiquidityRequestFailed)?,
+			payment_size_msat: lease.payment_size_msat,
+			valid_until: lease.valid_until,
+		};
+		let payment_metadata = PaymentMetadata {
+			lsps2_parameters: Some(fee_parameters),
+			lsps2_lease_parameters: Some(lease_parameters),
+		}
+		.encode_as_bolt12_payment_metadata();
+
+		self.channel_manager
+			.respond_to_invoice_request(
+				invoice_request,
+				context,
+				responder,
+				Some(payment_metadata),
+				relative_expiry_secs,
+				allow_mpp,
+			)
+			.map_err(|error| {
+				log_error!(self.logger, "Failed responding to LSPS2 invoice request: {}", error);
+				Error::InvoiceCreationFailed
+			})
 	}
 
 	pub(crate) async fn lsps2_receive_to_jit_channel(
@@ -745,7 +910,87 @@ impl From<&PaymentLease> for LSPS2BuyResponse {
 }
 #[cfg(test)]
 mod tests {
+	use std::num::NonZeroU64;
+
+	use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+	use lightning::ln::channelmanager::PaymentId;
+	use lightning::ln::inbound_payment::ExpandedKey;
+	use lightning::offers::nonce::Nonce;
+	use lightning::offers::offer::{OfferBuilder, Quantity};
+	use lightning::sign::EntropySource;
+
 	use super::*;
+	use crate::liquidity::client::lsps2::state::PendingOfferAmount;
+
+	struct FixedEntropy;
+
+	impl EntropySource for FixedEntropy {
+		fn get_secure_random_bytes(&self) -> [u8; 32] {
+			[42; 32]
+		}
+	}
+
+	fn recipient_pubkey() -> PublicKey {
+		PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[43; 32]).unwrap())
+	}
+
+	#[test]
+	fn fixed_offer_request_uses_quantity_resolved_amount() {
+		let expanded_key = ExpandedKey::new([44; 32]);
+		let nonce = Nonce::from_entropy_source(&FixedEntropy);
+		let secp_ctx = Secp256k1::new();
+		let offer = OfferBuilder::new(recipient_pubkey())
+			.amount_msats(1_000)
+			.supported_quantity(Quantity::Bounded(NonZeroU64::new(10).unwrap()))
+			.build()
+			.unwrap();
+		let invoice_request = offer
+			.request_invoice(&expanded_key, nonce, &secp_ctx, PaymentId([45; 32]))
+			.unwrap()
+			.quantity(3)
+			.unwrap()
+			.build_and_sign()
+			.unwrap();
+		let pending_offer = PendingOffer::new(
+			offer.id(),
+			PendingOfferAmount::Fixed { amount_msat: 1_000, max_total_fee_msat: Some(250) },
+			None,
+		);
+
+		assert_eq!(
+			jit_invoice_request(&pending_offer, &invoice_request).unwrap(),
+			JitInvoiceRequest::Fixed { amount_msat: 3_000, max_total_fee_msat: Some(250) }
+		);
+	}
+
+	#[test]
+	fn variable_offer_request_disables_mpp() {
+		let expanded_key = ExpandedKey::new([46; 32]);
+		let nonce = Nonce::from_entropy_source(&FixedEntropy);
+		let secp_ctx = Secp256k1::new();
+		let offer = OfferBuilder::new(recipient_pubkey()).build().unwrap();
+		let invoice_request = offer
+			.request_invoice(&expanded_key, nonce, &secp_ctx, PaymentId([47; 32]))
+			.unwrap()
+			.amount_msats(2_500)
+			.unwrap()
+			.build_and_sign()
+			.unwrap();
+		let pending_offer = PendingOffer::new(
+			offer.id(),
+			PendingOfferAmount::Variable { max_proportional_fee_ppm_msat: Some(10_000) },
+			None,
+		);
+
+		assert_eq!(
+			jit_invoice_request(&pending_offer, &invoice_request).unwrap(),
+			JitInvoiceRequest::Variable {
+				amount_msat: 2_500,
+				max_proportional_fee_ppm_msat: Some(10_000),
+			}
+		);
+		assert!(!jit_invoice_request(&pending_offer, &invoice_request).unwrap().allow_mpp());
+	}
 
 	#[tokio::test]
 	async fn failed_persisted_removal_does_not_consume() {

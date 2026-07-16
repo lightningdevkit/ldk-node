@@ -45,7 +45,7 @@ use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::liquidity::LiquiditySource;
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
@@ -533,7 +533,7 @@ where
 	connection_manager: Arc<ConnectionManager<L>>,
 	output_sweeper: Arc<Sweeper>,
 	network_graph: Arc<Graph>,
-	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
+	liquidity_source: Arc<LiquiditySource<L>>,
 	payment_store: Arc<PaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
@@ -555,7 +555,7 @@ where
 		bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
-		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
+		liquidity_source: Arc<LiquiditySource<L>>, payment_store: Arc<PaymentStore>,
 		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
@@ -1773,8 +1773,26 @@ where
 			LdkEvent::InvoiceReceived { .. } => {
 				debug_assert!(false, "We currently don't handle BOLT12 invoices manually, so this event should never be emitted.");
 			},
-			LdkEvent::InvoiceRequestReceived { .. } => {
-				debug_assert!(false, "We currently don't handle BOLT12 invoice requests manually, so this event should never be emitted.");
+			LdkEvent::InvoiceRequestReceived { offer_id, invoice_request, context, responder } => {
+				let lsps2_client = self.liquidity_source.lsps2_client();
+				let connection_manager = Arc::clone(&self.connection_manager);
+				let logger = self.logger.clone();
+				// LSPS2 negotiation completes through liquidity events handled by the background
+				// processor, so awaiting it from this event handler would deadlock the response.
+				self.runtime.spawn_cancellable_background_task(async move {
+					if let Err(error) = lsps2_client
+						.respond_to_invoice_request(
+							offer_id,
+							invoice_request,
+							context,
+							responder,
+							connection_manager,
+						)
+						.await
+					{
+						log_error!(logger, "Failed handling BOLT12 invoice request: {}", error);
+					}
+				});
 			},
 			LdkEvent::ConnectionNeeded { node_id, addresses } => {
 				let spawn_logger = self.logger.clone();

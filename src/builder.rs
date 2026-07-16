@@ -1915,6 +1915,7 @@ fn build_with_store_internal(
 	));
 
 	let mut user_config = default_user_config(&config);
+	user_config.manually_handle_bolt12_invoice_requests = true;
 
 	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
 		// If we act as an LSPS2 service, we need to be able to intercept HTLCs and forward the
