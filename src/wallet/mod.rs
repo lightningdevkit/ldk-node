@@ -216,14 +216,12 @@ impl Wallet {
 		Ok(())
 	}
 
-	pub(crate) fn list_revealed_scripts(&self) -> Vec<ScriptBuf> {
-		self.inner
-			.lock()
-			.expect("lock")
-			.spk_index()
-			.revealed_spks(..)
-			.map(|((_keychain, _index), spk)| spk)
-			.collect()
+	/// Returns every script pubkey the wallet is watching for on-chain activity: all revealed
+	/// SPKs plus the lookahead window BDK derives beyond the last revealed index on each keychain.
+	/// A block may pay an address we have not explicitly revealed yet (e.g. on recovery, where a fresh
+	/// wallet has revealed nothing) but which is still within the gap limit.
+	pub(crate) fn list_watched_scripts(&self) -> Vec<ScriptBuf> {
+		self.inner.lock().expect("lock").spk_index().inner().all_spks().values().cloned().collect()
 	}
 
 	async fn update_payment_store(&self, mut events: Vec<WalletEvent>) -> Result<(), Error> {
