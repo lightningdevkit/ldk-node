@@ -147,4 +147,31 @@ mod tests {
 		assert!(state.take_valid(&id).is_some());
 		assert!(state.take_valid(&id).is_none());
 	}
+
+	#[test]
+	fn prunes_leases_close_to_expiry() {
+		let id = PaymentLeaseId {
+			lsp_node_id: PublicKey::from_slice(&[2; 33]).unwrap(),
+			intercept_scid: 43,
+		};
+		let mut state = LSPS2LeaseState::default();
+		state.insert(PaymentLease {
+			id,
+			params: LSPS2OpeningFeeParams {
+				min_fee_msat: 1,
+				proportional: 1,
+				valid_until: "2030-01-01T00:00:00Z".parse().unwrap(),
+				min_lifetime: 1,
+				max_client_to_self_delay: 1,
+				min_payment_size_msat: 1,
+				max_payment_size_msat: 2,
+				promise: String::new(),
+			},
+			cltv_expiry_delta: 18,
+			payment_size_msat: Some(1_000),
+			valid_until: now_secs() + MIN_LEASE_REMAINING_SECS - 1,
+		});
+		state.prune();
+		assert!(state.take_valid(&id).is_none());
+	}
 }
