@@ -551,3 +551,4 @@ pub(crate) struct LSPS2BuyResponse {
 	intercept_scid: u64,
 	cltv_expiry_delta: u32,
 }
+pub(crate) mod state;
