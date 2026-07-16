@@ -27,6 +27,8 @@ use lightning_types::string::UntrustedString;
 use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
+use crate::liquidity::client::lsps2::state::{PendingOffer, PendingOfferAmount};
+use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::runtime::Runtime;
@@ -62,6 +64,7 @@ type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
 pub struct Bolt12Payment {
 	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
+	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore>,
 	config: Arc<Config>,
@@ -73,13 +76,14 @@ pub struct Bolt12Payment {
 impl Bolt12Payment {
 	pub(crate) fn new(
 		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
-		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore>, config: Arc<Config>,
-		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
-		async_payments_role: Option<AsyncPaymentsRole>,
+		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, keys_manager: Arc<KeysManager>,
+		payment_store: Arc<PaymentStore>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
+		logger: Arc<Logger>, async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
 		Self {
 			runtime,
 			channel_manager,
+			liquidity_source,
 			keys_manager,
 			payment_store,
 			config,
@@ -237,6 +241,35 @@ impl Bolt12Payment {
 		Ok(finalized_offer)
 	}
 
+	fn receive_variable_amount_inner(
+		&self, description: &str, expiry_secs: Option<u32>,
+	) -> Result<LdkOffer, Error> {
+		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
+			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
+			Error::OfferCreationFailed
+		})?;
+
+		if let Some(expiry_secs) = expiry_secs {
+			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
+				.duration_since(UNIX_EPOCH)
+				.expect("system time must be after Unix epoch");
+			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
+		}
+
+		offer_builder.description(description.to_string()).build().map_err(|e| {
+			log_error!(self.logger, "Failed to create offer: {:?}", e);
+			Error::OfferCreationFailed
+		})
+	}
+
+	fn register_jit_offer(
+		&self, offer: &LdkOffer, amount: PendingOfferAmount,
+	) -> Result<(), Error> {
+		let pending_offer = pending_jit_offer(offer, amount);
+		self.runtime
+			.block_on(self.liquidity_source.lsps2_client().register_pending_offer(pending_offer))
+	}
+
 	fn blinded_paths_for_async_recipient_internal(
 		&self, recipient_id: Vec<u8>,
 	) -> Result<Vec<BlindedMessagePath>, Error> {
@@ -250,6 +283,55 @@ impl Bolt12Payment {
 		self.channel_manager
 			.blinded_paths_for_async_recipient(recipient_id, None)
 			.or(Err(Error::InvalidBlindedPaths))
+	}
+}
+
+fn pending_jit_offer(offer: &LdkOffer, amount: PendingOfferAmount) -> PendingOffer {
+	PendingOffer::new(offer.id(), amount, offer.absolute_expiry().map(|expiry| expiry.as_secs()))
+}
+
+#[cfg(test)]
+mod tests {
+	use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+	use lightning::offers::offer::{OfferBuilder, OfferId};
+
+	use super::*;
+	use crate::liquidity::client::lsps2::state::{PendingOfferAmount, PendingOfferId};
+
+	#[test]
+	fn jit_offer_descriptor_preserves_offer_lifetime() {
+		let node_id = PublicKey::from_secret_key(
+			&Secp256k1::new(),
+			&SecretKey::from_slice(&[42; 32]).unwrap(),
+		);
+		let offer = OfferBuilder::new(node_id).description("test".to_string()).build().unwrap();
+		let descriptor = pending_jit_offer(
+			&offer,
+			PendingOfferAmount::Fixed { amount_msat: 1_000, max_total_fee_msat: Some(100) },
+		);
+
+		assert_eq!(OfferId::from(descriptor.id), offer.id());
+		assert_eq!(descriptor.absolute_expiry, None);
+	}
+
+	#[test]
+	fn jit_offer_descriptor_preserves_offer_expiry() {
+		let node_id = PublicKey::from_secret_key(
+			&Secp256k1::new(),
+			&SecretKey::from_slice(&[43; 32]).unwrap(),
+		);
+		let offer = OfferBuilder::new(node_id)
+			.absolute_expiry(Duration::from_secs(42))
+			.description("test".to_string())
+			.build()
+			.unwrap();
+		let descriptor = pending_jit_offer(
+			&offer,
+			PendingOfferAmount::Variable { max_proportional_fee_ppm_msat: Some(100) },
+		);
+
+		assert_eq!(PendingOfferId::from(offer.id()), descriptor.id);
+		assert_eq!(descriptor.absolute_expiry, Some(42));
 	}
 }
 
@@ -403,23 +485,50 @@ impl Bolt12Payment {
 	pub fn receive_variable_amount(
 		&self, description: &str, expiry_secs: Option<u32>,
 	) -> Result<Offer, Error> {
-		let mut offer_builder = self.channel_manager.create_offer_builder().map_err(|e| {
-			log_error!(self.logger, "Failed to create offer builder: {:?}", e);
-			Error::OfferCreationFailed
-		})?;
+		let offer = self.receive_variable_amount_inner(description, expiry_secs)?;
+		Ok(maybe_wrap(offer))
+	}
 
-		if let Some(expiry_secs) = expiry_secs {
-			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
-				.duration_since(UNIX_EPOCH)
-				.expect("system time must be after Unix epoch");
-			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
-		}
+	/// Returns a payable offer that can be used to request a payment of the amount given and
+	/// receive it via a just-in-time (JIT) channel.
+	///
+	/// Creating the offer does not contact an LSP. LSPS2 payment parameters are selected only when
+	/// an invoice request for the offer is received, allowing the offer to outlive those parameters.
+	/// If sufficient inbound liquidity is available over pre-existing channels, the payment may be
+	/// received over those channels without opening a new JIT channel.
+	pub fn receive_via_jit_channel(
+		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>,
+		quantity: Option<u64>, max_total_lsp_fee_limit_msat: Option<u64>,
+	) -> Result<Offer, Error> {
+		let offer = self.receive_inner(amount_msat, description, expiry_secs, quantity)?;
+		self.register_jit_offer(
+			&offer,
+			PendingOfferAmount::Fixed {
+				amount_msat,
+				max_total_fee_msat: max_total_lsp_fee_limit_msat,
+			},
+		)?;
+		Ok(maybe_wrap(offer))
+	}
 
-		let offer = offer_builder.description(description.to_string()).build().map_err(|e| {
-			log_error!(self.logger, "Failed to create offer: {:?}", e);
-			Error::OfferCreationFailed
-		})?;
-
+	/// Returns a payable offer that can be used to request a variable amount payment and receive it
+	/// via a just-in-time (JIT) channel.
+	///
+	/// Creating the offer does not contact an LSP. LSPS2 payment parameters are selected only when
+	/// an invoice request for the offer is received, allowing the offer to outlive those parameters.
+	/// If sufficient inbound liquidity is available over pre-existing channels, the payment may be
+	/// received over those channels without opening a new JIT channel.
+	pub fn receive_variable_amount_via_jit_channel(
+		&self, description: &str, expiry_secs: Option<u32>,
+		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
+	) -> Result<Offer, Error> {
+		let offer = self.receive_variable_amount_inner(description, expiry_secs)?;
+		self.register_jit_offer(
+			&offer,
+			PendingOfferAmount::Variable {
+				max_proportional_fee_ppm_msat: max_proportional_lsp_fee_limit_ppm_msat,
+			},
+		)?;
 		Ok(maybe_wrap(offer))
 	}
 
