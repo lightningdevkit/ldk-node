@@ -30,6 +30,14 @@ impl PaymentMetadata {
 		metadata.insert(LDK_NODE_BOLT12_PAYMENT_METADATA_KEY, self.encode());
 		metadata
 	}
+
+	pub(crate) fn decode_from_bolt12_payment_metadata(
+		payment_metadata: &BTreeMap<u64, Vec<u8>>,
+	) -> Option<Self> {
+		payment_metadata
+			.get(&LDK_NODE_BOLT12_PAYMENT_METADATA_KEY)
+			.and_then(|encoded| Self::read(&mut &encoded[..]).ok())
+	}
 }
 
 impl_writeable_tlv_based!(PaymentMetadata, {
@@ -44,9 +52,7 @@ impl PaymentMetadataDecoder for LSPS2PaymentMetadataDecoder {
 	fn decode_payment_parameters(
 		&self, payment_metadata: &BTreeMap<u64, Vec<u8>>,
 	) -> Vec<PaymentParameters> {
-		payment_metadata
-			.get(&LDK_NODE_BOLT12_PAYMENT_METADATA_KEY)
-			.and_then(|encoded| PaymentMetadata::read(&mut &encoded[..]).ok())
+		PaymentMetadata::decode_from_bolt12_payment_metadata(payment_metadata)
 			.and_then(|metadata| metadata.lsps2_lease_parameters)
 			.into_iter()
 			.collect()
@@ -111,5 +117,20 @@ mod tests {
 			LSPS2PaymentMetadataDecoder.decode_payment_parameters(&metadata),
 			vec![lease_parameters]
 		);
+	}
+
+	#[test]
+	fn bolt12_metadata_roundtrips() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: Some(42_000),
+				max_proportional_opening_fee_ppm_msat: None,
+			}),
+			lsps2_lease_parameters: None,
+		};
+
+		let encoded = metadata.encode_as_bolt12_payment_metadata();
+
+		assert_eq!(PaymentMetadata::decode_from_bolt12_payment_metadata(&encoded), Some(metadata));
 	}
 }
