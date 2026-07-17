@@ -20,6 +20,8 @@ use std::time::Duration;
 use bitcoin::Amount;
 use electrsd::corepc_node::Client as BitcoindClient;
 use electrsd::electrum_client::ElectrumApi;
+#[cfg(zero_fee_commitment_tests)]
+use ldk_node::ReserveType;
 use ldk_node::{Event, Node};
 
 use super::external_node::ExternalNode;
@@ -87,15 +89,15 @@ pub(crate) async fn wait_for_htlcs_settled(
 	panic!("HTLCs did not settle on {} channel {} within 15s", peer.name(), ext_channel_id);
 }
 
-/// Build a fresh LDK node configured for interop tests. Uses electrum at the
+/// Build a fresh LDK node configured for interop tests. Uses esplora at the
 /// docker-compose default port and bumps sync timeouts for combo stress.
 pub(crate) fn setup_ldk_node() -> Node {
 	let config = crate::common::random_config();
 	let mut builder = ldk_node::Builder::from_config(config.node_config);
-	let mut sync_config = ldk_node::config::ElectrumSyncConfig::default();
+	let mut sync_config = ldk_node::config::EsploraSyncConfig::default();
 	sync_config.timeouts_config.onchain_wallet_sync_timeout_secs = 180;
 	sync_config.timeouts_config.lightning_wallet_sync_timeout_secs = 120;
-	builder.set_chain_source_electrum("tcp://127.0.0.1:50001".to_string(), Some(sync_config));
+	builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), Some(sync_config));
 	let node = builder.build(config.node_entropy).unwrap();
 	node.start().unwrap();
 	node
@@ -163,6 +165,20 @@ pub(crate) async fn basic_channel_cycle_scenario<E: ElectrumApi>(
 		Some(500_000_000),
 	)
 	.await;
+
+	#[cfg(zero_fee_commitment_tests)]
+	{
+		let ext_node_id = peer.get_node_id().await.unwrap();
+		let channel = node
+			.list_channels()
+			.into_iter()
+			.find(|channel| channel.user_channel_id == user_ch)
+			.expect("opened channel should be listed");
+		assert_eq!(channel.counterparty.node_id, ext_node_id);
+		assert!(channel.counterparty.features.supports_anchor_zero_fee_commitments());
+		assert_eq!(channel.feerate_sat_per_1000_weight, 0);
+		assert_eq!(channel.reserve_type, Some(ReserveType::Adaptive));
+	}
 
 	payment::send_bolt11_to_peer(node, peer, 10_000_000, "basic-send").await;
 	payment::receive_bolt11_payment(node, peer, 10_000_000).await;
