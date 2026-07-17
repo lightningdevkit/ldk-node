@@ -31,19 +31,20 @@ use crate::{Error, PersistedNodeMetrics};
 
 /// We use this parent-child TRUC package to make sure the configured chain source supports
 /// broadcasting packages via the `submitpackage` Bitcoin Core RPC.
-const PARENT_TXID: &str = "9a015f93fac6cb203c2b994e18b85176eb0354a22a468255516f3c6002d3f696";
+const DUMMY_PACKAGE_EXPECTED_ERROR: &str = "bad-txns-inputs-missingorspent";
+const PARENT_TXID: &str = "11105ba7c94f2fdc1b870a9fbdb136ca006bcf598c372548a1a3051001f3238f";
 const PARENT_HEX: &str =
-	"0300000000010160d0cdb72f2ddf719f40ca32f44614c67577fc75996140544003915683c34a310000000000fd\
+	"0300000000010160d0cdb72f2ddf719f40ca32f44614c67577fc75996140544003915683c34a310000000000ff\
 	ffffff0201000000000000000451024e73876100000000000022512042731375894dad3b25092cd0f713dc5bee4\
 	a71e30a95e1db3d880906d7eba1fa01409327942924218e4eb1635a7cce6706fcb37b8bbb61a2f0b86357356681\
-	4e09419a3501e02252043bb237d479304632282fe9159db9e9a6ae6ec5bedea9f0f115a97b0e00";
-const CHILD_TXID: &str = "d011b3ff78cdfb8b93822639ea87771847936b04bb83afc8763a7c02a386ae26";
+	4e09419a3501e02252043bb237d479304632282fe9159db9e9a6ae6ec5bedea9f0f11500000000";
+const CHILD_TXID: &str = "6a051464dbf0534a060a61355a6a971559de004795328f8dfd19f3197f9bb4b0";
 const CHILD_HEX: &str =
-	"0300000000010296f6d302603c6f515582462aa25403eb7651b8184e992b3c20cbc6fa935f019a0000000000ff\
-	ffffff96f6d302603c6f515582462aa25403eb7651b8184e992b3c20cbc6fa935f019a0100000000fdffffff015\
+	"030000000001028f23f3011005a3a14825378c59cf6b00ca36b1bd9f0a871bdc2f4fc9a75b10110000000000ff\
+	ffffff8f23f3011005a3a14825378c59cf6b00ca36b1bd9f0a871bdc2f4fc9a75b10110100000000ffffffff015\
 	660000000000000225120ac18cd599a1be003595854e2eeec18dbe1c92d04b0ba05812d04445e3fcf16bc000140\
 	1462a35808d77a164f0a23a84c4721d1545befd09ad19945bb8aa0ea5576953a9699038725f944b1bc429942ef4\
-	7e6504a554babf022cb15db53be2d8c1dbfe5a97b0e00";
+	7e6504a554babf022cb15db53be2d8c1dbfe500000000";
 
 fn dummy_package() -> [bitcoin::Transaction; 2] {
 	use bitcoin::consensus::Decodable;
@@ -55,9 +56,25 @@ fn dummy_package() -> [bitcoin::Transaction; 2] {
 		Transaction::consensus_decode(&mut &parent_tx_bytes[..]).expect("read from a constant");
 	let child =
 		Transaction::consensus_decode(&mut &child_tx_bytes[..]).expect("read from a constant");
-	assert_eq!(parent.compute_txid().to_string(), PARENT_TXID);
-	assert_eq!(child.compute_txid().to_string(), CHILD_TXID);
+	let [parent_txid, child_txid] = dummy_package_txids();
+	assert_eq!(parent.compute_txid(), parent_txid);
+	assert_eq!(child.compute_txid(), child_txid);
+	assert_eq!(parent.lock_time, bitcoin::absolute::LockTime::ZERO);
+	assert_eq!(child.lock_time, bitcoin::absolute::LockTime::ZERO);
+	assert!(parent
+		.input
+		.iter()
+		.chain(child.input.iter())
+		.all(|input| input.sequence == bitcoin::Sequence::MAX));
+	assert!(child.input.iter().all(|input| input.previous_output.txid == parent.compute_txid()));
 	[parent, child]
+}
+
+fn dummy_package_txids() -> [Txid; 2] {
+	[
+		PARENT_TXID.parse().expect("read from a constant"),
+		CHILD_TXID.parse().expect("read from a constant"),
+	]
 }
 
 pub(crate) enum WalletSyncStatus {

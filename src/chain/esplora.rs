@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bdk_esplora::EsploraAsyncExt;
 use bitcoin::transaction::Version;
 use bitcoin::{FeeRate, Network, Script, Txid};
-use esplora_client::AsyncClient as EsploraAsyncClient;
+use esplora_client::{AsyncClient as EsploraAsyncClient, SubmitPackageResult};
 use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::EsploraSyncClient;
@@ -86,16 +86,13 @@ impl EsploraChainSource {
 	}
 
 	pub(super) async fn validate_zero_fee_commitments_support(&self) -> Result<(), Error> {
-		// This could still accept an Esplora server running against Bitcoin Core v26
-		// through v28, which does not relay ephemeral dust.
-		self.esplora_client.submit_package(&super::dummy_package(), None, None).await.map_err(
-			|e| {
-				if let esplora_client::Error::HttpResponse { status: 404, message } = e {
-					log_error!(
-						self.logger,
-						"Esplora server does not support submitpackage: {}",
-						message
-					);
+		let result = self
+			.esplora_client
+			.submit_package(&super::dummy_package(), None, None)
+			.await
+			.map_err(|e| {
+				if esplora_submitpackage_error_implies_unsupported(&e) {
+					log_error!(self.logger, "Esplora server does not support submitpackage: {}", e);
 					Error::ChainSourceNotSupported
 				} else {
 					log_error!(
@@ -105,8 +102,11 @@ impl EsploraChainSource {
 					);
 					Error::ConnectionFailed
 				}
-			},
-		)?;
+			})?;
+		if !dummy_submit_package_result_matches_v29_or_later(&result) {
+			log_error!(self.logger, "Esplora server does not support submitpackage: {:?}", result);
+			return Err(Error::ChainSourceNotSupported);
+		}
 		Ok(())
 	}
 
@@ -519,6 +519,23 @@ impl EsploraChainSource {
 			},
 		}
 	}
+}
+
+fn esplora_submitpackage_error_implies_unsupported(e: &esplora_client::Error) -> bool {
+	matches!(e, esplora_client::Error::HttpResponse { status: 400 | 404, .. })
+}
+
+fn dummy_submit_package_result_matches_v29_or_later(result: &SubmitPackageResult) -> bool {
+	if result.package_msg != "transaction failed" {
+		return false;
+	}
+
+	super::dummy_package_txids().iter().all(|expected_txid| {
+		result.tx_results.values().any(|tx_result| {
+			&tx_result.txid == expected_txid
+				&& tx_result.error.as_deref() == Some(super::DUMMY_PACKAGE_EXPECTED_ERROR)
+		})
+	})
 }
 
 impl Filter for EsploraChainSource {
