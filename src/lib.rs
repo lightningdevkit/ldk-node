@@ -292,6 +292,16 @@ impl Node {
 			return Err(Error::AlreadyRunning);
 		}
 
+		match self.start_inner(&mut is_running_lock) {
+			Ok(()) => Ok(()),
+			Err(e) => {
+				self.chain_source.stop();
+				Err(e)
+			},
+		}
+	}
+
+	fn start_inner(&self, is_running_lock: &mut bool) -> Result<(), Error> {
 		log_info!(
 			self.logger,
 			"Starting up LDK Node with node ID {} on network: {}",
@@ -336,18 +346,14 @@ impl Node {
 		//
 		// TODO: drop 0FC chain source validation when support is ubiquitous
 		let chain_source = Arc::clone(&self.chain_source);
-		let startup_chain_check_res = self.runtime.block_on(async move {
+		self.runtime.block_on(async move {
 			tokio::try_join!(
 				chain_source.update_fee_rate_estimates(),
 				chain_source.validate_zero_fee_commitments_support_if_required(
 					zero_fee_commitments_support_required
 				)
 			)
-		});
-		if let Err(e) = startup_chain_check_res {
-			self.chain_source.stop();
-			return Err(e);
-		}
+		})?;
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
