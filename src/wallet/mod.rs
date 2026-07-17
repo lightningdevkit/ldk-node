@@ -63,6 +63,7 @@ use crate::payment::{
 };
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, PaymentStore, PendingPaymentStore};
+use crate::util::random_range;
 use crate::{ChainSource, Error};
 
 pub(crate) enum OnchainSendAmount {
@@ -326,7 +327,7 @@ impl Wallet {
 					}
 
 					if !unconfirmed_outbound_txids.is_empty() {
-						let txs_to_broadcast: Vec<Transaction> = {
+						let mut txs_to_broadcast: Vec<Transaction> = {
 							let locked_wallet = self.inner.lock().expect("lock");
 							unconfirmed_outbound_txids
 								.iter()
@@ -337,6 +338,10 @@ impl Wallet {
 								})
 								.collect()
 						};
+						for i in (1..txs_to_broadcast.len()).rev() {
+							let j = random_range(0, i as u64) as usize;
+							txs_to_broadcast.swap(i, j);
+						}
 
 						if !txs_to_broadcast.is_empty() {
 							let tx_count = txs_to_broadcast.len();
