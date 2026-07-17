@@ -296,8 +296,9 @@ async fn locked_msat_accounts_for_routing_fees() {
 /// HTLC pending across the restart we observe `locked_msat > 0` and then *immediately*
 /// call `node_a.disconnect(node_b)`, which closes A's socket to B in-process — much
 /// faster than `node_b.stop()` — so any failure message from B is dropped before A
-/// processes it. If the race is lost on a given probe (locked_msat drops back to 0
-/// after the disconnect), we reconnect and let the next probe tick try again.
+/// processes it. Before rechecking, we allow monitor persistence and queued failure
+/// handling to settle. If the race is lost on a given probe (locked_msat drops back to
+/// 0 after the disconnect), we reconnect and let the next probe tick try again.
 /// The pending Probe entry persists in `node_a`'s channel manager and must be
 /// rebuilt by the prober's `locked_msat` on restart via `list_recent_payments()`.
 #[tokio::test(flavor = "multi_thread")]
@@ -363,11 +364,14 @@ async fn probing_budget_restored_after_node_restart() {
 	let isolated = tokio::time::timeout(Duration::from_secs(30), async {
 		loop {
 			if node_a.prober().unwrap().locked_msat() > 0 {
+				strategy.stop_probing();
 				node_a.disconnect(node_b_id).ok();
+				tokio::time::sleep(Duration::from_secs(1)).await;
 				if node_a.prober().unwrap().locked_msat() > 0 {
 					return true;
 				}
 				node_a.connect(node_b_id, node_b_addr.clone(), false).ok();
+				strategy.start_probing();
 			}
 			tokio::time::sleep(Duration::from_millis(1)).await;
 		}
