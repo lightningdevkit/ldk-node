@@ -1832,11 +1832,12 @@ where
 							"Onion message intercepted, but no onion message mailbox available"
 						);
 					}
+					self.liquidity_source
+						.lsps5_service()
+						.notify_onion_message_incoming(peer_node_id);
 				} else {
 					log_error!(self.logger, "Onion message intercepted for unknown SCID");
 				}
-
-				self.liquidity_source.lsps5_service().notify_onion_message_incoming(peer_node_id);
 			},
 			LdkEvent::OnionMessagePeerConnected { peer_node_id } => {
 				if let Some(om_mailbox) = self.om_mailbox.as_ref() {
