@@ -44,7 +44,10 @@ pub use lightning_liquidity::lsps0::ser::LSPSDateTime;
 pub use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
 };
-use lightning_types::features::{InitFeatures as LdkInitFeatures, NodeFeatures as LdkNodeFeatures};
+use lightning_types::features::{
+	ChannelTypeFeatures as LdkChannelTypeFeatures, InitFeatures as LdkInitFeatures,
+	NodeFeatures as LdkNodeFeatures,
+};
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
 use vss_client::headers::{
@@ -1819,6 +1822,102 @@ impl From<LdkNodeFeatures> for NodeFeatures {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
 #[uniffi::export(Debug, Eq)]
+pub struct ChannelTypeFeatures {
+	pub(crate) inner: LdkChannelTypeFeatures,
+}
+
+#[uniffi::export]
+impl ChannelTypeFeatures {
+	/// Constructs channel type features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkChannelTypeFeatures::from_be_bytes(bytes.to_vec()) }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation of these features.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.encode()
+	}
+
+	/// Whether this channel type advertises support for `option_static_remotekey`.
+	pub fn supports_static_remote_key(&self) -> bool {
+		self.inner.supports_static_remote_key()
+	}
+
+	/// Whether this channel type requires `option_static_remotekey`.
+	pub fn requires_static_remote_key(&self) -> bool {
+		self.inner.requires_static_remote_key()
+	}
+
+	/// Whether this channel type advertises support for `option_anchors_zero_fee_htlc_tx`.
+	pub fn supports_anchors_zero_fee_htlc_tx(&self) -> bool {
+		self.inner.supports_anchors_zero_fee_htlc_tx()
+	}
+
+	/// Whether this channel type requires `option_anchors_zero_fee_htlc_tx`.
+	pub fn requires_anchors_zero_fee_htlc_tx(&self) -> bool {
+		self.inner.requires_anchors_zero_fee_htlc_tx()
+	}
+
+	/// Whether this channel type advertises support for `option_anchors_nonzero_fee_htlc_tx`.
+	pub fn supports_anchors_nonzero_fee_htlc_tx(&self) -> bool {
+		self.inner.supports_anchors_nonzero_fee_htlc_tx()
+	}
+
+	/// Whether this channel type requires `option_anchors_nonzero_fee_htlc_tx`.
+	pub fn requires_anchors_nonzero_fee_htlc_tx(&self) -> bool {
+		self.inner.requires_anchors_nonzero_fee_htlc_tx()
+	}
+
+	/// Whether this channel type advertises support for `option_taproot`.
+	pub fn supports_taproot(&self) -> bool {
+		self.inner.supports_taproot()
+	}
+
+	/// Whether this channel type requires `option_taproot`.
+	pub fn requires_taproot(&self) -> bool {
+		self.inner.requires_taproot()
+	}
+
+	/// Whether this channel type advertises support for `option_scid_alias`.
+	pub fn supports_scid_privacy(&self) -> bool {
+		self.inner.supports_scid_privacy()
+	}
+
+	/// Whether this channel type requires `option_scid_alias`.
+	pub fn requires_scid_privacy(&self) -> bool {
+		self.inner.requires_scid_privacy()
+	}
+
+	/// Whether this channel type advertises support for `option_zeroconf`.
+	pub fn supports_zero_conf(&self) -> bool {
+		self.inner.supports_zero_conf()
+	}
+
+	/// Whether this channel type requires `option_zeroconf`.
+	pub fn requires_zero_conf(&self) -> bool {
+		self.inner.requires_zero_conf()
+	}
+
+	/// Whether this channel type advertises support for `option_zero_fee_commitments`.
+	pub fn supports_anchor_zero_fee_commitments(&self) -> bool {
+		self.inner.supports_anchor_zero_fee_commitments()
+	}
+
+	/// Whether this channel type requires `option_zero_fee_commitments`.
+	pub fn requires_anchor_zero_fee_commitments(&self) -> bool {
+		self.inner.requires_anchor_zero_fee_commitments()
+	}
+}
+
+impl From<LdkChannelTypeFeatures> for ChannelTypeFeatures {
+	fn from(features: LdkChannelTypeFeatures) -> Self {
+		Self { inner: features }
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
 pub struct InitFeatures {
 	pub(crate) inner: LdkInitFeatures,
 }
@@ -2189,6 +2288,27 @@ mod tests {
 		let wrapped_invoice = Bolt12Invoice { inner: ldk_invoice.clone() };
 
 		(ldk_invoice, wrapped_invoice)
+	}
+
+	#[test]
+	fn test_channel_type_feature_accessors() {
+		let mut optional = LdkChannelTypeFeatures::empty();
+		optional.set_scid_privacy_optional();
+		optional.set_zero_conf_optional();
+		let optional = ChannelTypeFeatures::from(optional);
+		assert!(optional.supports_scid_privacy());
+		assert!(!optional.requires_scid_privacy());
+		assert!(optional.supports_zero_conf());
+		assert!(!optional.requires_zero_conf());
+
+		let mut required = LdkChannelTypeFeatures::empty();
+		required.set_scid_privacy_required();
+		required.set_zero_conf_required();
+		let required = ChannelTypeFeatures::from(required);
+		assert!(required.supports_scid_privacy());
+		assert!(required.requires_scid_privacy());
+		assert!(required.supports_zero_conf());
+		assert!(required.requires_zero_conf());
 	}
 
 	#[test]

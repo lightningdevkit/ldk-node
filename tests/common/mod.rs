@@ -1578,12 +1578,15 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 
 	if disable_node_b_reserve {
-		let node_a_outbound_capacity_msat = node_a.list_channels()[0].outbound_capacity_msat;
-		let node_a_reserve_msat =
-			node_a.list_channels()[0].unspendable_punishment_reserve.unwrap() * 1000;
-		let zero_fee_commitments = node_a.list_channels()[0].feerate_sat_per_1000_weight == 0;
+		let node_a_channel = node_a.list_channels().into_iter().next().unwrap();
+		let node_a_outbound_capacity_msat = node_a_channel.outbound_capacity_msat;
+		let node_a_reserve_msat = node_a_channel.unspendable_punishment_reserve.unwrap() * 1000;
+		let zero_fee_commitments = node_a_channel
+			.channel_type
+			.as_ref()
+			.map_or(false, |c| c.requires_anchor_zero_fee_commitments());
 		let node_a_anchors_msat = if zero_fee_commitments { 0 } else { 2 * 330 * 1000 };
-		let funding_amount_msat = node_a.list_channels()[0].channel_value_sats * 1000;
+		let funding_amount_msat = node_a_channel.channel_value_sats * 1000;
 		// Node B does not have any reserve, so we only subtract a few items on node A's
 		// side to arrive at node B's capacity
 		let node_b_capacity_msat = funding_amount_msat

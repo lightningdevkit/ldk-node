@@ -39,6 +39,8 @@ use lightning::util::sweep::OutputSweeper;
 use lightning_block_sync::gossip::GossipVerifier;
 use lightning_liquidity::utils::time::DefaultTimeProvider;
 use lightning_net_tokio::SocketDescriptor;
+#[cfg(not(feature = "uniffi"))]
+use lightning_types::features::ChannelTypeFeatures;
 
 use crate::chain::bitcoind::UtxoSourceClient;
 use crate::chain::ChainSource;
@@ -51,6 +53,8 @@ use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::{PaymentDetails, PendingPaymentDetails};
 use crate::runtime::RuntimeSpawner;
 
+#[cfg(feature = "uniffi")]
+type ChannelTypeFeatures = Arc<crate::ffi::ChannelTypeFeatures>;
 #[cfg(not(feature = "uniffi"))]
 type InitFeatures = lightning::types::features::InitFeatures;
 #[cfg(feature = "uniffi")]
@@ -642,6 +646,11 @@ pub struct ChannelDetails {
 	///
 	/// See [`ReserveType`] for details on how reserves differ between anchor and legacy channels.
 	pub reserve_type: Option<ReserveType>,
+	/// The negotiated channel type features.
+	///
+	/// Will be `None` until channel negotiation has completed and the channel type has been
+	/// determined.
+	pub channel_type: Option<ChannelTypeFeatures>,
 }
 
 impl ChannelDetails {
@@ -706,6 +715,7 @@ impl ChannelDetails {
 				.expect("value is set for objects serialized with LDK v0.0.109+"),
 			channel_shutdown_state: value.channel_shutdown_state,
 			reserve_type,
+			channel_type: value.channel_type.map(maybe_wrap),
 		}
 	}
 }
