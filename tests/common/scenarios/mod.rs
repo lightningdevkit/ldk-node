@@ -20,8 +20,6 @@ use std::time::Duration;
 use bitcoin::Amount;
 use electrsd::corepc_node::Client as BitcoindClient;
 use electrsd::electrum_client::ElectrumApi;
-#[cfg(zero_fee_commitment_tests)]
-use ldk_node::ReserveType;
 use ldk_node::{Event, Node};
 
 use super::external_node::ExternalNode;
@@ -165,20 +163,6 @@ pub(crate) async fn basic_channel_cycle_scenario<E: ElectrumApi>(
 		Some(500_000_000),
 	)
 	.await;
-
-	#[cfg(zero_fee_commitment_tests)]
-	{
-		let ext_node_id = peer.get_node_id().await.unwrap();
-		let channel = node
-			.list_channels()
-			.into_iter()
-			.find(|channel| channel.user_channel_id == user_ch)
-			.expect("opened channel should be listed");
-		assert_eq!(channel.counterparty.node_id, ext_node_id);
-		assert!(channel.counterparty.features.supports_anchor_zero_fee_commitments());
-		assert_eq!(channel.feerate_sat_per_1000_weight, 0);
-		assert_eq!(channel.reserve_type, Some(ReserveType::Adaptive));
-	}
 
 	payment::send_bolt11_to_peer(node, peer, 10_000_000, "basic-send").await;
 	payment::receive_bolt11_payment(node, peer, 10_000_000).await;

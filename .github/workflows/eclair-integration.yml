@@ -8,8 +8,19 @@ concurrency:
 
 jobs:
   check-eclair:
+    name: check-eclair (${{ matrix.name }})
     timeout-minutes: 60
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: standard
+            eclair_extra_java_opts: ""
+            rustflags: "--cfg eclair_test"
+          - name: zero-fee-commitments
+            eclair_extra_java_opts: "-Declair.features.zero_fee_commitments=optional"
+            rustflags: "--cfg eclair_test --cfg zero_fee_commitment_tests"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -37,6 +48,8 @@ jobs:
           docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml exec bitcoin bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass createwallet ldk_node_test
 
       - name: Start Eclair
+        env:
+          ECLAIR_EXTRA_JAVA_OPTS: ${{ matrix.eclair_extra_java_opts }}
         run: docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml up -d eclair
 
       - name: Wait for Eclair to be ready
@@ -54,4 +67,5 @@ jobs:
           exit 1
 
       - name: Run Eclair integration tests
-        run: RUSTFLAGS="--cfg eclair_test" cargo test --test integration_tests_eclair -- --show-output --test-threads=1
+        run: |
+          RUSTFLAGS="${{ matrix.rustflags }}" cargo test --test integration_tests_eclair -- --show-output --test-threads=1
