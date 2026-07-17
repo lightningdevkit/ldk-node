@@ -18,7 +18,7 @@ use crate::logger::{log_error, LdkLogger};
 use crate::types::Wallet;
 use crate::Error;
 
-const BCAST_PACKAGE_QUEUE_SIZE: usize = 50;
+const BCAST_PACKAGE_QUEUE_SIZE: usize = 256;
 
 /// A package of transactions that LDK handed to the broadcaster in one `broadcast_transactions`
 /// call, along with each transaction's type. Queued until the background task classifies and
