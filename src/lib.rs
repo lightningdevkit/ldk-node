@@ -336,14 +336,18 @@ impl Node {
 		//
 		// TODO: drop 0FC chain source validation when support is ubiquitous
 		let chain_source = Arc::clone(&self.chain_source);
-		self.runtime.block_on(async move {
+		let startup_chain_check_res = self.runtime.block_on(async move {
 			tokio::try_join!(
 				chain_source.update_fee_rate_estimates(),
 				chain_source.validate_zero_fee_commitments_support_if_required(
 					zero_fee_commitments_support_required
 				)
 			)
-		})?;
+		});
+		if let Err(e) = startup_chain_check_res {
+			self.chain_source.stop();
+			return Err(e);
+		}
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
