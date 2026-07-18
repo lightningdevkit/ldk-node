@@ -47,13 +47,12 @@ pub(crate) type EltooHandler = EltooMessageHandler<Arc<KeysManager>>;
 /// Fee reserved for a P2A anchor CPFP child (PoC: fixed, no estimation).
 const ANCHOR_CHILD_FEE: Amount = Amount::from_sat(20_000);
 
-/// An eltoo channel we opened, between channel creation and `channel_ready`.
+/// An eltoo channel we opened, between channel creation and its funding broadcast.
 struct PendingFunding {
 	/// The channel id — temporary until the funding tx is created, final afterwards.
 	channel_id: ChannelId,
 	capacity: Amount,
 	funding_txid: Option<Txid>,
-	ready_signalled: bool,
 }
 
 /// Owns the node-side glue around the sans-IO [`EltooChannelManager`]: the funding
@@ -70,6 +69,8 @@ pub(crate) struct EltooRuntime {
 	pending_funding: Mutex<Vec<PendingFunding>>,
 	/// Watched funding txids → confirmation height (once seen in a block).
 	confirmations: Mutex<HashMap<Txid, u32>>,
+	/// Channels whose `funding_confirmed` we already signalled.
+	ready_signalled: Mutex<Vec<ChannelId>>,
 	tip: AtomicU32,
 	/// Non-broadcast events, drained by the user via `Node::eltoo_events`.
 	events: Mutex<Vec<EltooEvent>>,
@@ -101,6 +102,7 @@ impl EltooRuntime {
 			logger,
 			pending_funding: Mutex::new(Vec::new()),
 			confirmations: Mutex::new(HashMap::new()),
+			ready_signalled: Mutex::new(Vec::new()),
 			tip: AtomicU32::new(best_height),
 			events: Mutex::new(Vec::new()),
 		}
@@ -117,7 +119,6 @@ impl EltooRuntime {
 			channel_id,
 			capacity: Amount::from_sat(capacity_sat),
 			funding_txid: None,
-			ready_signalled: false,
 		});
 	}
 
@@ -190,34 +191,26 @@ impl EltooRuntime {
 		}
 	}
 
-	/// Signals `funding_confirmed` once a funding tx has the configured depth.
+	/// Watches every not-yet-ready channel's funding txid — whether we or the peer
+	/// initiated — and signals `funding_confirmed` once it has the configured depth.
 	fn signal_confirmed_fundings(&self) {
 		let tip = self.tip();
 		let mut ready = Vec::new();
 		{
-			let confirmations = self.confirmations.lock().unwrap();
-			let mut pending = self.pending_funding.lock().unwrap();
-			for entry in pending.iter_mut() {
-				if entry.ready_signalled {
+			let mut confirmations = self.confirmations.lock().unwrap();
+			let signalled = self.ready_signalled.lock().unwrap();
+			for (channel_id, txid) in self.manager.channels_awaiting_funding() {
+				let height = *confirmations.entry(txid).or_insert(0);
+				if signalled.contains(&channel_id) || height == 0 {
 					continue;
 				}
-				let txid = match entry.funding_txid {
-					Some(txid) => txid,
-					None => continue,
-				};
-				match confirmations.get(&txid) {
-					Some(&height) if height > 0 => {
-						let depth = tip + 1 - height;
-						if depth >= self.config.minimum_depth {
-							entry.ready_signalled = true;
-							ready.push(entry.channel_id);
-						}
-					},
-					_ => {},
+				if tip + 1 - height >= self.config.minimum_depth {
+					ready.push(channel_id);
 				}
 			}
 		}
 		for channel_id in ready {
+			self.ready_signalled.lock().unwrap().push(channel_id);
 			if let Err(e) = self.manager.funding_confirmed(channel_id) {
 				log_error!(self.logger, "eltoo funding_confirmed failed: {:?}", e);
 			}

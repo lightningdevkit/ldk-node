@@ -2072,6 +2072,13 @@ impl lightning::sign::eltoo::EltooSignerProvider for WalletKeysManager {
 	fn derive_eltoo_channel_signer(&self, channel_keys_id: [u8; 32]) -> Self::EltooSigner {
 		self.inner.derive_eltoo_channel_signer(channel_keys_id)
 	}
+
+	fn get_shutdown_scriptpubkey(&self) -> Result<ScriptBuf, ()> {
+		let address = self.wallet.get_new_address().map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+		})?;
+		Ok(address.script_pubkey())
+	}
 }
 
 impl ChangeDestinationSource for WalletKeysManager {
