@@ -1982,8 +1982,8 @@ impl Node {
 	/// reported via the `ChannelReady` event in [`Node::eltoo_events`] once the funding
 	/// transaction (created and broadcast automatically after the peer accepts) confirms.
 	///
-	/// Eltoo channels are in-memory only (they do not survive restarts) and require a
-	/// bitcoind chain source and a BIP-448-patched Bitcoin Core.
+	/// Eltoo channels are persisted (channel + monitor) and survive restarts, but require
+	/// a bitcoind chain source and a BIP-448-patched Bitcoin Core.
 	pub fn open_eltoo_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: u64,

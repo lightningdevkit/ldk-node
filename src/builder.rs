@@ -1939,12 +1939,12 @@ fn build_with_store_internal(
 
 	let channel_manager = Arc::new(channel_manager);
 
-	// The experimental eltoo stack, sharing wallet, chain source and broadcaster.
-	// Channels are in-memory only (PoC: no persistence).
+	// The experimental eltoo stack, sharing wallet, chain source, broadcaster and the
+	// node's KVStore (channels + monitors are persisted per-update and reloaded here).
 	let eltoo_runtime = {
 		let best_height = channel_manager.current_best_block().height;
 		let node_id = channel_manager.get_our_node_id();
-		Arc::new(crate::eltoo::EltooRuntime::new(
+		let eltoo_runtime = Arc::new(crate::eltoo::EltooRuntime::new(
 			node_id,
 			Arc::clone(&keys_manager),
 			config.network.into(),
@@ -1952,7 +1952,11 @@ fn build_with_store_internal(
 			Arc::clone(&wallet),
 			Arc::clone(&tx_broadcaster),
 			Arc::clone(&logger),
-		))
+			Arc::clone(&kv_store),
+		));
+		let reload = Arc::clone(&eltoo_runtime);
+		runtime.block_on(async move { reload.load_persisted_channels().await });
+		eltoo_runtime
 	};
 
 	// Give ChannelMonitors to ChainMonitor

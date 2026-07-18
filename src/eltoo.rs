@@ -11,12 +11,15 @@
 //! and the transaction broadcaster. Only the bitcoind chain source feeds eltoo
 //! channels; esplora/electrum do not.
 //!
-//! Scope mirrors the PoC: no persistence (channels do not survive restarts), no
-//! reorg handling, no routed payments (direct channels only, with out-of-band
-//! payment hashes standing in for invoices).
+//! Channels and their monitors are persisted to the node's KVStore per-update and
+//! reloaded on startup (see [`EltooRuntime::load_persisted_channels`] /
+//! [`EltooRuntime::persist_dirty_channels`]), so a channel survives a restart and can
+//! still be force-closed and settled afterwards. Scope otherwise mirrors the PoC: no
+//! reorg handling, no routed payments (direct channels only, with out-of-band payment
+//! hashes standing in for invoices).
 
 use crate::logger::{log_debug, log_error, LdkLogger, Logger};
-use crate::types::{Broadcaster, ChannelManager, KeysManager, Wallet};
+use crate::types::{Broadcaster, ChannelManager, DynStore, KeysManager, Wallet};
 
 use lightning::chain::chaininterface::{BroadcasterInterface, TransactionType};
 use lightning::chain::{BlockLocator, Listen};
@@ -27,6 +30,7 @@ use lightning::ln::msgs;
 use lightning::ln::msgs::{BaseMessageHandler, ChannelMessageHandler, MessageSendEvent};
 use lightning::ln::types::ChannelId;
 use lightning::types::features::{InitFeatures, NodeFeatures};
+use lightning::util::persist::KVStore;
 use lightning::util::wallet_utils::WalletSource;
 
 use bitcoin::absolute::LockTime;
@@ -46,6 +50,18 @@ pub(crate) type EltooHandler = EltooMessageHandler<Arc<KeysManager>>;
 
 /// Fee reserved for a P2A anchor CPFP child (PoC: fixed, no estimation).
 const ANCHOR_CHILD_FEE: Amount = Amount::from_sat(20_000);
+
+/// KVStore namespace under which each eltoo channel's `(channel, monitor)` blob is
+/// persisted, keyed by channel id. Mirrors the persistence discipline of the regular
+/// `ChainMonitor`: the tip state (with its aggregate signature) must survive a restart,
+/// or the channel can no longer be force-closed or rebound against a stale broadcast.
+const ELTOO_PERSIST_PRIMARY_NAMESPACE: &str = "eltoo_channels";
+const ELTOO_PERSIST_SECONDARY_NAMESPACE: &str = "";
+
+/// The KVStore key for a channel's persisted state: its channel id, hex-encoded.
+fn channel_persist_key(channel_id: &ChannelId) -> String {
+	channel_id.0.iter().map(|byte| format!("{:02x}", byte)).collect()
+}
 
 /// An eltoo channel we opened, between channel creation and its funding broadcast.
 struct PendingFunding {
@@ -74,13 +90,17 @@ pub(crate) struct EltooRuntime {
 	tip: AtomicU32,
 	/// Non-broadcast events, drained by the user via `Node::eltoo_events`.
 	events: Mutex<Vec<EltooEvent>>,
+	/// The persistence backend and the last bytes written per channel, so a channel is
+	/// only re-persisted when its serialized state actually changed (persist-on-update).
+	kv_store: Arc<DynStore>,
+	last_persisted: Mutex<HashMap<ChannelId, Vec<u8>>>,
 }
 
 impl EltooRuntime {
 	pub(crate) fn new(
 		node_id: PublicKey, keys_manager: Arc<KeysManager>, network: bitcoin::Network,
 		best_height: u32, wallet: Arc<Wallet>, tx_broadcaster: Arc<Broadcaster>,
-		logger: Arc<Logger>,
+		logger: Arc<Logger>, kv_store: Arc<DynStore>,
 	) -> Self {
 		let chain_hash = ChainHash::using_genesis_block(network);
 		let config = EltooChannelConfig::default();
@@ -105,6 +125,104 @@ impl EltooRuntime {
 			ready_signalled: Mutex::new(Vec::new()),
 			tip: AtomicU32::new(best_height),
 			events: Mutex::new(Vec::new()),
+			kv_store,
+			last_persisted: Mutex::new(HashMap::new()),
+		}
+	}
+
+	/// Reloads eltoo channels persisted before a restart. Each stored blob rebuilds a
+	/// channel and its monitor (their signers re-derived from the shared keys manager),
+	/// so the node can still force-close and settle a channel it opened in a prior run.
+	/// Called once at startup, before the background driver begins.
+	pub(crate) async fn load_persisted_channels(&self) {
+		let keys = match KVStore::list(
+			&*self.kv_store,
+			ELTOO_PERSIST_PRIMARY_NAMESPACE,
+			ELTOO_PERSIST_SECONDARY_NAMESPACE,
+		)
+		.await
+		{
+			Ok(keys) => keys,
+			Err(e) => {
+				log_error!(self.logger, "Failed to list persisted eltoo channels: {}", e);
+				return;
+			},
+		};
+		for key in keys {
+			let bytes = match KVStore::read(
+				&*self.kv_store,
+				ELTOO_PERSIST_PRIMARY_NAMESPACE,
+				ELTOO_PERSIST_SECONDARY_NAMESPACE,
+				&key,
+			)
+			.await
+			{
+				Ok(bytes) => bytes,
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to read persisted eltoo channel {}: {}",
+						key,
+						e
+					);
+					continue;
+				},
+			};
+			match self.manager.load_persisted_channel(&bytes) {
+				Ok(channel_id) => {
+					self.last_persisted.lock().unwrap().insert(channel_id, bytes);
+					// A persisted channel is already ready (it owns a monitor); make sure
+					// the funding tracker never tries to re-signal its funding depth.
+					self.ready_signalled.lock().unwrap().push(channel_id);
+					log_debug!(self.logger, "Reloaded eltoo channel {}", channel_id);
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to deserialize eltoo channel {}: {:?}", key, e);
+				},
+			}
+		}
+	}
+
+	/// Persists every ready channel whose serialized state changed since it was last
+	/// written. Called after each driver pass (persist-on-update): the blob is O(1) per
+	/// channel, so re-serializing to diff it is cheap.
+	async fn persist_dirty_channels(&self) {
+		let to_write: Vec<(ChannelId, String, Vec<u8>)> = {
+			let cache = self.last_persisted.lock().unwrap();
+			self.manager
+				.persistable_channel_ids()
+				.into_iter()
+				.filter_map(|channel_id| {
+					let bytes = self.manager.serialize_channel_state(channel_id)?;
+					if cache.get(&channel_id) == Some(&bytes) {
+						return None;
+					}
+					Some((channel_id, channel_persist_key(&channel_id), bytes))
+				})
+				.collect()
+		};
+		for (channel_id, key, bytes) in to_write {
+			match KVStore::write(
+				&*self.kv_store,
+				ELTOO_PERSIST_PRIMARY_NAMESPACE,
+				ELTOO_PERSIST_SECONDARY_NAMESPACE,
+				&key,
+				bytes.clone(),
+			)
+			.await
+			{
+				Ok(()) => {
+					self.last_persisted.lock().unwrap().insert(channel_id, bytes);
+				},
+				Err(e) => {
+					log_error!(
+						self.logger,
+						"Failed to persist eltoo channel {}: {}",
+						channel_id,
+						e
+					);
+				},
+			}
 		}
 	}
 
@@ -133,6 +251,9 @@ impl EltooRuntime {
 		self.fund_accepted_channels();
 		self.signal_confirmed_fundings();
 		self.pump_events().await;
+		// Persist any channel whose state changed this pass (a new state was committed or
+		// advanced, a preimage learned, an on-chain status moved).
+		self.persist_dirty_channels().await;
 	}
 
 	/// For each pending channel whose handshake completed, build, broadcast and

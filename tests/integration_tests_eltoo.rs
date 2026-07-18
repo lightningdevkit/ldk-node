@@ -84,22 +84,33 @@ impl Harness {
 	}
 
 	fn make_node(&self) -> Node {
-		let mut storage: PathBuf = std::env::temp_dir();
-		storage.push(format!("eltoo-node-{}", NEXT_PORT.fetch_add(0, Ordering::Relaxed)));
-		storage.push(format!("{}", rand_suffix()));
-		let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+		self.start_node(&self.new_node_setup())
+	}
 
+	/// Fresh, restart-stable node identity: a storage directory, wallet entropy and
+	/// listening port that stay fixed across restarts (so the KVStore-backed state — the
+	/// BDK wallet and now the eltoo channels/monitors — is reloaded).
+	fn new_node_setup(&self) -> NodeSetup {
+		let mut storage: PathBuf = std::env::temp_dir();
+		storage.push(format!("eltoo-node-{}", rand_suffix()));
+		let port = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+		let entropy = NodeEntropy::from_bip39_mnemonic(generate_entropy_mnemonic(None), None);
+		NodeSetup { storage: storage.to_str().unwrap().to_string(), entropy, port }
+	}
+
+	/// Builds and starts a node for the given (possibly reused) setup.
+	fn start_node(&self, setup: &NodeSetup) -> Node {
 		let rpc_host = self.bitcoind.params.rpc_socket.ip().to_string();
 		let rpc_port = self.bitcoind.params.rpc_socket.port();
 		let cookie = self.bitcoind.params.get_cookie_values().unwrap().unwrap();
 
 		let mut builder = Builder::new();
 		builder.set_network(Network::Regtest);
-		eprintln!("node storage: {}", storage.display());
-		builder.set_storage_dir_path(storage.to_str().unwrap().to_string());
+		eprintln!("node storage: {}", setup.storage);
+		builder.set_storage_dir_path(setup.storage.clone());
 		builder.set_filesystem_logger(None, Some(ldk_node::logger::LogLevel::Trace));
 		builder
-			.set_listening_addresses(vec![format!("127.0.0.1:{}", port).parse().unwrap()])
+			.set_listening_addresses(vec![format!("127.0.0.1:{}", setup.port).parse().unwrap()])
 			.unwrap();
 		builder.set_chain_source_bitcoind_rpc(
 			rpc_host,
@@ -108,11 +119,41 @@ impl Harness {
 			cookie.password,
 			None,
 		);
-		let entropy = NodeEntropy::from_bip39_mnemonic(generate_entropy_mnemonic(None), None);
-		let node = builder.build(entropy).unwrap();
+		let node = builder.build(setup.entropy).unwrap();
 		node.start().unwrap();
 		node
 	}
+
+	/// Scans confirmed blocks for the channel funding output (the capacity-value output).
+	fn find_funding_outpoint(&self) -> OutPoint {
+		let mut found = None;
+		for height in 100..=self.tip() {
+			let hash = self
+				.bitcoind
+				.client
+				.get_block_hash(height as u64)
+				.expect("getblockhash")
+				.into_model()
+				.expect("hash")
+				.0;
+			let block = self.bitcoind.client.get_block(hash).expect("getblock");
+			for tx in block.txdata {
+				if let Some(vout) =
+					tx.output.iter().position(|out| out.value == Amount::from_sat(CAPACITY_SAT))
+				{
+					found = Some(OutPoint { txid: tx.compute_txid(), vout: vout as u32 });
+				}
+			}
+		}
+		found.expect("funding tx confirmed")
+	}
+}
+
+/// A restart-stable node identity (storage + entropy + port).
+struct NodeSetup {
+	storage: String,
+	entropy: NodeEntropy,
+	port: u16,
 }
 
 fn rand_suffix() -> u64 {
@@ -304,6 +345,97 @@ fn eltoo_force_close_settles_over_tcp() {
 	let state_outpoint = OutPoint { txid: update_tx.compute_txid(), vout: 2 };
 	let settlement_tx =
 		harness.find_spending_tx(state_outpoint, settle_from).expect("settlement must confirm");
+	assert_eq!(settlement_tx.input[0].witness.len(), 2, "covenant spend: [leaf, control]");
+
+	a.stop().unwrap();
+	b.stop().unwrap();
+}
+
+#[test]
+fn eltoo_channel_survives_restart_and_force_closes() {
+	let harness = match Harness::start() {
+		Some(harness) => harness,
+		None => return,
+	};
+	// Both nodes get restart-stable identities so their KVStore-backed state (BDK wallet
+	// + eltoo channels/monitors) reloads after a stop/start.
+	let setup_a = harness.new_node_setup();
+	let setup_b = harness.new_node_setup();
+	let a = harness.start_node(&setup_a);
+	let b = harness.start_node(&setup_b);
+
+	let addr_a = a.onchain_payment().new_address().expect("address");
+	harness.fund(&addr_a, Amount::from_sat(10_000_000));
+	settle(&[&a, &b]);
+
+	// Open an eltoo channel and make one payment, so the persisted tip is not state 0.
+	let b_addr = b.listening_addresses().unwrap()[0].clone();
+	a.open_eltoo_channel(b.node_id(), b_addr, CAPACITY_SAT, 0).expect("open");
+	let channel_id: ChannelId = wait_for_event(&harness, &[&a, &b], &a, 30, |event| match event {
+		EltooEvent::ChannelReady { channel_id } => Some(*channel_id),
+		_ => None,
+	});
+	wait_for_event(&harness, &[&a, &b], &b, 10, |event| match event {
+		EltooEvent::ChannelReady { channel_id: id } if *id == channel_id => Some(()),
+		_ => None,
+	});
+
+	let payment_hash = b.eltoo_receive_payment();
+	a.send_eltoo_payment(channel_id, 100_000_000, payment_hash).expect("send");
+	wait_for_event(&harness, &[&a, &b], &a, 10, |event| match event {
+		EltooEvent::PaymentFulfilled { .. } => Some(()),
+		_ => None,
+	});
+
+	// Give the background driver a few passes to flush the per-update persistence.
+	settle(&[&a, &b]);
+	settle(&[&a, &b]);
+
+	let funding_outpoint = harness.find_funding_outpoint();
+
+	// Restart both nodes from their existing storage: the eltoo channels and monitors are
+	// re-read from the KVStore (their signers re-derived from the persisted key ids).
+	a.stop().unwrap();
+	b.stop().unwrap();
+	drop(a);
+	drop(b);
+	let a = harness.start_node(&setup_a);
+	let b = harness.start_node(&setup_b);
+	settle(&[&a, &b]);
+
+	// The reloaded node force-closes: this only succeeds if the monitor's tip state — and
+	// its aggregate signature — survived the restart. A lost monitor could not produce a
+	// valid update transaction here.
+	let close_from = harness.tip() + 1;
+	a.force_close_eltoo_channel(channel_id);
+	settle(&[&a, &b]);
+	harness.mine(1);
+	settle(&[&a, &b]);
+	let update_tx = harness
+		.find_spending_tx(funding_outpoint, close_from)
+		.expect("update tx must confirm after restart");
+	assert_eq!(update_tx.input[0].witness.len(), 3, "script-path: [sig, leaf, control]");
+
+	// And its signature-free settlement follows after the shared delay, exactly as for a
+	// channel that never restarted.
+	harness.mine(144);
+	let state_outpoint = OutPoint { txid: update_tx.compute_txid(), vout: 2 };
+	let settle_from = harness.tip() + 1;
+	// Poll: let the reloaded monitor broadcast the settlement once the delay matures, then
+	// mine it in. (The broadcast lands a driver tick after the maturing block is synced.)
+	let settlement_tx = {
+		let mut found = None;
+		for _ in 0..20 {
+			settle(&[&a, &b]);
+			harness.mine(1);
+			settle(&[&a, &b]);
+			if let Some(tx) = harness.find_spending_tx(state_outpoint, settle_from) {
+				found = Some(tx);
+				break;
+			}
+		}
+		found.expect("settlement must confirm after restart")
+	};
 	assert_eq!(settlement_tx.input[0].witness.len(), 2, "covenant spend: [leaf, control]");
 
 	a.stop().unwrap();
