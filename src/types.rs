@@ -19,7 +19,7 @@ use bitcoin_payment_instructions::hrn_resolution::{
 };
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::chainmonitor;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based;
 use lightning::ln::channel_state::{
 	ChannelDetails as LdkChannelDetails, ChannelShutdownState, CounterpartyForwardingInfo,
 };
@@ -238,7 +238,9 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 
 pub(crate) type PeerManager = lightning::ln::peer_handler::PeerManager<
 	SocketDescriptor,
-	Arc<ChannelManager>,
+	// Routes LN-penalty channel messages to the ChannelManager and eltoo channel
+	// messages to the EltooChannelManager.
+	Arc<crate::eltoo::DualChannelMessageHandler>,
 	Arc<dyn RoutingMessageHandler + Send + Sync>,
 	Arc<OnionMessenger>,
 	Arc<Logger>,
@@ -744,7 +746,7 @@ pub struct CustomTlvRecord {
 	pub value: Vec<u8>,
 }
 
-impl_writeable_tlv_based!(CustomTlvRecord, {
+impl_ser_tlv_based!(CustomTlvRecord, {
 	(0, type_num, required),
 	(2, value, required),
 });

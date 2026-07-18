@@ -13,7 +13,7 @@ use std::time::Duration;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use lightning::blinded_path::message::BlindedMessagePath;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based;
 use lightning::offers::static_invoice::StaticInvoice;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable};
@@ -28,7 +28,7 @@ struct PersistedStaticInvoice {
 	request_path: BlindedMessagePath,
 }
 
-impl_writeable_tlv_based!(PersistedStaticInvoice, {
+impl_ser_tlv_based!(PersistedStaticInvoice, {
 	(0, invoice, required),
 	(2, request_path, required)
 });

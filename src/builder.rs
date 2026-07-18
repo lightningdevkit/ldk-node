@@ -1939,6 +1939,22 @@ fn build_with_store_internal(
 
 	let channel_manager = Arc::new(channel_manager);
 
+	// The experimental eltoo stack, sharing wallet, chain source and broadcaster.
+	// Channels are in-memory only (PoC: no persistence).
+	let eltoo_runtime = {
+		let best_height = channel_manager.current_best_block().height;
+		let node_id = channel_manager.get_our_node_id();
+		Arc::new(crate::eltoo::EltooRuntime::new(
+			node_id,
+			Arc::clone(&keys_manager),
+			config.network.into(),
+			best_height,
+			Arc::clone(&wallet),
+			Arc::clone(&tx_broadcaster),
+			Arc::clone(&logger),
+		))
+	};
+
 	// Give ChannelMonitors to ChainMonitor
 	for (_blockhash, channel_monitor) in channel_monitors.into_iter() {
 		let channel_id = channel_monitor.channel_id();
@@ -2012,6 +2028,9 @@ fn build_with_store_internal(
 				Arc::clone(&channel_manager),
 				Arc::clone(&om_resolver),
 				IgnoringMessageHandler {},
+				// Only intercept messages for offline peers, not for unknown SCIDs (the
+				// event handler relies on interceptions carrying a node id).
+				false,
 			))
 		} else {
 			Arc::new(OnionMessenger::new(
@@ -2091,9 +2110,15 @@ fn build_with_store_internal(
 		(liquidity_source, custom_message_handler)
 	};
 
+	// Route channel messages to the regular ChannelManager or the eltoo manager.
+	let dual_chan_handler = Arc::new(crate::eltoo::DualChannelMessageHandler {
+		ldk: Arc::clone(&channel_manager),
+		eltoo: Arc::clone(&eltoo_runtime.handler),
+	});
+
 	let msg_handler = match gossip_source.as_gossip_sync() {
 		GossipSync::P2P(p2p_gossip_sync) => MessageHandler {
-			chan_handler: Arc::clone(&channel_manager),
+			chan_handler: Arc::clone(&dual_chan_handler),
 			route_handler: Arc::clone(&p2p_gossip_sync)
 				as Arc<dyn RoutingMessageHandler + Sync + Send>,
 			onion_message_handler: Arc::clone(&onion_messenger),
@@ -2101,7 +2126,7 @@ fn build_with_store_internal(
 			send_only_message_handler: Arc::clone(&chain_monitor),
 		},
 		GossipSync::Rapid(_) => MessageHandler {
-			chan_handler: Arc::clone(&channel_manager),
+			chan_handler: Arc::clone(&dual_chan_handler),
 			route_handler: Arc::new(IgnoringMessageHandler {})
 				as Arc<dyn RoutingMessageHandler + Sync + Send>,
 			onion_message_handler: Arc::clone(&onion_messenger),
@@ -2251,6 +2276,7 @@ fn build_with_store_internal(
 		om_mailbox,
 		async_payments_role,
 		hrn_resolver,
+		eltoo: eltoo_runtime,
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})

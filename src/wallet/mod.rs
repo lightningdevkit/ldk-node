@@ -2062,6 +2062,18 @@ impl SignerProvider for WalletKeysManager {
 	}
 }
 
+impl lightning::sign::eltoo::EltooSignerProvider for WalletKeysManager {
+	type EltooSigner = lightning::sign::eltoo::InMemoryEltooSigner;
+
+	fn generate_eltoo_channel_keys_id(&self, inbound: bool, user_channel_id: u128) -> [u8; 32] {
+		self.inner.generate_eltoo_channel_keys_id(inbound, user_channel_id)
+	}
+
+	fn derive_eltoo_channel_signer(&self, channel_keys_id: [u8; 32]) -> Self::EltooSigner {
+		self.inner.derive_eltoo_channel_signer(channel_keys_id)
+	}
+}
+
 impl ChangeDestinationSource for WalletKeysManager {
 	fn get_change_destination_script<'a>(
 		&'a self,

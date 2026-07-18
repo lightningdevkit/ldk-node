@@ -29,7 +29,7 @@ use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
-use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
+use lightning::{impl_ser_tlv_based, impl_ser_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
@@ -78,7 +78,7 @@ pub struct HTLCLocator {
 	pub node_id: Option<PublicKey>,
 }
 
-impl_writeable_tlv_based!(HTLCLocator, {
+impl_ser_tlv_based!(HTLCLocator, {
 	(1, channel_id, required),
 	(3, user_channel_id, option),
 	(5, node_id, option),
@@ -294,7 +294,7 @@ pub enum Event {
 	},
 }
 
-impl_writeable_tlv_based_enum!(Event,
+impl_ser_tlv_based_enum!(Event,
 	(0, PaymentSuccessful) => {
 		(0, payment_hash, required),
 		(1, fee_paid_msat, option),
@@ -1725,7 +1725,21 @@ where
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
 			},
-			LdkEvent::OnionMessageIntercepted { peer_node_id, message } => {
+			LdkEvent::OnionMessageIntercepted { prev_hop: _, next_hop, message } => {
+				// We only intercept messages for offline peers (known node ids), never for
+				// unknown SCIDs (`intercept_for_unknown_scids` is disabled at construction).
+				let peer_node_id = match next_hop {
+					lightning::blinded_path::message::NextMessageHop::NodeId(node_id) => node_id,
+					lightning::blinded_path::message::NextMessageHop::ShortChannelId(scid) => {
+						debug_assert!(false, "Unexpected onion message interception for SCID");
+						log_trace!(
+							self.logger,
+							"Ignoring intercepted onion message for unknown SCID {}",
+							scid
+						);
+						return Ok(());
+					},
+				};
 				if let Some(om_mailbox) = self.om_mailbox.as_ref() {
 					om_mailbox.onion_message_intercepted(peer_node_id, message);
 				} else {

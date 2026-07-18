@@ -123,6 +123,7 @@ impl BitcoindChainSource {
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
 		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		eltoo: Arc<crate::eltoo::EltooRuntime>,
 	) {
 		// First register for the wallet polling status to make sure `Node::sync_wallets` calls
 		// wait on the result before proceeding.
@@ -156,6 +157,8 @@ impl BitcoindChainSource {
 				(onchain_wallet_best_block, &*onchain_wallet as &(dyn Listen + Send + Sync)),
 				(channel_manager_best_block, &*channel_manager as &(dyn Listen + Send + Sync)),
 				(sweeper_best_block, &*output_sweeper as &(dyn Listen + Send + Sync)),
+				// The eltoo runtime was initialized at the channel manager's best block.
+				(channel_manager_best_block, &*eltoo as &(dyn Listen + Send + Sync)),
 			];
 
 			// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
@@ -299,7 +302,8 @@ impl BitcoindChainSource {
 							Arc::clone(&onchain_wallet),
 							Arc::clone(&channel_manager),
 							Arc::clone(&chain_monitor),
-							Arc::clone(&output_sweeper)
+							Arc::clone(&output_sweeper),
+							Arc::clone(&eltoo)
 						) => {}
 					}
 				}
@@ -356,6 +360,7 @@ impl BitcoindChainSource {
 	pub(super) async fn poll_and_update_listeners(
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		eltoo: Arc<crate::eltoo::EltooRuntime>,
 	) -> Result<(), Error> {
 		let receiver_res = {
 			let mut status_lock = self.wallet_polling_status.lock().expect("lock");
@@ -377,6 +382,7 @@ impl BitcoindChainSource {
 				channel_manager,
 				chain_monitor,
 				output_sweeper,
+				eltoo,
 			)
 			.await;
 
@@ -388,6 +394,7 @@ impl BitcoindChainSource {
 	async fn poll_and_update_listeners_inner(
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		eltoo: Arc<crate::eltoo::EltooRuntime>,
 	) -> Result<(), Error> {
 		let latest_chain_tip_opt = self.latest_chain_tip.read().expect("lock").clone();
 		let chain_tip =
@@ -399,6 +406,7 @@ impl BitcoindChainSource {
 			channel_manager: Arc::clone(&channel_manager),
 			chain_monitor: Arc::clone(&chain_monitor),
 			output_sweeper,
+			eltoo,
 		};
 		let mut spv_client =
 			SpvClient::new(chain_tip, chain_poller, HeaderCache::new(), &chain_listener);
@@ -572,10 +580,33 @@ impl BitcoindChainSource {
 	}
 
 	pub(crate) async fn process_broadcast_package(&self, package: Vec<Transaction>) {
-		// While it's a bit unclear when we'd be able to lean on Bitcoin Core >v28
-		// features, we should eventually switch to use `submitpackage` via the
-		// `rust-bitcoind-json-rpc` crate rather than just broadcasting individual
-		// transactions.
+		// Multi-transaction packages (e.g. a zero-fee TRUC parent with its P2A CPFP
+		// child) must enter the mempool atomically: `submitpackage` them.
+		if package.len() > 1 {
+			let timeout_fut = tokio::time::timeout(
+				Duration::from_secs(DEFAULT_TX_BROADCAST_TIMEOUT_SECS),
+				self.api_client.submit_package(&package),
+			);
+			match timeout_fut.await {
+				Ok(Ok(res)) if res.package_msg == "success" => {
+					log_trace!(
+						self.logger,
+						"Successfully submitted package of {} transactions",
+						package.len()
+					);
+				},
+				Ok(Ok(res)) => {
+					log_error!(self.logger, "Package not accepted: {}", res.package_msg);
+				},
+				Ok(Err(e)) => {
+					log_error!(self.logger, "Failed to submit package: {}", e);
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to submit package due to timeout: {}", e);
+				},
+			}
+			return;
+		}
 		for tx in &package {
 			let txid = tx.compute_txid();
 			let timeout_fut = tokio::time::timeout(
@@ -774,6 +805,26 @@ impl BitcoindClient {
 		let tx_serialized = bitcoin::consensus::encode::serialize_hex(tx);
 		let tx_json = serde_json::json!(tx_serialized);
 		rpc_client.call_method::<Txid>("sendrawtransaction", &[tx_json]).await
+	}
+
+	/// Submits a package of transactions atomically via `submitpackage` (Core v28+),
+	/// allowing zero-fee (e.g. TRUC/P2A-anchored) parents to enter the mempool with
+	/// their fee-paying children.
+	pub(crate) async fn submit_package(
+		&self, package: &[Transaction],
+	) -> Result<SubmitPackageResponse, BitcoindClientError> {
+		let rpc_client = match self {
+			BitcoindClient::Rpc { rpc_client, .. } => Arc::clone(rpc_client),
+			// The REST interface does not support broadcasting, so we use the RPC client.
+			BitcoindClient::Rest { rpc_client, .. } => Arc::clone(rpc_client),
+		};
+		let hex_txs: Vec<String> =
+			package.iter().map(bitcoin::consensus::encode::serialize_hex).collect();
+		let package_json = serde_json::json!(hex_txs);
+		rpc_client
+			.call_method::<SubmitPackageResponse>("submitpackage", &[package_json])
+			.await
+			.map_err(BitcoindClientError::Rpc)
 	}
 
 	/// Retrieve the fee estimate needed for a transaction to begin
@@ -1235,6 +1286,21 @@ impl TryInto<FeeResponse> for JsonResponse {
 	}
 }
 
+pub(crate) struct SubmitPackageResponse {
+	pub(crate) package_msg: String,
+}
+
+impl TryInto<SubmitPackageResponse> for JsonResponse {
+	type Error = String;
+	fn try_into(self) -> Result<SubmitPackageResponse, String> {
+		let package_msg = self.0["package_msg"]
+			.as_str()
+			.ok_or_else(|| "submitpackage response missing package_msg".to_string())?
+			.to_string();
+		Ok(SubmitPackageResponse { package_msg })
+	}
+}
+
 pub(crate) struct MempoolMinFeeResponse(pub FeeRate);
 
 impl TryInto<MempoolMinFeeResponse> for JsonResponse {
@@ -1349,6 +1415,7 @@ pub(crate) struct ChainListener {
 	pub(crate) channel_manager: Arc<ChannelManager>,
 	pub(crate) chain_monitor: Arc<ChainMonitor>,
 	pub(crate) output_sweeper: Arc<Sweeper>,
+	pub(crate) eltoo: Arc<crate::eltoo::EltooRuntime>,
 }
 
 impl Listen for ChainListener {
@@ -1360,12 +1427,14 @@ impl Listen for ChainListener {
 		self.channel_manager.filtered_block_connected(header, txdata, height);
 		self.chain_monitor.filtered_block_connected(header, txdata, height);
 		self.output_sweeper.filtered_block_connected(header, txdata, height);
+		self.eltoo.filtered_block_connected(header, txdata, height);
 	}
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
 		self.onchain_wallet.block_connected(block, height);
 		self.channel_manager.block_connected(block, height);
 		self.chain_monitor.block_connected(block, height);
 		self.output_sweeper.block_connected(block, height);
+		self.eltoo.block_connected(block, height);
 	}
 
 	fn blocks_disconnected(&self, fork_point_block: lightning::chain::BlockLocator) {
@@ -1373,6 +1442,7 @@ impl Listen for ChainListener {
 		self.channel_manager.blocks_disconnected(fork_point_block);
 		self.chain_monitor.blocks_disconnected(fork_point_block);
 		self.output_sweeper.blocks_disconnected(fork_point_block);
+		self.eltoo.blocks_disconnected(fork_point_block);
 	}
 }
 

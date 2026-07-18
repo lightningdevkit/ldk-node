@@ -229,7 +229,7 @@ impl ChainSource {
 	pub(crate) async fn continuously_sync_wallets(
 		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>, onchain_wallet: Arc<Wallet>,
 		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-		output_sweeper: Arc<Sweeper>,
+		output_sweeper: Arc<Sweeper>, eltoo: Arc<crate::eltoo::EltooRuntime>,
 	) {
 		match &self.kind {
 			ChainSourceKind::Esplora(esplora_chain_source) => {
@@ -286,6 +286,7 @@ impl ChainSource {
 						channel_manager,
 						chain_monitor,
 						output_sweeper,
+						eltoo,
 					)
 					.await
 			},
@@ -399,6 +400,7 @@ impl ChainSource {
 	pub(crate) async fn poll_and_update_listeners(
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		eltoo: Arc<crate::eltoo::EltooRuntime>,
 	) -> Result<(), Error> {
 		match &self.kind {
 			ChainSourceKind::Esplora { .. } => {
@@ -418,6 +420,7 @@ impl ChainSource {
 						channel_manager,
 						chain_monitor,
 						output_sweeper,
+						eltoo,
 					)
 					.await
 			},

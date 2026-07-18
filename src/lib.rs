@@ -86,6 +86,7 @@ mod chain;
 pub mod config;
 mod connection;
 mod data_store;
+mod eltoo;
 pub mod entropy;
 mod error;
 mod event;
@@ -146,13 +147,14 @@ use graph::NetworkGraph;
 use io::utils::update_and_persist_node_metrics;
 pub use lightning;
 use lightning::chain::BlockLocator;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based;
 use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 pub use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
+use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStore;
@@ -162,6 +164,7 @@ pub use lightning_invoice;
 pub use lightning_liquidity;
 pub use lightning_types;
 use lightning_types::features::NodeFeatures as LdkNodeFeatures;
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use liquidity::LiquiditySource;
 use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -250,6 +253,7 @@ pub struct Node {
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
 	hrn_resolver: HRNResolver,
+	eltoo: Arc<crate::eltoo::EltooRuntime>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }
@@ -296,6 +300,7 @@ impl Node {
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
+		let sync_eltoo = Arc::clone(&self.eltoo);
 		self.runtime.spawn_background_task(async move {
 			chain_source
 				.continuously_sync_wallets(
@@ -304,8 +309,31 @@ impl Node {
 					sync_cman,
 					sync_cmon,
 					sync_sweeper,
+					sync_eltoo,
 				)
 				.await;
+		});
+
+		// Spawn the eltoo driver: funds accepted eltoo channels, pumps broadcasts
+		// (with P2A CPFP children) and flushes outbound eltoo messages.
+		let eltoo_runtime = Arc::clone(&self.eltoo);
+		let eltoo_peer_manager = Arc::clone(&self.peer_manager);
+		let mut stop_eltoo = self.stop_sender.subscribe();
+		self.runtime.spawn_cancellable_background_task(async move {
+			let mut interval = tokio::time::interval(Duration::from_millis(100));
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+					biased;
+					_ = stop_eltoo.changed() => {
+						return;
+					}
+					_ = interval.tick() => {
+						eltoo_runtime.process().await;
+						eltoo_peer_manager.process_events();
+					}
+				}
+			}
 		});
 
 		if self.gossip_source.is_rgs() {
@@ -1924,6 +1952,7 @@ impl Node {
 		let sync_cman = Arc::clone(&self.channel_manager);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
+		let sync_eltoo = Arc::clone(&self.eltoo);
 		self.runtime.block_on(async move {
 			if chain_source.is_transaction_based() {
 				chain_source.update_fee_rate_estimates().await?;
@@ -1939,12 +1968,87 @@ impl Node {
 						sync_cman,
 						sync_cmon,
 						Arc::clone(&sync_sweeper),
+						sync_eltoo,
 					)
 					.await?;
 			}
 			let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
 			Ok(())
 		})
+	}
+
+	/// Opens an experimental eltoo (LN-Symmetry over BIP-448) channel with the given peer,
+	/// funded from the on-chain wallet. Returns the temporary channel id; the final id is
+	/// reported via the `ChannelReady` event in [`Node::eltoo_events`] once the funding
+	/// transaction (created and broadcast automatically after the peer accepts) confirms.
+	///
+	/// Eltoo channels are in-memory only (they do not survive restarts) and require a
+	/// bitcoind chain source and a BIP-448-patched Bitcoin Core.
+	pub fn open_eltoo_channel(
+		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
+		push_to_counterparty_msat: u64,
+	) -> Result<ChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+		self.connect(node_id, address, false)?;
+		let temp_id = self.eltoo.manager.create_channel(
+			node_id,
+			channel_amount_sats,
+			push_to_counterparty_msat,
+		);
+		self.eltoo.register_pending_channel(temp_id, channel_amount_sats);
+		self.peer_manager.process_events();
+		Ok(temp_id)
+	}
+
+	/// Registers a payment to be received over an eltoo channel, returning the payment
+	/// hash for the sender (communicated out-of-band; the PoC has no invoices).
+	pub fn eltoo_receive_payment(&self) -> PaymentHash {
+		let preimage = PaymentPreimage(self.keys_manager.get_secure_random_bytes());
+		self.eltoo.manager.register_payment(preimage)
+	}
+
+	/// Sends a payment over the given (direct) eltoo channel.
+	pub fn send_eltoo_payment(
+		&self, channel_id: ChannelId, amount_msat: u64, payment_hash: PaymentHash,
+	) -> Result<(), Error> {
+		let cltv_expiry = self.eltoo.tip() + 300;
+		self.eltoo
+			.manager
+			.send_payment(channel_id, amount_msat, payment_hash, cltv_expiry)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to send eltoo payment: {:?}", e);
+				Error::PaymentSendingFailed
+			})?;
+		self.peer_manager.process_events();
+		Ok(())
+	}
+
+	/// Cooperatively closes the given eltoo channel, paying our balance to the on-chain
+	/// wallet.
+	pub fn close_eltoo_channel(&self, channel_id: ChannelId) -> Result<(), Error> {
+		let address = self.wallet.get_new_address().map_err(|e| {
+			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
+			Error::ChannelClosingFailed
+		})?;
+		self.eltoo.manager.close_channel(channel_id, address.script_pubkey()).map_err(|e| {
+			log_error!(self.logger, "Failed to close eltoo channel: {:?}", e);
+			Error::ChannelClosingFailed
+		})?;
+		self.peer_manager.process_events();
+		Ok(())
+	}
+
+	/// Force-closes the given eltoo channel by broadcasting the latest state; the
+	/// settlement follows after the shared delay, driven by chain sync.
+	pub fn force_close_eltoo_channel(&self, channel_id: ChannelId) {
+		self.eltoo.manager.force_close_channel(channel_id);
+	}
+
+	/// Drains the pending eltoo events (channels becoming ready, payment outcomes, ...).
+	pub fn eltoo_events(&self) -> Vec<lightning::ln::eltoo::channelmanager::EltooEvent> {
+		self.eltoo.take_events()
 	}
 
 	/// Close a previously opened channel.
@@ -2365,7 +2469,7 @@ impl PersistedNodeMetrics {
 	}
 }
 
-impl_writeable_tlv_based!(NodeMetrics, {
+impl_ser_tlv_based!(NodeMetrics, {
 	(0, latest_lightning_wallet_sync_timestamp, option),
 	(1, latest_pathfinding_scores_sync_timestamp, option),
 	(2, latest_onchain_wallet_sync_timestamp, option),
@@ -2435,7 +2539,7 @@ mod tests {
 			latest_pathfinding_scores_sync_timestamp: Option<u64>,
 			latest_node_announcement_broadcast_timestamp: Option<u64>,
 		}
-		impl_writeable_tlv_based!(OldNodeMetrics, {
+		impl_ser_tlv_based!(OldNodeMetrics, {
 			(0, latest_lightning_wallet_sync_timestamp, option),
 			(1, latest_pathfinding_scores_sync_timestamp, option),
 			(2, latest_onchain_wallet_sync_timestamp, option),

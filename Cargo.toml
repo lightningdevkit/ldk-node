@@ -141,6 +141,23 @@ check-cfg = [
 name = "payments"
 harness = false
 
+# EXPERIMENTAL: redirect all rust-lightning crates to the eltoo PoC tree
+# (LN-Symmetry over BIP-448; forked from upstream main @ 7b115207c, ~3 weeks
+# ahead of the rev pinned above).
+[patch."https://github.com/lightningdevkit/rust-lightning"]
+lightning = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-types = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-invoice = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-net-tokio = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-persister = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-background-processor = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-rapid-gossip-sync = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-block-sync = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-transaction-sync = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-liquidity = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-macros = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+lightning-dns-resolver = { git = "https://github.com/elnosh/rust-lightning", rev = "dbea0f87a6d6c9522612ebb81f94169da854eeef" }
+
 #[patch.crates-io]
 #lightning = { path = "../rust-lightning/lightning" }
 #lightning-types = { path = "../rust-lightning/lightning-types" }
