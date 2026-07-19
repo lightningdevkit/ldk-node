@@ -79,7 +79,7 @@ The Minimum Supported Rust Version (MSRV) is currently 1.85.0.
 [api_docs]: https://docs.rs/ldk-node/*/ldk_node/
 [api_docs_node]: https://docs.rs/ldk-node/*/ldk_node/struct.Node.html
 [api_docs_builder]: https://docs.rs/ldk-node/*/ldk_node/struct.Builder.html
-[rust_crate]: https://crates.io/
+[rust_crate]: https://crates.io/crates/ldk-node
 [ldk]: https://lightningdevkit.org/
 [bdk]: https://bitcoindevkit.org/
 [electrum]: https://github.com/spesmilo/electrum-protocol
