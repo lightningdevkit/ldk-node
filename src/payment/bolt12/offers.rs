@@ -6,6 +6,7 @@
 // accordance with one or both of these licenses.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use bitcoin::block::Header;
@@ -52,6 +53,38 @@ impl InvoiceBuildError {
 	}
 }
 
+const MAX_PENDING_JIT_INVOICE_REQUESTS: usize = 100;
+
+struct PendingJitInvoiceRequests {
+	in_flight: Arc<AtomicUsize>,
+	limit: usize,
+}
+
+impl PendingJitInvoiceRequests {
+	fn new(limit: usize) -> Self {
+		Self { in_flight: Arc::new(AtomicUsize::new(0)), limit }
+	}
+
+	fn try_acquire(&self) -> Option<PendingJitInvoiceRequest> {
+		self.in_flight
+			.fetch_update(Ordering::AcqRel, Ordering::Acquire, |in_flight| {
+				(in_flight < self.limit).then_some(in_flight + 1)
+			})
+			.ok()
+			.map(|_| PendingJitInvoiceRequest { in_flight: Arc::clone(&self.in_flight) })
+	}
+}
+
+struct PendingJitInvoiceRequest {
+	in_flight: Arc<AtomicUsize>,
+}
+
+impl Drop for PendingJitInvoiceRequest {
+	fn drop(&mut self) {
+		self.in_flight.fetch_sub(1, Ordering::AcqRel);
+	}
+}
+
 struct JitInvoiceRequestDependencies {
 	runtime: Arc<Runtime>,
 	lsps2_client: Arc<LSPS2Client<Arc<Logger>>>,
@@ -68,6 +101,7 @@ pub(crate) struct NodeOffersMessageHandler {
 	secp_ctx: Arc<Secp256k1<bitcoin::secp256k1::All>>,
 	best_block: RwLock<BlockLocator>,
 	jit_dependencies: OnceLock<JitInvoiceRequestDependencies>,
+	pending_jit_invoice_requests: PendingJitInvoiceRequests,
 	logger: Arc<Logger>,
 }
 
@@ -99,6 +133,9 @@ impl NodeOffersMessageHandler {
 			secp_ctx: Arc::new(secp_ctx),
 			best_block: RwLock::new(best_block),
 			jit_dependencies: OnceLock::new(),
+			pending_jit_invoice_requests: PendingJitInvoiceRequests::new(
+				MAX_PENDING_JIT_INVOICE_REQUESTS,
+			),
 			logger,
 		}
 	}
@@ -289,6 +326,17 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 				));
 			},
 		};
+		let pending_request = match self.pending_jit_invoice_requests.try_acquire() {
+			Some(pending_request) => pending_request,
+			None => {
+				return Some((
+					OffersMessage::InvoiceError(InvoiceError::from_string(
+						"Too many pending JIT invoice requests".to_owned(),
+					)),
+					responder.respond(),
+				));
+			},
+		};
 		let connection_manager = match dependencies.connection_manager.upgrade() {
 			Some(connection_manager) => connection_manager,
 			None => {
@@ -320,6 +368,7 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 		let secp_ctx = Arc::clone(&self.secp_ctx);
 		let logger = Arc::clone(&self.logger);
 		dependencies.runtime.spawn_cancellable_background_task(async move {
+			let _pending_request = pending_request;
 			let response =
 				lsps2_client.prepare_invoice_response(jit_request, connection_manager).await;
 			let (message, instructions) = match response {
@@ -472,5 +521,17 @@ mod tests {
 			JitInvoiceRequest::Variable { amount_msat: 2_500, absolute_expiry: None }
 		);
 		assert!(!request.allow_mpp());
+	}
+
+	#[test]
+	fn pending_jit_invoice_requests_are_bounded() {
+		let pending_requests = PendingJitInvoiceRequests::new(2);
+		let first = pending_requests.try_acquire().unwrap();
+		let _second = pending_requests.try_acquire().unwrap();
+
+		assert!(pending_requests.try_acquire().is_none());
+
+		drop(first);
+		assert!(pending_requests.try_acquire().is_some());
 	}
 }
