@@ -42,6 +42,7 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::payment::NodeOffersMessageHandler;
 use crate::tx_broadcaster::SortedTransactions;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
@@ -156,7 +157,8 @@ impl BitcoindChainSource {
 	pub(super) async fn continuously_sync_wallets(
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
 		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
-		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
 	) {
 		// First register for the wallet polling status to make sure `Node::sync_wallets` calls
 		// wait on the result before proceeding.
@@ -184,11 +186,13 @@ impl BitcoindChainSource {
 
 			let onchain_wallet_best_block = onchain_wallet.current_best_block();
 			let channel_manager_best_block = channel_manager.current_best_block();
+			let offers_best_block = offers_message_handler.current_best_block();
 			let sweeper_best_block = output_sweeper.current_best_block();
 
 			let mut chain_listeners = vec![
 				(onchain_wallet_best_block, &*onchain_wallet as &(dyn Listen + Send + Sync)),
 				(channel_manager_best_block, &*channel_manager as &(dyn Listen + Send + Sync)),
+				(offers_best_block, &*offers_message_handler as &(dyn Listen + Send + Sync)),
 				(sweeper_best_block, &*output_sweeper as &(dyn Listen + Send + Sync)),
 			];
 
@@ -224,6 +228,7 @@ impl BitcoindChainSource {
 						header_cache,
 						Arc::clone(&onchain_wallet),
 						Arc::clone(&channel_manager),
+						Arc::clone(&offers_message_handler),
 						Arc::clone(&chain_monitor),
 						Arc::clone(&output_sweeper),
 					);
@@ -341,6 +346,7 @@ impl BitcoindChainSource {
 						_ = self.poll_and_update_listeners(
 							Arc::clone(&onchain_wallet),
 							Arc::clone(&channel_manager),
+							Arc::clone(&offers_message_handler),
 							Arc::clone(&chain_monitor),
 							Arc::clone(&output_sweeper)
 						) => {}
@@ -398,7 +404,8 @@ impl BitcoindChainSource {
 
 	pub(super) async fn poll_and_update_listeners(
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
-		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		let receiver_res = {
 			let mut status_lock = self.wallet_polling_status.lock().expect("lock");
@@ -418,6 +425,7 @@ impl BitcoindChainSource {
 			.poll_and_update_listeners_inner(
 				onchain_wallet,
 				channel_manager,
+				offers_message_handler,
 				chain_monitor,
 				output_sweeper,
 			)
@@ -430,7 +438,8 @@ impl BitcoindChainSource {
 
 	async fn poll_and_update_listeners_inner(
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
-		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		let mut spv_client_lock = self.spv_client.lock().await;
 		if spv_client_lock.is_none() {
@@ -445,6 +454,7 @@ impl BitcoindChainSource {
 				HeaderCache::new(),
 				Arc::clone(&onchain_wallet),
 				Arc::clone(&channel_manager),
+				Arc::clone(&offers_message_handler),
 				chain_monitor,
 				output_sweeper,
 			));
@@ -511,12 +521,14 @@ impl BitcoindChainSource {
 	fn new_spv_client(
 		&self, chain_tip: ValidatedBlockHeader, header_cache: HeaderCache,
 		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
-		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
 	) -> BitcoindSpvClient {
 		let chain_poller = ChainPoller::new(Arc::clone(&self.api_client), self.config.network);
 		let chain_listener = Arc::new(ChainListener {
 			onchain_wallet: Arc::downgrade(&onchain_wallet),
 			channel_manager: Arc::downgrade(&channel_manager),
+			offers_message_handler: Arc::downgrade(&offers_message_handler),
 			chain_monitor: Arc::downgrade(&chain_monitor),
 			output_sweeper: Arc::downgrade(&output_sweeper),
 		});
@@ -1507,6 +1519,7 @@ pub(crate) enum FeeRateEstimationMode {
 pub(crate) struct ChainListener {
 	pub(crate) onchain_wallet: std::sync::Weak<Wallet>,
 	pub(crate) channel_manager: std::sync::Weak<ChannelManager>,
+	pub(crate) offers_message_handler: std::sync::Weak<NodeOffersMessageHandler>,
 	pub(crate) chain_monitor: std::sync::Weak<ChainMonitor>,
 	pub(crate) output_sweeper: std::sync::Weak<Sweeper>,
 }
@@ -1514,10 +1527,17 @@ pub(crate) struct ChainListener {
 impl ChainListener {
 	fn upgrade(
 		&self,
-	) -> Option<(Arc<Wallet>, Arc<ChannelManager>, Arc<ChainMonitor>, Arc<Sweeper>)> {
+	) -> Option<(
+		Arc<Wallet>,
+		Arc<ChannelManager>,
+		Arc<NodeOffersMessageHandler>,
+		Arc<ChainMonitor>,
+		Arc<Sweeper>,
+	)> {
 		Some((
 			self.onchain_wallet.upgrade()?,
 			self.channel_manager.upgrade()?,
+			self.offers_message_handler.upgrade()?,
 			self.chain_monitor.upgrade()?,
 			self.output_sweeper.upgrade()?,
 		))
@@ -1529,32 +1549,50 @@ impl Listen for ChainListener {
 		&self, header: &bitcoin::block::Header,
 		txdata: &lightning::chain::transaction::TransactionData, height: u32,
 	) {
-		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
-			self.upgrade()
+		if let Some((
+			onchain_wallet,
+			channel_manager,
+			offers_message_handler,
+			chain_monitor,
+			output_sweeper,
+		)) = self.upgrade()
 		{
 			onchain_wallet.filtered_block_connected(header, txdata, height);
 			channel_manager.filtered_block_connected(header, txdata, height);
+			offers_message_handler.filtered_block_connected(header, txdata, height);
 			chain_monitor.filtered_block_connected(header, txdata, height);
 			output_sweeper.filtered_block_connected(header, txdata, height);
 		}
 	}
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
-		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
-			self.upgrade()
+		if let Some((
+			onchain_wallet,
+			channel_manager,
+			offers_message_handler,
+			chain_monitor,
+			output_sweeper,
+		)) = self.upgrade()
 		{
 			onchain_wallet.block_connected(block, height);
 			channel_manager.block_connected(block, height);
+			offers_message_handler.block_connected(block, height);
 			chain_monitor.block_connected(block, height);
 			output_sweeper.block_connected(block, height);
 		}
 	}
 
 	fn blocks_disconnected(&self, fork_point_block: lightning::chain::BlockLocator) {
-		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
-			self.upgrade()
+		if let Some((
+			onchain_wallet,
+			channel_manager,
+			offers_message_handler,
+			chain_monitor,
+			output_sweeper,
+		)) = self.upgrade()
 		{
 			onchain_wallet.blocks_disconnected(fork_point_block);
 			channel_manager.blocks_disconnected(fork_point_block);
+			offers_message_handler.blocks_disconnected(fork_point_block);
 			chain_monitor.blocks_disconnected(fork_point_block);
 			output_sweeper.blocks_disconnected(fork_point_block);
 		}
