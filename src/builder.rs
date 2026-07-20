@@ -2176,8 +2176,14 @@ fn build_with_store_internal(
 	};
 
 	let channel_manager = Arc::new(channel_manager);
-	let offers_message_handler =
-		Arc::new(NodeOffersMessageHandler::new(Arc::clone(&channel_manager)));
+	let offers_message_handler = Arc::new(NodeOffersMessageHandler::new(
+		config.network,
+		cur_time.as_secs().try_into().map_err(|_| BuildError::InvalidSystemTime)?,
+		Arc::clone(&channel_manager),
+		Arc::clone(&keys_manager),
+		Arc::clone(&message_router),
+		Arc::clone(&logger),
+	));
 
 	// Give ChannelMonitors to ChainMonitor
 	for (_blockhash, channel_monitor) in channel_monitors.into_iter() {
@@ -2539,6 +2545,7 @@ fn build_with_store_internal(
 		output_sweeper,
 		peer_manager,
 		onion_messenger,
+		offers_message_handler,
 		connection_manager,
 		keys_manager,
 		network_graph,

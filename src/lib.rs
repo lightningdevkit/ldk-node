@@ -178,8 +178,8 @@ use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 pub use payment::forwarding_store::aggregate_channel_pair_stats;
 use payment::forwarding_store::{run_forwarded_payment_aggregation, ForwardingStore};
 use payment::{
-	Bolt11Payment, Bolt12Payment, ForwardingAnalytics, OnchainPayment, PaymentDetails,
-	PaymentDetailsPage, SpontaneousPayment,
+	Bolt11Payment, Bolt12Payment, ForwardingAnalytics, NodeOffersMessageHandler, OnchainPayment,
+	PaymentDetails, PaymentDetailsPage, SpontaneousPayment,
 };
 #[cfg(feature = "unified-payments")]
 use payment::{HRNResolver, UnifiedPayment};
@@ -261,6 +261,7 @@ pub struct Node {
 	output_sweeper: Arc<Sweeper>,
 	peer_manager: Arc<PeerManager>,
 	onion_messenger: Arc<OnionMessenger>,
+	offers_message_handler: Arc<NodeOffersMessageHandler>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
@@ -371,6 +372,7 @@ impl Node {
 		let chain_source = Arc::clone(&self.chain_source);
 		let sync_wallet = Arc::clone(&self.wallet);
 		let sync_cman = Arc::clone(&self.channel_manager);
+		let sync_offers = Arc::clone(&self.offers_message_handler);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		self.runtime.spawn_background_task(async move {
@@ -379,6 +381,7 @@ impl Node {
 					stop_sync_receiver,
 					sync_wallet,
 					sync_cman,
+					sync_offers,
 					sync_cmon,
 					sync_sweeper,
 				)
@@ -2087,13 +2090,19 @@ impl Node {
 		let chain_source = Arc::clone(&self.chain_source);
 		let sync_wallet = Arc::clone(&self.wallet);
 		let sync_cman = Arc::clone(&self.channel_manager);
+		let sync_offers = Arc::clone(&self.offers_message_handler);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		self.runtime.block_on(async move {
 			if chain_source.is_transaction_based() {
 				chain_source.update_fee_rate_estimates().await?;
 				chain_source
-					.sync_lightning_wallet(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
+					.sync_lightning_wallet(
+						sync_cman,
+						sync_offers,
+						sync_cmon,
+						Arc::clone(&sync_sweeper),
+					)
 					.await?;
 				chain_source.sync_onchain_wallet(sync_wallet).await?;
 			} else {
@@ -2102,6 +2111,7 @@ impl Node {
 					.poll_and_update_listeners(
 						sync_wallet,
 						sync_cman,
+						sync_offers,
 						sync_cmon,
 						Arc::clone(&sync_sweeper),
 					)
