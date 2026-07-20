@@ -65,6 +65,34 @@ pub(crate) enum WalletSyncStatus {
 	InProgress { subscribers: tokio::sync::broadcast::Sender<Result<(), Error>> },
 }
 
+pub(crate) struct WalletSyncGuard<'a> {
+	status: &'a Mutex<WalletSyncStatus>,
+	cancellation_error: Error,
+	active: bool,
+}
+
+impl<'a> WalletSyncGuard<'a> {
+	pub(crate) fn new(status: &'a Mutex<WalletSyncStatus>, cancellation_error: Error) -> Self {
+		Self { status, cancellation_error, active: true }
+	}
+
+	pub(crate) fn complete(mut self, res: Result<(), Error>) {
+		self.status.lock().expect("lock").propagate_result_to_subscribers(res);
+		self.active = false;
+	}
+}
+
+impl Drop for WalletSyncGuard<'_> {
+	fn drop(&mut self) {
+		if self.active {
+			self.status
+				.lock()
+				.expect("lock")
+				.propagate_result_to_subscribers(Err(self.cancellation_error));
+		}
+	}
+}
+
 impl WalletSyncStatus {
 	fn register_or_subscribe_pending_sync(
 		&mut self,
@@ -95,16 +123,7 @@ impl WalletSyncStatus {
 				WalletSyncStatus::InProgress { subscribers } => {
 					// A sync is in-progress, we notify subscribers.
 					if subscribers.receiver_count() > 0 {
-						match subscribers.send(res) {
-							Ok(_) => (),
-							Err(e) => {
-								debug_assert!(
-									false,
-									"Failed to send wallet sync result to subscribers: {:?}",
-									e
-								);
-							},
-						}
+						let _ = subscribers.send(res);
 					}
 					*self = WalletSyncStatus::Completed;
 				},
@@ -559,5 +578,30 @@ impl Filter for ChainSource {
 			},
 			ChainSourceKind::Bitcoind { .. } => (),
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn wallet_sync_guard_resets_abandoned_sync() {
+		let status = Mutex::new(WalletSyncStatus::Completed);
+		assert!(status.lock().expect("lock").register_or_subscribe_pending_sync().is_none());
+		let sync_guard = WalletSyncGuard::new(&status, Error::WalletOperationFailed);
+		let mut subscriber = status
+			.lock()
+			.expect("lock")
+			.register_or_subscribe_pending_sync()
+			.expect("sync subscriber");
+
+		drop(sync_guard);
+
+		assert!(
+			matches!(*status.lock().expect("lock"), WalletSyncStatus::Completed),
+			"abandoned wallet sync should reset its status"
+		);
+		assert_eq!(subscriber.try_recv(), Ok(Err(Error::WalletOperationFailed)));
 	}
 }

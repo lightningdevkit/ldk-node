@@ -31,7 +31,7 @@ use lightning_block_sync::{
 };
 use serde::Serialize;
 
-use super::WalletSyncStatus;
+use super::{WalletSyncGuard, WalletSyncStatus};
 use crate::config::{
 	BitcoindRestClientConfig, Config, DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
 	DEFAULT_TX_BROADCAST_TIMEOUT_SECS,
@@ -152,12 +152,14 @@ impl BitcoindChainSource {
 	) {
 		// First register for the wallet polling status to make sure `Node::sync_wallets` calls
 		// wait on the result before proceeding.
-		{
+		let initial_sync_guard = {
 			let mut status_lock = self.wallet_polling_status.lock().expect("lock");
 			if status_lock.register_or_subscribe_pending_sync().is_some() {
 				debug_assert!(false, "Sync already in progress. This should never happen.");
+				return;
 			}
-		}
+			WalletSyncGuard::new(&self.wallet_polling_status, Error::WalletOperationFailed)
+		};
 
 		log_info!(
 			self.logger,
@@ -285,7 +287,7 @@ impl BitcoindChainSource {
 		}
 
 		// Now propagate the initial result to unblock waiting subscribers.
-		self.wallet_polling_status.lock().expect("lock").propagate_result_to_subscribers(Ok(()));
+		initial_sync_guard.complete(Ok(()));
 
 		let mut chain_polling_interval =
 			tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
@@ -396,6 +398,8 @@ impl BitcoindChainSource {
 				Error::WalletOperationFailed
 			})?;
 		}
+		let sync_guard =
+			WalletSyncGuard::new(&self.wallet_polling_status, Error::WalletOperationFailed);
 
 		let res = self
 			.poll_and_update_listeners_inner(
@@ -406,7 +410,7 @@ impl BitcoindChainSource {
 			)
 			.await;
 
-		self.wallet_polling_status.lock().expect("lock").propagate_result_to_subscribers(res);
+		sync_guard.complete(res);
 
 		res
 	}
