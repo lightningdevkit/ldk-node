@@ -10,8 +10,8 @@
 pub(crate) mod client;
 pub(crate) mod service;
 
-use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -41,6 +41,45 @@ use crate::{Config, Error};
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 const LSPS_DISCOVERY_WAIT_TIMEOUT_SECS: u64 = 10;
+
+pub(crate) struct PendingRequest<T> {
+	token: Arc<()>,
+	pub(crate) sender: oneshot::Sender<T>,
+	followers: Vec<oneshot::Sender<T>>,
+}
+
+pub(crate) struct PendingRequestGuard<'a, K: Clone + Eq + Hash, T> {
+	pending_requests: &'a Mutex<HashMap<K, PendingRequest<T>>>,
+	request_key: K,
+	token: Arc<()>,
+}
+
+impl<'a, K: Clone + Eq + Hash, T> PendingRequestGuard<'a, K, T> {
+	pub(crate) fn insert(
+		pending_requests: &'a Mutex<HashMap<K, PendingRequest<T>>>,
+		pending_requests_lock: &mut HashMap<K, PendingRequest<T>>, request_key: K,
+		sender: oneshot::Sender<T>,
+	) -> Self {
+		let token = Arc::new(());
+		pending_requests_lock.insert(
+			request_key.clone(),
+			PendingRequest { token: Arc::clone(&token), sender, followers: Vec::new() },
+		);
+		Self { pending_requests, request_key, token }
+	}
+}
+
+impl<K: Clone + Eq + Hash, T> Drop for PendingRequestGuard<'_, K, T> {
+	fn drop(&mut self) {
+		let mut pending_requests = self.pending_requests.lock().expect("lock");
+		if pending_requests
+			.get(&self.request_key)
+			.is_some_and(|request| Arc::ptr_eq(&request.token, &self.token))
+		{
+			pending_requests.remove(&self.request_key);
+		}
+	}
+}
 
 fn select_lsps_for_protocol(
 	lsp_nodes: &Arc<RwLock<Vec<LspNode>>>, protocol: u16, override_node_id: Option<&PublicKey>,
@@ -345,7 +384,7 @@ where
 	lsps1_client: Arc<LSPS1Client<L>>,
 	lsps2_client: Arc<LSPS2Client<L>>,
 	lsps2_service: Arc<LSPS2ServiceLiquiditySource<L>>,
-	pending_lsps0_discovery: Mutex<HashMap<PublicKey, Vec<oneshot::Sender<Vec<u16>>>>>,
+	pending_lsps0_discovery: Mutex<HashMap<PublicKey, PendingRequest<Vec<u16>>>>,
 	discovery_done_tx: tokio::sync::watch::Sender<bool>,
 	discovery_done_rx: tokio::sync::watch::Receiver<bool>,
 	liquidity_manager: Arc<LiquidityManager>,
@@ -383,13 +422,14 @@ where
 				protocols,
 			}) => {
 				if self.is_lsps_node(&counterparty_node_id) {
-					if let Some(senders) = self
+					if let Some(request) = self
 						.pending_lsps0_discovery
 						.lock()
 						.expect("lock")
 						.remove(&counterparty_node_id)
 					{
-						for sender in senders {
+						let _ = request.sender.send(protocols.clone());
+						for sender in request.followers {
 							let _ = sender.send(protocols.clone());
 						}
 					} else {
@@ -431,23 +471,25 @@ where
 		let lsps0_handler = self.liquidity_manager.lsps0_client_handler();
 
 		let (sender, receiver) = oneshot::channel();
-		let issued_request = {
+		let _pending_request = {
 			let mut pending_discovery = self.pending_lsps0_discovery.lock().expect("lock");
-			match pending_discovery.entry(*node_id) {
-				Entry::Occupied(mut e) => {
-					e.get_mut().push(sender);
-					false
-				},
-				Entry::Vacant(v) => {
-					v.insert(vec![sender]);
-					lsps0_handler.list_protocols(node_id);
-					true
-				},
+			if let Some(request) = pending_discovery.get_mut(node_id) {
+				request.followers.push(sender);
+				None
+			} else {
+				let request_guard = PendingRequestGuard::insert(
+					&self.pending_lsps0_discovery,
+					&mut pending_discovery,
+					*node_id,
+					sender,
+				);
+				lsps0_handler.list_protocols(node_id);
+				Some(request_guard)
 			}
 		};
 
-		// Only the request that issued the discovery may remove the entry; a follower removing it
-		// would drop the in-flight request and all other waiters.
+		// Only the request that issued the discovery holds the guard. If it is abandoned, dropping
+		// the pending request also wakes all followers without risking removal of a newer request.
 		let protocols =
 			tokio::time::timeout(Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS), receiver)
 				.await
@@ -458,9 +500,6 @@ where
 						node_id,
 						e
 					);
-					if issued_request {
-						self.pending_lsps0_discovery.lock().expect("lock").remove(node_id);
-					}
 					Error::LiquidityRequestFailed
 				})?
 				.map_err(|e| {
@@ -470,9 +509,6 @@ where
 						node_id,
 						e
 					);
-					if issued_request {
-						self.pending_lsps0_discovery.lock().expect("lock").remove(node_id);
-					}
 					Error::LiquidityRequestFailed
 				})?;
 
@@ -538,5 +574,85 @@ where
 	/// discovered by the background task spawned in `Node::start`.
 	pub(crate) fn mark_discovery_done(&self) {
 		let _ = self.discovery_done_tx.send(true);
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn pending_request_guard_removes_abandoned_request() {
+		let pending_requests = Mutex::new(HashMap::new());
+		let (sender, receiver) = oneshot::channel::<()>();
+		let request_guard = {
+			let mut pending_requests_lock = pending_requests.lock().expect("lock");
+			PendingRequestGuard::insert(
+				&pending_requests,
+				&mut pending_requests_lock,
+				"request".to_owned(),
+				sender,
+			)
+		};
+		let (follower_sender, mut follower_receiver) = oneshot::channel();
+		pending_requests
+			.lock()
+			.expect("lock")
+			.get_mut("request")
+			.expect("request should be pending")
+			.followers
+			.push(follower_sender);
+
+		drop(receiver);
+		drop(request_guard);
+
+		assert!(
+			pending_requests.lock().expect("lock").is_empty(),
+			"abandoned pending request should be removed"
+		);
+		assert!(
+			matches!(follower_receiver.try_recv(), Err(oneshot::error::TryRecvError::Closed)),
+			"abandoned pending request should wake its followers"
+		);
+	}
+
+	#[test]
+	fn pending_request_guard_preserves_replacement() {
+		let pending_requests = Mutex::new(HashMap::new());
+		let (old_sender, old_receiver) = oneshot::channel::<()>();
+		let old_request_guard = {
+			let mut pending_requests_lock = pending_requests.lock().expect("lock");
+			PendingRequestGuard::insert(
+				&pending_requests,
+				&mut pending_requests_lock,
+				"request".to_owned(),
+				old_sender,
+			)
+		};
+
+		pending_requests.lock().expect("lock").remove("request");
+		drop(old_receiver);
+
+		let (replacement_sender, replacement_receiver) = oneshot::channel::<()>();
+		let replacement_request_guard = {
+			let mut pending_requests_lock = pending_requests.lock().expect("lock");
+			PendingRequestGuard::insert(
+				&pending_requests,
+				&mut pending_requests_lock,
+				"request".to_owned(),
+				replacement_sender,
+			)
+		};
+
+		drop(old_request_guard);
+		assert_eq!(
+			pending_requests.lock().expect("lock").len(),
+			1,
+			"an older guard should not remove a replacement request"
+		);
+
+		drop(replacement_receiver);
+		drop(replacement_request_guard);
+		assert!(pending_requests.lock().expect("lock").is_empty());
 	}
 }
