@@ -113,6 +113,7 @@ interface Node {
 	OnchainPayment onchain_payment();
 	UnifiedPayment unified_payment();
 	Liquidity liquidity();
+	LSPS5Liquidity lsps5_liquidity();
 	[Throws=NodeError]
 	void lnurl_auth(string lnurl);
 	[Throws=NodeError]
@@ -184,6 +185,8 @@ typedef interface UnifiedPayment;
 
 typedef interface Liquidity;
 
+typedef interface LSPS5Liquidity;
+
 [Error]
 enum NodeError {
 	"AlreadyRunning",
@@ -247,6 +250,9 @@ enum NodeError {
 	"LnurlAuthTimeout",
 	"InvalidLnurl",
 	"ChainSourceNotSupported",
+	"LiquiditySetWebhookFailed",
+	"LiquidityRemoveWebhookFailed",
+	"LiquidityListWebhooksFailed"
 };
 
 typedef dictionary NodeStatus;
