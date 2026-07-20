@@ -1990,6 +1990,7 @@ fn build_with_store_internal(
 		cur_time.as_secs().try_into().map_err(|_| BuildError::InvalidSystemTime)?,
 		Arc::clone(&channel_manager),
 		Arc::clone(&keys_manager),
+		Arc::clone(&router),
 		Arc::clone(&message_router),
 		Arc::clone(&logger),
 	));
