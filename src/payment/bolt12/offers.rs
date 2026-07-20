@@ -5,12 +5,14 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+use std::time::{Duration, Instant};
 
 use bitcoin::block::Header;
 use bitcoin::constants::ChainHash;
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::{Block, BlockHash, Network, Txid};
 use lightning::blinded_path::message::{MessageContext, OffersContext};
@@ -29,6 +31,7 @@ use lightning::onion_message::offers::{OffersMessage, OffersMessageHandler};
 use lightning::sign::{EntropySource, NodeSigner, Recipient};
 use lightning::types::payment::{PaymentHash, PaymentSecret};
 use lightning::util::logger::Logger as _;
+use lightning::util::ser::Writeable;
 
 use crate::connection::ConnectionManager;
 use crate::liquidity::client::lsps2::{JitInvoiceRequest, LSPS2Client};
@@ -66,6 +69,137 @@ where
 	result
 }
 
+const MAX_PENDING_JIT_INVOICE_REQUESTS: usize = 100;
+const MAX_PENDING_JIT_INVOICE_RESPONDERS: usize = 100;
+const MAX_RESPONDERS_PER_JIT_INVOICE_REQUEST: usize = 10;
+const MAX_COMPLETED_JIT_INVOICE_RESPONSES: usize = 100;
+const JIT_INVOICE_RESPONSE_CACHE_LIFETIME: Duration = Duration::from_secs(60);
+
+struct PendingJitInvoiceRequests<T> {
+	state: Arc<Mutex<PendingJitInvoiceRequestState<T>>>,
+	request_limit: usize,
+	responder_limit: usize,
+	per_request_limit: usize,
+}
+
+struct PendingJitInvoiceRequestState<T> {
+	requests: HashMap<sha256::Hash, Vec<T>>,
+	completed_responses: HashMap<sha256::Hash, (Instant, Bolt12Invoice, MessageContext)>,
+	responder_count: usize,
+}
+
+impl<T> PendingJitInvoiceRequestState<T> {
+	fn expire_completed_responses(&mut self) {
+		self.completed_responses.retain(|_, (completed_at, invoice, _)| {
+			completed_at.elapsed() < JIT_INVOICE_RESPONSE_CACHE_LIFETIME && !invoice.is_expired()
+		});
+	}
+}
+
+impl<T> PendingJitInvoiceRequests<T> {
+	fn new(request_limit: usize, responder_limit: usize, per_request_limit: usize) -> Self {
+		Self {
+			state: Arc::new(Mutex::new(PendingJitInvoiceRequestState {
+				requests: HashMap::new(),
+				completed_responses: HashMap::new(),
+				responder_count: 0,
+			})),
+			request_limit,
+			responder_limit,
+			per_request_limit,
+		}
+	}
+
+	fn cached_response(
+		&self, request_id: &sha256::Hash,
+	) -> Option<(Bolt12Invoice, MessageContext)> {
+		let mut state = self.state.lock().expect("lock");
+		state.expire_completed_responses();
+		state
+			.completed_responses
+			.get(request_id)
+			.map(|(_, invoice, context)| (invoice.clone(), context.clone()))
+	}
+
+	fn register(
+		&self, request_id: sha256::Hash, responder: T,
+	) -> PendingJitInvoiceRequestRegistration<T> {
+		let mut state = self.state.lock().expect("lock");
+		state.expire_completed_responses();
+		if let Some((_, invoice, context)) = state.completed_responses.get(&request_id) {
+			return PendingJitInvoiceRequestRegistration::Completed(
+				invoice.clone(),
+				context.clone(),
+				responder,
+			);
+		}
+		let responder_limit_reached = state.responder_count >= self.responder_limit;
+		if let Some(responders) = state.requests.get_mut(&request_id) {
+			if responder_limit_reached || responders.len() >= self.per_request_limit {
+				return PendingJitInvoiceRequestRegistration::ReplayLimitReached;
+			}
+			responders.push(responder);
+			state.responder_count += 1;
+			return PendingJitInvoiceRequestRegistration::Joined;
+		}
+		if state.requests.len() >= self.request_limit || responder_limit_reached {
+			return PendingJitInvoiceRequestRegistration::AtCapacity(responder);
+		}
+		state.requests.insert(request_id, vec![responder]);
+		state.responder_count += 1;
+		PendingJitInvoiceRequestRegistration::Started(PendingJitInvoiceRequest {
+			request_id: Some(request_id),
+			state: Arc::clone(&self.state),
+		})
+	}
+}
+
+enum PendingJitInvoiceRequestRegistration<T> {
+	Started(PendingJitInvoiceRequest<T>),
+	Completed(Bolt12Invoice, MessageContext, T),
+	Joined,
+	ReplayLimitReached,
+	AtCapacity(T),
+}
+
+struct PendingJitInvoiceRequest<T> {
+	request_id: Option<sha256::Hash>,
+	state: Arc<Mutex<PendingJitInvoiceRequestState<T>>>,
+}
+
+impl<T> PendingJitInvoiceRequest<T> {
+	fn complete(mut self, response: Option<(Bolt12Invoice, MessageContext)>) -> Vec<T> {
+		self.finish(response)
+	}
+
+	fn finish(&mut self, response: Option<(Bolt12Invoice, MessageContext)>) -> Vec<T> {
+		let Some(request_id) = self.request_id.take() else { return Vec::new() };
+		let mut state = self.state.lock().expect("lock");
+		let responders = state.requests.remove(&request_id).unwrap_or_default();
+		state.responder_count -= responders.len();
+		if let Some((invoice, context)) = response {
+			state.expire_completed_responses();
+			if state.completed_responses.len() >= MAX_COMPLETED_JIT_INVOICE_RESPONSES {
+				let oldest_request_id = *state
+					.completed_responses
+					.iter()
+					.min_by_key(|(_, (completed_at, _, _))| *completed_at)
+					.expect("non-empty cache")
+					.0;
+				state.completed_responses.remove(&oldest_request_id);
+			}
+			state.completed_responses.insert(request_id, (Instant::now(), invoice, context));
+		}
+		responders
+	}
+}
+
+impl<T> Drop for PendingJitInvoiceRequest<T> {
+	fn drop(&mut self) {
+		self.finish(None);
+	}
+}
+
 struct JitInvoiceRequestDependencies {
 	runtime: Arc<Runtime>,
 	lsps2_client: Arc<LSPS2Client<Arc<Logger>>>,
@@ -82,6 +216,7 @@ pub(crate) struct NodeOffersMessageHandler {
 	secp_ctx: Arc<Secp256k1<bitcoin::secp256k1::All>>,
 	best_block: RwLock<BlockLocator>,
 	jit_dependencies: OnceLock<JitInvoiceRequestDependencies>,
+	pending_jit_invoice_requests: PendingJitInvoiceRequests<Responder>,
 	logger: Arc<Logger>,
 }
 
@@ -113,6 +248,11 @@ impl NodeOffersMessageHandler {
 			secp_ctx: Arc::new(secp_ctx),
 			best_block: RwLock::new(best_block),
 			jit_dependencies: OnceLock::new(),
+			pending_jit_invoice_requests: PendingJitInvoiceRequests::new(
+				MAX_PENDING_JIT_INVOICE_REQUESTS,
+				MAX_PENDING_JIT_INVOICE_RESPONDERS,
+				MAX_RESPONDERS_PER_JIT_INVOICE_REQUEST,
+			),
 			logger,
 		}
 	}
@@ -238,6 +378,7 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 				responder,
 			);
 		}
+		let invoice_request_id = sha256::Hash::hash(&invoice_request.encode());
 
 		let responder = responder?;
 		let payment_metadata = match context.as_ref() {
@@ -250,6 +391,17 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 			Ok(InvreqResponseInstructions::SendInvoice(invoice_request)) => invoice_request,
 			Ok(InvreqResponseInstructions::SendStaticInvoice { .. }) | Err(()) => return None,
 		};
+
+		// Replays must reuse the issued invoice even if ordinary payment paths became available
+		// after its JIT lease was negotiated. Verification above still authenticates every request.
+		if let Some((invoice, context)) =
+			self.pending_jit_invoice_requests.cached_response(&invoice_request_id)
+		{
+			return Some((
+				OffersMessage::Invoice(invoice),
+				responder.respond_with_reply_path(context),
+			));
+		}
 
 		// The initial response only contains ordinary payment paths, for which MPP remains useful
 		// regardless of whether the offer fixed the amount. Only disable MPP below when rebuilding a
@@ -317,6 +469,26 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 				responder.respond(),
 			));
 		};
+		let pending_request =
+			match self.pending_jit_invoice_requests.register(invoice_request_id, responder) {
+				PendingJitInvoiceRequestRegistration::Started(pending_request) => pending_request,
+				PendingJitInvoiceRequestRegistration::Completed(invoice, context, responder) => {
+					return Some((
+						OffersMessage::Invoice(invoice),
+						responder.respond_with_reply_path(context),
+					));
+				},
+				PendingJitInvoiceRequestRegistration::Joined => return None,
+				PendingJitInvoiceRequestRegistration::ReplayLimitReached => return None,
+				PendingJitInvoiceRequestRegistration::AtCapacity(responder) => {
+					return Some((
+						OffersMessage::InvoiceError(InvoiceError::from_string(
+							"Too many pending JIT invoice requests".to_owned(),
+						)),
+						responder.respond(),
+					));
+				},
+			};
 
 		let lsps2_client = Arc::clone(&dependencies.lsps2_client);
 		let flow = Arc::clone(&self.flow);
@@ -329,7 +501,7 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 			let response = Arc::clone(&lsps2_client)
 				.prepare_invoice_response(jit_request, connection_manager)
 				.await;
-			let (message, instructions) = match response {
+			let (message, reply_context) = match response {
 				Ok(jit_metadata) => {
 					let mut merged_metadata = payment_metadata.unwrap_or_default();
 					merged_metadata.extend(jit_metadata);
@@ -350,14 +522,10 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 					})
 					.await;
 					match invoice_result {
-						Ok((invoice, context)) => (
-							OffersMessage::Invoice(invoice),
-							responder.respond_with_reply_path(context),
-						),
-						Err(error) => (
-							OffersMessage::InvoiceError(error.into_invoice_error()),
-							responder.respond(),
-						),
+						Ok((invoice, context)) => (OffersMessage::Invoice(invoice), Some(context)),
+						Err(error) => {
+							(OffersMessage::InvoiceError(error.into_invoice_error()), None)
+						},
 					}
 				},
 				Err(error) => {
@@ -366,13 +534,26 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 						OffersMessage::InvoiceError(InvoiceError::from_string(
 							"Failed preparing JIT invoice".to_owned(),
 						)),
-						responder.respond(),
+						None,
 					)
 				},
 			};
-			if let Err(error) = onion_messenger.handle_onion_message_response(message, instructions)
-			{
-				log_error!(logger, "Failed sending LSPS2 invoice response: {:?}", error);
+			let cached_response = match (&message, &reply_context) {
+				(OffersMessage::Invoice(invoice), Some(context)) => {
+					Some((invoice.clone(), context.clone()))
+				},
+				_ => None,
+			};
+			for responder in pending_request.complete(cached_response) {
+				let instructions = match reply_context.as_ref() {
+					Some(context) => responder.respond_with_reply_path(context.clone()),
+					None => responder.respond(),
+				};
+				if let Err(error) =
+					onion_messenger.handle_onion_message_response(message.clone(), instructions)
+				{
+					log_error!(logger, "Failed sending LSPS2 invoice response: {:?}", error);
+				}
 			}
 		});
 		None
@@ -417,12 +598,16 @@ impl Listen for NodeOffersMessageHandler {
 mod tests {
 	use core::sync::atomic::{AtomicBool, Ordering};
 	use std::num::NonZeroU64;
+	use std::time::{SystemTime, UNIX_EPOCH};
 
-	use bitcoin::secp256k1::{PublicKey, SecretKey};
+	use bitcoin::secp256k1::{Keypair, PublicKey, SecretKey};
+	use lightning::blinded_path::payment::{BlindedPayInfo, BlindedPaymentPath};
+	use lightning::blinded_path::BlindedHop;
 	use lightning::ln::channelmanager::PaymentId;
 	use lightning::ln::inbound_payment::ExpandedKey;
 	use lightning::offers::nonce::Nonce;
 	use lightning::offers::offer::{OfferBuilder, Quantity};
+	use lightning::types::features::BlindedHopFeatures;
 
 	use super::*;
 
@@ -436,6 +621,48 @@ mod tests {
 
 	fn recipient_pubkey() -> PublicKey {
 		PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[43; 32]).unwrap())
+	}
+
+	fn invoice_response(created_at: Duration) -> (Bolt12Invoice, MessageContext) {
+		let expanded_key = ExpandedKey::new([44; 32]);
+		let nonce = Nonce::from_entropy_source(&FixedEntropy);
+		let secp_ctx = Secp256k1::new();
+		let payment_hash = PaymentHash([45; 32]);
+		let path = BlindedPaymentPath::from_blinded_path_and_payinfo(
+			recipient_pubkey(),
+			recipient_pubkey(),
+			vec![BlindedHop {
+				blinded_node_id: recipient_pubkey(),
+				encrypted_payload: vec![0; 43],
+			}],
+			BlindedPayInfo {
+				fee_base_msat: 0,
+				fee_proportional_millionths: 0,
+				cltv_expiry_delta: 18,
+				htlc_minimum_msat: 1,
+				htlc_maximum_msat: 100_000,
+				features: BlindedHopFeatures::empty(),
+			},
+		);
+		let invoice = OfferBuilder::new(recipient_pubkey())
+			.amount_msats(1_000)
+			.build()
+			.unwrap()
+			.request_invoice(&expanded_key, nonce, &secp_ctx, PaymentId([46; 32]))
+			.unwrap()
+			.build_and_sign()
+			.unwrap()
+			.respond_with_no_std(vec![path], payment_hash, created_at)
+			.unwrap()
+			.build()
+			.unwrap()
+			.sign(|invoice: &UnsignedBolt12Invoice| {
+				let keypair =
+					Keypair::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[43; 32]).unwrap());
+				Ok(secp_ctx.sign_schnorr_no_aux_rand(invoice.tagged_hash().as_digest(), &keypair))
+			})
+			.unwrap();
+		(invoice, MessageContext::Offers(OffersContext::InboundPayment { payment_hash }))
 	}
 
 	#[tokio::test]
@@ -512,5 +739,166 @@ mod tests {
 			JitInvoiceRequest::Variable { amount_msat: 2_500, absolute_expiry: None }
 		);
 		assert!(!request.allow_mpp());
+	}
+
+	fn started_request<T>(
+		registration: PendingJitInvoiceRequestRegistration<T>,
+	) -> PendingJitInvoiceRequest<T> {
+		match registration {
+			PendingJitInvoiceRequestRegistration::Started(request) => request,
+			_ => panic!("expected a new pending JIT invoice request"),
+		}
+	}
+
+	#[test]
+	fn completed_jit_invoice_request_reuses_response() {
+		let pending_requests = PendingJitInvoiceRequests::new(2, 2, 2);
+		let request_id = sha256::Hash::from_byte_array([1; 32]);
+		let first = started_request(pending_requests.register(request_id, 1));
+		let response = invoice_response(SystemTime::now().duration_since(UNIX_EPOCH).unwrap());
+		assert_eq!(first.complete(Some(response.clone())), vec![1]);
+
+		assert!(
+			!matches!(
+				pending_requests.register(request_id, 2),
+				PendingJitInvoiceRequestRegistration::Started(_)
+			),
+			"a completed invoice request replay started a new lease and invoice"
+		);
+		let (invoice, context) = pending_requests.cached_response(&request_id).unwrap();
+		assert_eq!(invoice.encode(), response.0.encode());
+		assert_eq!(context.encode(), response.1.encode());
+		match pending_requests.register(request_id, 3) {
+			PendingJitInvoiceRequestRegistration::Completed(invoice, context, responder) => {
+				assert_eq!(invoice.encode(), response.0.encode());
+				assert_eq!(context.encode(), response.1.encode());
+				assert_eq!(responder, 3);
+			},
+			_ => panic!("expected the same response with the replay's responder"),
+		}
+	}
+
+	#[test]
+	fn completed_jit_invoice_responses_are_bounded() {
+		let pending_requests = PendingJitInvoiceRequests::new(2, 2, 2);
+		let response = invoice_response(SystemTime::now().duration_since(UNIX_EPOCH).unwrap());
+		let oldest_id = sha256::Hash::from_byte_array([0; 32]);
+		let first = started_request(pending_requests.register(oldest_id, 0));
+		assert_eq!(first.complete(Some(response.clone())), vec![0]);
+		pending_requests
+			.state
+			.lock()
+			.unwrap()
+			.completed_responses
+			.get_mut(&oldest_id)
+			.unwrap()
+			.0 -= Duration::from_secs(1);
+		for index in 1..=MAX_COMPLETED_JIT_INVOICE_RESPONSES {
+			let request_id = sha256::Hash::hash(&index.to_be_bytes());
+			let request = started_request(pending_requests.register(request_id, index));
+			assert_eq!(request.complete(Some(response.clone())), vec![index]);
+		}
+		assert!(pending_requests.cached_response(&oldest_id).is_none());
+		assert_eq!(
+			pending_requests.state.lock().unwrap().completed_responses.len(),
+			MAX_COMPLETED_JIT_INVOICE_RESPONSES
+		);
+	}
+
+	#[test]
+	fn completed_jit_invoice_responses_expire() {
+		let pending_requests = PendingJitInvoiceRequests::new(2, 2, 2);
+		let request_id = sha256::Hash::from_byte_array([1; 32]);
+		let first = started_request(pending_requests.register(request_id, 1));
+		let response = invoice_response(SystemTime::now().duration_since(UNIX_EPOCH).unwrap());
+		assert_eq!(first.complete(Some(response)), vec![1]);
+		pending_requests
+			.state
+			.lock()
+			.unwrap()
+			.completed_responses
+			.get_mut(&request_id)
+			.unwrap()
+			.0 -= JIT_INVOICE_RESPONSE_CACHE_LIFETIME;
+		assert!(pending_requests.cached_response(&request_id).is_none());
+
+		let retry = started_request(pending_requests.register(request_id, 2));
+		let expired_response = invoice_response(Duration::ZERO);
+		assert!(expired_response.0.is_expired());
+		assert_eq!(retry.complete(Some(expired_response)), vec![2]);
+		assert!(pending_requests.cached_response(&request_id).is_none());
+		assert!(matches!(
+			pending_requests.register(request_id, 3),
+			PendingJitInvoiceRequestRegistration::Started(_)
+		));
+	}
+
+	#[test]
+	fn failed_jit_invoice_requests_can_retry() {
+		let pending_requests = PendingJitInvoiceRequests::new(1, 1, 1);
+		let request_id = sha256::Hash::from_byte_array([1; 32]);
+		let first = started_request(pending_requests.register(request_id, 1));
+		assert_eq!(first.complete(None), vec![1]);
+		assert!(matches!(
+			pending_requests.register(request_id, 2),
+			PendingJitInvoiceRequestRegistration::Started(_)
+		));
+	}
+
+	#[test]
+	fn pending_jit_invoice_requests_are_bounded() {
+		let pending_requests = PendingJitInvoiceRequests::new(2, 2, 2);
+		let first =
+			started_request(pending_requests.register(sha256::Hash::from_byte_array([1; 32]), 1));
+		let _second =
+			started_request(pending_requests.register(sha256::Hash::from_byte_array([2; 32]), 2));
+
+		assert!(matches!(
+			pending_requests.register(sha256::Hash::from_byte_array([3; 32]), 3),
+			PendingJitInvoiceRequestRegistration::AtCapacity(3)
+		));
+
+		drop(first);
+		assert!(matches!(
+			pending_requests.register(sha256::Hash::from_byte_array([3; 32]), 3),
+			PendingJitInvoiceRequestRegistration::Started(_)
+		));
+	}
+
+	#[test]
+	fn pending_jit_invoice_requests_fan_out_replays() {
+		let pending_requests = PendingJitInvoiceRequests::new(2, 2, 2);
+		let request_id = sha256::Hash::from_byte_array([1; 32]);
+		let first = started_request(pending_requests.register(request_id, 1));
+
+		assert!(
+			matches!(
+				pending_requests.register(request_id, 2),
+				PendingJitInvoiceRequestRegistration::Joined
+			),
+			"an in-flight invoice request replay's responder was discarded"
+		);
+		assert!(matches!(
+			pending_requests.register(sha256::Hash::from_byte_array([2; 32]), 3),
+			PendingJitInvoiceRequestRegistration::AtCapacity(3)
+		));
+		assert_eq!(first.complete(None), vec![1, 2]);
+	}
+
+	#[test]
+	fn pending_jit_invoice_requests_bound_replay_responders() {
+		let pending_requests = PendingJitInvoiceRequests::new(3, 3, 2);
+		let request_id = sha256::Hash::from_byte_array([1; 32]);
+		let first = started_request(pending_requests.register(request_id, 1));
+
+		assert!(matches!(
+			pending_requests.register(request_id, 2),
+			PendingJitInvoiceRequestRegistration::Joined
+		));
+		assert!(matches!(
+			pending_requests.register(request_id, 3),
+			PendingJitInvoiceRequestRegistration::ReplayLimitReached
+		));
+		assert_eq!(first.complete(None), vec![1, 2]);
 	}
 }
