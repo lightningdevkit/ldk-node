@@ -676,6 +676,26 @@ async fn start_stop_reinit() {
 	reinitialized_node.stop().unwrap();
 }
 
+// The scores-sync task runs alongside LDK's background processor, which claims the runtime's
+// single background-processor slot; startup must not panic with both configured.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn start_stop_with_pathfinding_scores_sync() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let config = random_config();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+	setup_builder!(builder, config.node_config);
+	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	builder.set_pathfinding_scores_source(esplora_url);
+
+	let node = builder.build(config.node_entropy.into()).unwrap();
+	node.start().unwrap();
+	node.stop().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
