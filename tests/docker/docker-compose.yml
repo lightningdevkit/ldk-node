@@ -2,7 +2,7 @@ version: '3'
 
 services:
   bitcoin:
-    image: blockstream/bitcoind:27.2
+    image: blockstream/bitcoind:31.1
     platform: linux/amd64
     command:
       [
