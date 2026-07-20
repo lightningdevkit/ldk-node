@@ -31,7 +31,7 @@ use lightning_block_sync::{
 };
 use serde::Serialize;
 
-use super::WalletSyncStatus;
+use super::{WalletSyncGuard, WalletSyncStatus};
 use crate::config::{
 	BitcoindRestClientConfig, Config, DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
 	DEFAULT_TX_BROADCAST_TIMEOUT_SECS,
@@ -51,6 +51,31 @@ const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
 
 type BitcoindSpvClient =
 	SpvClient<ChainPoller<Arc<BitcoindClient>, BitcoindClient>, Arc<ChainListener>>;
+
+async fn acquire_initial_wallet_sync_guard<'a>(
+	wallet_polling_status: &'a Mutex<WalletSyncStatus>,
+	stop_sync_receiver: &mut tokio::sync::watch::Receiver<()>,
+) -> Option<WalletSyncGuard<'a>> {
+	loop {
+		let mut pending_sync = {
+			let mut status_lock = wallet_polling_status.lock().expect("lock");
+			match status_lock.register_or_subscribe_pending_sync() {
+				Some(pending_sync) => pending_sync,
+				None => {
+					return Some(WalletSyncGuard::new(
+						wallet_polling_status,
+						Error::WalletOperationFailed,
+					));
+				},
+			}
+		};
+		tokio::select! {
+			biased;
+			_ = stop_sync_receiver.changed() => return None,
+			_ = pending_sync.recv() => {},
+		}
+	}
+}
 
 pub(super) struct BitcoindChainSource {
 	api_client: Arc<BitcoindClient>,
@@ -160,12 +185,13 @@ impl BitcoindChainSource {
 	) {
 		// First register for the wallet polling status to make sure `Node::sync_wallets` calls
 		// wait on the result before proceeding.
-		{
-			let mut status_lock = self.wallet_polling_status.lock().expect("lock");
-			if status_lock.register_or_subscribe_pending_sync().is_some() {
-				debug_assert!(false, "Sync already in progress. This should never happen.");
-			}
-		}
+		let Some(initial_sync_guard) =
+			acquire_initial_wallet_sync_guard(&self.wallet_polling_status, &mut stop_sync_receiver)
+				.await
+		else {
+			log_trace!(self.logger, "Stopping initial chain sync.");
+			return;
+		};
 
 		log_info!(
 			self.logger,
@@ -302,7 +328,7 @@ impl BitcoindChainSource {
 		}
 
 		// Now propagate the initial result to unblock waiting subscribers.
-		self.wallet_polling_status.lock().expect("lock").propagate_result_to_subscribers(Ok(()));
+		initial_sync_guard.complete(Ok(()));
 
 		let mut chain_polling_interval =
 			tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
@@ -413,6 +439,8 @@ impl BitcoindChainSource {
 				Error::WalletOperationFailed
 			})?;
 		}
+		let sync_guard =
+			WalletSyncGuard::new(&self.wallet_polling_status, Error::WalletOperationFailed);
 
 		let res = self
 			.poll_and_update_listeners_inner(
@@ -423,7 +451,7 @@ impl BitcoindChainSource {
 			)
 			.await;
 
-		self.wallet_polling_status.lock().expect("lock").propagate_result_to_subscribers(res);
+		sync_guard.complete(res);
 
 		res
 	}
@@ -1588,6 +1616,9 @@ impl std::error::Error for BitcoindClientError {}
 
 #[cfg(test)]
 mod tests {
+	use std::sync::Mutex;
+	use std::time::Duration;
+
 	use bitcoin::hashes::Hash;
 	use bitcoin::{FeeRate, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
 	use lightning_block_sync::http::JsonResponse;
@@ -1597,9 +1628,36 @@ mod tests {
 	use serde_json::json;
 
 	use crate::chain::bitcoind::{
-		FeeResponse, GetMempoolEntryResponse, GetRawMempoolResponse, GetRawTransactionResponse,
-		MempoolMinFeeResponse,
+		acquire_initial_wallet_sync_guard, FeeResponse, GetMempoolEntryResponse,
+		GetRawMempoolResponse, GetRawTransactionResponse, MempoolMinFeeResponse,
 	};
+	use crate::chain::{WalletSyncGuard, WalletSyncStatus};
+	use crate::Error;
+
+	#[tokio::test]
+	async fn initial_sync_waits_for_in_progress_sync() {
+		let status = Mutex::new(WalletSyncStatus::Completed);
+		assert!(status.lock().expect("lock").register_or_subscribe_pending_sync().is_none());
+		let in_progress_guard = WalletSyncGuard::new(&status, Error::WalletOperationFailed);
+		let (_stop_sender, mut stop_receiver) = tokio::sync::watch::channel(());
+		let mut acquire_guard =
+			Box::pin(acquire_initial_wallet_sync_guard(&status, &mut stop_receiver));
+
+		let early_result =
+			tokio::time::timeout(Duration::from_millis(10), acquire_guard.as_mut()).await;
+		assert!(early_result.is_err(), "background sync should wait for the active sync");
+
+		in_progress_guard.complete(Ok(()));
+		let acquired_guard = tokio::time::timeout(Duration::from_secs(1), acquire_guard)
+			.await
+			.expect("background sync should resume")
+			.expect("background sync should acquire the sync guard");
+		assert!(
+			matches!(*status.lock().expect("lock"), WalletSyncStatus::InProgress { .. }),
+			"background sync should own the next sync"
+		);
+		acquired_guard.complete(Ok(()));
+	}
 
 	prop_compose! {
 		fn arbitrary_witness()(
