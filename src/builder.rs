@@ -74,6 +74,7 @@ use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::payment::NodeOffersMessageHandler;
 use crate::peer_store::PeerStore;
 use crate::probing::{
 	HighDegreeStrategy, Prober, ProbingConfig, ProbingStrategy, ProbingStrategyKind,
@@ -2022,6 +2023,8 @@ fn build_with_store_internal(
 	};
 
 	let channel_manager = Arc::new(channel_manager);
+	let offers_message_handler =
+		Arc::new(NodeOffersMessageHandler::new(Arc::clone(&channel_manager)));
 
 	// Give ChannelMonitors to ChainMonitor
 	for (_blockhash, channel_monitor) in channel_monitors.into_iter() {
@@ -2092,7 +2095,7 @@ fn build_with_store_internal(
 				Arc::clone(&logger),
 				Arc::clone(&channel_manager),
 				message_router,
-				Arc::clone(&channel_manager),
+				Arc::clone(&offers_message_handler),
 				Arc::clone(&channel_manager),
 				Arc::clone(&om_resolver),
 				IgnoringMessageHandler {},
@@ -2105,7 +2108,7 @@ fn build_with_store_internal(
 				Arc::clone(&logger),
 				Arc::clone(&channel_manager),
 				message_router,
-				Arc::clone(&channel_manager),
+				Arc::clone(&offers_message_handler),
 				Arc::clone(&channel_manager),
 				Arc::clone(&om_resolver),
 				IgnoringMessageHandler {},
