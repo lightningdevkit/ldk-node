@@ -5,12 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
-use std::sync::{Arc, OnceLock, RwLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use bitcoin::block::Header;
 use bitcoin::constants::ChainHash;
+use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::Secp256k1;
 use bitcoin::{Block, BlockHash, Network, Txid};
 use lightning::blinded_path::message::{MessageContext, OffersContext};
@@ -29,6 +30,7 @@ use lightning::onion_message::offers::{OffersMessage, OffersMessageHandler};
 use lightning::sign::{EntropySource, NodeSigner, Recipient};
 use lightning::types::payment::{PaymentHash, PaymentSecret};
 use lightning::util::logger::Logger as _;
+use lightning::util::ser::Writeable;
 
 use crate::connection::ConnectionManager;
 use crate::liquidity::client::lsps2::{JitInvoiceRequest, JitInvoiceResponse, LSPS2Client};
@@ -66,6 +68,50 @@ where
 	result
 }
 
+const MAX_PENDING_JIT_INVOICE_REQUESTS: usize = 100;
+
+struct PendingJitInvoiceRequests {
+	in_flight: Arc<Mutex<HashSet<sha256::Hash>>>,
+	limit: usize,
+}
+
+impl PendingJitInvoiceRequests {
+	fn new(limit: usize) -> Self {
+		Self { in_flight: Arc::new(Mutex::new(HashSet::new())), limit }
+	}
+
+	fn try_acquire(
+		&self, request_id: sha256::Hash,
+	) -> Result<PendingJitInvoiceRequest, PendingJitInvoiceRequestError> {
+		let mut in_flight = self.in_flight.lock().expect("lock");
+		if in_flight.contains(&request_id) {
+			return Err(PendingJitInvoiceRequestError::AlreadyPending);
+		}
+		if in_flight.len() == self.limit {
+			return Err(PendingJitInvoiceRequestError::AtCapacity);
+		}
+		in_flight.insert(request_id);
+		Ok(PendingJitInvoiceRequest { request_id, in_flight: Arc::clone(&self.in_flight) })
+	}
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PendingJitInvoiceRequestError {
+	AlreadyPending,
+	AtCapacity,
+}
+
+struct PendingJitInvoiceRequest {
+	request_id: sha256::Hash,
+	in_flight: Arc<Mutex<HashSet<sha256::Hash>>>,
+}
+
+impl Drop for PendingJitInvoiceRequest {
+	fn drop(&mut self) {
+		self.in_flight.lock().expect("lock").remove(&self.request_id);
+	}
+}
+
 struct JitInvoiceRequestDependencies {
 	runtime: Arc<Runtime>,
 	lsps2_client: Arc<LSPS2Client<Arc<Logger>>>,
@@ -82,6 +128,7 @@ pub(crate) struct NodeOffersMessageHandler {
 	secp_ctx: Arc<Secp256k1<bitcoin::secp256k1::All>>,
 	best_block: RwLock<BlockLocator>,
 	jit_dependencies: OnceLock<JitInvoiceRequestDependencies>,
+	pending_jit_invoice_requests: PendingJitInvoiceRequests,
 	logger: Arc<Logger>,
 }
 
@@ -113,6 +160,9 @@ impl NodeOffersMessageHandler {
 			secp_ctx: Arc::new(secp_ctx),
 			best_block: RwLock::new(best_block),
 			jit_dependencies: OnceLock::new(),
+			pending_jit_invoice_requests: PendingJitInvoiceRequests::new(
+				MAX_PENDING_JIT_INVOICE_REQUESTS,
+			),
 			logger,
 		}
 	}
@@ -237,6 +287,7 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 				responder,
 			);
 		}
+		let invoice_request_id = sha256::Hash::hash(&invoice_request.encode());
 
 		let responder = responder?;
 		let payment_metadata = match context.as_ref() {
@@ -306,6 +357,19 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 				));
 			},
 		};
+		let pending_request =
+			match self.pending_jit_invoice_requests.try_acquire(invoice_request_id) {
+				Ok(pending_request) => pending_request,
+				Err(PendingJitInvoiceRequestError::AlreadyPending) => return None,
+				Err(PendingJitInvoiceRequestError::AtCapacity) => {
+					return Some((
+						OffersMessage::InvoiceError(InvoiceError::from_string(
+							"Too many pending JIT invoice requests".to_owned(),
+						)),
+						responder.respond(),
+					));
+				},
+			};
 		let connection_manager = match dependencies.connection_manager.upgrade() {
 			Some(connection_manager) => connection_manager,
 			None => {
@@ -337,6 +401,7 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 		let secp_ctx = Arc::clone(&self.secp_ctx);
 		let logger = Arc::clone(&self.logger);
 		dependencies.runtime.spawn_cancellable_background_task(async move {
+			let _pending_request = pending_request;
 			let response = Arc::clone(&lsps2_client)
 				.prepare_invoice_response(jit_request, connection_manager)
 				.await;
@@ -524,5 +589,36 @@ mod tests {
 			JitInvoiceRequest::Variable { amount_msat: 2_500, absolute_expiry: None }
 		);
 		assert!(!request.allow_mpp());
+	}
+
+	#[test]
+	fn pending_jit_invoice_requests_are_bounded() {
+		let pending_requests = PendingJitInvoiceRequests::new(2);
+		let first = pending_requests.try_acquire(sha256::Hash::from_byte_array([1; 32])).unwrap();
+		let _second = pending_requests.try_acquire(sha256::Hash::from_byte_array([2; 32])).unwrap();
+
+		assert!(matches!(
+			pending_requests.try_acquire(sha256::Hash::from_byte_array([3; 32])),
+			Err(PendingJitInvoiceRequestError::AtCapacity)
+		));
+
+		drop(first);
+		assert!(pending_requests.try_acquire(sha256::Hash::from_byte_array([3; 32])).is_ok());
+	}
+
+	#[test]
+	fn pending_jit_invoice_requests_reject_replays() {
+		let pending_requests = PendingJitInvoiceRequests::new(2);
+		let request_id = sha256::Hash::from_byte_array([1; 32]);
+		let _first = pending_requests.try_acquire(request_id).unwrap();
+
+		assert!(
+			matches!(
+				pending_requests.try_acquire(request_id),
+				Err(PendingJitInvoiceRequestError::AlreadyPending)
+			),
+			"an in-flight invoice request replay was accepted"
+		);
+		assert!(pending_requests.try_acquire(sha256::Hash::from_byte_array([2; 32])).is_ok());
 	}
 }
