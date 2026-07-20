@@ -48,7 +48,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::{PaymentDetails, PendingPaymentDetails};
+use crate::payment::{NodeOffersMessageHandler, PaymentDetails, PendingPaymentDetails};
 use crate::runtime::RuntimeSpawner;
 
 #[cfg(not(feature = "uniffi"))]
@@ -306,7 +306,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<Logger>,
 	Arc<ChannelManager>,
 	Arc<MessageRouter>,
-	Arc<ChannelManager>,
+	Arc<NodeOffersMessageHandler>,
 	Arc<ChannelManager>,
 	Arc<dyn DNSResolverMessageHandler + Sync + Send>,
 	IgnoringMessageHandler,

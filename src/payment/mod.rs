@@ -19,6 +19,7 @@ mod unified;
 
 pub use bolt11::Bolt11Payment;
 pub use bolt12::Bolt12Payment;
+pub(crate) use bolt12::NodeOffersMessageHandler;
 pub(crate) use metadata::PaymentMetadata;
 pub use onchain::OnchainPayment;
 pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
