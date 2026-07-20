@@ -9,6 +9,10 @@
 //!
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 
+mod offers;
+
+pub(crate) use offers::NodeOffersMessageHandler;
+
 use std::num::NonZeroU64;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
