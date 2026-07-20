@@ -54,7 +54,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
-          key: bitcoind-29.0-${{ runner.os }}-${{ runner.arch }}
+          key: bitcoind-31.1-${{ runner.os }}-${{ runner.arch }}
       - name: Enable caching for electrs
         id: cache-electrs
         uses: actions/cache@v4

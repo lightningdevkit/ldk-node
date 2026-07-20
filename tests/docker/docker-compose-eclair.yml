@@ -5,7 +5,7 @@ services:
   # causing Eclair to fall behind the chain tip. Host networking avoids
   # this by keeping all inter-process communication on localhost.
   bitcoin:
-    image: blockstream/bitcoind:30.2
+    image: blockstream/bitcoind:31.1
     platform: linux/amd64
     network_mode: host
     command:
