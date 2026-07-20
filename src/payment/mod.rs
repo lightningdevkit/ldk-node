@@ -23,6 +23,7 @@ pub(crate) mod store;
 mod unified;
 
 pub use bolt11::Bolt11Payment;
+pub(crate) use bolt12::NodeOffersMessageHandler;
 pub use bolt12::{Bolt12Payment, PayerProofOptions};
 pub use forwarding::{
 	ChannelForwardingStats, ChannelForwardingStatsPage, ChannelPairForwardingStats,
