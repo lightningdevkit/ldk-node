@@ -191,6 +191,7 @@ pub use types::{
 };
 pub use vss_client;
 
+use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY};
 use crate::ffi::maybe_wrap;
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
@@ -755,33 +756,7 @@ impl Node {
 				let logger = Arc::clone(&discovery_logger);
 				let ls = Arc::clone(&liquidity_handler);
 				discovery_set.spawn(async move {
-					if let Err(e) = cm.connect_peer_if_necessary(node_id, address.clone()).await {
-						log_error!(
-							logger,
-							"Failed to connect to LSP {} for protocol discovery: {}",
-							node_id,
-							e
-						);
-						return;
-					}
-					match ls.discover_lsp_protocols(&node_id).await {
-						Ok(protocols) => {
-							log_info!(
-								logger,
-								"Discovered protocols for LSP {}: {:?}",
-								node_id,
-								protocols
-							);
-						},
-						Err(e) => {
-							log_error!(
-								logger,
-								"Failed to discover protocols for LSP {}: {:?}",
-								node_id,
-								e
-							);
-						},
-					}
+					connect_and_discover_lsp(&cm, &ls, &logger, node_id, address).await;
 				});
 			}
 
@@ -808,6 +783,39 @@ impl Node {
 						}
 					}
 				}
+			}
+		});
+
+		// Retry protocol discovery for any LSPs that failed the startup batch, backing off up to a
+		// cap and then retrying at that cap until every configured LSP has been discovered.
+		let mut stop_retry = self.stop_sender.subscribe();
+		let retry_ls = Arc::clone(&self.liquidity_source);
+		let retry_logger = Arc::clone(&self.logger);
+		let retry_cm = Arc::clone(&self.connection_manager);
+		self.runtime.spawn_cancellable_background_task(async move {
+			let mut backoff = LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY;
+			loop {
+				tokio::select! {
+						_ = stop_retry.changed() => return,
+						_ = tokio::time::sleep(backoff) => {},
+				}
+
+				let undiscovered_lsps = retry_ls.get_undiscovered_lsps();
+				if undiscovered_lsps.is_empty() {
+					break;
+				}
+
+				let mut discovery_set = tokio::task::JoinSet::new();
+				for (node_id, address) in undiscovered_lsps {
+					let cm = Arc::clone(&retry_cm);
+					let ls = Arc::clone(&retry_ls);
+					let logger = Arc::clone(&retry_logger);
+					discovery_set.spawn(async move {
+						connect_and_discover_lsp(&cm, &ls, &logger, node_id, address).await;
+					});
+				}
+				discovery_set.join_all().await;
+				backoff = (backoff * 2).min(LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY);
 			}
 		});
 
@@ -2482,6 +2490,23 @@ pub(crate) fn new_channel_anchor_reserve_sats(
 		0
 	} else {
 		config.anchor_channels_config.per_channel_reserve_sats
+	}
+}
+
+async fn connect_and_discover_lsp(
+	connection_manager: &ConnectionManager<Arc<Logger>>,
+	liquidity_source: &LiquiditySource<Arc<Logger>>, logger: &Logger, node_id: PublicKey,
+	address: SocketAddress,
+) {
+	if let Err(e) = connection_manager.connect_peer_if_necessary(node_id, address).await {
+		log_debug!(logger, "Failed to connect to LSP {} for protocol discovery: {}", node_id, e);
+		return;
+	}
+	match liquidity_source.discover_lsp_protocols(&node_id).await {
+		Ok(protocols) => {
+			log_info!(logger, "Discovered protocols for LSP {}: {:?}", node_id, protocols)
+		},
+		Err(e) => log_debug!(logger, "Protocol discovery failed for LSP {}: {:?}", node_id, e),
 	}
 }
 

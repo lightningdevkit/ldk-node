@@ -345,7 +345,7 @@ where
 	lsps1_client: Arc<LSPS1Client<L>>,
 	lsps2_client: Arc<LSPS2Client<L>>,
 	lsps2_service: Arc<LSPS2ServiceLiquiditySource<L>>,
-	pending_lsps0_discovery: Mutex<HashMap<PublicKey, oneshot::Sender<Vec<u16>>>>,
+	pending_lsps0_discovery: Mutex<HashMap<PublicKey, Vec<oneshot::Sender<Vec<u16>>>>>,
 	discovery_done_tx: tokio::sync::watch::Sender<bool>,
 	discovery_done_rx: tokio::sync::watch::Receiver<bool>,
 	liquidity_manager: Arc<LiquidityManager>,
@@ -383,21 +383,14 @@ where
 				protocols,
 			}) => {
 				if self.is_lsps_node(&counterparty_node_id) {
-					if let Some(sender) = self
+					if let Some(senders) = self
 						.pending_lsps0_discovery
 						.lock()
 						.expect("lock")
 						.remove(&counterparty_node_id)
 					{
-						match sender.send(protocols) {
-							Ok(()) => (),
-							Err(_) => {
-								log_error!(
-									self.logger,
-									"Failed to handle response for request {:?} from liquidity service",
-									counterparty_node_id
-								);
-							},
+						for sender in senders {
+							let _ = sender.send(protocols.clone());
 						}
 					} else {
 						log_error!(
@@ -438,24 +431,23 @@ where
 		let lsps0_handler = self.liquidity_manager.lsps0_client_handler();
 
 		let (sender, receiver) = oneshot::channel();
-		{
+		let issued_request = {
 			let mut pending_discovery = self.pending_lsps0_discovery.lock().expect("lock");
 			match pending_discovery.entry(*node_id) {
-				Entry::Occupied(_) => {
-					log_error!(
-						self.logger,
-						"LSPS0 protocol discovery already in flight for {}",
-						node_id
-					);
-					return Err(Error::LiquidityRequestFailed);
+				Entry::Occupied(mut e) => {
+					e.get_mut().push(sender);
+					false
 				},
 				Entry::Vacant(v) => {
-					v.insert(sender);
+					v.insert(vec![sender]);
 					lsps0_handler.list_protocols(node_id);
+					true
 				},
 			}
-		}
+		};
 
+		// Only the request that issued the discovery may remove the entry; a follower removing it
+		// would drop the in-flight request and all other waiters.
 		let protocols =
 			tokio::time::timeout(Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS), receiver)
 				.await
@@ -466,7 +458,9 @@ where
 						node_id,
 						e
 					);
-					self.pending_lsps0_discovery.lock().expect("lock").remove(node_id);
+					if issued_request {
+						self.pending_lsps0_discovery.lock().expect("lock").remove(node_id);
+					}
 					Error::LiquidityRequestFailed
 				})?
 				.map_err(|e| {
@@ -476,7 +470,9 @@ where
 						node_id,
 						e
 					);
-					self.pending_lsps0_discovery.lock().expect("lock").remove(node_id);
+					if issued_request {
+						self.pending_lsps0_discovery.lock().expect("lock").remove(node_id);
+					}
 					Error::LiquidityRequestFailed
 				})?;
 
@@ -515,6 +511,25 @@ where
 		}
 
 		select_lsps_for_protocol(&self.lsp_nodes, protocol, Some(node_id))
+	}
+
+	pub(crate) fn get_undiscovered_lsps(&self) -> Vec<(PublicKey, SocketAddress)> {
+		self.lsp_nodes
+			.read()
+			.expect("lock")
+			.iter()
+			.filter(|n| n.supported_protocols.is_none())
+			.map(|n| (n.node_id, n.address.clone()))
+			.collect()
+	}
+
+	pub(crate) fn get_lsp_trust_0conf(&self, node_id: &PublicKey) -> Option<bool> {
+		self.lsp_nodes
+			.read()
+			.expect("lock")
+			.iter()
+			.find(|n| &n.node_id == node_id)
+			.map(|n| n.trust_peer_0conf)
 	}
 
 	/// Flips the `discovery_done` watch to `true`.
