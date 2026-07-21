@@ -2820,6 +2820,7 @@ mod tests {
 				max_proportional_opening_fee_ppm_msat: None,
 				min_opening_fee_msat: 1_000,
 			}),
+			lsps2_lease_parameters: None,
 		};
 
 		for (gross_amount_msat, expected) in
@@ -2870,6 +2871,7 @@ mod tests {
 					max_proportional_opening_fee_ppm_msat: Some(proportional),
 					min_opening_fee_msat: 0,
 				}),
+				lsps2_lease_parameters: None,
 			};
 			assert_eq!(
 				EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
@@ -2889,6 +2891,7 @@ mod tests {
 				max_proportional_opening_fee_ppm_msat: Some(10_000),
 				min_opening_fee_msat: 0,
 			}),
+			lsps2_lease_parameters: None,
 		};
 
 		assert_eq!(
@@ -2902,13 +2905,15 @@ mod tests {
 
 	#[test]
 	fn lsps2_payment_metadata_missing_or_malformed_limit_is_rejected() {
-		let empty_metadata = PaymentMetadata { lsps2_parameters: None }.encode();
+		let empty_metadata =
+			PaymentMetadata { lsps2_parameters: None, lsps2_lease_parameters: None }.encode();
 		let metadata_without_fee_limit = PaymentMetadata {
 			lsps2_parameters: Some(LSPS2Parameters {
 				max_total_opening_fee_msat: None,
 				max_proportional_opening_fee_ppm_msat: None,
 				min_opening_fee_msat: 1_000,
 			}),
+			lsps2_lease_parameters: None,
 		}
 		.encode();
 
