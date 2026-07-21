@@ -76,8 +76,8 @@ where
 
 	pub(crate) async fn lsps2_receive_to_jit_channel(
 		self: Arc<Self>, amount_msat: u64, description: &Bolt11InvoiceDescription,
-		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
-		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
+		expiry_secs: u32, payment_hash: Option<PaymentHash>,
+		connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
 		// Connect to all candidate LSPs before querying fees.
 		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
@@ -111,10 +111,10 @@ where
 				Error::LiquidityRequestFailed
 			})?;
 
-		if let Some(max_total_lsp_fee_limit_msat) = max_total_lsp_fee_limit_msat {
+		if let Some(max_total_lsp_fee_limit_msat) = self.config.lsps2_max_total_lsp_fee_limit_msat {
 			if min_total_fee_msat > max_total_lsp_fee_limit_msat {
 				log_error!(self.logger,
-					"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our fee limit of {}msat",
+					"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our configured fee limit of {}msat",
 					min_total_fee_msat, max_total_lsp_fee_limit_msat
 				);
 				return Err(Error::LiquidityFeeTooHigh);
@@ -157,11 +157,11 @@ where
 
 	pub(crate) async fn lsps2_receive_variable_amount_to_jit_channel(
 		self: Arc<Self>, description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
-		connection_manager: Arc<ConnectionManager<L>>,
+		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
 		// Connect to all candidate LSPs before querying fees.
 		let all_offers = self.gather_lsps2_offers(&connection_manager).await?;
+		let mut rejected_for_fee = false;
 		let (cheapest_lsp, min_prop_fee_ppm_msat, min_opening_params) = all_offers
 			.into_iter()
 			.flat_map(|(lsp, resp)| {
@@ -171,25 +171,26 @@ where
 				let ppm = params.proportional as u64;
 				(lsp, ppm, params)
 			})
+			.filter(|(_, _, params)| {
+				let allowed = self
+					.config
+					.lsps2_max_total_lsp_fee_limit_msat
+					.map_or(true, |limit| params.min_fee_msat <= limit);
+				rejected_for_fee |= !allowed;
+				allowed
+			})
 			.min_by_key(|(_, ppm, _)| *ppm)
 			.ok_or_else(|| {
+				if rejected_for_fee {
+					log_error!(
+						self.logger,
+						"Failed to request inbound JIT channel as all LSP offers exceed our configured fee limit"
+					);
+					return Error::LiquidityFeeTooHigh;
+				}
 				log_error!(self.logger, "Failed to handle response from liquidity service",);
 				Error::LiquidityRequestFailed
 			})?;
-
-		if let Some(max_proportional_lsp_fee_limit_ppm_msat) =
-			max_proportional_lsp_fee_limit_ppm_msat
-		{
-			if min_prop_fee_ppm_msat > max_proportional_lsp_fee_limit_ppm_msat {
-				log_error!(self.logger,
-					"Failed to request inbound JIT channel as LSP's requested proportional opening fee of {} ppm msat exceeds our fee limit of {} ppm msat",
-					min_prop_fee_ppm_msat,
-					max_proportional_lsp_fee_limit_ppm_msat
-				);
-				return Err(Error::LiquidityFeeTooHigh);
-			}
-		}
-
 		log_debug!(
 			self.logger,
 			"Choosing cheapest liquidity offer from LSP {}, will pay {}ppm msat in proportional LSP fees",
@@ -202,8 +203,12 @@ where
 			.await?;
 		let lease = self.consume_lease(&negotiated_lease.id).await?;
 		let lsps2_parameters = LSPS2Parameters {
-			max_total_opening_fee_msat: None,
-			max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
+			max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
+			max_proportional_opening_fee_ppm_msat: self
+				.config
+				.lsps2_max_total_lsp_fee_limit_msat
+				.is_none()
+				.then_some(min_prop_fee_ppm_msat),
 		};
 		let invoice = self.lsps2_create_jit_invoice(
 			LSPS2BuyResponse::from(&lease),
