@@ -41,6 +41,9 @@ use self::state::{
 	PaymentLease, PaymentLeaseId, PaymentLeaseStore,
 };
 
+// LSPS2 requires two blocks more than the usual final CLTV delta.
+const LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA: u16 = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
+
 async fn consume_after_persisted_removal<T, E, RF, CF, Fut>(
 	value: T, persist_removal: RF, restore: CF,
 ) -> Result<T, E>
@@ -525,10 +528,11 @@ where
 		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
 			.ok_or(Error::LiquiditySourceUnavailable)?;
 
-		// LSPS2 requires min_final_cltv_expiry_delta to be at least 2 more than usual.
-		let min_final_cltv_expiry_delta = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
-		let encoded_payment_metadata =
-			PaymentMetadata { lsps2_parameters: Some(lsps2_parameters) }.encode();
+		let encoded_payment_metadata = PaymentMetadata {
+			lsps2_parameters: Some(lsps2_parameters),
+			lsps2_lease_parameters: None,
+		}
+		.encode();
 		let (payment_hash, payment_secret, payment_metadata) = match payment_hash {
 			Some(payment_hash) => {
 				let (payment_secret, payment_metadata) = self
@@ -537,7 +541,7 @@ where
 						payment_hash,
 						lease.payment_size_msat,
 						expiry_secs,
-						Some(min_final_cltv_expiry_delta),
+						Some(LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA),
 						Some(encoded_payment_metadata),
 					)
 					.map_err(|e| {
@@ -551,7 +555,7 @@ where
 				.create_inbound_payment(
 					lease.payment_size_msat,
 					expiry_secs,
-					Some(min_final_cltv_expiry_delta),
+					Some(LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA),
 					Some(encoded_payment_metadata),
 				)
 				.map_err(|e| {
@@ -576,7 +580,7 @@ where
 			.payment_hash(payment_hash)
 			.payment_secret(payment_secret)
 			.current_timestamp()
-			.min_final_cltv_expiry_delta(min_final_cltv_expiry_delta.into())
+			.min_final_cltv_expiry_delta(LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA.into())
 			.expiry_time(Duration::from_secs(expiry_secs.into()))
 			.private_route(route_hint);
 
@@ -751,4 +755,5 @@ mod tests {
 	}
 }
 
+pub(crate) mod router;
 pub(crate) mod state;
