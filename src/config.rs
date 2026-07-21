@@ -151,6 +151,7 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_
 /// | `node_alias`                           | None                                 |
 /// | `trusted_peers_0conf`                  | []                                   |
 /// | `probing_liquidity_limit_multiplier`   | 3                                    |
+/// | `lsps2_max_total_lsp_fee_limit_msat`   | None                                 |
 /// | `anchor_channels_config`               | AnchorChannelsConfig::default()      |
 /// | `route_parameters`                     | None                                 |
 /// | `tor_config`                           | None                                 |
@@ -194,6 +195,13 @@ pub struct Config {
 	/// Channels with available liquidity less than the required amount times this value won't be
 	/// used to send pre-flight probes.
 	pub probing_liquidity_limit_multiplier: u64,
+	/// The maximum total fee in millisatoshis that an LSPS2 liquidity provider may charge for a
+	/// just-in-time channel.
+	///
+	/// This limit applies to all configured LSPS2 liquidity sources. If unset, fixed-amount
+	/// payments accept the fee negotiated for that payment, while variable-amount payments use the
+	/// negotiated proportional fee as their limit.
+	pub lsps2_max_total_lsp_fee_limit_msat: Option<u64>,
 	/// Configuration options pertaining to Anchor channels, i.e., channels for which the
 	/// `option_zero_fee_commitments` or `option_anchors_zero_fee_htlc_tx` channel type is
 	/// negotiated.
@@ -230,6 +238,7 @@ impl Default for Config {
 			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
+			lsps2_max_total_lsp_fee_limit_msat: None,
 			anchor_channels_config: AnchorChannelsConfig::default(),
 			tor_config: None,
 			route_parameters: None,
