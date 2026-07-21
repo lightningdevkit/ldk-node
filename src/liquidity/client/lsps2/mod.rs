@@ -140,6 +140,23 @@ where
 		self.cache_target_store.targets()
 	}
 
+	pub(crate) async fn refill_cached_leases(
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(), Error> {
+		self.prune_stale_cache_targets().await?;
+		for target in self.cache_targets() {
+			match target.id {
+				LeaseCacheTargetId::Fixed { amount_msat } => {
+					self.schedule_fixed_lease_refill(amount_msat, connection_manager);
+				},
+				LeaseCacheTargetId::Variable => {
+					self.schedule_variable_lease_refill(connection_manager);
+				},
+			}
+		}
+		Ok(())
+	}
+
 	pub(crate) async fn prepare_invoice_response(
 		self: Arc<Self>, request: JitInvoiceRequest, connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<JitInvoiceResponse, Error> {
