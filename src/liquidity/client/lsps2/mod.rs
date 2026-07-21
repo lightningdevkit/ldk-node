@@ -316,37 +316,21 @@ where
 	pub(crate) async fn prepare_invoice_response(
 		self: Arc<Self>, request: JitInvoiceRequest, connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<BTreeMap<u64, Vec<u8>>, Error> {
-		let (lease, fee_parameters) = match request {
+		let (lease, total_fee_msat, _, _) = match request {
 			JitInvoiceRequest::Fixed { amount_msat, .. } => {
-				let (lease, total_fee_msat, _, _) =
-					self.acquire_fixed_lease(amount_msat, &connection_manager).await?;
-				let min_opening_fee_msat = lease.params.min_fee_msat;
-				(
-					lease,
-					LSPS2Parameters {
-						max_total_opening_fee_msat: Some(total_fee_msat),
-						max_proportional_opening_fee_ppm_msat: None,
-						min_opening_fee_msat,
-					},
-				)
+				self.acquire_fixed_lease(amount_msat, &connection_manager).await?
 			},
-			JitInvoiceRequest::Variable { .. } => {
-				let (lease, proportional_fee, _, _) =
-					self.acquire_variable_lease(&connection_manager).await?;
-				let min_opening_fee_msat = lease.params.min_fee_msat;
-				(
-					lease,
-					LSPS2Parameters {
-						max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
-						max_proportional_opening_fee_ppm_msat: self
-							.config
-							.lsps2_max_total_lsp_fee_limit_msat
-							.is_none()
-							.then_some(proportional_fee),
-						min_opening_fee_msat,
-					},
-				)
+			JitInvoiceRequest::Variable { amount_msat, .. } => {
+				// A BOLT12 invoice request has already resolved the payment amount. Use it to avoid
+				// consuming a cached variable lease outside its advertised range, and record the exact
+				// fee for that amount so payment validation need not accept the broader node-wide cap.
+				self.acquire_variable_lease(Some(amount_msat), &connection_manager).await?
 			},
+		};
+		let fee_parameters = LSPS2Parameters {
+			max_total_opening_fee_msat: Some(total_fee_msat),
+			max_proportional_opening_fee_ppm_msat: None,
+			min_opening_fee_msat: lease.params.min_fee_msat,
 		};
 
 		// The offers flow currently uses its two-hour default invoice expiry. Never publish a JIT
@@ -403,7 +387,7 @@ where
 		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
 		let (lease, proportional_fee, lsp, was_negotiated) =
-			self.acquire_variable_lease(&connection_manager).await?;
+			self.acquire_variable_lease(None, &connection_manager).await?;
 		let lsps2_parameters = LSPS2Parameters {
 			max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
 			max_proportional_opening_fee_ppm_msat: Some(proportional_fee),
@@ -553,10 +537,10 @@ where
 	}
 
 	async fn acquire_variable_lease(
-		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+		self: &Arc<Self>, amount_msat: Option<u64>, connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig, bool), Error> {
-		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
-			return Ok((lease, proportional_fee, lsp, false));
+		if let Some((lease, fee, lsp)) = self.take_cached_variable_lease(amount_msat).await? {
+			return Ok((lease, fee, lsp, false));
 		}
 		let request_lock = self
 			.pending_lease_request_state
@@ -564,22 +548,22 @@ where
 			.expect("lock")
 			.request_lock(LeaseCacheTargetId::Variable);
 		let _request_guard = request_lock.lock().await;
-		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
-			return Ok((lease, proportional_fee, lsp, false));
+		if let Some((lease, fee, lsp)) = self.take_cached_variable_lease(amount_msat).await? {
+			return Ok((lease, fee, lsp, false));
 		}
 
-		let (negotiated_lease, min_prop_fee_ppm_msat, cheapest_lsp) =
-			self.negotiate_variable_lease(connection_manager).await?;
+		let (negotiated_lease, fee, cheapest_lsp) =
+			self.negotiate_variable_lease(amount_msat, connection_manager).await?;
 		let lease = self.consume_lease(&negotiated_lease.id).await?;
-		Ok((lease, min_prop_fee_ppm_msat, cheapest_lsp, true))
+		Ok((lease, fee, cheapest_lsp, true))
 	}
 
 	async fn negotiate_variable_lease(
-		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+		self: &Arc<Self>, amount_msat: Option<u64>, connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let mut attempt = 1;
 		loop {
-			let result = self.negotiate_variable_lease_once(connection_manager).await;
+			let result = self.negotiate_variable_lease_once(amount_msat, connection_manager).await;
 			match result {
 				Err(error) if should_retry_lease_negotiation(&error, attempt) => {
 					log_warn!(
@@ -596,7 +580,7 @@ where
 	}
 
 	async fn negotiate_variable_lease_once(
-		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+		self: &Arc<Self>, amount_msat: Option<u64>, connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig), LeaseNegotiationError> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let mut rejected_for_fee = false;
@@ -605,20 +589,17 @@ where
 			.flat_map(|(lsp, resp)| {
 				resp.opening_fee_params_menu.into_iter().map(move |params| (lsp.clone(), params))
 			})
-			.map(|(lsp, params)| {
-				let ppm = params.proportional as u64;
-				(lsp, ppm, params)
-			})
-			.filter(|(_, _, params)| {
-				let allowed = self
-					.config
-					.lsps2_max_total_lsp_fee_limit_msat
-					.map_or(true, |limit| params.min_fee_msat <= limit);
-				rejected_for_fee |= !allowed;
-				allowed
+			.filter_map(|(lsp, params)| {
+				let (selection_fee, fee_for_limit) =
+					state::variable_lease_fees(&params, amount_msat)?;
+				let fee_allowed = self
+					.max_variable_amount_fee_msat(amount_msat)
+					.map_or(true, |limit| fee_for_limit <= limit);
+				rejected_for_fee |= !fee_allowed;
+				fee_allowed.then_some((lsp, selection_fee, params))
 			})
 			.collect::<Vec<_>>();
-		candidates.sort_unstable_by_key(|(_, ppm, _)| *ppm);
+		candidates.sort_unstable_by_key(|(_, fee, _)| *fee);
 		if candidates.is_empty() {
 			return Err(if rejected_for_fee {
 				log_error!(
@@ -635,20 +616,29 @@ where
 		try_lease_candidates(
 			candidates,
 			|(lsp, _, _)| lsp.node_id,
-			|(lsp, proportional_fee_ppm_msat, opening_params)| {
+			|(lsp, fee, opening_params)| {
 				let client = Arc::clone(self);
 				async move {
-					log_debug!(
-						client.logger,
-						"Choosing liquidity offer from LSP {}, will pay {}ppm msat in proportional LSP fees",
-						lsp.node_id,
-						proportional_fee_ppm_msat
-					);
+					if amount_msat.is_some() {
+						log_debug!(
+							client.logger,
+							"Choosing liquidity offer from LSP {}, will pay {}msat in total LSP fees",
+							lsp.node_id,
+							fee
+						);
+					} else {
+						log_debug!(
+							client.logger,
+							"Choosing liquidity offer from LSP {}, will pay {}ppm msat in proportional LSP fees",
+							lsp.node_id,
+							fee
+						);
+					}
 					match client
 						.lsps2_send_buy_request(None, opening_params, Some(&lsp.node_id))
 						.await
 					{
-						Ok(lease) => Ok((lease, proportional_fee_ppm_msat, lsp)),
+						Ok(lease) => Ok((lease, fee, lsp)),
 						Err(error) => {
 							log_warn!(
 								client.logger,
@@ -728,7 +718,7 @@ where
 		{
 			return Ok(());
 		}
-		self.negotiate_variable_lease(connection_manager).await?;
+		self.negotiate_variable_lease(None, connection_manager).await?;
 		Ok(())
 	}
 
@@ -941,6 +931,14 @@ where
 		self.config.lsps2_max_total_lsp_fee_limit_msat.unwrap_or(amount_msat).min(amount_msat)
 	}
 
+	/// Variable-amount opening fees are bounded likewise once the payment amount has been resolved.
+	fn max_variable_amount_fee_msat(&self, amount_msat: Option<u64>) -> Option<u64> {
+		match amount_msat {
+			Some(amount_msat) => Some(self.max_fixed_amount_fee_msat(amount_msat)),
+			None => self.config.lsps2_max_total_lsp_fee_limit_msat,
+		}
+	}
+
 	async fn take_cached_fixed_lease(
 		&self, amount_msat: u64,
 	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
@@ -962,16 +960,15 @@ where
 	}
 
 	async fn take_cached_variable_lease(
-		&self,
+		&self, amount_msat: Option<u64>,
 	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
 		let lsps2_nodes = self.get_lsps2_nodes().await?;
 		let available_lsps = lsps2_nodes.iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
-		let Some((lease, proportional_fee)) = self
-			.lease_state
-			.lock()
-			.expect("lock")
-			.variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat, &available_lsps)
-		else {
+		let Some((lease, fee)) = self.lease_state.lock().expect("lock").variable_amount(
+			amount_msat,
+			self.max_variable_amount_fee_msat(amount_msat),
+			&available_lsps,
+		) else {
 			return Ok(None);
 		};
 		let lsp = lsps2_nodes
@@ -979,7 +976,7 @@ where
 			.find(|lsp| lsp.node_id == lease.id.lsp_node_id)
 			.expect("lease was selected from available LSPs");
 		let lease = self.consume_selected_lease(lease).await?;
-		Ok(Some((lease, proportional_fee, lsp)))
+		Ok(Some((lease, fee, lsp)))
 	}
 
 	fn lsps2_create_jit_invoice(
@@ -1363,7 +1360,7 @@ mod tests {
 						if fixed_amount {
 							client.negotiate_fixed_lease(1_000, &node.connection_manager).await
 						} else {
-							client.negotiate_variable_lease(&node.connection_manager).await
+							client.negotiate_variable_lease(Some(1_000), &node.connection_manager).await
 						}
 					};
 					let rejections = async {
@@ -1625,6 +1622,38 @@ mod tests {
 
 		assert_eq!(result, Ok(30));
 		assert_eq!(*attempted_lsps.lock().unwrap(), vec![1, 2]);
+	}
+	#[test]
+	fn cached_variable_lease_must_cover_resolved_amount() {
+		let (node, lsp_node_id) = rejection_test_node();
+		let client = node.liquidity_source.lsps2_client();
+		let lease = PaymentLease {
+			id: PaymentLeaseId { lsp_node_id, intercept_scid: 7 },
+			params: LSPS2OpeningFeeParams {
+				min_fee_msat: 1_500,
+				proportional: 0,
+				valid_until: (chrono::Utc::now() + chrono::Duration::days(2))
+					.to_rfc3339()
+					.parse()
+					.unwrap(),
+				min_lifetime: 1,
+				max_client_to_self_delay: 1,
+				min_payment_size_msat: 1,
+				max_payment_size_msat: 10_000,
+				promise: String::new(),
+			},
+			cltv_expiry_delta: 18,
+			payment_size_msat: None,
+			valid_until: now_secs() + 7 * 24 * 60 * 60,
+		};
+		node.runtime.block_on(client.lease_store.insert(lease.clone())).unwrap();
+		client.lease_state.lock().unwrap().insert(lease.clone());
+
+		// No fee limit is configured, so only the resolved amount bounds the acceptable fee.
+		let taken = node.runtime.block_on(client.take_cached_variable_lease(Some(1_000))).unwrap();
+		assert!(taken.is_none(), "a lease fee exceeding the payment amount must not be accepted");
+		let taken = node.runtime.block_on(client.take_cached_variable_lease(Some(2_000))).unwrap();
+		assert_eq!(taken.map(|(lease, fee_msat, _)| (lease.id, fee_msat)), Some((lease.id, 1_500)));
 	}
 }
 
