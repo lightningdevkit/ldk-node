@@ -58,7 +58,7 @@ bdk_chain = { version = "0.23.3", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.22.2", default-features = false, features = ["async-https-rustls", "tokio"]}
 bdk_electrum = { version = "0.24.0", default-features = false, features = ["use-rustls-ring"]}
 bdk_wallet = { version = "3.1.0", default-features = false, features = ["std", "keys-bip39"]}
-bip157 = { version = "0.6.1", default-features = false }
+bip157 = { version = "0.6.3", default-features = false }
 
 bitreq = { version = "0.3", default-features = false, features = ["async-https", "json-using-serde"] }
 rustls = { version = "0.23", default-features = false }

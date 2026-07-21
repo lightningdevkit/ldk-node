@@ -5,8 +5,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bip157::chain::ChainState;
 use bip157::{
-	chain::BlockHeaderChanges, Builder as KyotoBuilder, Client, Event, HashCheckpoint, Header,
-	IndexedBlock, Info, Node as KyotoNode, Package, Requester, TrustedPeer, Warning,
+	chain::BlockHeaderChanges, Builder as KyotoBuilder, Client, Event as KyotoEvent,
+	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Package, Requester, TrustedPeer,
+	Warning,
 };
 use bitcoin::{BlockHash, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder};
@@ -577,14 +578,14 @@ impl CbfChainSource {
 	}
 
 	async fn process_kyoto_events(
-		logger: Arc<Logger>, mut event_rx: mpsc::UnboundedReceiver<Event>,
+		logger: Arc<Logger>, mut event_rx: mpsc::UnboundedReceiver<KyotoEvent>,
 		registered_scripts: Arc<Mutex<HashSet<ScriptBuf>>>,
 		cbf_runtime_status: Arc<Mutex<CbfRuntimeStatus>>, ops_tx: mpsc::UnboundedSender<ChainOp>,
 		onchain_wallet: Arc<Wallet>, sync_state_tx: watch::Sender<CbfSyncState>,
 	) {
 		while let Some(event) = event_rx.recv().await {
 			match event {
-				Event::IndexedFilter(indexed_filter) => {
+				KyotoEvent::IndexedFilter(indexed_filter) => {
 					// A new block's filter arrived, so we're behind by at least this block until it
 					// is fetched (if matched) and applied. Flip this before the fetch, not after,
 					// so a `sync_wallets` call issued in between doesn't return on a stale
@@ -668,61 +669,30 @@ impl CbfChainSource {
 						};
 						ChainOp::ConnectFull { block }
 					} else {
-						let height = indexed_filter.height();
-						//TODO we need to recheck that a particular height has not been
-						//reorganized, and we retrieve indeed the same block header that we
-						//received `IndexedFilter` event of.
-						match requester.get_header(height).await {
-							Ok(Some(indexed_header)) => {
-								if indexed_header.block_hash() != block_hash {
-									log_debug!(
-										logger,
-										"Filter for {} reorged; skipping",
-										block_hash
-									);
-									continue;
-								}
-								ChainOp::ConnectFiltered {
-									header: indexed_header.header,
-									height: indexed_header.height,
-								}
-							},
-							Ok(None) => {
-								log_error!(logger, "No header at height {}", height,);
-								let _ = ops_tx.send(ChainOp::Failed { error: Error::TxSyncFailed });
-								break;
-							},
-							Err(e) => {
-								log_error!(
-									logger,
-									"Failed to fetch header at height {}: {:?}",
-									height,
-									e,
-								);
-								let _ = ops_tx.send(ChainOp::Failed { error: Error::TxSyncFailed });
-								break;
-							},
+						ChainOp::ConnectFiltered {
+							header: indexed_filter.header(),
+							height: indexed_filter.height(),
 						}
 					};
 					if let Err(e) = ops_tx.send(chop) {
 						log_debug!(logger, "ops_rx gone: {}", e);
 					}
 				},
-				Event::FiltersSynced(sync_update) => {
+				KyotoEvent::FiltersSynced(sync_update) => {
 					//Because application of blocks is async, the fact that kyoto synced up to the
 					//tip does NOT mean that we caught everything up, that's why we send a ChainOp,
 					//only processing of which means we processed all blocks up to the tip.
 					log_info!(logger, "Kyoto synced up to the tip {}", sync_update.tip().height);
 					let _ = ops_tx.send(ChainOp::Synced { tip_height: sync_update.tip().height });
 				},
-				Event::ChainUpdate(BlockHeaderChanges::Connected(indexed_header)) => {
+				KyotoEvent::ChainUpdate(BlockHeaderChanges::Connected(indexed_header)) => {
 					log_debug!(
 						logger,
 						"Kyoto connected header at height {}",
 						indexed_header.height
 					);
 				},
-				Event::ChainUpdate(BlockHeaderChanges::Reorganized {
+				KyotoEvent::ChainUpdate(BlockHeaderChanges::Reorganized {
 					reorganized,
 					accepted: _,
 				}) => {
@@ -735,7 +705,7 @@ impl CbfChainSource {
 						let _ = ops_tx.send(ChainOp::Disconnect { fork_point });
 					}
 				},
-				Event::ChainUpdate(BlockHeaderChanges::ForkAdded(fork)) => {
+				KyotoEvent::ChainUpdate(BlockHeaderChanges::ForkAdded(fork)) => {
 					log_debug!(logger, "Kyoto added fork header at height {}", fork.height);
 				},
 			}
