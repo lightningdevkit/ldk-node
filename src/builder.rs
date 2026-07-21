@@ -683,6 +683,9 @@ impl NodeBuilder {
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
 	/// previously configured.
 	///
+	/// This acquires an exclusive lease for the selected KV table before reading persisted node
+	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
+	///
 	/// Connects to the PostgreSQL database at the given `connection_string`, e.g.,
 	/// `"postgres://user:password@localhost/ldk_db"`.
 	///
@@ -696,13 +699,10 @@ impl NodeBuilder {
 	/// The given `kv_table_name` will be used or default to
 	/// [`DEFAULT_KV_TABLE_NAME`](io::postgres_store::DEFAULT_KV_TABLE_NAME).
 	///
-	/// # Warning
-	///
-	/// Do not point multiple [`Node`] instances at the same database and table. Concurrent access is
-	/// unsafe and can corrupt node state. You must make sure that only one node accesses each
-	/// database and table. The store uses a PostgreSQL advisory lock to reduce this risk. This lock
-	/// is only a temporary safeguard and does not make concurrent access safe.
-	/// Nodes using a different database or table on the same server may coexist.
+	/// Opening a schema-v1 store upgrades it to the lease-aware schema v2. Stop all processes using
+	/// the v1 store before upgrading. For the first v2 open, use the same resolved database name and
+	/// byte-for-byte same `kv_table_name` spelling, including schema qualification, so its transition
+	/// lock matches v1. Older releases cannot reopen a v2 store, so downgrading is unsupported.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
@@ -729,7 +729,13 @@ impl NodeBuilder {
 				log_error!(logger, "Failed to set up Postgres store: {e}");
 				BuildError::KVStoreSetupFailed
 			})?;
-		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
+		let node_lease = kv_store.node_lease();
+		let mut node =
+			self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)?;
+		if !node.install_node_lease(node_lease) {
+			return Err(BuildError::KVStoreSetupFailed);
+		}
+		Ok(node)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
@@ -1225,6 +1231,9 @@ impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
 	/// previously configured.
 	///
+	/// This acquires an exclusive lease for the selected KV table before reading persisted node
+	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
+	///
 	/// Connects to the PostgreSQL database at the given `connection_string`, e.g.,
 	/// `"postgres://user:password@localhost/ldk_db"`.
 	///
@@ -1238,13 +1247,10 @@ impl ArcedNodeBuilder {
 	/// The given `kv_table_name` will be used or default to
 	/// [`DEFAULT_KV_TABLE_NAME`](io::postgres_store::DEFAULT_KV_TABLE_NAME).
 	///
-	/// # Warning
-	///
-	/// Do not point multiple [`Node`] instances at the same database and table. Concurrent access is
-	/// unsafe and can corrupt node state. You must make sure that only one node accesses each
-	/// database and table. The store uses a PostgreSQL advisory lock to reduce this risk. This lock
-	/// is only a temporary safeguard and does not make concurrent access safe.
-	/// Nodes using a different database or table on the same server may coexist.
+	/// Opening a schema-v1 store upgrades it to the lease-aware schema v2. Stop all processes using
+	/// the v1 store before upgrading. For the first v2 open, use the same resolved database name and
+	/// byte-for-byte same `kv_table_name` spelling, including schema qualification, so its transition
+	/// lock matches v1. Older releases cannot reopen a v2 store, so downgrading is unsupported.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
@@ -2377,6 +2383,7 @@ fn build_with_store_internal(
 		payment_store,
 		lnurl_auth,
 		is_running,
+		node_lease: None,
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
