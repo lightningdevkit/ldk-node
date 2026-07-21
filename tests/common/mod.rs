@@ -314,6 +314,10 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	bitcoind_conf.args.push("-rest");
+	// Enable P2P and compact block filters so the CBF (BIP157) chain source can connect and sync.
+	bitcoind_conf.p2p = corepc_node::P2P::Yes;
+	bitcoind_conf.args.push("-blockfilterindex=1");
+	bitcoind_conf.args.push("-peerblockfilters=1");
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = env::var("ELECTRS_EXE")
@@ -330,7 +334,14 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 pub(crate) fn random_chain_source<'a>(
 	bitcoind: &'a BitcoinD, electrsd: &'a ElectrsD,
 ) -> TestChainSource<'a> {
-	let r = rand::random_range(0..3);
+	let r = match std::env::var("LDK_TEST_CHAIN_SOURCE").ok().as_deref() {
+		Some("esplora") => 0,
+		Some("electrum") => 1,
+		Some("bitcoind-rpc") => 2,
+		Some("bitcoind-rest") => 3,
+		Some("cbf") => 4,
+		_ => rand::random_range(0..3),
+	};
 	match r {
 		0 => {
 			println!("Randomly setting up Esplora chain syncing...");
@@ -347,6 +358,10 @@ pub(crate) fn random_chain_source<'a>(
 		3 => {
 			println!("Randomly setting up Bitcoind REST chain syncing...");
 			TestChainSource::BitcoindRestSync(bitcoind)
+		},
+		4 => {
+			println!("Randomly setting up CBF compact block filter syncing...");
+			TestChainSource::Cbf(bitcoind)
 		},
 		_ => unreachable!(),
 	}
@@ -475,7 +490,10 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 				assert_eq!(actual_counterparty_node_id, counterparty_node_id);
 				let cur_height = node.status().current_best_block.height;
 				let blocks_to_go = confirmation_height - cur_height;
-				generate_blocks_and_wait(bitcoind, electrsd, blocks_to_go as usize).await;
+				let new_height =
+					generate_blocks_and_wait(bitcoind, electrsd, blocks_to_go as usize).await;
+				wait_for_node_tip(node, new_height).await;
+				wait_for_node_tip(peer_node, new_height).await;
 				node.sync_wallets().unwrap();
 				peer_node.sync_wallets().unwrap();
 			},
@@ -490,7 +508,9 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 		if node.list_balances().lightning_balances.is_empty() {
 			break;
 		}
-		generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+		let new_height = generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+		wait_for_node_tip(node, new_height).await;
+		wait_for_node_tip(peer_node, new_height).await;
 		node.sync_wallets().unwrap();
 		peer_node.sync_wallets().unwrap();
 	}
@@ -500,7 +520,9 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 	assert_eq!(balances.pending_balances_from_channel_closures.len(), 1);
 	match balances.pending_balances_from_channel_closures[0] {
 		PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {
-			generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+			let new_height = generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+			wait_for_node_tip(node, new_height).await;
+			wait_for_node_tip(peer_node, new_height).await;
 			node.sync_wallets().unwrap();
 			peer_node.sync_wallets().unwrap();
 
@@ -515,7 +537,9 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 		_ => panic!("Unexpected balance state!"),
 	}
 
-	generate_blocks_and_wait(bitcoind, electrsd, 5).await;
+	let new_height = generate_blocks_and_wait(bitcoind, electrsd, 5).await;
+	wait_for_node_tip(node, new_height).await;
+	wait_for_node_tip(peer_node, new_height).await;
 	node.sync_wallets().unwrap();
 	peer_node.sync_wallets().unwrap();
 }
@@ -526,6 +550,7 @@ pub(crate) enum TestChainSource<'a> {
 	Electrum(&'a ElectrsD),
 	BitcoindRpcSync(&'a BitcoinD),
 	BitcoindRestSync(&'a BitcoinD),
+	Cbf(&'a BitcoinD),
 }
 
 #[derive(Clone, Copy)]
@@ -698,6 +723,11 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 				config.wallet_rescan_from_height,
 			);
 		},
+		TestChainSource::Cbf(bitcoind) => {
+			let p2p_socket = bitcoind.params.p2p_socket.expect("P2P must be enabled for CBF");
+			let peer_addr = format!("{}", p2p_socket);
+			builder.set_chain_source_cbf(vec![peer_addr], None);
+		},
 	}
 
 	match &config.log_writer {
@@ -737,7 +767,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 
 pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
-) {
+) -> usize {
 	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	print!("Generating {} blocks...", num);
@@ -746,9 +776,11 @@ pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
-	wait_for_block(bitcoind, electrs, cur_height as usize + num).await;
+	let new_height = cur_height as usize + num;
+	wait_for_block(bitcoind, electrs, new_height).await;
 	print!(" Done!");
 	println!("\n");
+	return new_height;
 }
 
 pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
@@ -845,6 +877,13 @@ pub(crate) async fn wait_for_channel_ready_to_send(
 		counterparty,
 		min_amount_msat,
 	);
+}
+
+pub(crate) async fn wait_for_node_tip(node: &Node, height: usize) {
+	exponential_backoff_poll(|| {
+		(node.status().current_best_block.height as usize >= height).then_some(())
+	})
+	.await;
 }
 
 pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> T
@@ -1156,7 +1195,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	wait_for_tx(electrsd, funding_txo_a.txid).await;
 
 	if !allow_0conf {
-		generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+		let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+		wait_for_node_tip(&node_a, new_height).await;
+		wait_for_node_tip(&node_b, new_height).await;
 	}
 
 	node_a.sync_wallets().unwrap();
@@ -1528,7 +1569,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 
 	// Mine a block to give time for the HTLC to resolve
-	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	wait_for_node_tip(&node_a, new_height).await;
+	wait_for_node_tip(&node_b, new_height).await;
 
 	println!("\nB splices out to pay A");
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
@@ -1540,7 +1583,11 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	tokio::time::sleep(Duration::from_secs(2)).await;
+
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	wait_for_node_tip(&node_a, new_height).await;
+	wait_for_node_tip(&node_b, new_height).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1562,7 +1609,10 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	tokio::time::sleep(Duration::from_secs(5)).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	wait_for_node_tip(&node_a, new_height).await;
+	wait_for_node_tip(&node_b, new_height).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1612,8 +1662,10 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	tokio::time::sleep(Duration::from_secs(1)).await;
 	if force_close {
 		node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
+		tokio::time::sleep(Duration::from_secs(2)).await;
 	} else {
 		node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
+		tokio::time::sleep(Duration::from_secs(2)).await;
 		// The cooperative shutdown may complete before we get to check, but if the channel
 		// is still visible it must already be in a shutdown state.
 		if let Some(channel) =
@@ -1635,7 +1687,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	wait_for_outpoint_spend(electrsd, funding_txo_b).await;
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	wait_for_node_tip(&node_a, new_height).await;
+	wait_for_node_tip(&node_b, new_height).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1680,7 +1734,10 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 		assert_eq!(node_a_blocks_to_go, node_b_blocks_to_go);
 
-		generate_blocks_and_wait(&bitcoind, electrsd, node_a_blocks_to_go as usize).await;
+		let new_height =
+			generate_blocks_and_wait(&bitcoind, electrsd, node_a_blocks_to_go as usize).await;
+		wait_for_node_tip(&node_a, new_height).await;
+		wait_for_node_tip(&node_b, new_height).await;
 		node_a.sync_wallets().unwrap();
 		node_b.sync_wallets().unwrap();
 

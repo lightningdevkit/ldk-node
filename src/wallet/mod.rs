@@ -141,6 +141,10 @@ impl Wallet {
 			.collect()
 	}
 
+	pub(crate) fn latest_checkpoint(&self) -> bdk_chain::local_chain::CheckPoint {
+		self.inner.lock().expect("lock").latest_checkpoint()
+	}
+
 	pub(crate) fn current_best_block(&self) -> BlockLocator {
 		let checkpoint = self.inner.lock().expect("lock").latest_checkpoint();
 		let mut current_block = Some(checkpoint.clone());
@@ -210,6 +214,14 @@ impl Wallet {
 		})?;
 
 		Ok(())
+	}
+
+	/// Returns every script pubkey the wallet is watching for on-chain activity: all revealed
+	/// SPKs plus the lookahead window BDK derives beyond the last revealed index on each keychain.
+	/// A block may pay an address we have not explicitly revealed yet (e.g. on recovery, where a fresh
+	/// wallet has revealed nothing) but which is still within the gap limit.
+	pub(crate) fn list_watched_scripts(&self) -> Vec<ScriptBuf> {
+		self.inner.lock().expect("lock").spk_index().inner().all_spks().values().cloned().collect()
 	}
 
 	async fn update_payment_store(&self, mut events: Vec<WalletEvent>) -> Result<(), Error> {
@@ -1842,13 +1854,14 @@ fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
 
 impl Listen for Wallet {
 	fn filtered_block_connected(
-		&self, _header: &bitcoin::block::Header,
-		_txdata: &lightning::chain::transaction::TransactionData, _height: u32,
+		&self, header: &bitcoin::block::Header,
+		_txdata: &lightning::chain::transaction::TransactionData, height: u32,
 	) {
-		debug_assert!(false, "Syncing filtered blocks is currently not supported");
-		// As far as we can tell this would be a no-op anyways as we don't have to tell BDK about
-		// the header chain of intermediate blocks. According to the BDK team, it's sufficient to
-		// only connect full blocks starting from the last point of disagreement.
+		// A non-matching filter means none of this block's transactions are relevant to us, so there
+		// is nothing but the header to apply. We still connect an empty block built from the header
+		// to keep the on-chain wallet's chain contiguous with the listeners.
+		let block = bitcoin::Block { header: *header, txdata: Vec::new() };
+		self.block_connected(&block, height);
 	}
 
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
