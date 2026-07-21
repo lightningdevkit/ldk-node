@@ -2249,18 +2249,6 @@ fn build_with_store_internal(
 
 	let pathfinding_scores_sync_url = pathfinding_scores_sync_config.map(|c| c.url.clone());
 
-	#[cfg(cycle_tests)]
-	let mut _leak_checker = crate::LeakChecker(Vec::new());
-	#[cfg(cycle_tests)]
-	{
-		use std::any::Any;
-		use std::sync::Weak;
-
-		_leak_checker.0.push(Arc::downgrade(&channel_manager) as Weak<dyn Any + Send + Sync>);
-		_leak_checker.0.push(Arc::downgrade(&network_graph) as Weak<dyn Any + Send + Sync>);
-		_leak_checker.0.push(Arc::downgrade(&wallet) as Weak<dyn Any + Send + Sync>);
-	}
-
 	let prober = probing_config.map(|probing_cfg| {
 		let strategy: Arc<dyn ProbingStrategy> = match &probing_cfg.kind {
 			ProbingStrategyKind::HighDegree { top_node_count } => {
@@ -2305,6 +2293,18 @@ fn build_with_store_internal(
 			max_locked_msat: probing_cfg.max_locked_msat,
 		})
 	});
+
+	#[cfg(cycle_tests)]
+	let mut _leak_checker = crate::LeakChecker(Vec::new());
+	#[cfg(cycle_tests)]
+	{
+		use std::any::Any;
+		use std::sync::Weak;
+
+		_leak_checker.0.push(Arc::downgrade(&channel_manager) as Weak<dyn Any + Send + Sync>);
+		_leak_checker.0.push(Arc::downgrade(&network_graph) as Weak<dyn Any + Send + Sync>);
+		_leak_checker.0.push(Arc::downgrade(&wallet) as Weak<dyn Any + Send + Sync>);
+	}
 
 	Ok(Node {
 		runtime,
