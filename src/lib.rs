@@ -545,7 +545,7 @@ impl Node {
 			}
 		});
 
-		// Periodically prune LSPS2 leases before they expire so stale parameters don't accumulate.
+		// Periodically prune LSPS2 state so expired leases and cache targets don't accumulate.
 		let lsps2_client = self.liquidity_source.lsps2_client();
 		let prune_logger = Arc::clone(&self.logger);
 		let mut stop_pruning = self.stop_sender.subscribe();
@@ -558,6 +558,9 @@ impl Node {
 					_ = interval.tick() => {
 						if let Err(error) = lsps2_client.prune_stale_leases().await {
 							log_error!(prune_logger, "Failed pruning stale LSPS2 leases: {}", error);
+						}
+						if let Err(error) = lsps2_client.prune_stale_cache_targets().await {
+							log_error!(prune_logger, "Failed pruning stale LSPS2 cache targets: {}", error);
 						}
 					},
 				}

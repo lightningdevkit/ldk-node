@@ -36,7 +36,10 @@ use crate::payment::PaymentMetadata;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
-use self::state::{LSPS2LeaseState, PaymentLease, PaymentLeaseId, PaymentLeaseStore};
+use self::state::{
+	now_secs, LSPS2LeaseState, LeaseCacheTarget, LeaseCacheTargetId, LeaseCacheTargetStore,
+	PaymentLease, PaymentLeaseId, PaymentLeaseStore,
+};
 
 async fn consume_after_persisted_removal<T, E, RF, CF, Fut>(
 	value: T, persist_removal: RF, consume: CF,
@@ -63,6 +66,7 @@ where
 		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2BuyResponse>>>,
 	pub(crate) lease_store: Arc<PaymentLeaseStore<L>>,
 	pub(crate) lease_state: Mutex<LSPS2LeaseState>,
+	pub(crate) cache_target_store: Arc<LeaseCacheTargetStore<L>>,
 	pub(crate) channel_manager: Arc<ChannelManager>,
 	pub(crate) keys_manager: Arc<KeysManager>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
@@ -87,6 +91,21 @@ where
 		}
 		self.lease_state.lock().expect("lock").prune();
 		Ok(())
+	}
+
+	pub(crate) async fn prune_stale_cache_targets(&self) -> Result<(), Error> {
+		self.cache_target_store.prune(now_secs()).await
+	}
+
+	pub(crate) async fn register_cache_target(
+		&self, id: LeaseCacheTargetId, absolute_expiry: Option<u64>,
+	) -> Result<(), Error> {
+		let target = LeaseCacheTarget::new(id, absolute_expiry);
+		self.cache_target_store.register(target).await
+	}
+
+	pub(crate) fn cache_targets(&self) -> Vec<LeaseCacheTarget> {
+		self.cache_target_store.targets()
 	}
 
 	pub(crate) async fn lsps2_receive_to_jit_channel(

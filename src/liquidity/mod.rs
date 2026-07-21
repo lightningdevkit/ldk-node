@@ -36,7 +36,10 @@ use crate::io::{
 	LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE, LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::liquidity::client::lsps1::LSPS1Client;
-use crate::liquidity::client::lsps2::state::{is_lease_usable, LSPS2LeaseState, PaymentLeaseStore};
+use crate::liquidity::client::lsps2::state::{
+	is_lease_usable, now_secs, read_lease_cache_targets, LSPS2LeaseState, LeaseCacheTargetState,
+	LeaseCacheTargetStore, PaymentLeaseStore,
+};
 use crate::liquidity::client::lsps2::LSPS2Client;
 use crate::liquidity::service::lsps2::{LSPS2Service, LSPS2ServiceLiquiditySource};
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
@@ -46,6 +49,9 @@ use crate::{Config, Error};
 
 const LIQUIDITY_REQUEST_TIMEOUT_SECS: u64 = 5;
 const LSPS_DISCOVERY_WAIT_TIMEOUT_SECS: u64 = 10;
+// Keep the proactively refreshed target set bounded. Evicted requirements still fall back to
+// on-demand lease negotiation, so this limits durable state without limiting offer validity.
+const LSPS2_LEASE_CACHE_TARGET_SIZE: usize = 100;
 
 fn select_lsps_for_protocol(
 	lsp_nodes: &Arc<RwLock<Vec<LspNode>>>, protocol: u16, override_node_id: Option<&PublicKey>,
@@ -252,14 +258,17 @@ where
 	}
 
 	pub(crate) async fn build(self) -> Result<LiquiditySource<L>, BuildError> {
-		let leases = read_all_objects(
-			&*self.kv_store,
-			LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE,
-			LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
-			self.logger.clone(),
-		)
-		.await
-		.map_err(|_| BuildError::ReadFailed)?;
+		let (leases, cache_targets) = tokio::join!(
+			read_all_objects(
+				&*self.kv_store,
+				LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE,
+				LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+				self.logger.clone(),
+			),
+			read_lease_cache_targets(&*self.kv_store, self.logger.clone()),
+		);
+		let leases = leases.map_err(|_| BuildError::ReadFailed)?;
+		let cache_targets = cache_targets.map_err(|_| BuildError::ReadFailed)?;
 		let lease_store = Arc::new(PaymentLeaseStore::new(
 			leases.clone(),
 			LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
@@ -272,6 +281,19 @@ where
 		}
 		let lease_state =
 			LSPS2LeaseState::from_leases(leases.into_iter().filter(is_lease_usable).collect());
+		let (cache_target_state, removed_target_ids) = LeaseCacheTargetState::from_targets(
+			cache_targets,
+			LSPS2_LEASE_CACHE_TARGET_SIZE,
+			now_secs(),
+		);
+		let cache_target_store = Arc::new(LeaseCacheTargetStore::new(
+			cache_target_state,
+			Arc::clone(&self.kv_store),
+			self.logger.clone(),
+		));
+		if !removed_target_ids.is_empty() {
+			cache_target_store.persist().await.map_err(|_| BuildError::WriteFailed)?;
+		}
 		let liquidity_service_config = self.lsps2_service.as_ref().map(|s| {
 			let lsps2_service_config = Some(s.ldk_service_config.clone());
 			let lsps5_service_config = None;
@@ -338,6 +360,7 @@ where
 				pending_buy_requests: Mutex::new(HashMap::new()),
 				lease_store,
 				lease_state: Mutex::new(lease_state),
+				cache_target_store,
 				channel_manager: self.channel_manager.clone(),
 				keys_manager: self.keys_manager.clone(),
 				discovery_done_rx: discovery_done_rx.clone(),
