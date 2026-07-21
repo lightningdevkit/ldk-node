@@ -125,8 +125,7 @@ impl Bolt11Payment {
 
 	fn receive_via_jit_channel_inner(
 		&self, amount_msat: Option<u64>, description: &LdkBolt11InvoiceDescription,
-		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
+		expiry_secs: u32, payment_hash: Option<PaymentHash>,
 	) -> Result<LdkBolt11Invoice, Error> {
 		let connection_manager = Arc::clone(&self.connection_manager);
 		let res = self.runtime.block_on(async move {
@@ -137,7 +136,6 @@ impl Bolt11Payment {
 						amount_msat,
 						description,
 						expiry_secs,
-						max_total_lsp_fee_limit_msat,
 						payment_hash,
 						connection_manager,
 					)
@@ -148,7 +146,6 @@ impl Bolt11Payment {
 					.lsps2_receive_variable_amount_to_jit_channel(
 						description,
 						expiry_secs,
-						max_proportional_lsp_fee_limit_ppm_msat,
 						payment_hash,
 						connection_manager,
 					)
@@ -621,40 +618,33 @@ impl Bolt11Payment {
 		Ok(maybe_wrap(invoice))
 	}
 
-	/// Returns a payable invoice that can be used to request a payment of the amount given and
-	/// receive it via a newly created just-in-time (JIT) channel.
+	/// Returns a payable invoice that can use a just-in-time (JIT) channel to receive a payment of
+	/// the amount given when additional inbound liquidity is needed.
 	///
-	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
-	/// to us, supplying just-in-time inbound liquidity.
+	/// The configured [LSPS2]-compliant LSP may open a channel when the invoice is paid. The payment
+	/// may instead arrive over pre-existing channels when they provide sufficient inbound liquidity,
+	/// in which case no new channel is opened.
 	///
-	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
-	/// channel to us. We'll use its cheapest offer otherwise.
+	/// The configured LSPS2 fee limit is enforced before creating the invoice.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	pub fn receive_via_jit_channel(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
-			Some(amount_msat),
-			&description,
-			expiry_secs,
-			max_total_lsp_fee_limit_msat,
-			None,
-			None,
-		)?;
+		let invoice =
+			self.receive_via_jit_channel_inner(Some(amount_msat), &description, expiry_secs, None)?;
 		Ok(maybe_wrap(invoice))
 	}
 
-	/// Returns a payable invoice that can be used to request a payment of the amount given and
-	/// receive it via a newly created just-in-time (JIT) channel.
+	/// Returns a payable invoice that can use a just-in-time (JIT) channel to receive a payment of
+	/// the amount given when additional inbound liquidity is needed.
 	///
-	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
-	/// to us, supplying just-in-time inbound liquidity.
+	/// The configured [LSPS2]-compliant LSP may open a channel when the invoice is paid. The payment
+	/// may instead arrive over pre-existing channels when they provide sufficient inbound liquidity,
+	/// in which case no new channel is opened.
 	///
-	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
-	/// channel to us. We'll use its cheapest offer otherwise.
+	/// The configured LSPS2 fee limit is enforced before creating the invoice.
 	///
 	/// The inbound payment will only be accepted if
 	/// [`Config::manually_handle_unknown_bolt11_payments`] is enabled. We will then emit a
@@ -678,56 +668,46 @@ impl Bolt11Payment {
 	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
 	pub fn receive_via_jit_channel_for_hash(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: PaymentHash,
+		payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			Some(amount_msat),
 			&description,
 			expiry_secs,
-			max_total_lsp_fee_limit_msat,
-			None,
 			Some(payment_hash),
 		)?;
 		Ok(maybe_wrap(invoice))
 	}
 
-	/// Returns a payable invoice that can be used to request a variable amount payment (also known
-	/// as "zero-amount" invoice) and receive it via a newly created just-in-time (JIT) channel.
+	/// Returns a payable invoice that can use a just-in-time (JIT) channel to receive a variable
+	/// amount payment, also known as a "zero-amount" invoice, when additional inbound liquidity is
+	/// needed.
 	///
-	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
-	/// to us, supplying just-in-time inbound liquidity.
+	/// The configured [LSPS2]-compliant LSP may open a channel when the invoice is paid. The payment
+	/// may instead arrive over pre-existing channels when they provide sufficient inbound liquidity,
+	/// in which case no new channel is opened.
 	///
-	/// If set, `max_proportional_lsp_fee_limit_ppm_msat` will limit how much proportional fee, in
-	/// parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
-	/// We'll use its cheapest offer otherwise.
+	/// The configured LSPS2 fee limit is enforced when the payment arrives.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	pub fn receive_variable_amount_via_jit_channel(
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_via_jit_channel_inner(
-			None,
-			&description,
-			expiry_secs,
-			None,
-			max_proportional_lsp_fee_limit_ppm_msat,
-			None,
-		)?;
+		let invoice = self.receive_via_jit_channel_inner(None, &description, expiry_secs, None)?;
 		Ok(maybe_wrap(invoice))
 	}
 
-	/// Returns a payable invoice that can be used to request a variable amount payment (also known
-	/// as "zero-amount" invoice) and receive it via a newly created just-in-time (JIT) channel.
+	/// Returns a payable invoice that can use a just-in-time (JIT) channel to receive a variable
+	/// amount payment, also known as a "zero-amount" invoice, when additional inbound liquidity is
+	/// needed.
 	///
-	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
-	/// to us, supplying just-in-time inbound liquidity.
+	/// The configured [LSPS2]-compliant LSP may open a channel when the invoice is paid. The payment
+	/// may instead arrive over pre-existing channels when they provide sufficient inbound liquidity,
+	/// in which case no new channel is opened.
 	///
-	/// If set, `max_proportional_lsp_fee_limit_ppm_msat` will limit how much proportional fee, in
-	/// parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
-	/// We'll use its cheapest offer otherwise.
+	/// The configured LSPS2 fee limit is enforced when the payment arrives.
 	///
 	/// The inbound payment will only be accepted if
 	/// [`Config::manually_handle_unknown_bolt11_payments`] is enabled. We will then emit a
@@ -750,16 +730,13 @@ impl Bolt11Payment {
 	/// [`fail_for_id`]: Self::fail_for_id
 	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
 	pub fn receive_variable_amount_via_jit_channel_for_hash(
-		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
-		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: PaymentHash,
+		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			None,
 			&description,
 			expiry_secs,
-			None,
-			max_proportional_lsp_fee_limit_ppm_msat,
 			Some(payment_hash),
 		)?;
 		Ok(maybe_wrap(invoice))
