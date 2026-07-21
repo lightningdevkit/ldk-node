@@ -112,11 +112,29 @@ where
 	}
 
 	pub(crate) async fn remove(&self, id: &SO::Id) -> Result<(), Error> {
+		self.remove_batch(std::slice::from_ref(id)).await?;
+		Ok(())
+	}
+
+	pub(crate) async fn remove_batch(&self, ids: &[SO::Id]) -> Result<Vec<SO>, Error> {
+		let (removed_objects, result) = self.remove_batch_with_partial_result(ids).await;
+		result?;
+		Ok(removed_objects)
+	}
+
+	pub(crate) async fn remove_batch_with_partial_result(
+		&self, ids: &[SO::Id],
+	) -> (Vec<SO>, Result<(), Error>) {
 		let _guard = self.mutation_lock.lock().await;
-		let should_remove = { self.objects.lock().expect("lock").contains_key(id) };
-		if should_remove {
+		let mut removed_objects = Vec::new();
+		for id in ids {
+			let should_remove = { self.objects.lock().expect("lock").contains_key(id) };
+			if !should_remove {
+				continue;
+			}
+
 			let store_key = id.encode_to_hex_str();
-			KVStore::remove(
+			let remove_result = KVStore::remove(
 				&*self.kv_store,
 				&self.primary_namespace,
 				&self.secondary_namespace,
@@ -134,10 +152,16 @@ where
 					e
 				);
 				Error::PersistenceFailed
-			})?;
-			self.objects.lock().expect("lock").remove(id);
+			});
+			if let Err(e) = remove_result {
+				return (removed_objects, Err(e));
+			}
+
+			if let Some(object) = self.objects.lock().expect("lock").remove(id) {
+				removed_objects.push(object);
+			}
 		}
-		Ok(())
+		(removed_objects, Ok(()))
 	}
 
 	/// Returns the current in-memory object for `id`.
@@ -420,6 +444,45 @@ mod tests {
 		let new_object = TestObject { id: new_id, data: [34u8; 3] };
 		assert_eq!(Err(Error::PersistenceFailed), data_store.insert_or_update(new_object).await);
 		assert!(data_store.get(&new_id).is_none());
+	}
+
+	#[tokio::test]
+	async fn batch_remove_removes_persisted_objects() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let primary_namespace = "datastore_batch_remove_test_primary".to_string();
+		let secondary_namespace = "datastore_batch_remove_test_secondary".to_string();
+		let data_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
+			Vec::new(),
+			primary_namespace.clone(),
+			secondary_namespace.clone(),
+			Arc::clone(&store),
+			logger,
+		);
+
+		let first = TestObject { id: TestObjectId { id: [1u8; 4] }, data: [23u8; 3] };
+		let second = TestObject { id: TestObjectId { id: [2u8; 4] }, data: [42u8; 3] };
+		let missing_id = TestObjectId { id: [3u8; 4] };
+		assert_eq!(Ok(false), data_store.insert(first).await);
+		assert_eq!(Ok(false), data_store.insert(second).await);
+
+		assert_eq!(
+			Ok(vec![first, second]),
+			data_store.remove_batch(&[first.id, missing_id, second.id]).await
+		);
+		assert_eq!(None, data_store.get(&first.id));
+		assert_eq!(None, data_store.get(&second.id));
+
+		for id in [first.id, second.id] {
+			assert!(KVStore::read(
+				&*store,
+				&primary_namespace,
+				&secondary_namespace,
+				&id.encode_to_hex_str()
+			)
+			.await
+			.is_err());
+		}
 	}
 
 	#[tokio::test]

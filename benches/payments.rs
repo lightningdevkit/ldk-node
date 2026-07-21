@@ -75,12 +75,8 @@ async fn send_payments(node_a: Arc<Node>, node_b: Arc<Node>) -> std::time::Durat
 	while success_count < total_payments {
 		match node_a.next_event_async().await {
 			Event::PaymentSuccessful { payment_id, payment_hash, .. } => {
-				if let Some(id) = payment_id {
-					success_count += 1;
-					println!("{}: Payment with id {:?} completed", payment_hash.0.as_hex(), id);
-				} else {
-					println!("Payment completed (no payment_id)");
-				}
+				success_count += 1;
+				println!("{}: Payment with id {:?} completed", payment_hash.0.as_hex(), payment_id);
 			},
 			Event::PaymentFailed { payment_id, payment_hash, .. } => {
 				println!("{}: Payment {:?} failed", payment_hash.unwrap().0.as_hex(), payment_id);

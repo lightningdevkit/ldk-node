@@ -48,7 +48,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::{PaymentDetails, PendingPaymentDetails};
+use crate::payment::{PaymentDetails, PendingPaymentStore as PendingPaymentStoreImpl};
 use crate::runtime::RuntimeSpawner;
 
 #[cfg(not(feature = "uniffi"))]
@@ -747,4 +747,4 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 	}
 }
 
-pub(crate) type PendingPaymentStore = DataStore<PendingPaymentDetails, Arc<Logger>>;
+pub(crate) type PendingPaymentStore = PendingPaymentStoreImpl<Arc<Logger>>;

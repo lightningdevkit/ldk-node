@@ -10,6 +10,7 @@ use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
@@ -51,11 +52,12 @@ use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
-use crate::payment::PaymentMetadata;
+use crate::payment::{PaymentMetadata, PendingPaymentDetails, PendingPaymentExpiry};
 use crate::probing::Prober;
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, PendingPaymentStore,
+	Sweeper, Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -105,9 +107,7 @@ pub enum Event {
 	/// A sent payment was successful.
 	PaymentSuccessful {
 		/// A local identifier used to track the payment.
-		///
-		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
-		payment_id: Option<PaymentId>,
+		payment_id: PaymentId,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
 		/// The preimage to the `payment_hash`.
@@ -133,9 +133,7 @@ pub enum Event {
 	/// A sent payment has failed.
 	PaymentFailed {
 		/// A local identifier used to track the payment.
-		///
-		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
-		payment_id: Option<PaymentId>,
+		payment_id: PaymentId,
 		/// The hash of the payment.
 		///
 		/// This will be `None` if the payment failed before receiving an invoice when paying a
@@ -151,9 +149,7 @@ pub enum Event {
 	/// A payment has been received.
 	PaymentReceived {
 		/// A local identifier used to track the payment.
-		///
-		/// Will only be `None` for events serialized with LDK Node v0.2.1 or prior.
-		payment_id: Option<PaymentId>,
+		payment_id: PaymentId,
 		/// The hash of the payment.
 		payment_hash: PaymentHash,
 		/// The value, in thousandths of a satoshi, that has been received.
@@ -202,15 +198,15 @@ pub enum Event {
 	},
 	/// A payment for a previously-registered payment hash has been received.
 	///
-	/// This needs to be manually claimed by supplying the correct preimage to [`claim_for_hash`].
+	/// This needs to be manually claimed by supplying the correct preimage to [`claim_for_id`].
 	///
 	/// If the provided parameters don't match the expectations or the preimage can't be
-	/// retrieved in time, should be failed-back via [`fail_for_hash`].
+	/// retrieved in time, should be failed-back via [`fail_for_id`].
 	///
 	/// Note claiming will necessarily fail after the `claim_deadline` has been reached.
 	///
-	/// [`claim_for_hash`]: crate::payment::Bolt11Payment::claim_for_hash
-	/// [`fail_for_hash`]: crate::payment::Bolt11Payment::fail_for_hash
+	/// [`claim_for_id`]: crate::payment::Bolt11Payment::claim_for_id
+	/// [`fail_for_id`]: crate::payment::Bolt11Payment::fail_for_id
 	PaymentClaimable {
 		/// A local identifier used to track the payment.
 		payment_id: PaymentId,
@@ -298,18 +294,18 @@ impl_writeable_tlv_based_enum!(Event,
 	(0, PaymentSuccessful) => {
 		(0, payment_hash, required),
 		(1, fee_paid_msat, option),
-		(3, payment_id, option),
+		(3, payment_id, required),
 		(5, payment_preimage, option),
 		(7, bolt12_invoice, option),
 	},
 	(1, PaymentFailed) => {
 		(0, payment_hash, option),
 		(1, reason, upgradable_option),
-		(3, payment_id, option),
+		(3, payment_id, required),
 	},
 	(2, PaymentReceived) => {
 		(0, payment_hash, required),
-		(1, payment_id, option),
+		(1, payment_id, required),
 		(2, amount_msat, required),
 		(3, custom_records, optional_vec),
 	},
@@ -535,6 +531,7 @@ where
 	network_graph: Arc<Graph>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	pending_payment_store: Arc<PendingPaymentStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
 	static_invoice_store: Option<StaticInvoiceStore>,
@@ -556,10 +553,10 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
-		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
-		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
-		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		pending_payment_store: Arc<PendingPaymentStore>, peer_store: Arc<PeerStore<L>>,
+		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
+		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
+		prober: Option<Arc<Prober>>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -571,6 +568,7 @@ where
 			network_graph,
 			liquidity_source,
 			payment_store,
+			pending_payment_store,
 			peer_store,
 			keys_manager,
 			static_invoice_store,
@@ -673,6 +671,52 @@ where
 				compute_opening_fee(amount_msat, 0, max_prop_fee)
 			})
 		})
+	}
+
+	fn current_time_secs() -> u64 {
+		SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs()
+	}
+
+	async fn prune_expired_pending_payments(&self) -> Result<(), ReplayEvent> {
+		let now = Self::current_time_secs();
+		let current_height = self.channel_manager.current_best_block().height;
+		let expired_payment_ids = self
+			.pending_payment_store
+			.list_filter(|payment| payment.has_expired(now, current_height))
+			.into_iter()
+			.map(|payment| payment.details.id)
+			.collect::<Vec<_>>();
+
+		if let Err(e) = self.pending_payment_store.remove_batch(&expired_payment_ids).await {
+			log_error!(self.logger, "Failed to remove expired pending payments: {}", e);
+			return Err(ReplayEvent());
+		}
+
+		Ok(())
+	}
+
+	async fn find_pending_inbound_payment(
+		&self, payment_hash: &PaymentHash,
+	) -> Result<Option<PendingPaymentDetails>, ReplayEvent> {
+		self.prune_expired_pending_payments().await?;
+		Ok(self.pending_payment_store.get_pending_manual_bolt11_by_payment_hash(payment_hash))
+	}
+
+	fn resolve_inbound_payment_id(
+		&self, event_payment_id: PaymentId, payment_hash: &PaymentHash,
+	) -> (PaymentId, Option<PaymentDetails>) {
+		if let Some(info) = self.payment_store.get(&event_payment_id) {
+			return (event_payment_id, Some(info));
+		}
+
+		let legacy_id = PaymentId(payment_hash.0);
+		if legacy_id != event_payment_id {
+			if let Some(info) = self.payment_store.get(&legacy_id) {
+				return (legacy_id, Some(info));
+			}
+		}
+
+		(event_payment_id, None)
 	}
 
 	pub async fn handle_event(&self, event: LdkEvent) -> Result<(), ReplayEvent> {
@@ -782,6 +826,7 @@ where
 					.lsps2_funding_tx_broadcast_safe(user_channel_id, counterparty_node_id);
 			},
 			LdkEvent::PaymentClaimable {
+				payment_id,
 				payment_hash,
 				purpose,
 				amount_msat,
@@ -790,8 +835,17 @@ where
 				counterparty_skimmed_fee_msat,
 				..
 			} => {
-				let payment_id = PaymentId(payment_hash.0);
-				let payment_info = self.payment_store.get(&payment_id);
+				let event_payment_id = payment_id.unwrap_or(PaymentId(payment_hash.0));
+				let (mut payment_id, payment_info) =
+					self.resolve_inbound_payment_id(event_payment_id, &payment_hash);
+				let pending_payment = if payment_info.is_none() {
+					self.find_pending_inbound_payment(&payment_hash).await?
+				} else {
+					None
+				};
+				if let Some(pending_payment) = pending_payment.as_ref() {
+					payment_id = pending_payment.details.id;
+				}
 				if let Some(info) = payment_info.as_ref() {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
@@ -877,6 +931,17 @@ where
 							counterparty_skimmed_fee_msat,
 						);
 						self.fail_claimable_payment(payment_id, &payment_hash).await?;
+						if pending_payment.is_some() {
+							if let Err(e) = self.pending_payment_store.remove(&payment_id).await {
+								log_error!(
+									self.logger,
+									"Failed to remove pending payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
+							}
+						}
 						return Ok(());
 					};
 
@@ -889,6 +954,17 @@ where
 							max_total_opening_fee_msat,
 						);
 						self.fail_claimable_payment(payment_id, &payment_hash).await?;
+						if pending_payment.is_some() {
+							if let Err(e) = self.pending_payment_store.remove(&payment_id).await {
+								log_error!(
+									self.logger,
+									"Failed to remove pending payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
+							}
+						}
 						return Ok(());
 					}
 
@@ -912,11 +988,63 @@ where
 					}
 				}
 
-				if let Some(info) = payment_info {
+				let payment_info = if let Some(pending_payment) = pending_payment.as_ref() {
+					let mut payment = pending_payment.details.clone();
+					if let PaymentKind::Bolt11 {
+						counterparty_skimmed_fee_msat: stored_fee, ..
+					} = &mut payment.kind
+					{
+						if counterparty_skimmed_fee_msat > 0 {
+							*stored_fee = Some(counterparty_skimmed_fee_msat);
+						}
+					}
+
+					match self.payment_store.insert(payment.clone()).await {
+						Ok(false) => (),
+						Ok(true) => {
+							log_error!(
+								self.logger,
+								"Bolt11InvoicePayment with ID {} was previously known",
+								payment_id,
+							);
+							debug_assert!(false);
+						},
+						Err(e) => {
+							log_error!(
+								self.logger,
+								"Failed to insert payment with ID {}: {}",
+								payment_id,
+								e
+							);
+							return Err(ReplayEvent());
+						},
+					}
+
+					let mut pending_payment = pending_payment.clone();
+					pending_payment.expiry =
+						claim_deadline.map(|height| PendingPaymentExpiry::Height { height });
+					if let Err(e) =
+						self.pending_payment_store.insert_or_update(pending_payment).await
+					{
+						log_error!(
+							self.logger,
+							"Failed to update pending payment with ID {}: {}",
+							payment_id,
+							e
+						);
+						return Err(ReplayEvent());
+					}
+
+					Some(payment)
+				} else {
+					payment_info
+				};
+
+				if let Some(info) = payment_info.as_ref() {
 					// If this is known by the store but ChannelManager doesn't know the preimage,
 					// the payment has been registered via `_for_hash` variants and needs to be manually claimed via
 					// user interaction.
-					match info.kind {
+					match &info.kind {
 						PaymentKind::Bolt11 { preimage, .. } => {
 							if purpose.preimage().is_none() {
 								debug_assert!(
@@ -960,7 +1088,55 @@ where
 					amount_msat,
 				);
 				let payment_preimage = match purpose {
-					PaymentPurpose::Bolt11InvoicePayment { payment_preimage, .. } => {
+					PaymentPurpose::Bolt11InvoicePayment {
+						payment_preimage,
+						payment_secret,
+						..
+					} => {
+						if payment_info.is_none() {
+							let kind = PaymentKind::Bolt11 {
+								hash: payment_hash,
+								preimage: payment_preimage,
+								secret: Some(payment_secret),
+								counterparty_skimmed_fee_msat: if counterparty_skimmed_fee_msat > 0
+								{
+									Some(counterparty_skimmed_fee_msat)
+								} else {
+									None
+								},
+							};
+
+							let payment = PaymentDetails::new(
+								payment_id,
+								kind,
+								Some(amount_msat),
+								None,
+								PaymentDirection::Inbound,
+								PaymentStatus::Pending,
+							);
+
+							match self.payment_store.insert(payment).await {
+								Ok(false) => (),
+								Ok(true) => {
+									log_error!(
+										self.logger,
+										"Bolt11InvoicePayment with ID {} was previously known",
+										payment_id,
+									);
+									debug_assert!(false);
+								},
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to insert payment with ID {}: {}",
+										payment_id,
+										e
+									);
+									return Err(ReplayEvent());
+								},
+							}
+						}
+
 						payment_preimage
 					},
 					PaymentPurpose::Bolt12OfferPayment {
@@ -972,84 +1148,130 @@ where
 						let payer_note = payment_context.invoice_request.payer_note_truncated;
 						let offer_id = payment_context.offer_id;
 						let quantity = payment_context.invoice_request.quantity;
-						let kind = PaymentKind::Bolt12Offer {
-							hash: Some(payment_hash),
-							preimage: payment_preimage,
-							secret: Some(payment_secret),
-							offer_id,
-							payer_note,
-							quantity,
-						};
+						if payment_info.is_none() {
+							let kind = PaymentKind::Bolt12Offer {
+								hash: Some(payment_hash),
+								preimage: payment_preimage,
+								secret: Some(payment_secret),
+								offer_id,
+								payer_note,
+								quantity,
+							};
 
-						let payment = PaymentDetails::new(
-							payment_id,
-							kind,
-							Some(amount_msat),
-							None,
-							PaymentDirection::Inbound,
-							PaymentStatus::Pending,
-						);
+							let payment = PaymentDetails::new(
+								payment_id,
+								kind,
+								Some(amount_msat),
+								None,
+								PaymentDirection::Inbound,
+								PaymentStatus::Pending,
+							);
 
-						match self.payment_store.insert(payment).await {
-							Ok(false) => (),
-							Ok(true) => {
-								log_error!(
-									self.logger,
-									"Bolt12OfferPayment with ID {} was previously known",
-									payment_id,
-								);
-								debug_assert!(false);
-							},
-							Err(e) => {
-								log_error!(
-									self.logger,
-									"Failed to insert payment with ID {}: {}",
-									payment_id,
-									e
-								);
-								debug_assert!(false);
-							},
+							match self.payment_store.insert(payment).await {
+								Ok(false) => (),
+								Ok(true) => {
+									log_error!(
+										self.logger,
+										"Bolt12OfferPayment with ID {} was previously known",
+										payment_id,
+									);
+									debug_assert!(false);
+								},
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to insert payment with ID {}: {}",
+										payment_id,
+										e
+									);
+									return Err(ReplayEvent());
+								},
+							}
 						}
 						payment_preimage
 					},
-					PaymentPurpose::Bolt12RefundPayment { payment_preimage, .. } => {
+					PaymentPurpose::Bolt12RefundPayment {
+						payment_preimage,
+						payment_secret,
+						..
+					} => {
+						if payment_info.is_none() {
+							let kind = PaymentKind::Bolt12Refund {
+								hash: Some(payment_hash),
+								preimage: payment_preimage,
+								secret: Some(payment_secret),
+								payer_note: None,
+								quantity: None,
+							};
+
+							let payment = PaymentDetails::new(
+								payment_id,
+								kind,
+								Some(amount_msat),
+								None,
+								PaymentDirection::Inbound,
+								PaymentStatus::Pending,
+							);
+
+							match self.payment_store.insert(payment).await {
+								Ok(false) => (),
+								Ok(true) => {
+									log_error!(
+										self.logger,
+										"Bolt12RefundPayment with ID {} was previously known",
+										payment_id,
+									);
+									debug_assert!(false);
+								},
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to insert payment with ID {}: {}",
+										payment_id,
+										e
+									);
+									return Err(ReplayEvent());
+								},
+							}
+						}
 						payment_preimage
 					},
 					PaymentPurpose::SpontaneousPayment(preimage) => {
-						// Since it's spontaneous, we insert it now into our store.
-						let kind = PaymentKind::Spontaneous {
-							hash: payment_hash,
-							preimage: Some(preimage),
-						};
+						if payment_info.is_none() {
+							let kind = PaymentKind::Spontaneous {
+								hash: payment_hash,
+								preimage: Some(preimage),
+							};
 
-						let payment = PaymentDetails::new(
-							payment_id,
-							kind,
-							Some(amount_msat),
-							None,
-							PaymentDirection::Inbound,
-							PaymentStatus::Pending,
-						);
+							let payment = PaymentDetails::new(
+								payment_id,
+								kind,
+								Some(amount_msat),
+								None,
+								PaymentDirection::Inbound,
+								PaymentStatus::Pending,
+							);
 
-						match self.payment_store.insert(payment).await {
-							Ok(false) => (),
-							Ok(true) => {
-								log_error!(
-									self.logger,
-									"Spontaneous payment with ID {} was previously known",
-									payment_id,
-								);
-								debug_assert!(false);
-							},
-							Err(e) => {
-								log_error!(
-									self.logger,
-									"Failed to insert payment with ID {}: {}",
-									payment_id,
-									e
-								);
-								debug_assert!(false);
-							},
+							match self.payment_store.insert(payment).await {
+								Ok(false) => (),
+								Ok(true) => {
+									log_error!(
+										self.logger,
+										"Spontaneous payment with ID {} was previously known",
+										payment_id,
+									);
+									debug_assert!(false);
+								},
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to insert payment with ID {}: {}",
+										payment_id,
+										e
+									);
+									return Err(ReplayEvent());
+								},
+							}
 						}
 
 						Some(preimage)
@@ -1081,6 +1303,7 @@ where
 				}
 			},
 			LdkEvent::PaymentClaimed {
+				payment_id,
 				payment_hash,
 				purpose,
 				amount_msat,
@@ -1088,9 +1311,18 @@ where
 				htlcs: _,
 				sender_intended_total_msat: _,
 				onion_fields,
-				payment_id: _,
 			} => {
-				let payment_id = PaymentId(payment_hash.0);
+				let event_payment_id = payment_id.unwrap_or(PaymentId(payment_hash.0));
+				let (mut payment_id, payment_info) =
+					self.resolve_inbound_payment_id(event_payment_id, &payment_hash);
+				let pending_payment = if payment_info.is_none() {
+					self.find_pending_inbound_payment(&payment_hash).await?
+				} else {
+					None
+				};
+				if let Some(pending_payment) = pending_payment.as_ref() {
+					payment_id = pending_payment.details.id;
+				}
 				log_info!(
 					self.logger,
 					"Claimed payment with ID {} from payment hash {} of {}msat.",
@@ -1099,43 +1331,83 @@ where
 					amount_msat,
 				);
 
-				let update = match purpose {
+				let (update, kind_for_insert) = match purpose {
 					PaymentPurpose::Bolt11InvoicePayment {
 						payment_preimage,
 						payment_secret,
 						..
-					} => PaymentDetailsUpdate {
-						preimage: Some(payment_preimage),
-						secret: Some(Some(payment_secret)),
-						amount_msat: Some(Some(amount_msat)),
-						status: Some(PaymentStatus::Succeeded),
-						..PaymentDetailsUpdate::new(payment_id)
+					} => {
+						let kind = PaymentKind::Bolt11 {
+							hash: payment_hash,
+							preimage: payment_preimage,
+							secret: Some(payment_secret),
+							counterparty_skimmed_fee_msat: None,
+						};
+						let update = PaymentDetailsUpdate {
+							preimage: Some(payment_preimage),
+							secret: Some(Some(payment_secret)),
+							amount_msat: Some(Some(amount_msat)),
+							status: Some(PaymentStatus::Succeeded),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						(update, kind)
 					},
 					PaymentPurpose::Bolt12OfferPayment {
-						payment_preimage, payment_secret, ..
-					} => PaymentDetailsUpdate {
-						preimage: Some(payment_preimage),
-						secret: Some(Some(payment_secret)),
-						amount_msat: Some(Some(amount_msat)),
-						status: Some(PaymentStatus::Succeeded),
-						..PaymentDetailsUpdate::new(payment_id)
+						payment_preimage,
+						payment_secret,
+						payment_context,
+						..
+					} => {
+						let kind = PaymentKind::Bolt12Offer {
+							hash: Some(payment_hash),
+							preimage: payment_preimage,
+							secret: Some(payment_secret),
+							offer_id: payment_context.offer_id,
+							payer_note: payment_context.invoice_request.payer_note_truncated,
+							quantity: payment_context.invoice_request.quantity,
+						};
+						let update = PaymentDetailsUpdate {
+							preimage: Some(payment_preimage),
+							secret: Some(Some(payment_secret)),
+							amount_msat: Some(Some(amount_msat)),
+							status: Some(PaymentStatus::Succeeded),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						(update, kind)
 					},
 					PaymentPurpose::Bolt12RefundPayment {
 						payment_preimage,
 						payment_secret,
 						..
-					} => PaymentDetailsUpdate {
-						preimage: Some(payment_preimage),
-						secret: Some(Some(payment_secret)),
-						amount_msat: Some(Some(amount_msat)),
-						status: Some(PaymentStatus::Succeeded),
-						..PaymentDetailsUpdate::new(payment_id)
+					} => {
+						let kind = PaymentKind::Bolt12Refund {
+							hash: Some(payment_hash),
+							preimage: payment_preimage,
+							secret: Some(payment_secret),
+							payer_note: None,
+							quantity: None,
+						};
+						let update = PaymentDetailsUpdate {
+							preimage: Some(payment_preimage),
+							secret: Some(Some(payment_secret)),
+							amount_msat: Some(Some(amount_msat)),
+							status: Some(PaymentStatus::Succeeded),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						(update, kind)
 					},
-					PaymentPurpose::SpontaneousPayment(preimage) => PaymentDetailsUpdate {
-						preimage: Some(Some(preimage)),
-						amount_msat: Some(Some(amount_msat)),
-						status: Some(PaymentStatus::Succeeded),
-						..PaymentDetailsUpdate::new(payment_id)
+					PaymentPurpose::SpontaneousPayment(preimage) => {
+						let kind = PaymentKind::Spontaneous {
+							hash: payment_hash,
+							preimage: Some(preimage),
+						};
+						let update = PaymentDetailsUpdate {
+							preimage: Some(Some(preimage)),
+							amount_msat: Some(Some(amount_msat)),
+							status: Some(PaymentStatus::Succeeded),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						(update, kind)
 					},
 				};
 
@@ -1145,11 +1417,23 @@ where
 						// be the result of a replayed event.
 					),
 					Ok(DataStoreUpdateResult::NotFound) => {
-						log_error!(
-							self.logger,
-							"Claimed payment with ID {} couldn't be found in store",
+						let payment = PaymentDetails::new(
 							payment_id,
+							kind_for_insert,
+							Some(amount_msat),
+							None,
+							PaymentDirection::Inbound,
+							PaymentStatus::Succeeded,
 						);
+						if let Err(e) = self.payment_store.insert(payment).await {
+							log_error!(
+								self.logger,
+								"Failed to insert payment with ID {}: {}",
+								payment_id,
+								e
+							);
+							return Err(ReplayEvent());
+						}
 					},
 					Err(e) => {
 						log_error!(
@@ -1163,7 +1447,7 @@ where
 				}
 
 				let event = Event::PaymentReceived {
-					payment_id: Some(payment_id),
+					payment_id,
 					payment_hash,
 					amount_msat,
 					custom_records: onion_fields
@@ -1171,12 +1455,28 @@ where
 						.unwrap_or_default(),
 				};
 				match self.event_queue.add_event(event).await {
-					Ok(_) => return Ok(()),
+					Ok(_) => (),
 					Err(e) => {
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						return Err(ReplayEvent());
 					},
 				};
+
+				if pending_payment.is_some() {
+					if let Err(e) = self.pending_payment_store.remove(&payment_id).await {
+						log_error!(
+							self.logger,
+							"Failed to remove pending payment with ID {}: {}",
+							payment_id,
+							e
+						);
+						// The user-visible PaymentReceived event has already been durably queued.
+						// Replaying the LDK event here would risk queuing a duplicate event.
+						return Ok(());
+					}
+				}
+
+				return Ok(());
 			},
 			LdkEvent::PaymentSent {
 				payment_id,
@@ -1228,7 +1528,7 @@ where
 					);
 				});
 				let event = Event::PaymentSuccessful {
-					payment_id: Some(payment_id),
+					payment_id,
 					payment_hash,
 					payment_preimage: Some(payment_preimage),
 					fee_paid_msat,
@@ -1264,8 +1564,7 @@ where
 					},
 				};
 
-				let event =
-					Event::PaymentFailed { payment_id: Some(payment_id), payment_hash, reason };
+				let event = Event::PaymentFailed { payment_id, payment_hash, reason };
 				match self.event_queue.add_event(event).await {
 					Ok(_) => return Ok(()),
 					Err(e) => {
