@@ -683,6 +683,9 @@ impl NodeBuilder {
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
 	/// previously configured.
 	///
+	/// This acquires an exclusive lease for the selected KV table before reading persisted node
+	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
+	///
 	/// Connects to the PostgreSQL database at the given `connection_string`, e.g.,
 	/// `"postgres://user:password@localhost/ldk_db"`.
 	///
@@ -721,7 +724,13 @@ impl NodeBuilder {
 				log_error!(logger, "Failed to set up Postgres store: {e}");
 				BuildError::KVStoreSetupFailed
 			})?;
-		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
+		let node_lease = kv_store.node_lease();
+		let mut node =
+			self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)?;
+		if !node.install_node_lease(node_lease) {
+			return Err(BuildError::KVStoreSetupFailed);
+		}
+		Ok(node)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
@@ -1216,6 +1225,9 @@ impl ArcedNodeBuilder {
 
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
 	/// previously configured.
+	///
+	/// This acquires an exclusive lease for the selected KV table before reading persisted node
+	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
 	///
 	/// Connects to the PostgreSQL database at the given `connection_string`, e.g.,
 	/// `"postgres://user:password@localhost/ldk_db"`.
@@ -2335,6 +2347,7 @@ fn build_with_store_internal(
 		payment_store,
 		lnurl_auth,
 		is_running,
+		node_lease: None,
 		node_metrics,
 		om_mailbox,
 		async_payments_role,

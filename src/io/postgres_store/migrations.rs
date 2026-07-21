@@ -6,15 +6,15 @@
 // accordance with one or both of these licenses.
 
 use lightning::io;
-use tokio_postgres::Client;
+use tokio_postgres::Transaction;
 
 pub(super) async fn migrate_schema(
-	_client: &Client, _kv_table_name: &str, from_version: u16, to_version: u16,
+	_transaction: &Transaction<'_>, _kv_table_name: &str, from_version: u16, to_version: u16,
 ) -> io::Result<()> {
 	assert!(from_version < to_version);
 	// Future migrations go here, e.g.:
 	// if from_version == 1 && to_version >= 2 {
-	//     migrate_v1_to_v2(client, kv_table_name).await?;
+	//     migrate_v1_to_v2(transaction, kv_table_name).await?;
 	//     from_version = 2;
 	// }
 	Ok(())

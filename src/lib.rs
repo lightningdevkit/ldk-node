@@ -110,6 +110,7 @@ mod util;
 mod wallet;
 
 use std::default::Default;
+use std::future::Future;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(cycle_tests)]
@@ -145,6 +146,7 @@ use fee_estimator::{
 use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
+use io::node_lease::NodeLease;
 use io::utils::update_and_persist_node_metrics;
 pub use lightning;
 use lightning::chain::BlockLocator;
@@ -267,6 +269,7 @@ pub struct Node {
 	payment_store: Arc<PaymentStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
+	node_lease: Option<Arc<NodeLease>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
@@ -277,6 +280,40 @@ pub struct Node {
 }
 
 impl Node {
+	fn node_lease_is_lost_or_expired(&self) -> bool {
+		self.node_lease.as_ref().is_some_and(|node_lease| {
+			if node_lease.renewal_deadline_elapsed() {
+				node_lease.mark_lost();
+			}
+			node_lease.is_lost()
+		})
+	}
+
+	#[cfg(feature = "postgres")]
+	pub(crate) fn install_node_lease(&mut self, node_lease: Arc<NodeLease>) -> bool {
+		debug_assert!(self.node_lease.is_none());
+		let lease_stop_sender = self.stop_sender.clone();
+		let lease_runtime = Arc::downgrade(&self.runtime);
+		let lease_peer_manager = Arc::downgrade(&self.peer_manager);
+		let lease_logger = Arc::downgrade(&self.logger);
+		// Store fencing is the safety boundary; this only limits activity until process exit.
+		node_lease.set_loss_handler(Box::new(move || {
+			if let Some(logger) = lease_logger.upgrade() {
+				log_error!(logger, "PostgreSQL node lease lost, stopping background processing");
+			}
+			lease_stop_sender.send_replace(());
+			if let Some(runtime) = lease_runtime.upgrade() {
+				runtime.abort_background_processor_task();
+			}
+			if let Some(peer_manager) = lease_peer_manager.upgrade() {
+				peer_manager.disconnect_all_peers();
+			}
+		}));
+
+		self.node_lease = Some(node_lease);
+		!self.node_lease_is_lost_or_expired()
+	}
+
 	/// Starts the necessary background tasks, such as handling events coming from user input,
 	/// LDK/BDK, and the peer-to-peer network.
 	///
@@ -285,11 +322,16 @@ impl Node {
 	///
 	/// After this returns, the [`Node`] instance can be controlled via the provided API methods in
 	/// a thread-safe manner.
+	/// Returns [`Error::PersistenceFailed`] if its PostgreSQL lease is already lost or expires
+	/// during startup.
 	pub fn start(&self) -> Result<(), Error> {
 		// Acquire a run lock and hold it until we're setup.
 		let mut is_running_lock = self.is_running.write().expect("lock");
 		if *is_running_lock {
 			return Err(Error::AlreadyRunning);
+		}
+		if self.node_lease_is_lost_or_expired() {
+			return Err(Error::PersistenceFailed);
 		}
 
 		log_info!(
@@ -819,8 +861,18 @@ impl Node {
 			}
 		});
 
-		log_info!(self.logger, "Startup complete.");
+		// The held write lock makes the lease check below the startup linearization point.
 		*is_running_lock = true;
+		if self.node_lease_is_lost_or_expired() {
+			*is_running_lock = false;
+			// Repeat containment after all startup stop receivers have been created.
+			self.stop_sender.send_replace(());
+			self.runtime.abort_background_processor_task();
+			self.peer_manager.disconnect_all_peers();
+			return Err(Error::PersistenceFailed);
+		}
+
+		log_info!(self.logger, "Startup complete.");
 		Ok(())
 	}
 
@@ -888,6 +940,19 @@ impl Node {
 		log_info!(self.logger, "Shutdown complete.");
 		*is_running_lock = false;
 		Ok(())
+	}
+
+	/// Returns a future which completes when this node loses its PostgreSQL lease.
+	///
+	/// Returns [`None`] when the node was not built with the built-in PostgreSQL store.
+	/// Lease loss is terminal for this [`Node`]. The caller must immediately terminate the process
+	/// without calling [`Node::stop`] or dropping the node. A new process may reconstruct the node
+	/// from persistence. Store fencing cannot revoke an external effect from a process that pauses
+	/// after a fenced mutation, so every critical external effect must immediately follow one and
+	/// finish within that mutation's renewed lease interval.
+	pub fn wait_for_lease_loss(&self) -> Option<impl Future<Output = ()> + Send + 'static> {
+		let node_lease = self.node_lease.as_ref().map(Arc::clone)?;
+		Some(async move { node_lease.wait_for_loss().await })
 	}
 
 	/// Returns the status of the [`Node`].
