@@ -18,12 +18,44 @@ use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::types::{KeysManager, PeerManager};
 use crate::Error;
 
+type PendingConnections =
+	Mutex<HashMap<PublicKey, Vec<tokio::sync::oneshot::Sender<Result<(), Error>>>>>;
+
+struct PendingConnectionGuard<'a> {
+	pending_connections: &'a PendingConnections,
+	node_id: PublicKey,
+	active: bool,
+}
+
+impl<'a> PendingConnectionGuard<'a> {
+	fn new(pending_connections: &'a PendingConnections, node_id: PublicKey) -> Self {
+		Self { pending_connections, node_id, active: true }
+	}
+
+	fn disarm(&mut self) {
+		self.active = false;
+	}
+}
+
+impl Drop for PendingConnectionGuard<'_> {
+	fn drop(&mut self) {
+		if !self.active {
+			return;
+		}
+		let mut pending_connections = self.pending_connections.lock().expect("lock");
+		if let Some(subscribers) = pending_connections.remove(&self.node_id) {
+			for subscriber in subscribers {
+				let _ = subscriber.send(Err(Error::ConnectionFailed));
+			}
+		}
+	}
+}
+
 pub(crate) struct ConnectionManager<L: Deref + Clone + Sync + Send>
 where
 	L::Target: LdkLogger,
 {
-	pending_connections:
-		Mutex<HashMap<PublicKey, Vec<tokio::sync::oneshot::Sender<Result<(), Error>>>>>,
+	pending_connections: PendingConnections,
 	peer_manager: Arc<PeerManager>,
 	tor_proxy_config: Option<TorConfig>,
 	keys_manager: Arc<KeysManager>,
@@ -60,19 +92,11 @@ where
 	pub(crate) async fn do_connect_peer(
 		&self, node_id: PublicKey, addr: SocketAddress,
 	) -> Result<(), Error> {
-		let res = self.do_connect_peer_internal(node_id, addr).await;
-		self.propagate_result_to_subscribers(&node_id, res);
-		res
-	}
-
-	async fn do_connect_peer_internal(
-		&self, node_id: PublicKey, addr: SocketAddress,
-	) -> Result<(), Error> {
-		// First, we check if there is already an outbound connection in flight, if so, we just
-		// await on the corresponding watch channel. The task driving the connection future will
-		// send us the result..
-		let pending_ready_receiver_opt = self.register_or_subscribe_pending_connection(&node_id);
-		if let Some(pending_connection_ready_receiver) = pending_ready_receiver_opt {
+		// If another task is already connecting, subscribe to its result instead of starting a
+		// duplicate attempt.
+		if let Some(pending_connection_ready_receiver) =
+			self.register_or_subscribe_pending_connection(&node_id)
+		{
 			return pending_connection_ready_receiver.await.map_err(|e| {
 				debug_assert!(false, "Failed to receive connection result: {:?}", e);
 				log_error!(self.logger, "Failed to receive connection result: {:?}", e);
@@ -80,6 +104,17 @@ where
 			})?;
 		}
 
+		let mut pending_connection =
+			PendingConnectionGuard::new(&self.pending_connections, node_id);
+		let res = self.do_connect_peer_internal(node_id, addr).await;
+		self.propagate_result_to_subscribers(&node_id, res);
+		pending_connection.disarm();
+		res
+	}
+
+	async fn do_connect_peer_internal(
+		&self, node_id: PublicKey, addr: SocketAddress,
+	) -> Result<(), Error> {
 		log_info!(self.logger, "Connecting to peer: {}@{}", node_id, addr);
 
 		match addr {
@@ -246,6 +281,7 @@ where
 		match pending_connections_lock.entry(*node_id) {
 			hash_map::Entry::Occupied(mut entry) => {
 				let (tx, rx) = tokio::sync::oneshot::channel();
+				entry.get_mut().retain(|subscriber| !subscriber.is_closed());
 				entry.get_mut().push(tx);
 				Some(rx)
 			},
@@ -275,5 +311,28 @@ where
 				});
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn pending_connection_guard_notifies_subscribers_when_abandoned() {
+		let node_id: PublicKey =
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".parse().unwrap();
+		let pending_connections = Mutex::new(HashMap::new());
+		let (sender, mut receiver) = tokio::sync::oneshot::channel();
+		pending_connections.lock().expect("lock").insert(node_id, vec![sender]);
+
+		let connection_guard = PendingConnectionGuard::new(&pending_connections, node_id);
+		drop(connection_guard);
+
+		assert!(
+			pending_connections.lock().expect("lock").is_empty(),
+			"abandoned connection attempt should remove pending state"
+		);
+		assert_eq!(receiver.try_recv(), Ok(Err(Error::ConnectionFailed)));
 	}
 }

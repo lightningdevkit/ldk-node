@@ -25,7 +25,7 @@ use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::ElectrumSyncClient;
 
-use super::WalletSyncStatus;
+use super::{WalletSyncGuard, WalletSyncStatus};
 use crate::config::{
 	clamp_full_scan_stop_gap, Config, ElectrumSyncConfig, MAX_FULL_SCAN_STOP_GAP,
 	MIN_FULL_SCAN_STOP_GAP,
@@ -113,10 +113,12 @@ impl ElectrumChainSource {
 				Error::WalletOperationFailed
 			})?;
 		}
+		let sync_guard =
+			WalletSyncGuard::new(&self.onchain_wallet_sync_status, Error::WalletOperationFailed);
 
 		let res = self.sync_onchain_wallet_inner(onchain_wallet).await;
 
-		self.onchain_wallet_sync_status.lock().expect("lock").propagate_result_to_subscribers(res);
+		sync_guard.complete(res);
 
 		res
 	}
@@ -223,14 +225,13 @@ impl ElectrumChainSource {
 				Error::TxSyncFailed
 			})?;
 		}
+		let sync_guard =
+			WalletSyncGuard::new(&self.lightning_wallet_sync_status, Error::TxSyncFailed);
 
 		let res =
 			self.sync_lightning_wallet_inner(channel_manager, chain_monitor, output_sweeper).await;
 
-		self.lightning_wallet_sync_status
-			.lock()
-			.expect("lock")
-			.propagate_result_to_subscribers(res);
+		sync_guard.complete(res);
 
 		res
 	}

@@ -26,8 +26,8 @@ use tokio::task::JoinSet;
 
 use crate::connection::ConnectionManager;
 use crate::liquidity::{
-	select_all_lsps_for_protocol, select_lsps_for_protocol, LspConfig, LspNode,
-	LIQUIDITY_REQUEST_TIMEOUT_SECS, LSPS_DISCOVERY_WAIT_TIMEOUT_SECS,
+	select_all_lsps_for_protocol, select_lsps_for_protocol, LspConfig, LspNode, PendingRequest,
+	PendingRequestGuard, LIQUIDITY_REQUEST_TIMEOUT_SECS, LSPS_DISCOVERY_WAIT_TIMEOUT_SECS,
 };
 use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::payment::store::LSPS2Parameters;
@@ -41,9 +41,9 @@ where
 {
 	pub(crate) lsp_nodes: Arc<RwLock<Vec<LspNode>>>,
 	pub(crate) pending_lsps2_fee_requests:
-		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2FeeResponse>>>,
+		Mutex<HashMap<LSPSRequestId, PendingRequest<LSPS2FeeResponse>>>,
 	pub(crate) pending_buy_requests:
-		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS2BuyResponse>>>,
+		Mutex<HashMap<LSPSRequestId, PendingRequest<LSPS2BuyResponse>>>,
 	pub(crate) channel_manager: Arc<ChannelManager>,
 	pub(crate) keys_manager: Arc<KeysManager>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
@@ -262,13 +262,18 @@ where
 		})?;
 
 		let (fee_request_sender, fee_request_receiver) = oneshot::channel();
-		{
+		let _pending_request = {
 			let mut pending_fee_requests_lock =
 				self.pending_lsps2_fee_requests.lock().expect("lock");
 			let request_id =
 				client_handler.request_opening_params(lsps2_node.node_id, lsps2_node.token.clone());
-			pending_fee_requests_lock.insert(request_id, fee_request_sender);
-		}
+			PendingRequestGuard::insert(
+				&self.pending_lsps2_fee_requests,
+				&mut pending_fee_requests_lock,
+				request_id,
+				fee_request_sender,
+			)
+		};
 
 		tokio::time::timeout(
 			Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS),
@@ -298,7 +303,7 @@ where
 		})?;
 
 		let (buy_request_sender, buy_request_receiver) = oneshot::channel();
-		{
+		let _pending_request = {
 			let mut pending_buy_requests_lock = self.pending_buy_requests.lock().expect("lock");
 			let request_id = client_handler
 				.select_opening_params(lsps2_node.node_id, amount_msat, opening_fee_params)
@@ -310,8 +315,13 @@ where
 					);
 					Error::LiquidityRequestFailed
 				})?;
-			pending_buy_requests_lock.insert(request_id, buy_request_sender);
-		}
+			PendingRequestGuard::insert(
+				&self.pending_buy_requests,
+				&mut pending_buy_requests_lock,
+				request_id,
+				buy_request_sender,
+			)
+		};
 
 		let buy_response = tokio::time::timeout(
 			Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS),
@@ -428,12 +438,12 @@ where
 					.iter()
 					.any(|n| n.node_id == counterparty_node_id)
 				{
-					if let Some(sender) =
+					if let Some(request) =
 						self.pending_lsps2_fee_requests.lock().expect("lock").remove(&request_id)
 					{
 						let response = LSPS2FeeResponse { opening_fee_params_menu };
 
-						match sender.send(response) {
+						match request.sender.send(response) {
 							Ok(()) => (),
 							Err(_) => {
 								log_error!(
@@ -474,12 +484,12 @@ where
 					.iter()
 					.any(|n| n.node_id == counterparty_node_id)
 				{
-					if let Some(sender) =
+					if let Some(request) =
 						self.pending_buy_requests.lock().expect("lock").remove(&request_id)
 					{
 						let response = LSPS2BuyResponse { intercept_scid, cltv_expiry_delta };
 
-						match sender.send(response) {
+						match request.sender.send(response) {
 							Ok(()) => (),
 							Err(_) => {
 								log_error!(
