@@ -520,8 +520,11 @@ where
 
 		// LSPS2 requires min_final_cltv_expiry_delta to be at least 2 more than usual.
 		let min_final_cltv_expiry_delta = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
-		let encoded_payment_metadata =
-			PaymentMetadata { lsps2_parameters: Some(lsps2_parameters) }.encode();
+		let encoded_payment_metadata = PaymentMetadata {
+			lsps2_parameters: Some(lsps2_parameters),
+			lsps2_lease_parameters: None,
+		}
+		.encode();
 		let (payment_hash, payment_secret, payment_metadata) = match payment_hash {
 			Some(payment_hash) => {
 				let (payment_secret, payment_metadata) = self
@@ -756,4 +759,5 @@ mod tests {
 	}
 }
 
+pub(crate) mod router;
 pub(crate) mod state;

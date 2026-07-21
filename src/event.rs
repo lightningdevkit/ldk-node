@@ -2032,6 +2032,7 @@ mod tests {
 				max_total_opening_fee_msat: Some(42_000),
 				max_proportional_opening_fee_ppm_msat: None,
 			}),
+			lsps2_lease_parameters: None,
 		};
 
 		assert_eq!(
@@ -2045,12 +2046,14 @@ mod tests {
 
 	#[test]
 	fn lsps2_payment_metadata_missing_or_malformed_limit_is_rejected() {
-		let empty_metadata = PaymentMetadata { lsps2_parameters: None }.encode();
+		let empty_metadata =
+			PaymentMetadata { lsps2_parameters: None, lsps2_lease_parameters: None }.encode();
 		let metadata_without_fee_limit = PaymentMetadata {
 			lsps2_parameters: Some(LSPS2Parameters {
 				max_total_opening_fee_msat: None,
 				max_proportional_opening_fee_ppm_msat: None,
 			}),
+			lsps2_lease_parameters: None,
 		}
 		.encode();
 
