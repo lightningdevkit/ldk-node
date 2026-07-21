@@ -715,19 +715,23 @@ where
 	) -> Option<u64> {
 		let metadata = PaymentMetadata::read(&mut &payment_metadata[..]).ok()?;
 		let lsps2_parameters = metadata.lsps2_parameters?;
-		lsps2_parameters
-			.max_total_opening_fee_msat
-			.or_else(|| {
-				lsps2_parameters.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
-					// If it's a variable amount payment, compute the actual fee.
-					compute_opening_fee(
-						gross_amount_msat,
-						lsps2_parameters.min_opening_fee_msat,
-						max_prop_fee,
-					)
-				})
-			})
-			.filter(|fee| *fee <= gross_amount_msat)
+		let proportional_limit =
+			lsps2_parameters.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
+				// If it's a variable amount payment, compute the actual fee.
+				compute_opening_fee(
+					gross_amount_msat,
+					lsps2_parameters.min_opening_fee_msat,
+					max_prop_fee,
+				)
+			});
+		match (lsps2_parameters.max_total_opening_fee_msat, proportional_limit) {
+			(Some(total_limit), Some(proportional_limit)) => {
+				Some(total_limit.min(proportional_limit))
+			},
+			(Some(total_limit), None) => Some(total_limit),
+			(None, proportional_limit) => proportional_limit,
+		}
+		.filter(|fee| *fee <= gross_amount_msat)
 	}
 
 	async fn resolve_inbound_payment_id(
@@ -2875,6 +2879,25 @@ mod tests {
 				expected
 			);
 		}
+	}
+
+	#[test]
+	fn lsps2_payment_metadata_applies_stricter_fee_limit() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: Some(42_000),
+				max_proportional_opening_fee_ppm_msat: Some(10_000),
+				min_opening_fee_msat: 0,
+			}),
+		};
+
+		assert_eq!(
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+				&metadata.encode(),
+				100_000
+			),
+			Some(1_000)
+		);
 	}
 
 	#[test]
