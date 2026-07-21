@@ -110,6 +110,7 @@ mod util;
 mod wallet;
 
 use std::default::Default;
+use std::future::Future;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(cycle_tests)]
@@ -145,6 +146,7 @@ use fee_estimator::{
 use ffi::*;
 use gossip::GossipSource;
 use graph::NetworkGraph;
+use io::node_lease::NodeLease;
 use io::utils::update_and_persist_node_metrics;
 pub use lightning;
 use lightning::chain::BlockLocator;
@@ -266,6 +268,7 @@ pub struct Node {
 	payment_store: Arc<PaymentStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
+	node_lease: Option<Arc<NodeLease>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
@@ -276,6 +279,35 @@ pub struct Node {
 }
 
 impl Node {
+	#[cfg(feature = "postgres")]
+	pub(crate) fn install_node_lease(&mut self, node_lease: Arc<NodeLease>) -> bool {
+		debug_assert!(self.node_lease.is_none());
+		if node_lease.is_lost() {
+			return false;
+		}
+
+		let lease_stop_sender = self.stop_sender.clone();
+		let lease_runtime = Arc::downgrade(&self.runtime);
+		let lease_peer_manager = Arc::downgrade(&self.peer_manager);
+		let lease_logger = Arc::downgrade(&self.logger);
+		// Store fencing is the safety boundary; this only limits activity until process exit.
+		node_lease.set_loss_handler(Box::new(move || {
+			if let Some(logger) = lease_logger.upgrade() {
+				log_error!(logger, "PostgreSQL node lease lost, stopping background processing");
+			}
+			lease_stop_sender.send_replace(());
+			if let Some(runtime) = lease_runtime.upgrade() {
+				runtime.abort_background_processor_task();
+			}
+			if let Some(peer_manager) = lease_peer_manager.upgrade() {
+				peer_manager.disconnect_all_peers();
+			}
+		}));
+
+		self.node_lease = Some(node_lease);
+		!self.node_lease.as_ref().unwrap().is_lost()
+	}
+
 	/// Starts the necessary background tasks, such as handling events coming from user input,
 	/// LDK/BDK, and the peer-to-peer network.
 	///
@@ -880,6 +912,17 @@ impl Node {
 		log_info!(self.logger, "Shutdown complete.");
 		*is_running_lock = false;
 		Ok(())
+	}
+
+	/// Returns a future which completes when this node loses its PostgreSQL lease.
+	///
+	/// Returns [`None`] when the node was not built with the built-in PostgreSQL store.
+	/// Lease loss is terminal for this [`Node`]. The caller must immediately terminate the process
+	/// without calling [`Node::stop`] or dropping the node. A new process may reconstruct the node
+	/// from persistence.
+	pub fn wait_for_lease_loss(&self) -> Option<impl Future<Output = ()> + Send + 'static> {
+		let node_lease = self.node_lease.as_ref().map(Arc::clone)?;
+		Some(async move { node_lease.wait_for_loss().await })
 	}
 
 	/// Returns the status of the [`Node`].

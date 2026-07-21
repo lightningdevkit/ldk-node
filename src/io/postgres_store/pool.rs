@@ -62,8 +62,8 @@ pub(super) const POOL_SIZE: usize = 2;
 /// A fixed-size pool of mutex-guarded PostgreSQL clients.
 ///
 /// `get` awaits on whichever slot lock becomes available first via [`tokio::select!`]. Up to
-/// [`POOL_SIZE`] operations can run concurrently against the database. Reconnection only happens
-/// when the chosen client's local mpsc sender is already closed — no per-acquire health-check
+/// [`POOL_SIZE`] operations can run concurrently against the database. `get` reconnects only when
+/// the chosen client's local mpsc sender is already closed, without a per-acquire health-check
 /// round trip.
 pub(super) struct SmallPool {
 	pub(super) connections: [tokio::sync::Mutex<ClientConnection>; POOL_SIZE],

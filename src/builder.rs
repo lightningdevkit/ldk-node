@@ -190,6 +190,8 @@ pub enum BuildError {
 	///
 	/// [`KVStore`]: lightning::util::persist::KVStore
 	KVStoreSetupFailed,
+	/// Another node currently owns the PostgreSQL node lease.
+	NodeLeaseUnavailable,
 	/// We failed to setup the onchain wallet.
 	WalletSetupFailed,
 	/// We failed to setup the logger.
@@ -232,6 +234,7 @@ impl fmt::Display for BuildError {
 			Self::WriteFailed => write!(f, "Failed to write to store."),
 			Self::StoragePathAccessFailed => write!(f, "Failed to access the given storage path."),
 			Self::KVStoreSetupFailed => write!(f, "Failed to setup KVStore."),
+			Self::NodeLeaseUnavailable => write!(f, "The PostgreSQL node lease is unavailable."),
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
 			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
 			Self::ChainSourceSetupFailed => write!(f, "Failed to setup the chain source."),
@@ -683,6 +686,9 @@ impl NodeBuilder {
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
 	/// previously configured.
 	///
+	/// This acquires an exclusive lease for the selected KV table before reading persisted node
+	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
+	///
 	/// Connects to the PostgreSQL database at the given `connection_string`, e.g.,
 	/// `"postgres://user:password@localhost/ldk_db"`.
 	///
@@ -701,6 +707,9 @@ impl NodeBuilder {
 	/// certificates (it does not replace them). If `certificate_pem` is `None`, connections
 	/// will be unencrypted.
 	///
+	/// Returns [`BuildError::NodeLeaseUnavailable`] while another process owns the selected KV
+	/// table's lease.
+	///
 	/// [PostgreSQL]: https://www.postgresql.org
 	#[cfg(feature = "postgres")]
 	pub fn build_with_postgres_store(
@@ -709,19 +718,29 @@ impl NodeBuilder {
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let runtime = self.setup_runtime(&logger)?;
-		let kv_store = runtime
-			.block_on(io::postgres_store::PostgresStore::new_with_logger(
-				connection_string,
-				db_name,
-				kv_table_name,
-				certificate_pem,
-				Some(Arc::clone(&logger)),
-			))
-			.map_err(|e| {
+		let kv_store = match runtime.block_on(io::postgres_store::PostgresStore::new_with_logger(
+			connection_string,
+			db_name,
+			kv_table_name,
+			certificate_pem,
+			Some(Arc::clone(&logger)),
+		)) {
+			Ok(kv_store) => kv_store,
+			Err(e) if e.kind() == lightning::io::ErrorKind::WouldBlock => {
+				return Err(BuildError::NodeLeaseUnavailable);
+			},
+			Err(e) => {
 				log_error!(logger, "Failed to set up Postgres store: {e}");
-				BuildError::KVStoreSetupFailed
-			})?;
-		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
+				return Err(BuildError::KVStoreSetupFailed);
+			},
+		};
+		let node_lease = kv_store.node_lease();
+		let mut node =
+			self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)?;
+		if !node.install_node_lease(node_lease) {
+			return Err(BuildError::NodeLeaseUnavailable);
+		}
+		Ok(node)
 	}
 
 	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
@@ -1217,6 +1236,9 @@ impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
 	/// previously configured.
 	///
+	/// This acquires an exclusive lease for the selected KV table before reading persisted node
+	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
+	///
 	/// Connects to the PostgreSQL database at the given `connection_string`, e.g.,
 	/// `"postgres://user:password@localhost/ldk_db"`.
 	///
@@ -1234,6 +1256,9 @@ impl ArcedNodeBuilder {
 	/// provided PEM-encoded CA certificate will be added to the system's default root
 	/// certificates (it does not replace them). If `certificate_pem` is `None`, connections
 	/// will be unencrypted.
+	///
+	/// Returns [`BuildError::NodeLeaseUnavailable`] while another process owns the selected KV
+	/// table's lease.
 	///
 	/// [PostgreSQL]: https://www.postgresql.org
 	#[cfg(feature = "postgres")]
@@ -2335,6 +2360,7 @@ fn build_with_store_internal(
 		payment_store,
 		lnurl_auth,
 		is_running,
+		node_lease: None,
 		node_metrics,
 		om_mailbox,
 		async_payments_role,

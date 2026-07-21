@@ -7,6 +7,8 @@
 
 //! Objects and traits for data persistence.
 
+#[cfg_attr(not(feature = "postgres"), allow(dead_code))]
+pub(crate) mod node_lease;
 #[cfg(feature = "postgres")]
 pub mod postgres_store;
 pub mod sqlite_store;
