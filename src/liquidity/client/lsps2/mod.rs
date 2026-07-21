@@ -214,18 +214,17 @@ where
 					},
 				)
 			},
-			JitInvoiceRequest::Variable { .. } => {
-				let (lease, proportional_fee, _, _) =
-					self.acquire_variable_lease(&connection_manager).await?;
+			JitInvoiceRequest::Variable { amount_msat, .. } => {
+				// A BOLT12 invoice request has already resolved the payment amount. Use it to avoid
+				// consuming a cached variable lease outside its advertised range, and record the exact
+				// fee for that amount so payment validation need not accept the broader node-wide cap.
+				let (lease, total_fee_msat, _, _) =
+					self.acquire_variable_lease(Some(amount_msat), &connection_manager).await?;
 				(
 					lease,
 					LSPS2Parameters {
-						max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
-						max_proportional_opening_fee_ppm_msat: self
-							.config
-							.lsps2_max_total_lsp_fee_limit_msat
-							.is_none()
-							.then_some(proportional_fee),
+						max_total_opening_fee_msat: Some(total_fee_msat),
+						max_proportional_opening_fee_ppm_msat: None,
 					},
 				)
 			},
@@ -289,7 +288,7 @@ where
 		payment_hash: Option<PaymentHash>, connection_manager: Arc<ConnectionManager<L>>,
 	) -> Result<(Bolt11Invoice, LspConfig), Error> {
 		let (lease, proportional_fee, lsp, was_negotiated) =
-			self.acquire_variable_lease(&connection_manager).await?;
+			self.acquire_variable_lease(None, &connection_manager).await?;
 		let lsps2_parameters = LSPS2Parameters {
 			max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
 			max_proportional_opening_fee_ppm_msat: self
@@ -448,11 +447,11 @@ where
 	}
 
 	async fn acquire_variable_lease(
-		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+		self: &Arc<Self>, amount_msat: Option<u64>, connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig, bool), Error> {
-		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
+		if let Some((lease, fee, lsp)) = self.take_cached_variable_lease(amount_msat).await? {
 			self.schedule_variable_lease_refill(connection_manager);
-			return Ok((lease, proportional_fee, lsp, false));
+			return Ok((lease, fee, lsp, false));
 		}
 		let request_lock = self
 			.pending_lease_request_state
@@ -460,24 +459,24 @@ where
 			.expect("lock")
 			.request_lock(LeaseRequestKey::Variable);
 		let _request_guard = request_lock.lock().await;
-		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
+		if let Some((lease, fee, lsp)) = self.take_cached_variable_lease(amount_msat).await? {
 			self.schedule_variable_lease_refill(connection_manager);
-			return Ok((lease, proportional_fee, lsp, false));
+			return Ok((lease, fee, lsp, false));
 		}
 
-		let (negotiated_lease, min_prop_fee_ppm_msat, cheapest_lsp) =
-			self.negotiate_variable_lease(connection_manager).await?;
+		let (negotiated_lease, fee, cheapest_lsp) =
+			self.negotiate_variable_lease(amount_msat, connection_manager).await?;
 		let lease = self.consume_lease(&negotiated_lease.id).await?;
 		self.schedule_variable_lease_refill(connection_manager);
-		Ok((lease, min_prop_fee_ppm_msat, cheapest_lsp, true))
+		Ok((lease, fee, cheapest_lsp, true))
 	}
 
 	async fn negotiate_variable_lease(
-		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+		self: &Arc<Self>, amount_msat: Option<u64>, connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let mut attempt = 1;
 		loop {
-			let result = self.negotiate_variable_lease_once(connection_manager).await;
+			let result = self.negotiate_variable_lease_once(amount_msat, connection_manager).await;
 			match result {
 				Err(error) if should_retry_lease_negotiation(error, attempt) => {
 					log_warn!(
@@ -494,7 +493,7 @@ where
 	}
 
 	async fn negotiate_variable_lease_once(
-		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+		self: &Arc<Self>, amount_msat: Option<u64>, connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig), Error> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let mut rejected_for_fee = false;
@@ -503,20 +502,34 @@ where
 			.flat_map(|(lsp, resp)| {
 				resp.opening_fee_params_menu.into_iter().map(move |params| (lsp.clone(), params))
 			})
-			.map(|(lsp, params)| {
-				let ppm = params.proportional as u64;
-				(lsp, ppm, params)
-			})
-			.filter(|(_, _, params)| {
-				let allowed = self
+			.filter_map(|(lsp, params)| {
+				// BOLT12 supplies a resolved amount here, while a BOLT11 zero-amount invoice does not.
+				// In the former case, only negotiate parameters that can carry that exact payment and
+				// compare providers by the total fee the payment would actually incur.
+				let selection_fee = if let Some(amount_msat) = amount_msat {
+					if amount_msat < params.min_payment_size_msat
+						|| amount_msat > params.max_payment_size_msat
+					{
+						return None;
+					}
+					compute_opening_fee(
+						amount_msat,
+						params.min_fee_msat,
+						params.proportional as u64,
+					)?
+				} else {
+					params.proportional as u64
+				};
+				let fee_for_limit = amount_msat.map_or(params.min_fee_msat, |_| selection_fee);
+				let fee_allowed = self
 					.config
 					.lsps2_max_total_lsp_fee_limit_msat
-					.map_or(true, |limit| params.min_fee_msat <= limit);
-				rejected_for_fee |= !allowed;
-				allowed
+					.map_or(true, |limit| fee_for_limit <= limit);
+				rejected_for_fee |= !fee_allowed;
+				fee_allowed.then_some((lsp, selection_fee, params))
 			})
 			.collect::<Vec<_>>();
-		candidates.sort_unstable_by_key(|(_, ppm, _)| *ppm);
+		candidates.sort_unstable_by_key(|(_, fee, _)| *fee);
 		if candidates.is_empty() {
 			return Err(if rejected_for_fee {
 				log_error!(
@@ -533,20 +546,29 @@ where
 		try_lease_candidates(
 			candidates,
 			|(lsp, _, _)| lsp.node_id,
-			|(lsp, proportional_fee_ppm_msat, opening_params)| {
+			|(lsp, fee, opening_params)| {
 				let client = Arc::clone(self);
 				async move {
-					log_debug!(
-						client.logger,
-						"Choosing liquidity offer from LSP {}, will pay {}ppm msat in proportional LSP fees",
-						lsp.node_id,
-						proportional_fee_ppm_msat
-					);
+					if amount_msat.is_some() {
+						log_debug!(
+							client.logger,
+							"Choosing liquidity offer from LSP {}, will pay {}msat in total LSP fees",
+							lsp.node_id,
+							fee
+						);
+					} else {
+						log_debug!(
+							client.logger,
+							"Choosing liquidity offer from LSP {}, will pay {}ppm msat in proportional LSP fees",
+							lsp.node_id,
+							fee
+						);
+					}
 					match client
 						.lsps2_send_buy_request(None, opening_params, Some(&lsp.node_id))
 						.await
 					{
-						Ok(lease) => Ok((lease, proportional_fee_ppm_msat, lsp)),
+						Ok(lease) => Ok((lease, fee, lsp)),
 						Err(error) => {
 							log_warn!(
 								client.logger,
@@ -621,11 +643,11 @@ where
 			.lease_state
 			.lock()
 			.expect("lock")
-			.has_variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat)
+			.has_variable_amount(None, self.config.lsps2_max_total_lsp_fee_limit_msat)
 		{
 			return Ok(());
 		}
-		self.negotiate_variable_lease(connection_manager).await?;
+		self.negotiate_variable_lease(None, connection_manager).await?;
 		Ok(())
 	}
 
@@ -822,14 +844,14 @@ where
 	}
 
 	async fn take_cached_variable_lease(
-		&self,
+		&self, amount_msat: Option<u64>,
 	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
 		loop {
-			let Some((lease, proportional_fee)) = self
+			let Some((lease, fee)) = self
 				.lease_state
 				.lock()
 				.expect("lock")
-				.variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat)
+				.variable_amount(amount_msat, self.config.lsps2_max_total_lsp_fee_limit_msat)
 			else {
 				return Ok(None);
 			};
@@ -837,7 +859,7 @@ where
 			if let Some(lsp) =
 				select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
 			{
-				return Ok(Some((lease, proportional_fee, lsp)));
+				return Ok(Some((lease, fee, lsp)));
 			}
 		}
 	}
