@@ -5372,7 +5372,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	println!("Generating JIT invoice!");
 	let jit_invoice = client_node
 		.bolt11_payment()
-		.receive_via_jit_channel(jit_amount_msat, &invoice_description.into(), 1024, None)
+		.receive_via_jit_channel(jit_amount_msat, &invoice_description.into(), 1024)
 		.unwrap();
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
@@ -5428,13 +5428,11 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 				jit_amount_msat,
 				&invoice_description,
 				1024,
-				None,
 			),
 			Some(hash) => client_node.bolt11_payment().receive_via_jit_channel_for_hash(
 				jit_amount_msat,
 				&invoice_description,
 				1024,
-				None,
 				hash,
 			),
 		}
@@ -5482,7 +5480,6 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 			jit_amount_msat,
 			&invoice_description,
 			1024,
-			None,
 			manual_payment_hash,
 		)
 		.unwrap();
@@ -5537,7 +5534,6 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 			jit_amount_msat,
 			&invoice_description,
 			1024,
-			None,
 			manual_payment_hash,
 		)
 		.unwrap();
@@ -5731,7 +5727,7 @@ async fn live_node_apis_return_not_running_after_stop() {
 	);
 	assert_eq!(node_a.bolt11_payment().fail_for_id(payment_id), Err(NodeError::NotRunning));
 	assert_eq!(
-		node_a.bolt11_payment().receive_via_jit_channel(1_000_000, &description.into(), 3600, None),
+		node_a.bolt11_payment().receive_via_jit_channel(1_000_000, &description.into(), 3600),
 		Err(NodeError::NotRunning)
 	);
 	assert_eq!(
@@ -5856,7 +5852,6 @@ async fn lsps2_client_trusts_lsp() {
 			jit_amount_msat,
 			&invoice_description.into(),
 			1024,
-			None,
 			manual_payment_hash,
 		)
 		.unwrap();
@@ -6032,7 +6027,6 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 			jit_amount_msat,
 			&invoice_description.into(),
 			1024,
-			None,
 			manual_payment_hash,
 		)
 		.unwrap();
@@ -6858,11 +6852,18 @@ async fn splice_in_with_all_balance() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn lsps2_multi_lsp_picks_cheapest() {
-	do_lsps2_multi_lsp_picks_cheapest(false).await;
-	do_lsps2_multi_lsp_picks_cheapest(true).await;
+	do_lsps2_multi_lsp_picks_cheapest(false, None).await;
+	do_lsps2_multi_lsp_picks_cheapest(true, None).await;
 }
 
-async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_multi_lsp_rejects_fees_above_limit() {
+	do_lsps2_multi_lsp_picks_cheapest(false, Some(999_999)).await;
+}
+
+async fn do_lsps2_multi_lsp_picks_cheapest(
+	reverse_order: bool, max_total_lsp_fee_limit_msat: Option<u64>,
+) {
 	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
@@ -6916,7 +6917,8 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	let expensive_addr = expensive.listening_addresses().unwrap().first().unwrap().clone();
 
 	// Client knows both LSPs. Registration order is varied to confirm selection isn't order-based.
-	let client_config = random_config();
+	let mut client_config = random_config();
+	client_config.node_config.lsps2_max_total_lsp_fee_limit_msat = max_total_lsp_fee_limit_msat;
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	if reverse_order {
@@ -6931,10 +6933,16 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 
 	let invoice_description =
 		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap()).into();
-	let jit_invoice = client
-		.bolt11_payment()
-		.receive_via_jit_channel(100_000_000, &invoice_description, 1024, None)
-		.unwrap();
+	let jit_invoice_result =
+		client.bolt11_payment().receive_via_jit_channel(100_000_000, &invoice_description, 1024);
+	if max_total_lsp_fee_limit_msat.is_some() {
+		assert!(matches!(jit_invoice_result, Err(NodeError::LiquidityFeeTooHigh)));
+		client.stop().unwrap();
+		cheap.stop().unwrap();
+		expensive.stop().unwrap();
+		return;
+	}
+	let jit_invoice = jit_invoice_result.unwrap();
 
 	// The route hint's src_node_id is the LSP the client picked.
 	let route_hints = jit_invoice.route_hints();
