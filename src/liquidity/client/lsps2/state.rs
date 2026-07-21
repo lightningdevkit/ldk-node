@@ -424,28 +424,64 @@ impl LSPS2LeaseState {
 
 	/// Selects and removes a variable-amount lease in one operation.
 	pub(crate) fn variable_amount(
-		&mut self, max_total_fee_msat: Option<u64>, available_lsps: &[PublicKey],
+		&mut self, amount_msat: Option<u64>, max_total_fee_msat: Option<u64>,
+		available_lsps: &[PublicKey],
 	) -> Option<(PaymentLease, u64)> {
-		let (id, proportional_fee) = self
+		let (id, selection_fee) = self
 			.leases
 			.iter()
 			.filter(|(id, _)| available_lsps.contains(&id.lsp_node_id))
 			.filter(|(_, lease)| lease.payment_size_msat.is_none())
 			.filter(|(_, lease)| is_lease_usable(lease))
-			.filter(|(_, lease)| {
-				max_total_fee_msat.map_or(true, |max| lease.params.min_fee_msat <= max)
+			.filter_map(|(id, lease)| {
+				let selection_fee = if let Some(amount_msat) = amount_msat {
+					if amount_msat < lease.params.min_payment_size_msat
+						|| amount_msat > lease.params.max_payment_size_msat
+					{
+						return None;
+					}
+					compute_opening_fee(
+						amount_msat,
+						lease.params.min_fee_msat,
+						lease.params.proportional as u64,
+					)?
+				} else {
+					lease.params.proportional as u64
+				};
+				let fee_for_limit =
+					amount_msat.map_or(lease.params.min_fee_msat, |_| selection_fee);
+				max_total_fee_msat
+					.map_or(true, |max| fee_for_limit <= max)
+					.then_some((*id, selection_fee))
 			})
-			.map(|(id, lease)| (*id, lease.params.proportional as u64))
 			.min_by_key(|(_, fee)| *fee)?;
-		self.leases.remove(&id).map(|lease| (lease, proportional_fee))
+		self.leases.remove(&id).map(|lease| (lease, selection_fee))
 	}
 
-	pub(crate) fn has_variable_amount(&self, max_total_fee_msat: Option<u64>) -> bool {
+	pub(crate) fn has_variable_amount(
+		&self, amount_msat: Option<u64>, max_total_fee_msat: Option<u64>,
+	) -> bool {
 		self.leases
 			.values()
 			.filter(|lease| lease.payment_size_msat.is_none())
 			.filter(|lease| is_lease_usable(lease))
-			.any(|lease| max_total_fee_msat.map_or(true, |max| lease.params.min_fee_msat <= max))
+			.filter_map(|lease| {
+				if let Some(amount_msat) = amount_msat {
+					if amount_msat < lease.params.min_payment_size_msat
+						|| amount_msat > lease.params.max_payment_size_msat
+					{
+						return None;
+					}
+					compute_opening_fee(
+						amount_msat,
+						lease.params.min_fee_msat,
+						lease.params.proportional as u64,
+					)
+				} else {
+					Some(lease.params.min_fee_msat)
+				}
+			})
+			.any(|fee_msat| max_total_fee_msat.map_or(true, |max| fee_msat <= max))
 	}
 
 	pub(crate) fn prune(&mut self) {
@@ -626,10 +662,33 @@ mod tests {
 		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
 		let variable = lease(2, 46, 50, None, valid_until);
 		let mut state = LSPS2LeaseState::from_leases(vec![variable.clone()]);
-
 		let available_lsps = [variable.id.lsp_node_id];
-		assert!(state.variable_amount(Some(49), &available_lsps).is_none());
-		assert_eq!(state.variable_amount(Some(50), &available_lsps).unwrap().0.id, variable.id);
+		assert!(state.variable_amount(None, Some(49), &available_lsps).is_none());
+		assert_eq!(
+			state.variable_amount(None, Some(50), &available_lsps).unwrap().0.id,
+			variable.id
+		);
+	}
+
+	#[test]
+	fn variable_lease_matches_resolved_payment_amount() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let mut incompatible = lease(2, 47, 1, None, valid_until);
+		incompatible.params.max_payment_size_msat = 1_000;
+		let mut compatible = lease(3, 48, 2, None, valid_until);
+		compatible.params.proportional = 500_000;
+		compatible.params.max_payment_size_msat = 3_000;
+		let available_lsps = [incompatible.id.lsp_node_id, compatible.id.lsp_node_id];
+		let mut state = LSPS2LeaseState::from_leases(vec![incompatible, compatible.clone()]);
+
+		assert!(state.variable_amount(Some(2_000), Some(999), &available_lsps).is_none());
+		let (selected, total_fee_msat) =
+			state.variable_amount(Some(2_000), None, &available_lsps).unwrap();
+		assert_eq!(
+			selected.id, compatible.id,
+			"selected variable lease must accept the resolved payment amount"
+		);
+		assert_eq!(total_fee_msat, 1_000);
 	}
 
 	#[test]
@@ -642,8 +701,8 @@ mod tests {
 		assert!(state.has_fixed_amount(1_000, Some(100)));
 		assert!(!state.has_fixed_amount(1_000, Some(99)));
 		assert!(!state.has_fixed_amount(2_000, None));
-		assert!(state.has_variable_amount(Some(50)));
-		assert!(!state.has_variable_amount(Some(49)));
+		assert!(state.has_variable_amount(None, Some(50)));
+		assert!(!state.has_variable_amount(None, Some(49)));
 	}
 
 	fn cache_target(
