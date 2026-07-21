@@ -34,7 +34,7 @@ use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
 use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig, DEFAULT_FULL_SCAN_STOP_GAP};
 use ldk_node::entropy::NodeEntropy;
-use ldk_node::liquidity::LSPS2ServiceConfig;
+use ldk_node::liquidity::{LSPS2ChannelConfig, LSPS2ServiceConfig};
 use ldk_node::payment::{
 	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
 	TransactionType, UnifiedPaymentResult,
@@ -2932,6 +2932,12 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	// Setup three nodes: service, client, and payer
 	let channel_opening_fee_ppm = 10_000;
 	let channel_over_provisioning_ppm = 100_000;
+
+	let jit_channel_config = LSPS2ChannelConfig {
+		cltv_expiry_delta: None,
+		max_dust_htlc_exposure: None,
+		force_close_avoidance_max_fee_satoshis: Some(1337),
+	};
 	let lsps2_service_config = LSPS2ServiceConfig {
 		require_token: None,
 		advertise_service: false,
@@ -2944,6 +2950,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		max_client_to_self_delay: 1024,
 		client_trusts_lsp,
 		disable_client_reserve: false,
+		channel_config: Some(jit_channel_config),
 	};
 
 	let service_config = random_config();
@@ -3034,6 +3041,14 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		(expected_received_amount_msat + expected_channel_overprovisioning_msat) / 1000;
 	let channel_value_sats = client_node.list_channels().first().unwrap().channel_value_sats;
 	assert_eq!(channel_value_sats, expected_channel_size_sat);
+
+	let jit_channel = service_node
+		.list_channels()
+		.into_iter()
+		.find(|c| c.counterparty.node_id == client_node.node_id())
+		.unwrap();
+	assert_eq!(jit_channel.config.force_close_avoidance_max_fee_satoshis, 1337);
+	assert_eq!(jit_channel.config.forwarding_fee_base_msat, 0);
 
 	println!("Generating regular invoice!");
 	let invoice_description =
@@ -3263,6 +3278,7 @@ async fn lsps2_client_trusts_lsp() {
 		max_client_to_self_delay: 1024,
 		client_trusts_lsp: true,
 		disable_client_reserve: false,
+		channel_config: None,
 	};
 
 	let service_config = random_config();
@@ -3438,6 +3454,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 		max_client_to_self_delay: 1024,
 		client_trusts_lsp: false,
 		disable_client_reserve: false,
+		channel_config: None,
 	};
 
 	let service_config = random_config();
@@ -4341,6 +4358,7 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 		max_client_to_self_delay: 1024,
 		client_trusts_lsp: true,
 		disable_client_reserve: false,
+		channel_config: None,
 	};
 	let cheap_node_config = random_config();
 	setup_builder!(cheap_builder, cheap_node_config.node_config);
@@ -4364,6 +4382,7 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 		max_client_to_self_delay: 1024,
 		client_trusts_lsp: true,
 		disable_client_reserve: false,
+		channel_config: None,
 	};
 	let expensive_node_config = random_config();
 	setup_builder!(expensive_builder, expensive_node_config.node_config);
