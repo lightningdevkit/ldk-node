@@ -37,6 +37,11 @@ pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = ""
 pub(crate) const LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE: &str = "lsps2_leases";
 pub(crate) const LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
+/// LSPS2 lease cache targets are persisted under this key.
+pub(crate) const LSPS2_CACHE_TARGET_PERSISTENCE_PRIMARY_NAMESPACE: &str = "lsps2_cache_targets";
+pub(crate) const LSPS2_CACHE_TARGET_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
+pub(crate) const LSPS2_CACHE_TARGET_PERSISTENCE_KEY: &str = "targets";
+
 /// The node metrics will be persisted under this key.
 pub(crate) const NODE_METRICS_PRIMARY_NAMESPACE: &str = "";
 pub(crate) const NODE_METRICS_SECONDARY_NAMESPACE: &str = "";
