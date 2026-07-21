@@ -196,6 +196,16 @@ where
 		res
 	}
 
+	pub(crate) async fn refill_cached_leases(
+		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(), Error> {
+		self.prune_stale_cache_targets().await?;
+		for target in self.cache_targets() {
+			self.schedule_lease_refill(target.id, connection_manager);
+		}
+		Ok(())
+	}
+
 	pub(crate) async fn commit_invoice_cache_target(
 		self: &Arc<Self>, request: JitInvoiceRequest,
 		connection_manager: &Arc<ConnectionManager<L>>,
