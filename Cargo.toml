@@ -25,6 +25,7 @@ panic = 'abort'     # Abort on panic
 
 [features]
 default = []
+bench = []
 postgres = ["dep:tokio-postgres", "dep:native-tls", "dep:postgres-native-tls"]
 
 [dependencies]
@@ -141,6 +142,15 @@ check-cfg = [
 [[bench]]
 name = "payments"
 harness = false
+
+[[bench]]
+name = "operations"
+harness = false
+
+[[bench]]
+name = "database"
+harness = false
+required-features = ["bench"]
 
 #[patch.crates-io]
 #lightning = { path = "../rust-lightning/lightning" }
