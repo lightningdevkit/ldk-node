@@ -10,6 +10,7 @@
 pub(crate) mod asynchronous;
 mod bolt11;
 mod bolt12;
+mod forwarding;
 mod onchain;
 pub(crate) mod pending_payment_store;
 mod spontaneous;
@@ -19,11 +20,16 @@ mod unified;
 pub use bolt11::Bolt11Payment;
 pub(crate) use bolt11::PaymentMetadata;
 pub use bolt12::Bolt12Payment;
+pub use forwarding::{
+	ChannelForwardingStatsPage, ChannelPairForwardingStatsPage, ForwardedPaymentDetailsPage,
+	Forwarding,
+};
 pub use onchain::OnchainPayment;
 pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
 pub use spontaneous::SpontaneousPayment;
 pub use store::{
-	Channel, ConfirmationStatus, LSPS2Parameters, PaymentDetails, PaymentDirection, PaymentKind,
+	Channel, ChannelForwardingStats, ChannelPairForwardingStats, ConfirmationStatus,
+	ForwardedPaymentDetails, LSPS2Parameters, PaymentDetails, PaymentDirection, PaymentKind,
 	PaymentStatus, TransactionType,
 };
 pub use unified::{UnifiedPayment, UnifiedPaymentResult};

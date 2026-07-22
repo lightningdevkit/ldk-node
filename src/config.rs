@@ -136,6 +136,27 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY: Duration = Duration::f
 // thereafter until every configured LSP has been discovered.
 pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_secs(60 * 60);
 
+/// The mode used for tracking forwarded payments.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum ForwardedPaymentTrackingMode {
+	/// Track new forwarded payments only as per-channel aggregate statistics.
+	///
+	/// Any detailed records left by a previous configuration are aggregated and removed after their
+	/// current one-hour bucket closes.
+	Stats,
+	/// Store individual forwarded payments for the current and previous one-hour buckets.
+	///
+	/// Payments from older buckets are aggregated into channel-pair statistics and removed.
+	Detailed,
+}
+
+impl Default for ForwardedPaymentTrackingMode {
+	fn default() -> Self {
+		Self::Stats
+	}
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 /// Represents the configuration of an [`Node`] instance.
@@ -155,9 +176,10 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_
 /// | `route_parameters`                     | None                                 |
 /// | `tor_config`                           | None                                 |
 /// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
+/// | `forwarded_payment_tracking_mode`      | Stats                               |
 ///
-/// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
-/// respective default values.
+/// See [`AnchorChannelsConfig`], [`RouteParametersConfig`], and
+/// [`ForwardedPaymentTrackingMode`] for more information regarding their respective default values.
 ///
 /// [`Node`]: crate::Node
 pub struct Config {
@@ -219,6 +241,8 @@ pub struct Config {
 	///
 	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 	pub hrn_config: HumanReadableNamesConfig,
+	/// The mode used for tracking forwarded payments.
+	pub forwarded_payment_tracking_mode: ForwardedPaymentTrackingMode,
 }
 
 impl Default for Config {
@@ -235,6 +259,7 @@ impl Default for Config {
 			route_parameters: None,
 			node_alias: None,
 			hrn_config: HumanReadableNamesConfig::default(),
+			forwarded_payment_tracking_mode: ForwardedPaymentTrackingMode::default(),
 		}
 	}
 }

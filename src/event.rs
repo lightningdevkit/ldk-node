@@ -7,9 +7,10 @@
 
 use core::future::Future;
 use core::task::{Poll, Waker};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
@@ -34,7 +35,9 @@ use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
-use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
+use crate::config::{
+	may_announce_channel, Config, ForwardedPaymentTrackingMode, PEER_RECONNECTION_INTERVAL,
+};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
 use crate::fee_estimator::ConfirmationTarget;
@@ -49,13 +52,15 @@ use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
-	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
+	ChannelForwardingStats, ForwardedPaymentDetails, PaymentDetails, PaymentDetailsUpdate,
+	PaymentDirection, PaymentKind, PaymentStatus,
 };
 use crate::payment::PaymentMetadata;
 use crate::probing::Prober;
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	ChannelForwardingStatsStore, CustomTlvRecord, DynStore, ForwardedPaymentStore, KeysManager,
+	OnionMessenger, PaymentStore, Sweeper, Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -68,6 +73,8 @@ use crate::{
 pub struct HTLCLocator {
 	/// The channel that the HTLC was sent or received on.
 	pub channel_id: ChannelId,
+	/// The amount of the HTLC, in millisatoshis, if known.
+	pub amount_msat: Option<u64>,
 	/// The `user_channel_id` for the channel.
 	///
 	/// Will only be `None` for events serialized with LDK Node v0.3.0 or prior, or if the
@@ -84,16 +91,185 @@ impl_writeable_tlv_based!(HTLCLocator, {
 	(1, channel_id, required),
 	(3, user_channel_id, option),
 	(5, node_id, option),
+	(7, amount_msat, option),
 });
 
 impl From<LdkHtlcLocator> for HTLCLocator {
 	fn from(value: LdkHtlcLocator) -> Self {
 		HTLCLocator {
 			channel_id: value.channel_id,
+			amount_msat: value.amount_msat,
 			user_channel_id: value.user_channel_id.map(|u| UserChannelId(u)),
 			node_id: value.node_id,
 		}
 	}
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ForwardedPaymentAllocation {
+	prev_htlc_index: usize,
+	next_htlc_index: usize,
+	inbound_amount_forwarded_msat: u64,
+	total_fee_earned_msat: Option<u64>,
+	skimmed_fee_msat: Option<u64>,
+	claim_from_onchain_tx: bool,
+	outbound_amount_forwarded_msat: u64,
+}
+
+fn forwarded_payment_allocations(
+	prev_htlcs: &[LdkHtlcLocator], next_htlcs: &[LdkHtlcLocator],
+	total_fee_earned_msat: Option<u64>, skimmed_fee_msat: Option<u64>, claim_from_onchain_tx: bool,
+) -> Option<Vec<ForwardedPaymentAllocation>> {
+	if prev_htlcs.is_empty() || next_htlcs.is_empty() {
+		return None;
+	}
+
+	let prev_amounts =
+		prev_htlcs.iter().map(|htlc| htlc.amount_msat).collect::<Option<Vec<_>>>()?;
+	let next_amounts =
+		next_htlcs.iter().map(|htlc| htlc.amount_msat).collect::<Option<Vec<_>>>()?;
+
+	if prev_htlcs.len() == 1 && next_htlcs.len() == 1 {
+		return Some(vec![ForwardedPaymentAllocation {
+			prev_htlc_index: 0,
+			next_htlc_index: 0,
+			inbound_amount_forwarded_msat: prev_amounts[0],
+			total_fee_earned_msat,
+			skimmed_fee_msat,
+			claim_from_onchain_tx,
+			outbound_amount_forwarded_msat: next_amounts[0],
+		}]);
+	}
+
+	// LDK reports the incoming and outgoing HTLCs, but not which incoming HTLC funded each
+	// outgoing HTLC. Infer the relationship by treating both lists as FIFO queues: allocate the
+	// smaller of the current HTLCs' remaining amounts, then advance past whichever HTLC is
+	// exhausted. If one side is exhausted first, attribute the other side's unmatched remainder to
+	// its final HTLC. This preserves every HTLC's exact amount without producing a Cartesian product
+	// of every possible channel pair.
+	let mut allocations = Vec::with_capacity(prev_htlcs.len() + next_htlcs.len());
+	let mut prev_htlc_index = 0;
+	let mut next_htlc_index = 0;
+	let mut remaining_inbound_amount_msat = prev_amounts[0];
+	let mut remaining_outbound_amount_msat = next_amounts[0];
+
+	while prev_htlc_index < prev_htlcs.len() && next_htlc_index < next_htlcs.len() {
+		if remaining_inbound_amount_msat == 0 {
+			prev_htlc_index += 1;
+			if prev_htlc_index < prev_htlcs.len() {
+				remaining_inbound_amount_msat = prev_amounts[prev_htlc_index];
+			}
+			continue;
+		}
+		if remaining_outbound_amount_msat == 0 {
+			next_htlc_index += 1;
+			if next_htlc_index < next_htlcs.len() {
+				remaining_outbound_amount_msat = next_amounts[next_htlc_index];
+			}
+			continue;
+		}
+
+		let amount = remaining_inbound_amount_msat.min(remaining_outbound_amount_msat);
+		allocations.push(ForwardedPaymentAllocation {
+			prev_htlc_index,
+			next_htlc_index,
+			inbound_amount_forwarded_msat: amount,
+			total_fee_earned_msat: total_fee_earned_msat.map(|_| 0),
+			skimmed_fee_msat: skimmed_fee_msat.map(|_| 0),
+			claim_from_onchain_tx,
+			outbound_amount_forwarded_msat: amount,
+		});
+		remaining_inbound_amount_msat -= amount;
+		remaining_outbound_amount_msat -= amount;
+	}
+
+	// Any unmatched inbound amount represents value not present in the outgoing HTLCs, such as the
+	// forwarding fee. Attribute it to the final outgoing HTLC so each incoming HTLC's full amount
+	// remains represented.
+	let last_next_htlc_index = next_htlcs.len() - 1;
+	while prev_htlc_index < prev_htlcs.len() {
+		if remaining_inbound_amount_msat > 0 {
+			allocations.push(ForwardedPaymentAllocation {
+				prev_htlc_index,
+				next_htlc_index: last_next_htlc_index,
+				inbound_amount_forwarded_msat: remaining_inbound_amount_msat,
+				total_fee_earned_msat: total_fee_earned_msat.map(|_| 0),
+				skimmed_fee_msat: skimmed_fee_msat.map(|_| 0),
+				claim_from_onchain_tx,
+				outbound_amount_forwarded_msat: 0,
+			});
+		}
+		prev_htlc_index += 1;
+		if prev_htlc_index < prev_htlcs.len() {
+			remaining_inbound_amount_msat = prev_amounts[prev_htlc_index];
+		}
+	}
+
+	// The inverse should not normally occur because forwarding fees make the inbound total larger,
+	// but preserve any unmatched outbound amount symmetrically if it does.
+	let last_prev_htlc_index = prev_htlcs.len() - 1;
+	while next_htlc_index < next_htlcs.len() {
+		if remaining_outbound_amount_msat > 0 {
+			allocations.push(ForwardedPaymentAllocation {
+				prev_htlc_index: last_prev_htlc_index,
+				next_htlc_index,
+				inbound_amount_forwarded_msat: 0,
+				total_fee_earned_msat: total_fee_earned_msat.map(|_| 0),
+				skimmed_fee_msat: skimmed_fee_msat.map(|_| 0),
+				claim_from_onchain_tx,
+				outbound_amount_forwarded_msat: remaining_outbound_amount_msat,
+			});
+		}
+		next_htlc_index += 1;
+		if next_htlc_index < next_htlcs.len() {
+			remaining_outbound_amount_msat = next_amounts[next_htlc_index];
+		}
+	}
+
+	// LDK reports fees for the complete forward rather than for individual HTLCs. Store them on the
+	// final inferred allocation so summing the allocations recovers the event's totals without
+	// counting the fees more than once.
+	if let Some(total_fee_earned_msat) = total_fee_earned_msat {
+		allocations.last_mut()?.total_fee_earned_msat = Some(total_fee_earned_msat);
+	}
+
+	if let Some(skimmed_fee_msat) = skimmed_fee_msat {
+		allocations.last_mut()?.skimmed_fee_msat = Some(skimmed_fee_msat);
+	}
+
+	// Multiple HTLC allocations may describe the same channel pair. Collapse them into one record
+	// per pair while preserving the inferred totals above.
+	let mut grouped_allocations: Vec<ForwardedPaymentAllocation> = Vec::new();
+	for allocation in allocations {
+		let prev_channel_id = prev_htlcs[allocation.prev_htlc_index].channel_id;
+		let next_channel_id = next_htlcs[allocation.next_htlc_index].channel_id;
+		if let Some(existing) = grouped_allocations.iter_mut().find(|existing| {
+			prev_htlcs[existing.prev_htlc_index].channel_id == prev_channel_id
+				&& next_htlcs[existing.next_htlc_index].channel_id == next_channel_id
+		}) {
+			existing.outbound_amount_forwarded_msat = existing
+				.outbound_amount_forwarded_msat
+				.saturating_add(allocation.outbound_amount_forwarded_msat);
+			existing.inbound_amount_forwarded_msat = existing
+				.inbound_amount_forwarded_msat
+				.saturating_add(allocation.inbound_amount_forwarded_msat);
+			existing.total_fee_earned_msat =
+				match (existing.total_fee_earned_msat, allocation.total_fee_earned_msat) {
+					(Some(existing), Some(additional)) => Some(existing.saturating_add(additional)),
+					_ => None,
+				};
+			existing.skimmed_fee_msat =
+				match (existing.skimmed_fee_msat, allocation.skimmed_fee_msat) {
+					(Some(existing), Some(additional)) => Some(existing.saturating_add(additional)),
+					_ => None,
+				};
+			existing.claim_from_onchain_tx |= allocation.claim_from_onchain_tx;
+		} else {
+			grouped_allocations.push(allocation);
+		}
+	}
+
+	Some(grouped_allocations)
 }
 
 /// An event emitted by [`Node`], which should be handled by the user.
@@ -353,11 +529,13 @@ impl_writeable_tlv_based_enum!(Event,
 		(14, outbound_amount_forwarded_msat, option),
 		(15, prev_htlcs, (default_value_vec, vec![HTLCLocator {
 			channel_id: legacy_prev_channel_id.ok_or(lightning::ln::msgs::DecodeError::InvalidValue)?,
+			amount_msat: total_fee_earned_msat.and_then(|fee: u64| outbound_amount_forwarded_msat.map(|amount: u64| amount.saturating_add(fee))),
 			user_channel_id: legacy_prev_user_channel_id.map(UserChannelId),
 			node_id: legacy_prev_node_id,
 		}])),
 		(17, next_htlcs, (default_value_vec, vec![HTLCLocator {
 			channel_id: legacy_next_channel_id.ok_or(lightning::ln::msgs::DecodeError::InvalidValue)?,
+			amount_msat: outbound_amount_forwarded_msat,
 			user_channel_id: legacy_next_user_channel_id.map(UserChannelId),
 			node_id: legacy_next_node_id,
 		}])),
@@ -535,6 +713,8 @@ where
 	network_graph: Arc<Graph>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	forwarded_payment_store: Arc<ForwardedPaymentStore>,
+	channel_forwarding_stats_store: Arc<ChannelForwardingStatsStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
 	static_invoice_store: Option<StaticInvoiceStore>,
@@ -556,6 +736,8 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
+		forwarded_payment_store: Arc<ForwardedPaymentStore>,
+		channel_forwarding_stats_store: Arc<ChannelForwardingStatsStore>,
 		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
@@ -571,6 +753,8 @@ where
 			network_graph,
 			liquidity_source,
 			payment_store,
+			forwarded_payment_store,
+			channel_forwarding_stats_store,
 			peer_store,
 			keys_manager,
 			static_invoice_store,
@@ -1500,7 +1684,7 @@ where
 						from_prev_str,
 						next_htlcs.len(),
 						to_next_str,
-						outbound_amount_forwarded_msat.unwrap_or(0),
+						outbound_amount_forwarded_msat,
 						fee_earned,
 					);
 					} else {
@@ -1511,7 +1695,7 @@ where
 							from_prev_str,
 							next_htlcs.len(),
 							to_next_str,
-							outbound_amount_forwarded_msat.unwrap_or(0),
+							outbound_amount_forwarded_msat,
 							fee_earned,
 						);
 					}
@@ -1539,13 +1723,185 @@ where
 						.await;
 				}
 
+				let all_htlc_amounts_known = prev_htlcs
+					.iter()
+					.chain(next_htlcs.iter())
+					.all(|htlc| htlc.amount_msat.is_some());
+				if !prev_htlcs.is_empty() && !next_htlcs.is_empty() && all_htlc_amounts_known {
+					let forwarded_at_timestamp = SystemTime::now()
+						.duration_since(UNIX_EPOCH)
+						.expect("current time should not be earlier than the Unix epoch")
+						.as_secs();
+
+					let mut inbound_stats_by_channel = HashMap::new();
+					for (idx, prev_htlc) in prev_htlcs.iter().enumerate() {
+						let inbound_amount_msat =
+							prev_htlc.amount_msat.expect("all HTLC amounts were checked above");
+						let inbound_stats = inbound_stats_by_channel
+							.entry(prev_htlc.channel_id)
+							.or_insert(ChannelForwardingStats {
+								channel_id: prev_htlc.channel_id,
+								counterparty_node_id: prev_htlc.node_id,
+								inbound_payments_forwarded: 1,
+								outbound_payments_forwarded: 0,
+								total_inbound_amount_msat: 0,
+								total_outbound_amount_msat: 0,
+								total_fee_earned_msat: total_fee_earned_msat.map(|_| 0),
+								total_skimmed_fee_msat: 0,
+								onchain_claims_count: 0,
+								first_forwarded_at_timestamp: forwarded_at_timestamp,
+								last_forwarded_at_timestamp: forwarded_at_timestamp,
+							});
+						if inbound_stats.counterparty_node_id.is_none() {
+							inbound_stats.counterparty_node_id = prev_htlc.node_id;
+						}
+						inbound_stats.total_inbound_amount_msat += inbound_amount_msat;
+						if idx == prev_htlcs.len() - 1 {
+							if let (Some(total), Some(fee)) = (
+								inbound_stats.total_fee_earned_msat.as_mut(),
+								total_fee_earned_msat,
+							) {
+								*total += fee;
+							}
+							inbound_stats.total_skimmed_fee_msat += skimmed_fee_msat.unwrap_or(0);
+						}
+					}
+
+					for inbound_stats in inbound_stats_by_channel.into_values() {
+						self.channel_forwarding_stats_store
+							.insert_or_update(inbound_stats)
+							.await
+							.map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to update inbound channel forwarding stats: {e}"
+							);
+							ReplayEvent()
+						})?;
+					}
+
+					let mut outbound_stats_by_channel = HashMap::new();
+					for (idx, next_htlc) in next_htlcs.iter().enumerate() {
+						let outbound_amount_msat =
+							next_htlc.amount_msat.expect("all HTLC amounts were checked above");
+						let outbound_stats = outbound_stats_by_channel
+							.entry(next_htlc.channel_id)
+							.or_insert(ChannelForwardingStats {
+								channel_id: next_htlc.channel_id,
+								counterparty_node_id: next_htlc.node_id,
+								inbound_payments_forwarded: 0,
+								outbound_payments_forwarded: 1,
+								total_inbound_amount_msat: 0,
+								total_outbound_amount_msat: 0,
+								total_fee_earned_msat: Some(0),
+								total_skimmed_fee_msat: 0,
+								onchain_claims_count: 0,
+								first_forwarded_at_timestamp: forwarded_at_timestamp,
+								last_forwarded_at_timestamp: forwarded_at_timestamp,
+							});
+						if outbound_stats.counterparty_node_id.is_none() {
+							outbound_stats.counterparty_node_id = next_htlc.node_id;
+						}
+						outbound_stats.total_outbound_amount_msat += outbound_amount_msat;
+						outbound_stats.onchain_claims_count +=
+							if claim_from_onchain_tx && idx == 0 { 1 } else { 0 };
+					}
+
+					for outbound_stats in outbound_stats_by_channel.into_values() {
+						self.channel_forwarding_stats_store
+							.insert_or_update(outbound_stats)
+							.await
+							.map_err(|e| {
+								log_error!(
+									self.logger,
+									"Failed to update outbound channel forwarding stats: {e}"
+								);
+								ReplayEvent()
+							})?;
+					}
+
+					if matches!(
+						self.config.forwarded_payment_tracking_mode,
+						ForwardedPaymentTrackingMode::Detailed
+					) {
+						if let Some(allocations) = forwarded_payment_allocations(
+							&prev_htlcs,
+							&next_htlcs,
+							total_fee_earned_msat,
+							skimmed_fee_msat,
+							claim_from_onchain_tx,
+						) {
+							for allocation in allocations {
+								let prev_htlc = &prev_htlcs[allocation.prev_htlc_index];
+								let next_htlc = &next_htlcs[allocation.next_htlc_index];
+								self.forwarded_payment_store
+									.insert_with(|| {
+										let forwarded_at_timestamp = SystemTime::now()
+											.duration_since(UNIX_EPOCH)
+											.expect(
+												"current time should not be earlier than the Unix epoch",
+											)
+											.as_secs();
+										ForwardedPaymentDetails {
+											id: hex_utils::to_string(
+												&self.keys_manager.get_secure_random_bytes(),
+											),
+											prev_channel_id: prev_htlc.channel_id,
+											next_channel_id: next_htlc.channel_id,
+											prev_user_channel_id: prev_htlc
+												.user_channel_id
+												.map(UserChannelId),
+											next_user_channel_id: next_htlc
+												.user_channel_id
+												.map(UserChannelId),
+											prev_node_id: prev_htlc.node_id,
+											next_node_id: next_htlc.node_id,
+											inbound_amount_forwarded_msat: Some(
+												allocation.inbound_amount_forwarded_msat,
+											),
+											total_fee_earned_msat: allocation.total_fee_earned_msat,
+											skimmed_fee_msat: allocation.skimmed_fee_msat,
+											claim_from_onchain_tx: allocation.claim_from_onchain_tx,
+											outbound_amount_forwarded_msat: Some(
+												allocation.outbound_amount_forwarded_msat,
+											),
+											forwarded_at_timestamp,
+										}
+									})
+									.await
+									.map_err(|e| {
+										log_error!(
+											self.logger,
+											"Failed to store forwarded payment: {e}"
+										);
+										ReplayEvent()
+									})?;
+							}
+						} else {
+							log_debug!(
+								self.logger,
+								"Skipping detailed channel-pair forwarding stats for forward with {} inbound and {} outbound HTLCs because per-HTLC amounts are unavailable or invalid",
+								prev_htlcs.len(),
+								next_htlcs.len()
+							);
+						}
+					}
+				} else if !prev_htlcs.is_empty() && !next_htlcs.is_empty() {
+					log_debug!(
+						self.logger,
+						"Skipping forwarding payment tracking for forward with {} inbound and {} outbound HTLCs because at least one per-HTLC amount is unavailable",
+						prev_htlcs.len(),
+						next_htlcs.len()
+					);
+				}
+
 				let event = Event::PaymentForwarded {
 					prev_htlcs: prev_htlcs.into_iter().map(HTLCLocator::from).collect(),
 					next_htlcs: next_htlcs.into_iter().map(HTLCLocator::from).collect(),
 					total_fee_earned_msat,
 					skimmed_fee_msat,
 					claim_from_onchain_tx,
-					outbound_amount_forwarded_msat,
+					outbound_amount_forwarded_msat: Some(outbound_amount_forwarded_msat),
 				};
 				self.event_queue.add_event(event).await.map_err(|e| {
 					log_error!(self.logger, "Failed to push to event queue: {}", e);
@@ -2025,6 +2381,469 @@ mod tests {
 	use crate::payment::store::LSPS2Parameters;
 	use crate::types::DynStoreWrapper;
 
+	fn ldk_htlc_locator(channel_byte: u8, amount_msat: Option<u64>) -> LdkHtlcLocator {
+		LdkHtlcLocator {
+			channel_id: ChannelId([channel_byte; 32]),
+			amount_msat,
+			user_channel_id: Some(channel_byte as u128),
+			node_id: None,
+		}
+	}
+
+	#[test]
+	fn multi_htlc_forward_is_allocated_across_channel_pairs() {
+		let prev_htlcs = vec![ldk_htlc_locator(1, Some(600)), ldk_htlc_locator(2, Some(400))];
+		let next_htlcs = vec![ldk_htlc_locator(3, Some(800))];
+
+		let allocations =
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(200), Some(40), true)
+				.unwrap();
+		assert_eq!(
+			allocations,
+			vec![
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 600,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: Some(0),
+					claim_from_onchain_tx: true,
+					outbound_amount_forwarded_msat: 600,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 1,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 400,
+					total_fee_earned_msat: Some(200),
+					skimmed_fee_msat: Some(40),
+					claim_from_onchain_tx: true,
+					outbound_amount_forwarded_msat: 200,
+				},
+			],
+		);
+		assert_eq!(
+			allocations
+				.iter()
+				.map(|allocation| allocation.outbound_amount_forwarded_msat)
+				.sum::<u64>(),
+			800
+		);
+		assert_eq!(
+			allocations
+				.iter()
+				.map(|allocation| allocation.total_fee_earned_msat.unwrap())
+				.sum::<u64>(),
+			200
+		);
+		assert_eq!(
+			allocations.iter().map(|allocation| allocation.skimmed_fee_msat.unwrap()).sum::<u64>(),
+			40
+		);
+		assert_eq!(
+			allocations.iter().filter(|allocation| allocation.claim_from_onchain_tx).count(),
+			2
+		);
+	}
+
+	#[test]
+	fn single_htlc_forward_preserves_all_fields() {
+		let prev_htlcs = vec![ldk_htlc_locator(1, Some(1_000))];
+		let next_htlcs = vec![ldk_htlc_locator(2, Some(800))];
+		assert_eq!(
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(200), Some(40), true),
+			Some(vec![ForwardedPaymentAllocation {
+				prev_htlc_index: 0,
+				next_htlc_index: 0,
+				inbound_amount_forwarded_msat: 1_000,
+				total_fee_earned_msat: Some(200),
+				skimmed_fee_msat: Some(40),
+				claim_from_onchain_tx: true,
+				outbound_amount_forwarded_msat: 800,
+			}])
+		);
+	}
+
+	#[test]
+	fn multi_outbound_htlc_forward_is_allocated_across_channel_pairs() {
+		let prev_htlcs = vec![ldk_htlc_locator(1, Some(1_000))];
+		let next_htlcs = vec![ldk_htlc_locator(2, Some(500)), ldk_htlc_locator(3, Some(300))];
+
+		let allocations =
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(200), None, false)
+				.unwrap();
+		assert_eq!(
+			allocations,
+			vec![
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 500,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 500,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 1,
+					inbound_amount_forwarded_msat: 500,
+					total_fee_earned_msat: Some(200),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 300,
+				},
+			],
+		);
+	}
+
+	#[test]
+	fn multi_htlc_forward_preserves_inbound_amounts_with_unknown_fee() {
+		let prev_htlcs = vec![ldk_htlc_locator(1, Some(600)), ldk_htlc_locator(2, Some(400))];
+		let next_htlcs = vec![ldk_htlc_locator(3, Some(800))];
+
+		let allocations =
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, None, None, false).unwrap();
+		assert_eq!(
+			allocations,
+			vec![
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 600,
+					total_fee_earned_msat: None,
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 600,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 1,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 400,
+					total_fee_earned_msat: None,
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 200,
+				},
+			],
+		);
+	}
+
+	#[test]
+	fn multi_htlc_forward_groups_repeated_channel_pairs() {
+		let prev_htlcs = vec![ldk_htlc_locator(1, Some(600)), ldk_htlc_locator(1, Some(400))];
+		let next_htlcs = vec![ldk_htlc_locator(2, Some(800))];
+
+		let allocations =
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(200), None, false)
+				.unwrap();
+		assert_eq!(
+			allocations,
+			vec![ForwardedPaymentAllocation {
+				prev_htlc_index: 0,
+				next_htlc_index: 0,
+				inbound_amount_forwarded_msat: 1_000,
+				total_fee_earned_msat: Some(200),
+				skimmed_fee_msat: None,
+				claim_from_onchain_tx: false,
+				outbound_amount_forwarded_msat: 800,
+			}],
+		);
+	}
+
+	#[test]
+	fn multi_htlc_forward_requires_all_locator_amounts() {
+		let prev_htlcs = vec![ldk_htlc_locator(1, Some(600)), ldk_htlc_locator(2, None)];
+		let next_htlcs = vec![ldk_htlc_locator(3, Some(800))];
+		assert_eq!(
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(200), None, false),
+			None
+		);
+	}
+
+	#[test]
+	fn multi_inbound_and_outbound_htlcs_are_allocated_across_channel_pairs() {
+		let prev_htlcs = vec![ldk_htlc_locator(1, Some(600)), ldk_htlc_locator(2, Some(400))];
+		let next_htlcs = vec![ldk_htlc_locator(3, Some(500)), ldk_htlc_locator(4, Some(300))];
+		assert_eq!(
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(200), None, false),
+			Some(vec![
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 500,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 500,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 1,
+					inbound_amount_forwarded_msat: 100,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 100,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 1,
+					next_htlc_index: 1,
+					inbound_amount_forwarded_msat: 400,
+					total_fee_earned_msat: Some(200),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 200,
+				},
+			])
+		);
+	}
+
+	#[test]
+	fn equal_htlc_counts_are_split_by_amount() {
+		let prev_htlcs = vec![
+			ldk_htlc_locator(1, Some(200)),
+			ldk_htlc_locator(2, Some(300)),
+			ldk_htlc_locator(3, Some(500)),
+		];
+		let next_htlcs = vec![
+			ldk_htlc_locator(4, Some(500)),
+			ldk_htlc_locator(5, Some(150)),
+			ldk_htlc_locator(6, Some(350)),
+		];
+		assert_eq!(
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(0), None, false),
+			Some(vec![
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 200,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 200,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 1,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 300,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 300,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 2,
+					next_htlc_index: 1,
+					inbound_amount_forwarded_msat: 150,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 150,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 2,
+					next_htlc_index: 2,
+					inbound_amount_forwarded_msat: 350,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 350,
+				},
+			])
+		);
+	}
+
+	#[test]
+	fn unmatched_inbound_amount_spans_multiple_htlcs() {
+		let prev_htlcs = vec![
+			ldk_htlc_locator(1, Some(300)),
+			ldk_htlc_locator(2, Some(400)),
+			ldk_htlc_locator(3, Some(500)),
+		];
+		let next_htlcs = vec![ldk_htlc_locator(4, Some(500))];
+		assert_eq!(
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(700), None, false),
+			Some(vec![
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 300,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 300,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 1,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 400,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 200,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 2,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 500,
+					total_fee_earned_msat: Some(700),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 0,
+				},
+			])
+		);
+	}
+
+	#[test]
+	fn unmatched_outbound_amount_spans_multiple_htlcs() {
+		let prev_htlcs = vec![ldk_htlc_locator(1, Some(500))];
+		let next_htlcs = vec![
+			ldk_htlc_locator(2, Some(200)),
+			ldk_htlc_locator(3, Some(400)),
+			ldk_htlc_locator(4, Some(300)),
+		];
+		assert_eq!(
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, None, None, false),
+			Some(vec![
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 200,
+					total_fee_earned_msat: None,
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 200,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 1,
+					inbound_amount_forwarded_msat: 300,
+					total_fee_earned_msat: None,
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 400,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 2,
+					inbound_amount_forwarded_msat: 0,
+					total_fee_earned_msat: None,
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 300,
+				},
+			])
+		);
+	}
+
+	#[test]
+	fn non_adjacent_repeated_channel_pairs_are_grouped() {
+		let prev_htlcs = vec![
+			ldk_htlc_locator(1, Some(200)),
+			ldk_htlc_locator(2, Some(300)),
+			ldk_htlc_locator(1, Some(500)),
+		];
+		let next_htlcs = vec![
+			ldk_htlc_locator(3, Some(500)),
+			ldk_htlc_locator(4, Some(150)),
+			ldk_htlc_locator(3, Some(350)),
+		];
+		assert_eq!(
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(0), None, false),
+			Some(vec![
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 550,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 550,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 1,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 300,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 300,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 2,
+					next_htlc_index: 1,
+					inbound_amount_forwarded_msat: 150,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 150,
+				},
+			])
+		);
+	}
+
+	#[test]
+	fn unequal_htlc_counts_are_allocated_fifo() {
+		let prev_htlcs = vec![ldk_htlc_locator(1, Some(300)), ldk_htlc_locator(2, Some(600))];
+		let next_htlcs = vec![
+			ldk_htlc_locator(3, Some(200)),
+			ldk_htlc_locator(4, Some(300)),
+			ldk_htlc_locator(5, Some(200)),
+		];
+		assert_eq!(
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(200), None, false),
+			Some(vec![
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 0,
+					inbound_amount_forwarded_msat: 200,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 200,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 0,
+					next_htlc_index: 1,
+					inbound_amount_forwarded_msat: 100,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 100,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 1,
+					next_htlc_index: 1,
+					inbound_amount_forwarded_msat: 200,
+					total_fee_earned_msat: Some(0),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 200,
+				},
+				ForwardedPaymentAllocation {
+					prev_htlc_index: 1,
+					next_htlc_index: 2,
+					inbound_amount_forwarded_msat: 400,
+					total_fee_earned_msat: Some(200),
+					skimmed_fee_msat: None,
+					claim_from_onchain_tx: false,
+					outbound_amount_forwarded_msat: 200,
+				},
+			])
+		);
+	}
+
+	#[test]
+	fn single_htlc_forward_with_unknown_amount_is_skipped() {
+		let prev_htlcs = vec![ldk_htlc_locator(1, None)];
+		let next_htlcs = vec![ldk_htlc_locator(2, None)];
+		assert_eq!(
+			forwarded_payment_allocations(&prev_htlcs, &next_htlcs, Some(20), None, false),
+			None
+		);
+	}
+
 	#[test]
 	fn lsps2_payment_metadata_decodes_total_fee_limit() {
 		let metadata = PaymentMetadata {
@@ -2120,6 +2939,14 @@ mod tests {
 			counterparty_node_id: Option<PublicKey>,
 			reason: Option<ClosureReason>,
 		},
+		PaymentForwarded {
+			prev_htlcs: Vec<HTLCLocator>,
+			next_htlcs: Vec<HTLCLocator>,
+			total_fee_earned_msat: Option<u64>,
+			skimmed_fee_msat: Option<u64>,
+			claim_from_onchain_tx: bool,
+			outbound_amount_forwarded_msat: Option<u64>,
+		},
 	}
 
 	impl_writeable_tlv_based_enum!(LegacyEvent,
@@ -2128,6 +2955,14 @@ mod tests {
 			(1, counterparty_node_id, option),
 			(2, user_channel_id, required),
 			(3, reason, upgradable_option),
+		},
+		(7, PaymentForwarded) => {
+			(8, total_fee_earned_msat, option),
+			(10, skimmed_fee_msat, option),
+			(12, claim_from_onchain_tx, required),
+			(14, outbound_amount_forwarded_msat, option),
+			(15, prev_htlcs, (default_value_vec, Vec::new())),
+			(17, next_htlcs, (default_value_vec, Vec::new())),
 		},
 	);
 
@@ -2188,6 +3023,54 @@ mod tests {
 
 		let res = EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger));
 		assert!(res.is_err());
+	}
+
+	#[test]
+	fn event_queue_reads_legacy_multi_htlc_forward() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let prev_htlcs = vec![
+			HTLCLocator::from(ldk_htlc_locator(1, Some(600))),
+			HTLCLocator::from(ldk_htlc_locator(2, Some(400))),
+		];
+		let next_htlcs = vec![HTLCLocator::from(ldk_htlc_locator(3, Some(800)))];
+		let legacy_event = LegacyEvent::PaymentForwarded {
+			prev_htlcs: prev_htlcs.clone(),
+			next_htlcs: next_htlcs.clone(),
+			total_fee_earned_msat: Some(200),
+			skimmed_fee_msat: None,
+			claim_from_onchain_tx: false,
+			outbound_amount_forwarded_msat: Some(800),
+		};
+		let persisted_bytes = encode_legacy_event_queue(legacy_event);
+
+		let event_queue =
+			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
+		assert_eq!(
+			event_queue.next_event(),
+			Some(Event::PaymentForwarded {
+				prev_htlcs,
+				next_htlcs,
+				total_fee_earned_msat: Some(200),
+				skimmed_fee_msat: None,
+				claim_from_onchain_tx: false,
+				outbound_amount_forwarded_msat: Some(800),
+			})
+		);
+	}
+
+	#[test]
+	fn payment_forwarded_event_roundtrips() {
+		let event = Event::PaymentForwarded {
+			prev_htlcs: vec![HTLCLocator::from(ldk_htlc_locator(1, Some(1_000)))],
+			next_htlcs: vec![HTLCLocator::from(ldk_htlc_locator(2, Some(800)))],
+			total_fee_earned_msat: Some(200),
+			skimmed_fee_msat: None,
+			claim_from_onchain_tx: false,
+			outbound_amount_forwarded_msat: Some(800),
+		};
+
+		assert_eq!(Event::read(&mut &event.encode()[..]).unwrap(), event);
 	}
 
 	#[tokio::test]
