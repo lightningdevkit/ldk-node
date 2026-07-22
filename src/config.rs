@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
+use bitreq::URL;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::RouteParametersConfig;
@@ -136,6 +137,18 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY: Duration = Duration::f
 // thereafter until every configured LSP has been discovered.
 pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_secs(60 * 60);
 
+// The time interval at which we resume persisted payjoin sessions.
+pub(crate) const PAYJOIN_RESUME_INTERVAL: Duration = Duration::from_secs(15);
+
+// The duration after which completed or failed payjoin sessions are cleaned up (24 hours).
+pub(crate) const PAYJOIN_SESSION_CLEANUP_AGE_SECS: u64 = 24 * 60 * 60;
+
+// The interval at which we check for old payjoin sessions to clean up (1 hour).
+pub(crate) const PAYJOIN_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+// The default timeout after which we abort a transaction lookup operation.
+pub(crate) const DEFAULT_TX_LOOKUP_TIMEOUT_SECS: u64 = 10;
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 /// Represents the configuration of an [`Node`] instance.
@@ -153,8 +166,9 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_
 /// | `probing_liquidity_limit_multiplier`   | 3                                    |
 /// | `anchor_channels_config`               | AnchorChannelsConfig::default()      |
 /// | `route_parameters`                     | None                                 |
-/// | `tor_config`                           | None                                 |
+/// | `tor_config`                           | None               				|
 /// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
+/// | `payjoin_config`                     	 | None                                 |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -219,6 +233,8 @@ pub struct Config {
 	///
 	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 	pub hrn_config: HumanReadableNamesConfig,
+	/// Configuration options for PayJoin payments.
+	pub payjoin_config: Option<PayjoinConfig>,
 }
 
 impl Default for Config {
@@ -235,6 +251,7 @@ impl Default for Config {
 			route_parameters: None,
 			node_alias: None,
 			hrn_config: HumanReadableNamesConfig::default(),
+			payjoin_config: None,
 		}
 	}
 }
@@ -776,6 +793,16 @@ pub enum AsyncPaymentsRole {
 	/// Node acts as a server in an async payments context. This means that it will hold async payments HTLCs and onion
 	/// messages for its peers.
 	Server,
+}
+
+/// Configuration options for PayJoin payments.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PayjoinConfig {
+	/// The URL of the PayJoin directory
+	pub payjoin_directory: URL,
+	/// The URLs of the OHTTP relays to use for sending OHTTP requests to PayJoin receivers.
+	pub ohttp_relays: Vec<URL>,
 }
 
 #[cfg(test)]
