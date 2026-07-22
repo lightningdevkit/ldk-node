@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Amount, OutPoint};
+use bitcoin::{Amount, BlockHash, OutPoint, Txid};
 use lightning::blinded_path::message::NextMessageHop;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
@@ -271,6 +271,52 @@ pub enum Event {
 		/// This will be `None` for events serialized by LDK Node v0.2.1 and prior.
 		reason: Option<ClosureReason>,
 	},
+	/// A sent on-chain payment was successful.
+	///
+	/// This is only emitted for wallet transactions which were not classified as channel
+	/// funding, splices, closes, sweeps, or other LDK-driven chain activity.
+	/// Transactions recorded by earlier LDK Node versions may lack classification metadata and
+	/// can still emit this event when they settle.
+	///
+	/// It's guaranteed to have reached at least [`ANTI_REORG_DELAY`] confirmations.
+	///
+	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+	OnchainPaymentSuccessful {
+		/// A local identifier used to track the payment.
+		payment_id: PaymentId,
+		/// The transaction identifier.
+		txid: Txid,
+		/// The value, in thousandths of a satoshi, that was sent.
+		amount_msat: u64,
+		/// The fees paid for the transaction, in thousandths of a satoshi, if known.
+		fee_paid_msat: Option<u64>,
+		/// The hash of the block in which the transaction was confirmed.
+		block_hash: BlockHash,
+		/// The height of the block in which the transaction was confirmed.
+		block_height: u32,
+	},
+	/// An on-chain payment has been received.
+	///
+	/// This is only emitted for wallet transactions which were not classified as channel
+	/// funding, splices, closes, sweeps, or other LDK-driven chain activity.
+	/// Transactions recorded by earlier LDK Node versions may lack classification metadata and
+	/// can still emit this event when they settle.
+	///
+	/// It's guaranteed to have reached at least [`ANTI_REORG_DELAY`] confirmations.
+	///
+	/// [`ANTI_REORG_DELAY`]: lightning::chain::channelmonitor::ANTI_REORG_DELAY
+	OnchainPaymentReceived {
+		/// A local identifier used to track the payment.
+		payment_id: PaymentId,
+		/// The transaction identifier.
+		txid: Txid,
+		/// The value, in thousandths of a satoshi, that has been received.
+		amount_msat: u64,
+		/// The hash of the block in which the transaction was confirmed.
+		block_hash: BlockHash,
+		/// The height of the block in which the transaction was confirmed.
+		block_height: u32,
+	},
 	/// A channel splice has been negotiated and the funding transaction is pending
 	/// confirmation on-chain.
 	SpliceNegotiated {
@@ -373,6 +419,21 @@ impl_writeable_tlv_based_enum!(Event,
 		(3, counterparty_node_id, required),
 		(5, user_channel_id, required),
 		// TLV 7 (abandoned_funding_txo) may be set for LDK Node v0.7.
+	},
+	(10, OnchainPaymentSuccessful) => {
+		(0, payment_id, required),
+		(2, txid, required),
+		(4, amount_msat, required),
+		(6, block_hash, required),
+		(8, block_height, required),
+		(10, fee_paid_msat, option),
+	},
+	(11, OnchainPaymentReceived) => {
+		(0, payment_id, required),
+		(2, txid, required),
+		(4, amount_msat, required),
+		(6, block_hash, required),
+		(8, block_height, required),
 	},
 );
 

@@ -43,7 +43,10 @@ use ldk_node::config::{
 };
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus, TransactionType};
+use ldk_node::lightning::chain::channelmonitor::ANTI_REORG_DELAY;
+use ldk_node::payment::{
+	ConfirmationStatus, PaymentDirection, PaymentKind, PaymentStatus, TransactionType,
+};
 use ldk_node::probing::ProbingConfig;
 use ldk_node::{
 	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
@@ -409,6 +412,68 @@ pub(crate) fn random_config() -> TestConfig {
 pub(crate) type TestNode = Arc<Node>;
 #[cfg(not(feature = "uniffi"))]
 pub(crate) type TestNode = Node;
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum OnchainPaymentEvent {
+	Successful,
+	Received,
+}
+
+pub(crate) trait ExpectOnchainPaymentEvent {
+	async fn expect_onchain_payment_event(&self, expected_event: OnchainPaymentEvent) -> Txid;
+}
+
+impl ExpectOnchainPaymentEvent for Node {
+	async fn expect_onchain_payment_event(&self, expected_event: OnchainPaymentEvent) -> Txid {
+		let event = tokio::time::timeout(
+			Duration::from_secs(INTEROP_TIMEOUT_SECS),
+			self.next_event_async(),
+		)
+		.await
+		.unwrap_or_else(|_| {
+			panic!("{} timed out waiting for {:?} event after 60s", self.node_id(), expected_event,)
+		});
+		let txid = match (&expected_event, &event) {
+			(OnchainPaymentEvent::Successful, Event::OnchainPaymentSuccessful { txid, .. })
+			| (OnchainPaymentEvent::Received, Event::OnchainPaymentReceived { txid, .. }) => *txid,
+			_ => panic!("Expected {:?} event, got {:?}", expected_event, event),
+		};
+		println!("{} got event {:?}", self.node_id(), event);
+		assert_onchain_payment_event_matches_payment(self, &event);
+		self.event_handled().unwrap();
+		txid
+	}
+}
+
+pub(crate) fn assert_onchain_payment_event_matches_payment(node: &Node, event: &Event) {
+	let (payment_id, txid, amount_msat, event_fee_paid_msat, expected_direction) = match event {
+		Event::OnchainPaymentSuccessful {
+			payment_id, txid, amount_msat, fee_paid_msat, ..
+		} => (*payment_id, *txid, *amount_msat, Some(*fee_paid_msat), PaymentDirection::Outbound),
+		Event::OnchainPaymentReceived { payment_id, txid, amount_msat, .. } => {
+			(*payment_id, *txid, *amount_msat, None, PaymentDirection::Inbound)
+		},
+		_ => panic!("Expected on-chain payment event, got {:?}", event),
+	};
+
+	let payment = node.payment(&payment_id).unwrap();
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	assert_eq!(payment.direction, expected_direction);
+	assert_eq!(payment.amount_msat, Some(amount_msat));
+	if let Some(fee_paid_msat) = event_fee_paid_msat {
+		assert_eq!(payment.fee_paid_msat, fee_paid_msat);
+	}
+	match payment.kind {
+		PaymentKind::Onchain {
+			txid: payment_txid,
+			status: ConfirmationStatus::Confirmed { .. },
+			tx_type: None,
+		} => {
+			assert_eq!(payment_txid, txid);
+		},
+		ref other => panic!("Expected unclassified confirmed on-chain payment, got {:?}", other),
+	}
+}
 
 fn has_onchain_tx_type<F: Fn(&TransactionType) -> bool>(node: &TestNode, predicate: F) -> bool {
 	node.list_payments().into_iter().any(|payment| {
@@ -870,11 +935,12 @@ where
 
 pub(crate) async fn premine_and_distribute_funds<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
-) {
+) -> Txid {
 	premine_blocks(bitcoind, electrs).await;
 
-	distribute_funds_unconfirmed(bitcoind, electrs, addrs, amount).await;
+	let txid = distribute_funds_unconfirmed(bitcoind, electrs, addrs, amount).await;
 	generate_blocks_and_wait(bitcoind, electrs, 1).await;
+	txid
 }
 
 pub(crate) async fn premine_blocks<E: ElectrumApi>(bitcoind: &BitcoindClient, electrs: &E) {
@@ -1076,7 +1142,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	let premine_amount_sat = if expect_anchor_channel { 2_125_000 } else { 2_100_000 };
 
-	premine_and_distribute_funds(
+	let premine_txid = premine_and_distribute_funds(
 		&bitcoind,
 		electrsd,
 		vec![addr_a, addr_b],
@@ -1121,6 +1187,18 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	// Check we haven't got any events yet
 	assert_eq!(node_a.next_event(), None);
 	assert_eq!(node_b.next_event(), None);
+
+	generate_blocks_and_wait(&bitcoind, electrsd, (ANTI_REORG_DELAY - 1) as usize).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	assert_eq!(
+		node_a.expect_onchain_payment_event(OnchainPaymentEvent::Received).await,
+		premine_txid,
+	);
+	assert_eq!(
+		node_b.expect_onchain_payment_event(OnchainPaymentEvent::Received).await,
+		premine_txid,
+	);
 
 	println!("\nA -- open_channel -> B");
 	let funding_amount_sat = 2_080_000;
@@ -1537,12 +1615,21 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert!(splice_out_sat > 500_000);
 	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
 
-	expect_splice_negotiated_event!(node_a, node_b.node_id());
+	let splice_out_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
+	// With 0-conf, LDK re-broadcasts the splice as `Funding`, allowing node A to classify it
+	// and suppress the on-chain payment event. Otherwise node A only broadcasts
+	// `InteractiveFunding`, which has no local contribution to classify, so wallet sync emits it.
+	if !allow_0conf {
+		assert_eq!(
+			node_a.expect_onchain_payment_event(OnchainPaymentEvent::Received).await,
+			splice_out_txo.txid,
+		);
+	}
 
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());

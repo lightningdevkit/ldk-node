@@ -1439,8 +1439,8 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res) =
-		runtime.block_on(async move {
+	let (payment_store_res, node_metris_res, pending_payment_store_res, event_queue_res) = runtime
+		.block_on(async move {
 			tokio::join!(
 				read_all_objects(
 					&*kv_store_ref,
@@ -1454,7 +1454,8 @@ fn build_with_store_internal(
 					PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 					PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 					Arc::clone(&logger_ref),
-				)
+				),
+				read_event_queue(Arc::clone(&kv_store_ref), Arc::clone(&logger_ref)),
 			)
 		});
 
@@ -1741,6 +1742,18 @@ fn build_with_store_internal(
 		},
 	};
 
+	let event_queue = match event_queue_res {
+		Ok(event_queue) => Arc::new(event_queue),
+		Err(e) => {
+			if e.kind() == std::io::ErrorKind::NotFound {
+				Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
+			} else {
+				log_error!(logger, "Failed to read event queue from store: {}", e);
+				return Err(BuildError::ReadFailed);
+			}
+		},
+	};
+
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
 		wallet_persister,
@@ -1750,6 +1763,7 @@ fn build_with_store_internal(
 		Arc::clone(&payment_store),
 		Arc::clone(&runtime),
 		Arc::clone(&config),
+		Arc::clone(&event_queue),
 		Arc::clone(&logger),
 		Arc::clone(&pending_payment_store),
 	));
@@ -1852,7 +1866,6 @@ fn build_with_store_internal(
 		external_scores_res,
 		channel_manager_bytes_res,
 		sweeper_bytes_res,
-		event_queue_res,
 		peer_info_res,
 	) = runtime.block_on(async move {
 		tokio::join!(
@@ -1865,7 +1878,6 @@ fn build_with_store_internal(
 				CHANNEL_MANAGER_PERSISTENCE_KEY,
 			),
 			output_sweeper_future,
-			read_event_queue(Arc::clone(&kv_store_ref), Arc::clone(&logger_ref)),
 			read_peer_info(Arc::clone(&kv_store_ref), Arc::clone(&logger_ref)),
 		)
 	});
@@ -2206,18 +2218,6 @@ fn build_with_store_internal(
 				))
 			} else {
 				log_error!(logger, "Failed to read output sweeper data from store: {}", e);
-				return Err(BuildError::ReadFailed);
-			}
-		},
-	};
-
-	let event_queue = match event_queue_res {
-		Ok(event_queue) => Arc::new(event_queue),
-		Err(e) => {
-			if e.kind() == std::io::ErrorKind::NotFound {
-				Arc::new(EventQueue::new(Arc::clone(&kv_store), Arc::clone(&logger)))
-			} else {
-				log_error!(logger, "Failed to read event queue from store: {}", e);
 				return Err(BuildError::ReadFailed);
 			}
 		},
