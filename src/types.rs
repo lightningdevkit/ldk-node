@@ -46,9 +46,10 @@ use crate::config::{AnchorChannelsConfig, ChannelConfig};
 use crate::data_store::DataStore;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
+use crate::liquidity::client::lsps2::router::LSPS2Router;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::{PaymentDetails, PendingPaymentDetails};
+use crate::payment::{NodeOffersMessageHandler, PaymentDetails, PendingPaymentDetails};
 use crate::runtime::RuntimeSpawner;
 
 #[cfg(not(feature = "uniffi"))]
@@ -273,7 +274,8 @@ pub(crate) type Broadcaster = crate::tx_broadcaster::TransactionBroadcaster<Arc<
 pub(crate) type Wallet = crate::wallet::Wallet;
 pub(crate) type KeysManager = crate::wallet::WalletKeysManager;
 
-pub(crate) type Router = DefaultRouter<
+pub(crate) type Router = LSPS2Router<BaseRouter, Arc<KeysManager>>;
+pub(crate) type BaseRouter = DefaultRouter<
 	Arc<Graph>,
 	Arc<Logger>,
 	Arc<KeysManager>,
@@ -306,7 +308,7 @@ pub(crate) type OnionMessenger = lightning::onion_message::messenger::OnionMesse
 	Arc<Logger>,
 	Arc<ChannelManager>,
 	Arc<MessageRouter>,
-	Arc<ChannelManager>,
+	Arc<NodeOffersMessageHandler>,
 	Arc<ChannelManager>,
 	Arc<dyn DNSResolverMessageHandler + Sync + Send>,
 	IgnoringMessageHandler,
