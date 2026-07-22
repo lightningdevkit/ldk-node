@@ -246,6 +246,15 @@ impl Runtime {
 		};
 	}
 
+	#[cfg(feature = "postgres")]
+	pub(crate) fn abort_background_processor_task(&self) {
+		if let Some(background_processor_task) =
+			self.background_processor_task.lock().expect("lock").as_ref()
+		{
+			background_processor_task.abort();
+		}
+	}
+
 	#[cfg(tokio_unstable)]
 	pub fn log_metrics(&self) {
 		let runtime_handle = self.handle();
