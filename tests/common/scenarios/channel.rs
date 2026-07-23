@@ -7,12 +7,13 @@
 
 use std::time::Duration;
 
+use bitcoin::Sequence;
 use electrsd::corepc_node::Client as BitcoindClient;
 use electrsd::electrum_client::ElectrumApi;
 use ldk_node::{Event, Node};
 
 use super::super::external_node::ExternalNode;
-use super::super::generate_blocks_and_wait;
+use super::super::{generate_blocks_and_wait, wait_for_outpoint_spend};
 use super::Side;
 
 /// Open a channel from LDK to peer; returns (user_channel_id, external_channel_id).
@@ -50,6 +51,12 @@ pub(crate) async fn cooperative_close<E: ElectrumApi>(
 	user_channel_id: &ldk_node::UserChannelId, ext_channel_id: &str, initiator: Side,
 ) {
 	tokio::time::sleep(Duration::from_secs(2)).await;
+	let funding_txo = node
+		.list_channels()
+		.into_iter()
+		.find(|channel| channel.user_channel_id == *user_channel_id)
+		.and_then(|channel| channel.funding_txo)
+		.expect("channel funding outpoint must be available before cooperative close");
 	match initiator {
 		Side::Ldk => {
 			let ext_node_id = peer.get_node_id().await.unwrap();
@@ -59,6 +66,21 @@ pub(crate) async fn cooperative_close<E: ElectrumApi>(
 			peer.close_channel(ext_channel_id).await.unwrap();
 		},
 	}
+	let closing_tx = wait_for_outpoint_spend(electrs, funding_txo).await;
+	let funding_input = closing_tx
+		.input
+		.iter()
+		.find(|input| input.previous_output == funding_txo)
+		.expect("closing transaction must spend the channel funding outpoint");
+	let expected_sequence = if node.config().enable_v2_channel_close {
+		Sequence::ENABLE_RBF_NO_LOCKTIME
+	} else {
+		Sequence::MAX
+	};
+	assert_eq!(
+		funding_input.sequence, expected_sequence,
+		"cooperative close used an unexpected transaction format"
+	);
 	generate_blocks_and_wait(bitcoind, electrs, 1).await;
 	super::sync_wallets_with_retry(node).await;
 	expect_event!(node, ChannelClosed);

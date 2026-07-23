@@ -89,8 +89,9 @@ pub(crate) async fn wait_for_htlcs_settled(
 
 /// Build a fresh LDK node configured for interop tests. Uses electrum at the
 /// docker-compose default port and bumps sync timeouts for combo stress.
-pub(crate) fn setup_ldk_node() -> Node {
-	let config = crate::common::random_config();
+pub(crate) fn setup_ldk_node(enable_v2_channel_close: bool) -> Node {
+	let mut config = crate::common::random_config();
+	config.node_config.enable_v2_channel_close = enable_v2_channel_close;
 	let mut builder = ldk_node::Builder::from_config(config.node_config);
 	let mut sync_config = ldk_node::config::ElectrumSyncConfig::default();
 	sync_config.timeouts_config.onchain_wallet_sync_timeout_secs = 180;
@@ -138,13 +139,14 @@ pub(crate) async fn setup_interop_test<E: ElectrumApi>(
 /// per-impl `setup_clients` future and a scenario fn.
 pub(crate) async fn run_interop_scenario<N, E, F>(
 	setup_fut: impl Future<Output = (BitcoindClient, E, N)>, scenario: F,
+	enable_v2_channel_close: bool,
 ) where
 	N: ExternalNode,
 	E: ElectrumApi,
 	F: AsyncFnOnce(&Node, &N, &BitcoindClient, &E),
 {
 	let (bitcoind, electrs, ext) = setup_fut.await;
-	let node = setup_ldk_node();
+	let node = setup_ldk_node(enable_v2_channel_close);
 	setup_interop_test(&node, &ext, &bitcoind, &electrs).await;
 	scenario(&node, &ext, &bitcoind, &electrs).await;
 	node.stop().unwrap();
