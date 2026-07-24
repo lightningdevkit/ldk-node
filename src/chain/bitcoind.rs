@@ -1354,9 +1354,12 @@ pub(crate) struct GetRawTransactionResponse(pub Transaction);
 impl TryInto<GetRawTransactionResponse> for JsonResponse {
 	type Error = String;
 	fn try_into(self) -> Result<GetRawTransactionResponse, String> {
+		// Accept both the bare hex-encoded TX from RPC, and the REST response
+		// of a JSON object with the hex-encoded TX in the 'hex' field.
 		let tx = self
 			.0
 			.as_str()
+			.or_else(|| self.0.get("hex").and_then(|v| v.as_str()))
 			.ok_or("Failed to parse getrawtransaction response".to_string())
 			.and_then(|s| {
 				bitcoin::consensus::encode::deserialize_hex(s)
@@ -1639,6 +1642,26 @@ mod tests {
 
 			prop_assert_eq!(decoded.0, tx);
 		}
+
+		#[test]
+		fn prop_get_raw_transaction_response_json_object_roundtrip(tx in arbitrary_transaction()) {
+			let hex = bitcoin::consensus::encode::serialize_hex(&tx);
+			let vsize = tx.vsize();
+			let json_val = json!({
+				"version": tx.version,
+				"vsize": vsize,
+				"hex": hex,
+			});
+
+			let resp = JsonResponse(json_val);
+			let decoded: GetRawTransactionResponse = resp.try_into().unwrap();
+
+			prop_assert_eq!(decoded.0.compute_txid(), tx.compute_txid());
+			prop_assert_eq!(decoded.0.compute_wtxid(), tx.compute_wtxid());
+
+			prop_assert_eq!(decoded.0, tx);
+		}
+
 
 		#[test]
 		fn prop_fee_response_roundtrip(fee_rate in any::<f64>()) {
