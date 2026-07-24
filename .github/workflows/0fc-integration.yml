@@ -46,4 +46,4 @@ jobs:
           echo "ELECTRS_EXE=$( pwd )/bin/electrs-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
       - name: Test with 0FC enabled
         run: |
-          RUSTFLAGS="--cfg no_download --cfg cycle_tests --cfg tokio_unstable --cfg zero_fee_commitment_tests" cargo test -- --test-threads=1
+          RUSTFLAGS="--cfg no_download --cfg cycle_tests --cfg tokio_unstable --cfg zero_fee_commitment_tests" cargo test

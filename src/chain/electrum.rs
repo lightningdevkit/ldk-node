@@ -19,7 +19,8 @@ use bdk_wallet::{KeychainKind as BdkKeyChainKind, Update as BdkUpdate};
 use bitcoin::transaction::Version;
 use bitcoin::{FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{
-	Batch, Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder, ElectrumApi,
+	Batch, BroadcastPackageRes, Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder,
+	ElectrumApi,
 };
 use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
@@ -321,11 +322,6 @@ impl ElectrumChainSource {
 			return Err(Error::ConnectionFailed);
 		};
 
-		// TODO: Use `protocol_version` API once shipped in
-		// https://github.com/bitcoindevkit/rust-electrum-client/pull/213.
-		//
-		// This could still accept an Electrum server running against Bitcoin Core v26
-		// through v28, which does not relay ephemeral dust.
 		let spawn_fut = electrum_client.runtime.spawn_blocking({
 			let electrum_client = Arc::clone(&electrum_client.electrum_client);
 			move || electrum_client.transaction_broadcast_package(&super::dummy_package())
@@ -336,11 +332,19 @@ impl ElectrumChainSource {
 		);
 
 		match timeout_fut.await {
-			Ok(Ok(Ok(_))) => Ok(()),
-			Ok(Ok(Err(
-				e @ (electrum_client::Error::Protocol(_)
-				| electrum_client::Error::AllAttemptsErrored(_)),
-			))) => {
+			Ok(Ok(Ok(result))) => {
+				if dummy_submit_package_result_matches_v29_or_later(&result) {
+					Ok(())
+				} else {
+					log_error!(
+						self.logger,
+						"Electrum server does not support submitpackage: {:?}",
+						result
+					);
+					Err(Error::ChainSourceNotSupported)
+				}
+			},
+			Ok(Ok(Err(e))) if electrum_submitpackage_error_implies_unsupported(&e) => {
 				log_error!(self.logger, "Electrum server does not support submitpackage: {:?}", e);
 				Err(Error::ChainSourceNotSupported)
 			},
@@ -375,6 +379,22 @@ impl ElectrumChainSource {
 			},
 		}
 	}
+}
+
+fn electrum_submitpackage_error_implies_unsupported(e: &electrum_client::Error) -> bool {
+	matches!(e, electrum_client::Error::Protocol(_) | electrum_client::Error::AllAttemptsErrored(_))
+}
+
+fn dummy_submit_package_result_matches_v29_or_later(result: &BroadcastPackageRes) -> bool {
+	if result.success {
+		return false;
+	}
+
+	super::dummy_package_txids().iter().all(|expected_txid| {
+		result.errors.iter().any(|error| {
+			&error.txid == expected_txid && error.error == super::DUMMY_PACKAGE_EXPECTED_ERROR
+		})
+	})
 }
 
 impl Filter for ElectrumChainSource {

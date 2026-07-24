@@ -292,6 +292,16 @@ impl Node {
 			return Err(Error::AlreadyRunning);
 		}
 
+		match self.start_inner(&mut is_running_lock) {
+			Ok(()) => Ok(()),
+			Err(e) => {
+				self.chain_source.stop();
+				Err(e)
+			},
+		}
+	}
+
+	fn start_inner(&self, is_running_lock: &mut bool) -> Result<(), Error> {
 		log_info!(
 			self.logger,
 			"Starting up LDK Node with node ID {} on network: {}",

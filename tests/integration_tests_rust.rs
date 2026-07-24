@@ -1706,7 +1706,9 @@ async fn splice_channel() {
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
 	let opening_transaction_fee_sat = 156;
-	let zero_fee_commitments = node_a.list_channels()[0].feerate_sat_per_1000_weight == 0;
+	let channel = node_a.list_channels().into_iter().next().unwrap();
+	let zero_fee_commitments =
+		channel.channel_type.as_ref().map_or(false, |c| c.requires_anchor_zero_fee_commitments());
 	let closing_transaction_fee_sat = if zero_fee_commitments { 0 } else { 614 };
 	let anchor_output_sat = if zero_fee_commitments { 0 } else { 330 };
 
