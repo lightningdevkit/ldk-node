@@ -1272,9 +1272,12 @@ pub(crate) struct GetRawTransactionResponse(pub Transaction);
 impl TryInto<GetRawTransactionResponse> for JsonResponse {
 	type Error = std::io::Error;
 	fn try_into(self) -> std::io::Result<GetRawTransactionResponse> {
+		// Accept both the bare hex-encoded TX from RPC, and the REST response
+		// of a JSON object with the hex-encoded TX in the 'hex' field.
 		let tx = self
 			.0
 			.as_str()
+			.or_else(|| self.0.get("hex").and_then(|v| v.as_str()))
 			.ok_or(std::io::Error::new(
 				std::io::ErrorKind::Other,
 				"Failed to parse getrawtransaction response",
@@ -1593,6 +1596,25 @@ mod tests {
 		fn prop_get_raw_transaction_response_roundtrip(tx in arbitrary_transaction()) {
 			let hex = bitcoin::consensus::encode::serialize_hex(&tx);
 			let json_val = serde_json::Value::String(hex.clone());
+
+			let resp = JsonResponse(json_val);
+			let decoded: GetRawTransactionResponse = resp.try_into().unwrap();
+
+			prop_assert_eq!(decoded.0.compute_txid(), tx.compute_txid());
+			prop_assert_eq!(decoded.0.compute_wtxid(), tx.compute_wtxid());
+
+			prop_assert_eq!(decoded.0, tx);
+		}
+
+		#[test]
+		fn prop_get_raw_transaction_response_json_object_roundtrip(tx in arbitrary_transaction()) {
+			let hex = bitcoin::consensus::encode::serialize_hex(&tx);
+			let vsize = tx.vsize();
+			let json_val = json!({
+				"version": tx.version,
+				"vsize": vsize,
+				"hex": hex,
+			});
 
 			let resp = JsonResponse(json_val);
 			let decoded: GetRawTransactionResponse = resp.try_into().unwrap();
