@@ -1,4 +1,4 @@
-# 0.7.0-rc.57 (Synonym Fork)
+# 0.7.0-rc.58 (Synonym Fork)
 
 ## Bug Fixes
 
@@ -68,6 +68,7 @@
 
 ## Synonym Fork Additions
 
+- Added stable GNU build IDs to every Android ABI.
 - Added rolling lookahead for derived on-chain accounts after their initial full scan.
 - Added configurable Electrum batch size and stop gap for full scans of non-primary on-chain
   wallets, while preserving the existing primary-wallet behavior and defaults.
