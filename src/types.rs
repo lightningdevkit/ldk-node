@@ -48,7 +48,11 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::{PaymentDetails, PendingPaymentDetails};
+use crate::payment::forwarding_store::DiskStore;
+use crate::payment::{
+	ChannelForwardingStats, ChannelPairForwardingStats, ForwardedPaymentDetails, PaymentDetails,
+	PendingPaymentDetails,
+};
 use crate::runtime::RuntimeSpawner;
 
 #[cfg(not(feature = "uniffi"))]
@@ -372,6 +376,9 @@ pub(crate) type BumpTransactionEventHandler =
 	>;
 
 pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>>;
+pub(crate) type ForwardedPaymentStore = DiskStore<ForwardedPaymentDetails>;
+pub(crate) type ChannelForwardingStatsStore = DataStore<ChannelForwardingStats, Arc<Logger>>;
+pub(crate) type ChannelPairForwardingStatsStore = DiskStore<ChannelPairForwardingStats>;
 
 /// A local, potentially user-provided, identifier of a channel.
 ///
