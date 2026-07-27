@@ -595,7 +595,7 @@ impl RandomWalkStrategy {
 			// Retrieve the direction-specific update via the public ChannelInfo fields.
 			// as_directed_from already checked both directions are Some, but we break
 			// defensively rather than unwrap.
-			let update = match if directed.source() == &next_channel.node_one {
+			let channel_update_info = match if directed.source() == &next_channel.node_one {
 				next_channel.one_to_two.as_ref()
 			} else {
 				next_channel.two_to_one.as_ref()
@@ -604,15 +604,15 @@ impl RandomWalkStrategy {
 				None => break,
 			};
 
-			if !update.enabled {
+			if !channel_update_info.enabled {
 				break;
 			}
 
 			route_least_htlc_upper_bound =
-				route_least_htlc_upper_bound.min(update.htlc_maximum_msat);
+				route_least_htlc_upper_bound.min(channel_update_info.htlc_maximum_msat);
 
 			route_greatest_htlc_lower_bound =
-				route_greatest_htlc_lower_bound.max(update.htlc_minimum_msat);
+				route_greatest_htlc_lower_bound.max(channel_update_info.htlc_minimum_msat);
 
 			let next_pubkey = match PublicKey::try_from(*next_node_id) {
 				Ok(pk) => pk,
@@ -682,7 +682,7 @@ impl RandomWalkStrategy {
 			let (_, next_scid, _) = route[i + 1];
 			let next_channel = graph.channel(next_scid)?;
 			let (directed, _) = next_channel.as_directed_from(&node_id)?;
-			let update = match if directed.source() == &next_channel.node_one {
+			let channel_update_info = match if directed.source() == &next_channel.node_one {
 				next_channel.one_to_two.as_ref()
 			} else {
 				next_channel.two_to_one.as_ref()
@@ -690,9 +690,21 @@ impl RandomWalkStrategy {
 				Some(u) => u,
 				None => return None,
 			};
-			let fee = update.fees.base_msat as u64
-				+ (forwarded * update.fees.proportional_millionths as u64 / 1_000_000);
-			forwarded += fee;
+			// forwarded is the amount sent over next_channel (before this hop's own fee is
+			// added on top for the preceding channel), so check it against next_channel's
+			// own advertised bounds before computing the fee.
+			if forwarded > channel_update_info.htlc_maximum_msat
+				|| forwarded < channel_update_info.htlc_minimum_msat
+			{
+				return None;
+			}
+
+			// Overflow prevention
+			let proportional_fee = forwarded
+				.checked_mul(channel_update_info.fees.proportional_millionths as u64)
+				.map(|v| v / 1_000_000)?;
+			let fee = (channel_update_info.fees.base_msat as u64).checked_add(proportional_fee)?;
+			forwarded = forwarded.checked_add(fee)?;
 
 			hops.push(RouteHop {
 				pubkey,
@@ -700,7 +712,7 @@ impl RandomWalkStrategy {
 				short_channel_id: via_scid,
 				channel_features,
 				fee_msat: fee,
-				cltv_expiry_delta: update.cltv_expiry_delta as u32,
+				cltv_expiry_delta: channel_update_info.cltv_expiry_delta as u32,
 				maybe_announced_channel,
 			});
 		}
