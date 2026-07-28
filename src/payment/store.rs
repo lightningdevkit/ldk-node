@@ -1137,6 +1137,111 @@ mod tests {
 		assert_eq!(merged.fee_paid_msat, Some(500));
 	}
 
+	#[tokio::test]
+	async fn funding_classification_update_or_insert_preserves_advanced_record() {
+		use bitcoin::hashes::Hash;
+		use lightning::util::test_utils::TestLogger;
+		use std::str::FromStr;
+		use std::sync::Arc;
+
+		use crate::data_store::{DataStore, DataStoreUpdateOrInsertResult};
+		use crate::io::test_utils::InMemoryStore;
+		use crate::types::{DynStore, DynStoreWrapper};
+
+		let txid = Txid::from_byte_array([7u8; 32]);
+		let id = PaymentId(txid.to_byte_array());
+		let tx_type = Some(TransactionType::InteractiveFunding {
+			channels: vec![Channel {
+				counterparty_node_id: PublicKey::from_str(
+					"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+				)
+				.unwrap(),
+				channel_id: ChannelId([3u8; 32]),
+			}],
+		});
+		// A funding payment wallet sync has already advanced to Succeeded/Confirmed.
+		let advanced = PaymentDetails::new(
+			id,
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Confirmed {
+					block_hash: BlockHash::from_byte_array([8u8; 32]),
+					height: 100,
+					timestamp: 1,
+				},
+				tx_type: tx_type.clone(),
+			},
+			Some(2_000_000),
+			Some(999),
+			PaymentDirection::Outbound,
+			PaymentStatus::Succeeded,
+		);
+		// A fresh funding classification for the same payment is always Pending/Unconfirmed.
+		let fresh = PaymentDetails::new(
+			id,
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed, tx_type },
+			Some(1_000_000),
+			Some(500),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+
+		let new_store = |seed: Vec<PaymentDetails>| {
+			let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+			let logger = Arc::new(TestLogger::new());
+			DataStore::<PaymentDetails, Arc<TestLogger>>::new(
+				seed,
+				"payment_test_primary".to_string(),
+				"payment_test_secondary".to_string(),
+				store,
+				logger,
+			)
+		};
+
+		// The pre-fix fresh-insert path — a full `insert_or_update` merge landing after a racing
+		// wallet sync already advanced the record — downgrades it.
+		let store = new_store(vec![advanced.clone()]);
+		store.insert_or_update(fresh.clone()).await.unwrap();
+		let downgraded = store.get(&id).unwrap();
+		assert_eq!(
+			downgraded.status,
+			PaymentStatus::Pending,
+			"a full merge of a fresh classification downgrades an advanced record",
+		);
+
+		// `update_or_insert` applies only the narrow reclassification when a record exists — no
+		// matter when it appeared — preserving the confirmation state wallet sync owns while
+		// still merging the contribution-derived figures.
+		let store = new_store(vec![advanced.clone()]);
+		let update = PaymentDetailsUpdate::funding_reclassification(fresh.clone());
+		assert_eq!(
+			Ok(DataStoreUpdateOrInsertResult::Updated),
+			store.update_or_insert(update, fresh.clone()).await
+		);
+		let merged = store.get(&id).unwrap();
+		assert_eq!(merged.status, PaymentStatus::Succeeded);
+		assert!(matches!(
+			merged.kind,
+			PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
+		));
+		assert_eq!(merged.amount_msat, Some(1_000_000));
+		assert_eq!(merged.fee_paid_msat, Some(500));
+
+		// And it inserts the fresh details when no record exists yet.
+		let store = new_store(Vec::new());
+		let update = PaymentDetailsUpdate::funding_reclassification(fresh.clone());
+		assert_eq!(
+			Ok(DataStoreUpdateOrInsertResult::Inserted),
+			store.update_or_insert(update, fresh).await
+		);
+		let inserted = store.get(&id).unwrap();
+		assert_eq!(inserted.status, PaymentStatus::Pending);
+		assert!(matches!(
+			inserted.kind,
+			PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
+		));
+	}
+
 	#[derive(Clone, Debug, PartialEq, Eq)]
 	struct LegacyBolt11JitKind {
 		hash: PaymentHash,

@@ -54,6 +54,7 @@ use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
 use crate::config::Config;
+use crate::data_store::DataStoreUpdateOrInsertResult;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::pending_payment_store::PendingPaymentDetailsUpdate;
@@ -1399,27 +1400,39 @@ impl Wallet {
 	async fn persist_funding_payment(
 		&self, details: PaymentDetails, candidates: Vec<FundingTxCandidate>,
 	) -> Result<(), Error> {
-		if !self.payment_store.contains_key(&details.id) {
-			// First time we record this funding payment: store it and index it for graduation.
-			self.payment_store.insert_or_update(details.clone()).await?;
-			let pending = PendingPaymentDetails::new(details, Vec::new(), candidates);
-			self.pending_payment_store.insert_or_update(pending).await?;
-		} else {
-			// An earlier candidate or a racing wallet sync already recorded this payment. Merge only
-			// the classification (`tx_type`) and our contribution figures, which the wallet can't
-			// recompute; the confirmation state is owned by wallet-sync events, so a late
-			// classification must not move it (which would downgrade an already-Confirmed/Succeeded
-			// record). `update` is a no-op when the entry is absent, so the pending index is not
-			// re-created for a payment the graduation path already removed.
-			let update = PaymentDetailsUpdate::funding_reclassification(details);
-			let pending_update = PendingPaymentDetailsUpdate {
-				id: update.id,
-				payment_update: Some(update.clone()),
-				conflicting_txids: None,
-				candidates,
-			};
-			self.payment_store.update(update).await?;
-			self.pending_payment_store.update(pending_update).await?;
+		// Deciding between a fresh insert and a merge must be atomic with the write: a racing
+		// wallet sync can record and advance this payment between a separate existence check and
+		// the write, and a full merge of the fresh Pending/Unconfirmed details would then
+		// downgrade the confirmation state the wallet-sync events own. `update_or_insert` holds
+		// the store's mutation lock across the whole decision: when a record exists — no matter
+		// when it appeared — only the classification (`tx_type`), the broadcast txid, and our
+		// contribution figures are merged, which the wallet can't recompute; otherwise the fresh
+		// details are inserted.
+		let update = PaymentDetailsUpdate::funding_reclassification(details.clone());
+		let pending_update = PendingPaymentDetailsUpdate {
+			id: update.id,
+			payment_update: Some(update.clone()),
+			conflicting_txids: None,
+			candidates: candidates.clone(),
+		};
+		match self.payment_store.update_or_insert(update, details.clone()).await? {
+			DataStoreUpdateOrInsertResult::Inserted => {
+				// First time we record this funding payment: index it for graduation. Wallet sync
+				// can still land between the payment-store write above and this one and mirror an
+				// advanced confirmation into the pending store, so this write makes the same
+				// atomic decision: merge narrowly into an entry that appeared, insert the fresh
+				// one otherwise.
+				let pending = PendingPaymentDetails::new(details, Vec::new(), candidates);
+				self.pending_payment_store.update_or_insert(pending_update, pending).await?;
+			},
+			DataStoreUpdateOrInsertResult::Updated | DataStoreUpdateOrInsertResult::Unchanged => {
+				// An earlier candidate or a racing wallet sync already recorded this payment.
+				// `update` is a no-op when the pending entry is absent, so the index is not
+				// re-created for a payment the graduation path already removed. (A graduated
+				// payment always has a payment-store record, so it cannot take the `Inserted`
+				// branch above and be re-indexed.)
+				self.pending_payment_store.update(pending_update).await?;
+			},
 		}
 		Ok(())
 	}

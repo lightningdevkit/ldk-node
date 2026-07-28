@@ -242,4 +242,78 @@ mod tests {
 			"current txid must not remain in its own conflict list"
 		);
 	}
+
+	#[test]
+	fn funding_classification_pending_update_preserves_mirrored_confirmation() {
+		use bitcoin::BlockHash;
+
+		use crate::payment::store::PaymentDetailsUpdate;
+
+		let txid = test_txid(7);
+		let payment_id = PaymentId(txid.to_byte_array());
+
+		// A pending entry wallet sync has already mirrored a confirmation into (via
+		// `apply_funding_status_update`) while classification was still writing its two stores.
+		let confirmed_details = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Confirmed {
+					block_hash: BlockHash::from_byte_array([8u8; 32]),
+					height: 100,
+					timestamp: 1,
+				},
+				tx_type: None,
+			},
+			Some(2_000_000),
+			Some(999),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		let mirrored = PendingPaymentDetails::new(confirmed_details, Vec::new(), Vec::new());
+
+		// A fresh classification is always Unconfirmed and carries the candidate history; its
+		// figures are the active candidate's.
+		let fresh = pending_onchain_payment(payment_id, txid);
+		let candidates = vec![FundingTxCandidate {
+			txid,
+			amount_msat: fresh.amount_msat,
+			fee_paid_msat: fresh.fee_paid_msat,
+		}];
+
+		// The old fresh-insert path merged the full fresh record, downgrading the mirrored
+		// confirmation.
+		let mut downgraded = mirrored.clone();
+		let full_update =
+			PendingPaymentDetails::new(fresh.clone(), Vec::new(), candidates.clone()).to_update();
+		assert!(downgraded.update(full_update));
+		assert!(
+			matches!(
+				downgraded.details.kind,
+				PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
+			),
+			"a full merge of a fresh classification downgrades a mirrored confirmation",
+		);
+
+		// The narrow classification update merges the figures and candidates while preserving the
+		// confirmation state wallet sync owns.
+		let mut merged = mirrored.clone();
+		let narrow_update = PendingPaymentDetailsUpdate {
+			id: payment_id,
+			payment_update: Some(PaymentDetailsUpdate::funding_reclassification(fresh)),
+			conflicting_txids: None,
+			candidates: candidates.clone(),
+		};
+		assert!(merged.update(narrow_update));
+		assert!(
+			matches!(
+				merged.details.kind,
+				PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
+			),
+			"a narrow classification update must not downgrade a mirrored confirmation",
+		);
+		assert_eq!(merged.candidates, candidates);
+		assert_eq!(merged.details.amount_msat, Some(1_000));
+		assert_eq!(merged.details.fee_paid_msat, Some(100));
+	}
 }
