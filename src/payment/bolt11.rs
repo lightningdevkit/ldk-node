@@ -124,26 +124,25 @@ impl Bolt11Payment {
 			}
 		};
 
+		if manual_claim_payment_hash.is_some() {
+			return Ok(invoice);
+		}
+
 		let payment_hash = invoice.payment_hash();
 		let payment_secret = invoice.payment_secret();
 		let id = PaymentId(payment_hash.0);
-		let preimage = if manual_claim_payment_hash.is_none() {
-			// If the user hasn't registered a custom payment hash, we're positive ChannelManager
-			// will know the preimage at this point.
-			let mut payment_metadata = invoice.payment_metadata().cloned();
-			let res = self
-				.channel_manager
-				.get_payment_preimage_decrypt_metadata(
-					payment_hash,
-					payment_secret.clone(),
-					payment_metadata.as_deref_mut(),
-				)
-				.ok();
-			debug_assert!(res.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
-			res
-		} else {
-			None
-		};
+		// If the user hasn't registered a custom payment hash, we're positive ChannelManager
+		// will know the preimage at this point.
+		let mut payment_metadata = invoice.payment_metadata().cloned();
+		let preimage = self
+			.channel_manager
+			.get_payment_preimage_decrypt_metadata(
+				payment_hash,
+				payment_secret.clone(),
+				payment_metadata.as_deref_mut(),
+			)
+			.ok();
+		debug_assert!(preimage.is_some(), "We just let ChannelManager create an inbound payment, it can't have forgotten the preimage by now.");
 		let kind = PaymentKind::Bolt11 {
 			hash: payment_hash,
 			preimage,
@@ -168,6 +167,7 @@ impl Bolt11Payment {
 		expiry_secs: u32, max_total_lsp_fee_limit_msat: Option<u64>,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: Option<PaymentHash>,
 	) -> Result<LdkBolt11Invoice, Error> {
+		let should_register_payment = payment_hash.is_none();
 		let connection_manager = Arc::clone(&self.connection_manager);
 		let (invoice, chosen_lsp) = self.runtime.block_on(async move {
 			if let Some(amount_msat) = amount_msat {
@@ -196,34 +196,36 @@ impl Bolt11Payment {
 			}
 		})?;
 
-		// Register payment in payment store.
-		let payment_hash = invoice.payment_hash();
-		let payment_secret = invoice.payment_secret();
-		let id = PaymentId(payment_hash.0);
-		let mut payment_metadata = invoice.payment_metadata().cloned();
-		let preimage = self
-			.channel_manager
-			.get_payment_preimage_decrypt_metadata(
-				payment_hash,
-				payment_secret.clone(),
-				payment_metadata.as_deref_mut(),
-			)
-			.ok();
-		let kind = PaymentKind::Bolt11 {
-			hash: payment_hash,
-			preimage,
-			secret: Some(payment_secret.clone()),
-			counterparty_skimmed_fee_msat: None,
-		};
-		let payment = PaymentDetails::new(
-			id,
-			kind,
-			amount_msat,
-			None,
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-		self.runtime.block_on(self.payment_store.insert(payment))?;
+		if should_register_payment {
+			// Register payment in payment store.
+			let payment_hash = invoice.payment_hash();
+			let payment_secret = invoice.payment_secret();
+			let id = PaymentId(payment_hash.0);
+			let mut payment_metadata = invoice.payment_metadata().cloned();
+			let preimage = self
+				.channel_manager
+				.get_payment_preimage_decrypt_metadata(
+					payment_hash,
+					payment_secret.clone(),
+					payment_metadata.as_deref_mut(),
+				)
+				.ok();
+			let kind = PaymentKind::Bolt11 {
+				hash: payment_hash,
+				preimage,
+				secret: Some(payment_secret.clone()),
+				counterparty_skimmed_fee_msat: None,
+			};
+			let payment = PaymentDetails::new(
+				id,
+				kind,
+				amount_msat,
+				None,
+				PaymentDirection::Inbound,
+				PaymentStatus::Pending,
+			);
+			self.runtime.block_on(self.payment_store.insert(payment))?;
+		}
 
 		// Persist the chosen LSP peer to make sure we reconnect on restart.
 		let peer_info = PeerInfo { node_id: chosen_lsp.node_id, address: chosen_lsp.address };
@@ -600,14 +602,19 @@ impl Bolt11Payment {
 	/// Returns a payable invoice that can be used to request a payment of the amount
 	/// given for the given payment hash.
 	///
-	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once
-	/// the inbound payment arrives.
+	/// If [`Config::manually_claim_unknown_bolt11_payments`] is enabled, a
+	/// [`PaymentClaimable`] event will be emitted once the inbound payment arrives. Otherwise, the
+	/// inbound payment will be failed back when it arrives.
 	///
-	/// **Note:** users *MUST* handle this event and claim the payment manually via
-	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
-	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
-	/// [`fail_for_hash`].
+	/// **Warning:** it is the user's responsibility to never reuse the same payment hash. Reusing a
+	/// payment hash is unsafe and can lead to loss of funds.
 	///
+	/// **Note:** if manual claiming is enabled, users *MUST* handle this event and claim the
+	/// payment manually via [`claim_for_hash`] as soon as they have obtained access to the
+	/// preimage of the given payment hash. If they're unable to obtain the preimage, they *MUST*
+	/// immediately fail the payment via [`fail_for_hash`].
+	///
+	/// [`Config::manually_claim_unknown_bolt11_payments`]: crate::config::Config::manually_claim_unknown_bolt11_payments
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
@@ -636,14 +643,19 @@ impl Bolt11Payment {
 	/// Returns a payable invoice that can be used to request a payment for the given payment hash
 	/// and the amount to be determined by the user, also known as a "zero-amount" invoice.
 	///
-	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once
-	/// the inbound payment arrives.
+	/// If [`Config::manually_claim_unknown_bolt11_payments`] is enabled, a
+	/// [`PaymentClaimable`] event will be emitted once the inbound payment arrives. Otherwise, the
+	/// inbound payment will be failed back when it arrives.
 	///
-	/// **Note:** users *MUST* handle this event and claim the payment manually via
-	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
-	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
-	/// [`fail_for_hash`].
+	/// **Warning:** it is the user's responsibility to never reuse the same payment hash. Reusing a
+	/// payment hash is unsafe and can lead to loss of funds.
 	///
+	/// **Note:** if manual claiming is enabled, users *MUST* handle this event and claim the
+	/// payment manually via [`claim_for_hash`] as soon as they have obtained access to the
+	/// preimage of the given payment hash. If they're unable to obtain the preimage, they *MUST*
+	/// immediately fail the payment via [`fail_for_hash`].
+	///
+	/// [`Config::manually_claim_unknown_bolt11_payments`]: crate::config::Config::manually_claim_unknown_bolt11_payments
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
@@ -690,16 +702,22 @@ impl Bolt11Payment {
 	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
 	/// channel to us. We'll use its cheapest offer otherwise.
 	///
-	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once
-	/// the inbound payment arrives. The check that [`counterparty_skimmed_fee_msat`] is within the limits
-	/// is performed *before* emitting the event.
+	/// If [`Config::manually_claim_unknown_bolt11_payments`] is enabled, a
+	/// [`PaymentClaimable`] event will be emitted once the inbound payment arrives. Otherwise, the
+	/// inbound payment will be failed back when it arrives. The check that
+	/// [`counterparty_skimmed_fee_msat`] is within the limits is performed *before* emitting the
+	/// event.
 	///
-	/// **Note:** users *MUST* handle this event and claim the payment manually via
-	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
-	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
-	/// [`fail_for_hash`].
+	/// **Warning:** it is the user's responsibility to never reuse the same payment hash. Reusing a
+	/// payment hash is unsafe and can lead to loss of funds.
+	///
+	/// **Note:** if manual claiming is enabled, users *MUST* handle this event and claim the
+	/// payment manually via [`claim_for_hash`] as soon as they have obtained access to the
+	/// preimage of the given payment hash. If they're unable to obtain the preimage, they *MUST*
+	/// immediately fail the payment via [`fail_for_hash`].
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	/// [`Config::manually_claim_unknown_bolt11_payments`]: crate::config::Config::manually_claim_unknown_bolt11_payments
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
@@ -757,16 +775,22 @@ impl Bolt11Payment {
 	/// parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
 	/// We'll use its cheapest offer otherwise.
 	///
-	/// We will register the given payment hash and emit a [`PaymentClaimable`] event once
-	/// the inbound payment arrives. The check that [`counterparty_skimmed_fee_msat`] is within the limits
-	/// is performed *before* emitting the event.
+	/// If [`Config::manually_claim_unknown_bolt11_payments`] is enabled, a
+	/// [`PaymentClaimable`] event will be emitted once the inbound payment arrives. Otherwise, the
+	/// inbound payment will be failed back when it arrives. The check that
+	/// [`counterparty_skimmed_fee_msat`] is within the limits is performed *before* emitting the
+	/// event.
 	///
-	/// **Note:** users *MUST* handle this event and claim the payment manually via
-	/// [`claim_for_hash`] as soon as they have obtained access to the preimage of the given
-	/// payment hash. If they're unable to obtain the preimage, they *MUST* immediately fail the payment via
-	/// [`fail_for_hash`].
+	/// **Warning:** it is the user's responsibility to never reuse the same payment hash. Reusing a
+	/// payment hash is unsafe and can lead to loss of funds.
+	///
+	/// **Note:** if manual claiming is enabled, users *MUST* handle this event and claim the
+	/// payment manually via [`claim_for_hash`] as soon as they have obtained access to the
+	/// preimage of the given payment hash. If they're unable to obtain the preimage, they *MUST*
+	/// immediately fail the payment via [`fail_for_hash`].
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	/// [`Config::manually_claim_unknown_bolt11_payments`]: crate::config::Config::manually_claim_unknown_bolt11_payments
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
