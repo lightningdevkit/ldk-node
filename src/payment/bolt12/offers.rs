@@ -236,7 +236,10 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 			Ok(InvreqResponseInstructions::SendStaticInvoice { .. }) | Err(()) => return None,
 		};
 
-		let allow_mpp = invoice_request.amount().is_some();
+		// The initial response only contains ordinary payment paths, for which MPP remains useful
+		// regardless of whether the offer fixed the amount. Only disable MPP below when rebuilding a
+		// variable-amount response with an LSPS2 JIT path.
+		let allow_mpp = true;
 		let payment_info = Arc::new(InvoicePaymentInfo::new());
 		let result = build_invoice(
 			self.flow.as_ref(),
