@@ -623,6 +623,7 @@ pub(crate) fn setup_two_nodes_with_store(
 	println!("\n== Node B ==");
 	let mut config_b = random_config();
 	config_b.store_type = store_type;
+	config_b.node_config.manually_handle_unknown_bolt11_payments = true;
 
 	if cfg!(hrn_tests) {
 		config_b.node_config.hrn_config = HumanReadableNamesConfig {
