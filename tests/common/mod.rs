@@ -330,7 +330,7 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 pub(crate) fn random_chain_source<'a>(
 	bitcoind: &'a BitcoinD, electrsd: &'a ElectrsD,
 ) -> TestChainSource<'a> {
-	let r = rand::random_range(0..3);
+	let r = rand::random_range(0..4);
 	match r {
 		0 => {
 			println!("Randomly setting up Esplora chain syncing...");
