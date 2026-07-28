@@ -61,7 +61,7 @@ echo "Building for Android architectures..."
 JNI_LIB_DIR="$ANDROID_LIB_DIR/lib/src/main/jniLibs"
 export CARGO_PROFILE_RELEASE_SMALLER_STRIP=false
 export CARGO_PROFILE_RELEASE_SMALLER_DEBUG=2
-export RUSTFLAGS="-C link-args=-Wl,-z,max-page-size=16384,-z,common-page-size=16384"
+export RUSTFLAGS="-C link-arg=-Wl,--build-id=sha1 -C link-args=-Wl,-z,max-page-size=16384,-z,common-page-size=16384"
 export CFLAGS="-D__ANDROID_MIN_SDK_VERSION__=21"
 
 find_readelf() {
