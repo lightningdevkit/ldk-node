@@ -295,8 +295,8 @@ mod tests {
 			"a full merge of a fresh classification downgrades a mirrored confirmation",
 		);
 
-		// The narrow classification update merges the figures and candidates while preserving the
-		// confirmation state wallet sync owns.
+		// The narrow classification update merges the candidates while preserving the
+		// confirmation state wallet sync owns and the confirmed candidate's figures.
 		let mut merged = mirrored.clone();
 		let narrow_update = PendingPaymentDetailsUpdate {
 			id: payment_id,
@@ -313,7 +313,7 @@ mod tests {
 			"a narrow classification update must not downgrade a mirrored confirmation",
 		);
 		assert_eq!(merged.candidates, candidates);
-		assert_eq!(merged.details.amount_msat, Some(1_000));
-		assert_eq!(merged.details.fee_paid_msat, Some(100));
+		assert_eq!(merged.details.amount_msat, Some(2_000_000));
+		assert_eq!(merged.details.fee_paid_msat, Some(999));
 	}
 }

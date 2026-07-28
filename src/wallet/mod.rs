@@ -1405,9 +1405,9 @@ impl Wallet {
 		// the write, and a full merge of the fresh Pending/Unconfirmed details would then
 		// downgrade the confirmation state the wallet-sync events own. `update_or_insert` holds
 		// the store's mutation lock across the whole decision: when a record exists — no matter
-		// when it appeared — only the classification (`tx_type`), the broadcast txid, and our
-		// contribution figures are merged, which the wallet can't recompute; otherwise the fresh
-		// details are inserted.
+		// when it appeared — only the classification (`tx_type`) and, while the record is still
+		// unconfirmed, the broadcast txid and our contribution figures are merged; otherwise the
+		// fresh details are inserted.
 		let update = PaymentDetailsUpdate::funding_reclassification(details.clone());
 		let pending_update = PendingPaymentDetailsUpdate {
 			id: update.id,
