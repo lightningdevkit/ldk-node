@@ -26,7 +26,7 @@ use lightning::routing::scoring::{
 	ChannelLiquidities, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
 };
 use lightning::util::persist::{
-	migrate_kv_store_data_async, KVStore, KVSTORE_NAMESPACE_KEY_ALPHABET,
+	migrate_kv_store_data_async, KVStore, PaginatedKVStore, KVSTORE_NAMESPACE_KEY_ALPHABET,
 	KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 	OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -222,7 +222,8 @@ where
 	})
 }
 
-/// Read all objects of type `T` from the given namespace, spawning reads in parallel.
+/// Read all objects of type `T` from the given namespace in reverse creation order, spawning reads
+/// within each page in parallel.
 pub(crate) async fn read_all_objects<T, L>(
 	kv_store: &DynStore, primary_namespace: &str, secondary_namespace: &str, logger: L,
 ) -> Result<Vec<T>, std::io::Error>
@@ -233,56 +234,67 @@ where
 {
 	let type_name = std::any::type_name::<T>();
 	let mut res = Vec::new();
-
-	let mut stored_keys = KVStore::list(&*kv_store, primary_namespace, secondary_namespace).await?;
-
 	const BATCH_SIZE: usize = 50;
+	let mut page_token = None;
 
-	let mut set = tokio::task::JoinSet::new();
+	loop {
+		let page = PaginatedKVStore::list_paginated(
+			&*kv_store,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		)
+		.await?;
+		let page_len = page.keys.len();
+		let mut stored_keys = page.keys.into_iter().enumerate();
+		let mut page_objects = Vec::with_capacity(page_len);
+		page_objects.resize_with(page_len, || None);
+		let mut set = tokio::task::JoinSet::new();
 
-	// Fill JoinSet with tasks if possible
-	while set.len() < BATCH_SIZE && !stored_keys.is_empty() {
-		if let Some(next_key) = stored_keys.pop() {
-			let fut = KVStore::read(kv_store, primary_namespace, secondary_namespace, &next_key);
-			set.spawn(fut);
-			debug_assert!(set.len() <= BATCH_SIZE);
+		while set.len() < BATCH_SIZE {
+			let Some((index, key)) = stored_keys.next() else {
+				break;
+			};
+			let fut = KVStore::read(kv_store, primary_namespace, secondary_namespace, &key);
+			set.spawn(async move { (index, fut.await) });
 		}
-	}
 
-	while let Some(read_res) = set.join_next().await {
-		// Exit early if we get an IO error.
-		let reader = read_res
-			.map_err(|e| {
-				log_error!(logger, "Failed to read {}: {}", type_name, e);
-				set.abort_all();
-				e
-			})?
-			.map_err(|e| {
+		while let Some(read_res) = set.join_next().await {
+			let (index, reader) = read_res.map_err(|e| {
 				log_error!(logger, "Failed to read {}: {}", type_name, e);
 				set.abort_all();
 				e
 			})?;
+			let reader = reader.map_err(|e| {
+				log_error!(logger, "Failed to read {}: {}", type_name, e);
+				set.abort_all();
+				e
+			})?;
+			let object = T::read(&mut &*reader).map_err(|e| {
+				log_error!(logger, "Failed to deserialize {}: {}", type_name, e);
+				set.abort_all();
+				std::io::Error::new(
+					std::io::ErrorKind::InvalidData,
+					format!("Failed to deserialize {}", type_name),
+				)
+			})?;
+			page_objects[index] = Some(object);
 
-		// Refill set for every finished future, if we still have something to do.
-		if let Some(next_key) = stored_keys.pop() {
-			let fut = KVStore::read(kv_store, primary_namespace, secondary_namespace, &next_key);
-			set.spawn(fut);
-			debug_assert!(set.len() <= BATCH_SIZE);
+			if let Some((next_index, next_key)) = stored_keys.next() {
+				let fut =
+					KVStore::read(kv_store, primary_namespace, secondary_namespace, &next_key);
+				set.spawn(async move { (next_index, fut.await) });
+			}
 		}
 
-		// Handle result.
-		let object = T::read(&mut &*reader).map_err(|e| {
-			log_error!(logger, "Failed to deserialize {}: {}", type_name, e);
-			std::io::Error::new(
-				std::io::ErrorKind::InvalidData,
-				format!("Failed to deserialize {}", type_name),
-			)
-		})?;
-		res.push(object);
-	}
+		debug_assert!(stored_keys.next().is_none());
+		res.extend(page_objects.into_iter().map(|object| object.expect("all reads completed")));
 
-	debug_assert!(set.is_empty());
-	debug_assert!(stored_keys.is_empty());
+		page_token = page.next_page_token;
+		if page_token.is_none() {
+			break;
+		}
+	}
 
 	Ok(res)
 }
@@ -718,13 +730,18 @@ fn recover_incomplete_fs_store_migration(storage_dir_path: &Path) -> Result<(), 
 mod tests {
 	use std::fs;
 	use std::path::{Path, PathBuf};
+	use std::sync::Arc;
 
 	use lightning::util::persist::{migrate_kv_store_data_async, KVStore};
+	use lightning::util::ser::Writeable;
+	use lightning::util::test_utils::TestLogger;
 	use lightning_persister::fs_store::v1::FilesystemStore;
 	use lightning_persister::fs_store::v2::FilesystemStoreV2;
 
 	use super::test_utils::random_storage_path;
-	use super::{open_or_migrate_fs_store, read_or_generate_seed_file};
+	use super::{open_or_migrate_fs_store, read_all_objects, read_or_generate_seed_file};
+	use crate::io::test_utils::InMemoryStore;
+	use crate::types::{DynStore, DynStoreWrapper};
 
 	const TEST_PRIMARY_NAMESPACE: &str = "test_primary_namespace";
 	const TEST_SECONDARY_NAMESPACE: &str = "test_secondary_namespace";
@@ -738,6 +755,31 @@ mod tests {
 		let expected_seed_bytes = read_or_generate_seed_file(&rand_path.to_str().unwrap()).unwrap();
 		let read_seed_bytes = read_or_generate_seed_file(&rand_path.to_str().unwrap()).unwrap();
 		assert_eq!(expected_seed_bytes, read_seed_bytes);
+	}
+
+	#[tokio::test]
+	async fn read_all_objects_preserves_paginated_creation_order() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let object_count = 120u64;
+
+		for object in 0..object_count {
+			KVStore::write(
+				&*store,
+				TEST_PRIMARY_NAMESPACE,
+				TEST_SECONDARY_NAMESPACE,
+				&object.to_string(),
+				object.encode(),
+			)
+			.await
+			.unwrap();
+		}
+
+		let objects: Vec<u64> =
+			read_all_objects(&*store, TEST_PRIMARY_NAMESPACE, TEST_SECONDARY_NAMESPACE, logger)
+				.await
+				.unwrap();
+		assert_eq!(objects, (0..object_count).rev().collect::<Vec<_>>());
 	}
 
 	#[tokio::test]

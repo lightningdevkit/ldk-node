@@ -10,7 +10,7 @@ use proptest::proptest;
 use crate::common::{
 	expect_event, exponential_backoff_poll, generate_blocks_and_wait, invalidate_blocks,
 	open_channel, premine_and_distribute_funds, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_node, wait_for_outpoint_spend, wait_for_tx,
+	setup_bitcoind_and_electrsd, setup_node, wait_for_outpoint_spend, wait_for_tx, NodePaymentExt,
 };
 
 async fn wait_for_pending_sweep_balance<F>(
@@ -118,10 +118,9 @@ proptest! {
 			let mut node_channels_id = HashMap::new();
 			for (i, node) in nodes.iter().enumerate() {
 				assert_eq!(
-					node
-						.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
-							&& matches!(p.kind, PaymentKind::Onchain { .. }))
-						.len(),
+					node.list_first_page_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+						&& matches!(p.kind, PaymentKind::Onchain { .. }))
+					.len(),
 					1
 				);
 
