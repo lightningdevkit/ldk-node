@@ -495,7 +495,7 @@ async fn multi_hop_sending() {
 		.bolt11_payment()
 		.receive(2_500_000, &invoice_description.clone().into(), 9217)
 		.unwrap();
-	nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
+	let outbound_payment_id = nodes[0].bolt11_payment().send(&invoice, Some(route_params)).unwrap();
 
 	expect_event!(nodes[1], PaymentForwarded);
 
@@ -504,9 +504,9 @@ async fn multi_hop_sending() {
 	let node_3_fwd_event = matches!(nodes[3].next_event(), Some(Event::PaymentForwarded { .. }));
 	assert!(node_2_fwd_event || node_3_fwd_event);
 
-	let payment_id = expect_payment_received_event!(&nodes[4], 2_500_000);
+	expect_payment_received_event!(&nodes[4], 2_500_000);
 	let fee_paid_msat = Some(2000);
-	expect_payment_successful_event!(nodes[0], payment_id, Some(fee_paid_msat));
+	expect_payment_successful_event!(nodes[0], outbound_payment_id, Some(fee_paid_msat));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -585,7 +585,6 @@ async fn split_underpaid_bolt11_payment() {
 		.unwrap();
 
 	let receiver_payment_id = expect_payment_received_event!(node_c, amount_msat);
-	assert_eq!(receiver_payment_id, PaymentId(invoice.payment_hash().0));
 	expect_payment_successful_event!(node_a, payment_id_a, None);
 	expect_payment_successful_event!(node_b, payment_id_b, None);
 
@@ -2389,7 +2388,7 @@ async fn simple_bolt12_send_receive() {
 		matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == payment_id
 	});
 	assert_eq!(node_a_payments.len(), 1);
-	let payment_hash = match node_a_payments.first().unwrap().kind {
+	match node_a_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer {
 			hash,
 			preimage,
@@ -2405,7 +2404,6 @@ async fn simple_bolt12_send_receive() {
 			assert_eq!(expected_payer_note.unwrap(), note.clone().unwrap().0);
 			// TODO: We should eventually set and assert the secret sender-side, too, but the BOLT12
 			// API currently doesn't allow to do that.
-			hash.unwrap()
 		},
 		_ => {
 			panic!("Unexpected payment kind");
@@ -2413,8 +2411,7 @@ async fn simple_bolt12_send_receive() {
 	};
 	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
 
-	expect_payment_received_event!(node_b, expected_amount_msat);
-	let node_b_payment_id = PaymentId(payment_hash.0);
+	let node_b_payment_id = expect_payment_received_event!(node_b, expected_amount_msat);
 	let node_b_payments = node_b.list_payments_with_filter(|p| {
 		matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == node_b_payment_id
 	});
@@ -2446,8 +2443,8 @@ async fn simple_bolt12_send_receive() {
 			None,
 		)
 		.unwrap();
-	let invoice = node_a.bolt12_payment().request_refund_payment(&refund).unwrap();
-	expect_payment_received_event!(node_a, overpaid_amount);
+	let _invoice = node_a.bolt12_payment().request_refund_payment(&refund).unwrap();
+	let node_a_payment_id = expect_payment_received_event!(node_a, overpaid_amount);
 
 	let node_b_payment_id = node_b
 		.list_payments_with_filter(|p| {
@@ -2484,7 +2481,6 @@ async fn simple_bolt12_send_receive() {
 	}
 	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(overpaid_amount));
 
-	let node_a_payment_id = PaymentId(invoice.payment_hash().0);
 	let node_a_payments = node_a.list_payments_with_filter(|p| {
 		matches!(p.kind, PaymentKind::Bolt12Refund { .. }) && p.id == node_a_payment_id
 	});
@@ -2951,7 +2947,8 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let service_node_id = service_node.node_id();
 	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
 
-	let client_config = random_config();
+	let mut client_config = random_config();
+	client_config.node_config.manually_handle_unknown_bolt11_payments = true;
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
@@ -3003,7 +3000,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payer_payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_event!(service_node, PaymentForwarded);
@@ -3012,7 +3009,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
 	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
-	expect_payment_successful_event!(payer_node, payment_id, None);
+	expect_payment_successful_event!(payer_node, payer_payment_id, None);
 	let client_payment_id =
 		expect_payment_received_event!(client_node, expected_received_amount_msat);
 	let client_payment = client_node.payment(&client_payment_id).unwrap();
@@ -3046,7 +3043,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	expect_payment_received_event!(client_node, amount_msat);
 
 	////////////////////////////////////////////////////////////////////////////
-	// receive_via_jit_channel_for_hash and claim_for_hash
+	// receive_via_jit_channel_for_hash and claim_for_id
 	////////////////////////////////////////////////////////////////////////////
 	println!("Generating JIT invoice!");
 	// Increase the amount to make sure it does not fit into the existing channels.
@@ -3066,7 +3063,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let payer_payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -3074,22 +3071,24 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
 	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
-	let claimable_amount_msat = expect_payment_claimable_event!(
+	let (client_payment_id, claimable_amount_msat) = expect_payment_claimable_event!(
 		client_node,
-		payment_id,
 		manual_payment_hash,
 		expected_received_amount_msat
 	);
+	assert_ne!(client_payment_id.0, manual_payment_hash.0);
+	assert_eq!(client_node.payment(&client_payment_id).unwrap().amount_msat, Some(jit_amount_msat));
 	println!("Claiming payment!");
 	client_node
 		.bolt11_payment()
-		.claim_for_hash(manual_payment_hash, claimable_amount_msat, manual_preimage)
+		.claim_for_id(client_payment_id, claimable_amount_msat, manual_preimage)
 		.unwrap();
 
 	expect_event!(service_node, PaymentForwarded);
-	expect_payment_successful_event!(payer_node, payment_id, None);
-	let client_payment_id =
+	expect_payment_successful_event!(payer_node, payer_payment_id, None);
+	let received_payment_id =
 		expect_payment_received_event!(client_node, expected_received_amount_msat);
+	assert_eq!(received_payment_id, client_payment_id);
 	let client_payment = client_node.payment(&client_payment_id).unwrap();
 	match client_payment.kind {
 		PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
@@ -3099,7 +3098,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	}
 
 	////////////////////////////////////////////////////////////////////////////
-	// receive_via_jit_channel_for_hash and fail_for_hash
+	// receive_via_jit_channel_for_hash and fail_for_id
 	////////////////////////////////////////////////////////////////////////////
 	println!("Generating JIT invoice!");
 	// Increase the amount to make sure it does not fit into the existing channels.
@@ -3119,7 +3118,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	let _payer_payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -3127,17 +3126,17 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
 	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
-	expect_payment_claimable_event!(
+	let (client_payment_id, _) = expect_payment_claimable_event!(
 		client_node,
-		payment_id,
 		manual_payment_hash,
 		expected_received_amount_msat
 	);
+	assert_ne!(client_payment_id.0, manual_payment_hash.0);
 	println!("Failing payment!");
-	client_node.bolt11_payment().fail_for_hash(manual_payment_hash).unwrap();
+	client_node.bolt11_payment().fail_for_id(client_payment_id).unwrap();
 
 	expect_event!(payer_node, PaymentFailed);
-	assert_eq!(client_node.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
+	assert_eq!(client_node.payment(&client_payment_id).unwrap().status, PaymentStatus::Failed);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -3269,7 +3268,8 @@ async fn lsps2_client_trusts_lsp() {
 	let service_node_id = service_node.node_id();
 	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
 
-	let client_config = random_config();
+	let mut client_config = random_config();
+	client_config.node_config.manually_handle_unknown_bolt11_payments = true;
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
@@ -3329,8 +3329,8 @@ async fn lsps2_client_trusts_lsp() {
 
 	// Have the payer_node pay the invoice, therby triggering channel open service_node -> client_node.
 	println!("Paying JIT invoice!");
-	let payment_id = payer_node.bolt11_payment().send(&res, None).unwrap();
-	println!("Payment ID: {:?}", payment_id);
+	let payer_payment_id = payer_node.bolt11_payment().send(&res, None).unwrap();
+	println!("Payment ID: {:?}", payer_payment_id);
 	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
 	expect_channel_ready_event!(service_node, client_node.node_id());
 	expect_channel_pending_event!(client_node, service_node.node_id());
@@ -3368,21 +3368,22 @@ async fn lsps2_client_trusts_lsp() {
 	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
 	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
 
-	let _ = expect_payment_claimable_event!(
+	let (client_payment_id, _) = expect_payment_claimable_event!(
 		client_node,
-		payment_id,
 		manual_payment_hash,
 		expected_received_amount_msat
 	);
 
 	client_node
 		.bolt11_payment()
-		.claim_for_hash(manual_payment_hash, jit_amount_msat, manual_preimage)
+		.claim_for_id(client_payment_id, jit_amount_msat, manual_preimage)
 		.unwrap();
 
-	expect_payment_successful_event!(payer_node, payment_id, None);
+	expect_payment_successful_event!(payer_node, payer_payment_id, None);
 
-	let _ = expect_payment_received_event!(client_node, expected_received_amount_msat);
+	let received_payment_id =
+		expect_payment_received_event!(client_node, expected_received_amount_msat);
+	assert_eq!(received_payment_id, client_payment_id);
 
 	// Check the nodes pick up on the confirmed funding tx now.
 	wait_for_tx(&electrsd.client, funding_txo.txid).await;
@@ -3445,7 +3446,8 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let service_node_id = service_node.node_id();
 	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
 
-	let client_config = random_config();
+	let mut client_config = random_config();
+	client_config.node_config.manually_handle_unknown_bolt11_payments = true;
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
