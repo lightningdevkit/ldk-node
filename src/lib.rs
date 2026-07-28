@@ -302,7 +302,9 @@ impl Node {
 		);
 
 		// Start up any runtime-dependant chain sources (e.g. Electrum)
-		self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
+		// Electrum needs execution access without owning the runtime lifecycle.
+		let runtime_handle = self.runtime.handle().clone();
+		self.chain_source.start(runtime_handle).map_err(|e| {
 			log_error!(self.logger, "Failed to start chain syncing: {}", e);
 			e
 		})?;

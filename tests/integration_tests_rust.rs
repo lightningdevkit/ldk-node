@@ -2213,6 +2213,22 @@ async fn drop_in_async_context() {
 	node.stop().unwrap();
 }
 
+#[test]
+fn owned_runtime_electrum_lifecycle() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Electrum(&electrsd);
+	let config = random_config(true);
+	let node = setup_node(&chain_source, config, Some(vec![42u8; 64]));
+
+	node.sync_wallets().unwrap();
+	node.stop().unwrap();
+	node.start().unwrap();
+	node.sync_wallets().unwrap();
+	node.stop().unwrap();
+
+	drop(node);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn lsps2_client_trusts_lsp() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
