@@ -1,7 +1,8 @@
-# 0.7.0-rc.60 (Synonym Fork)
+# 0.7.0-rc.61 (Synonym Fork)
 
 ## Bug Fixes
 
+- Moved peer persistence to async KV storage so slow writes no longer hold the peer-store lock.
 - Prevented Electrum runtime self-drop crashes and unbounded shutdown waits.
 - Scaled Electrum full-scan timeouts for additional wallets with the configured stop gap and batch
   size.
