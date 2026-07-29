@@ -42,17 +42,21 @@ use self::state::{
 };
 
 async fn consume_after_persisted_removal<T, E, RF, CF, Fut>(
-	value: T, persist_removal: RF, consume: CF,
+	value: T, persist_removal: RF, restore: CF,
 ) -> Result<T, E>
 where
 	T: Clone,
 	RF: FnOnce(T) -> Fut,
-	CF: FnOnce(&T),
+	CF: FnOnce(T),
 	Fut: Future<Output = Result<(), E>>,
 {
-	persist_removal(value.clone()).await?;
-	consume(&value);
-	Ok(value)
+	match persist_removal(value.clone()).await {
+		Ok(()) => Ok(value),
+		Err(error) => {
+			restore(value);
+			Err(error)
+		},
+	}
 }
 
 pub(crate) struct LSPS2Client<L: Deref>
@@ -440,18 +444,21 @@ where
 			.lease_state
 			.lock()
 			.expect("lock")
-			.valid(id)
+			.take_valid(id)
 			.ok_or(Error::LiquidityRequestFailed)?;
 		self.consume_selected_lease(lease).await
 	}
 
 	async fn consume_selected_lease(&self, lease: PaymentLease) -> Result<PaymentLease, Error> {
 		let lease_store = Arc::clone(&self.lease_store);
+		// Selection has already removed the lease from the shared state so no other payment can
+		// reuse its intercept SCID. Restore it only if the durable removal fails, before an invoice
+		// containing the lease can be returned.
 		consume_after_persisted_removal(
 			lease,
 			move |lease| async move { lease_store.remove(&lease.id).await },
 			|lease| {
-				self.lease_state.lock().expect("lock").remove(&lease.id);
+				self.lease_state.lock().expect("lock").insert(lease);
 			},
 		)
 		.await
@@ -733,18 +740,18 @@ mod tests {
 	use super::*;
 
 	#[tokio::test]
-	async fn failed_persisted_removal_does_not_consume() {
-		let consumed = Arc::new(Mutex::new(false));
-		let consumed_ref = Arc::clone(&consumed);
+	async fn failed_persisted_removal_restores_value() {
+		let restored = Arc::new(Mutex::new(None));
+		let restored_ref = Arc::clone(&restored);
 		let result = consume_after_persisted_removal(
 			42,
 			|_| async { Err(()) },
-			move |_| *consumed_ref.lock().unwrap() = true,
+			move |value| *restored_ref.lock().unwrap() = Some(value),
 		)
 		.await;
 
 		assert_eq!(result, Err(()));
-		assert!(!*consumed.lock().unwrap());
+		assert_eq!(*restored.lock().unwrap(), Some(42));
 	}
 }
 

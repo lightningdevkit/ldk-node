@@ -348,16 +348,17 @@ impl LSPS2LeaseState {
 		self.leases.insert(lease.id, lease);
 	}
 
-	pub(crate) fn valid(&self, id: &PaymentLeaseId) -> Option<PaymentLease> {
-		self.leases.get(id).filter(|lease| is_lease_usable(lease)).cloned()
+	pub(crate) fn take_valid(&mut self, id: &PaymentLeaseId) -> Option<PaymentLease> {
+		if self.leases.get(id).map_or(false, is_lease_usable) {
+			self.leases.remove(id)
+		} else {
+			None
+		}
 	}
 
-	pub(crate) fn remove(&mut self, id: &PaymentLeaseId) -> Option<PaymentLease> {
-		self.leases.remove(id)
-	}
-
+	/// Selects and removes a fixed-amount lease in one operation.
 	pub(crate) fn fixed_amount(
-		&self, amount_msat: u64, max_fee_msat: Option<u64>, available_lsps: &[PublicKey],
+		&mut self, amount_msat: u64, max_fee_msat: Option<u64>, available_lsps: &[PublicKey],
 	) -> Option<(PaymentLease, u64)> {
 		let (id, fee_msat) = self
 			.leases
@@ -375,11 +376,12 @@ impl LSPS2LeaseState {
 			})
 			.filter(|(_, fee_msat)| max_fee_msat.map_or(true, |max| *fee_msat <= max))
 			.min_by_key(|(_, fee_msat)| *fee_msat)?;
-		self.leases.get(&id).cloned().map(|lease| (lease, fee_msat))
+		self.leases.remove(&id).map(|lease| (lease, fee_msat))
 	}
 
+	/// Selects and removes a variable-amount lease in one operation.
 	pub(crate) fn variable_amount(
-		&self, max_total_fee_msat: Option<u64>, available_lsps: &[PublicKey],
+		&mut self, max_total_fee_msat: Option<u64>, available_lsps: &[PublicKey],
 	) -> Option<(PaymentLease, u64)> {
 		let (id, proportional_fee) = self
 			.leases
@@ -392,7 +394,7 @@ impl LSPS2LeaseState {
 			})
 			.map(|(id, lease)| (*id, lease.params.proportional as u64))
 			.min_by_key(|(_, fee)| *fee)?;
-		self.leases.get(&id).cloned().map(|lease| (lease, proportional_fee))
+		self.leases.remove(&id).map(|lease| (lease, proportional_fee))
 	}
 
 	pub(crate) fn prune(&mut self) {
@@ -498,9 +500,21 @@ mod tests {
 		let id = lease.id;
 		let mut state = LSPS2LeaseState::default();
 		state.insert(lease);
-		assert!(state.valid(&id).is_some());
-		assert!(state.remove(&id).is_some());
-		assert!(state.valid(&id).is_none());
+		assert!(state.take_valid(&id).is_some());
+		assert!(state.take_valid(&id).is_none());
+	}
+
+	#[test]
+	fn selected_leases_cannot_be_consumed_twice() {
+		let lease = lease(2, 52, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS + 60);
+		let available_lsps = [lease.id.lsp_node_id];
+		let mut state = LSPS2LeaseState::from_leases(vec![lease]);
+
+		assert!(state.fixed_amount(1_000, None, &available_lsps).is_some());
+		assert!(
+			state.fixed_amount(1_000, None, &available_lsps).is_none(),
+			"single-use lease was handed out twice"
+		);
 	}
 
 	#[test]
@@ -510,7 +524,7 @@ mod tests {
 		let mut state = LSPS2LeaseState::default();
 		state.insert(lease);
 		state.prune();
-		assert!(state.valid(&id).is_none());
+		assert!(state.take_valid(&id).is_none());
 	}
 
 	#[test]
@@ -523,7 +537,6 @@ mod tests {
 		let available_lsps = [expensive.id.lsp_node_id, cheap.id.lsp_node_id];
 		let (selected, _) = state.fixed_amount(1_000, None, &available_lsps).unwrap();
 		assert_eq!(selected.id, cheap.id);
-		state.remove(&selected.id);
 		let (remaining, _) = state.fixed_amount(1_000, None, &available_lsps).unwrap();
 		assert_eq!(remaining.id, expensive.id);
 	}
@@ -533,7 +546,7 @@ mod tests {
 		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
 		let unavailable = lease(2, 46, 1, Some(1_000), valid_until);
 		let available = lease(3, 47, 2, Some(1_000), valid_until);
-		let state = LSPS2LeaseState::from_leases(vec![unavailable, available.clone()]);
+		let mut state = LSPS2LeaseState::from_leases(vec![unavailable, available.clone()]);
 
 		let (selected, _) = state.fixed_amount(1_000, None, &[available.id.lsp_node_id]).unwrap();
 		assert_eq!(selected.id, available.id, "lease selection ignored the set of available LSPs");
@@ -543,7 +556,7 @@ mod tests {
 	fn variable_lease_honors_total_fee_limit() {
 		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
 		let variable = lease(2, 46, 50, None, valid_until);
-		let state = LSPS2LeaseState::from_leases(vec![variable.clone()]);
+		let mut state = LSPS2LeaseState::from_leases(vec![variable.clone()]);
 
 		let available_lsps = [variable.id.lsp_node_id];
 		assert!(state.variable_amount(Some(49), &available_lsps).is_none());
