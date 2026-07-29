@@ -168,7 +168,8 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 				local_node_receive_key,
 				tlvs.clone(),
 				htlc_amount_msat,
-				MIN_FINAL_CLTV_EXPIRY_DELTA,
+				// LSPS2 requires two blocks more than the usual final CLTV delta.
+				MIN_FINAL_CLTV_EXPIRY_DELTA + 2,
 				&self.entropy_source,
 				secp_ctx,
 			) {
@@ -301,6 +302,7 @@ mod tests {
 		);
 		assert_eq!(paths[0].payinfo.htlc_minimum_msat, 3_000);
 		assert_eq!(paths[0].payinfo.htlc_maximum_msat, 3_000);
+		assert_eq!(paths[0].payinfo.cltv_expiry_delta, 48 + MIN_FINAL_CLTV_EXPIRY_DELTA + 2);
 	}
 
 	#[test]
