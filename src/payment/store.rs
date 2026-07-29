@@ -181,11 +181,6 @@ impl StorableObject for PaymentDetails {
 		if let Some(hash_opt) = update.hash {
 			match self.kind {
 				PaymentKind::Bolt12Offer { ref mut hash, .. } => {
-					debug_assert_eq!(
-						self.direction,
-						PaymentDirection::Outbound,
-						"We should only ever override payment hash for outbound BOLT 12 payments"
-					);
 					debug_assert!(
 						hash.is_none() || *hash == hash_opt,
 						"We should never change a payment hash after being initially set"
