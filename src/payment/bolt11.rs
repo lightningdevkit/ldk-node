@@ -602,19 +602,19 @@ impl Bolt11Payment {
 	/// Returns a payable invoice that can be used to request a payment of the amount
 	/// given for the given payment hash.
 	///
-	/// If [`Config::manually_claim_unknown_bolt11_payments`] is enabled, a
+	/// If [`Config::manually_handle_unknown_bolt11_payments`] is enabled, a
 	/// [`PaymentClaimable`] event will be emitted once the inbound payment arrives. Otherwise, the
 	/// inbound payment will be failed back when it arrives.
 	///
 	/// **Warning:** it is the user's responsibility to never reuse the same payment hash. Reusing a
 	/// payment hash is unsafe and can lead to loss of funds.
 	///
-	/// **Note:** if manual claiming is enabled, users *MUST* handle this event and claim the
+	/// **Note:** if manual handling is enabled, users *MUST* handle this event and claim the
 	/// payment manually via [`claim_for_hash`] as soon as they have obtained access to the
 	/// preimage of the given payment hash. If they're unable to obtain the preimage, they *MUST*
 	/// immediately fail the payment via [`fail_for_hash`].
 	///
-	/// [`Config::manually_claim_unknown_bolt11_payments`]: crate::config::Config::manually_claim_unknown_bolt11_payments
+	/// [`Config::manually_handle_unknown_bolt11_payments`]: crate::config::Config::manually_handle_unknown_bolt11_payments
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
@@ -643,19 +643,19 @@ impl Bolt11Payment {
 	/// Returns a payable invoice that can be used to request a payment for the given payment hash
 	/// and the amount to be determined by the user, also known as a "zero-amount" invoice.
 	///
-	/// If [`Config::manually_claim_unknown_bolt11_payments`] is enabled, a
+	/// If [`Config::manually_handle_unknown_bolt11_payments`] is enabled, a
 	/// [`PaymentClaimable`] event will be emitted once the inbound payment arrives. Otherwise, the
 	/// inbound payment will be failed back when it arrives.
 	///
 	/// **Warning:** it is the user's responsibility to never reuse the same payment hash. Reusing a
 	/// payment hash is unsafe and can lead to loss of funds.
 	///
-	/// **Note:** if manual claiming is enabled, users *MUST* handle this event and claim the
+	/// **Note:** if manual handling is enabled, users *MUST* handle this event and claim the
 	/// payment manually via [`claim_for_hash`] as soon as they have obtained access to the
 	/// preimage of the given payment hash. If they're unable to obtain the preimage, they *MUST*
 	/// immediately fail the payment via [`fail_for_hash`].
 	///
-	/// [`Config::manually_claim_unknown_bolt11_payments`]: crate::config::Config::manually_claim_unknown_bolt11_payments
+	/// [`Config::manually_handle_unknown_bolt11_payments`]: crate::config::Config::manually_handle_unknown_bolt11_payments
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
@@ -702,7 +702,7 @@ impl Bolt11Payment {
 	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
 	/// channel to us. We'll use its cheapest offer otherwise.
 	///
-	/// If [`Config::manually_claim_unknown_bolt11_payments`] is enabled, a
+	/// If [`Config::manually_handle_unknown_bolt11_payments`] is enabled, a
 	/// [`PaymentClaimable`] event will be emitted once the inbound payment arrives. Otherwise, the
 	/// inbound payment will be failed back when it arrives. The check that
 	/// [`counterparty_skimmed_fee_msat`] is within the limits is performed *before* emitting the
@@ -711,13 +711,13 @@ impl Bolt11Payment {
 	/// **Warning:** it is the user's responsibility to never reuse the same payment hash. Reusing a
 	/// payment hash is unsafe and can lead to loss of funds.
 	///
-	/// **Note:** if manual claiming is enabled, users *MUST* handle this event and claim the
+	/// **Note:** if manual handling is enabled, users *MUST* handle this event and claim the
 	/// payment manually via [`claim_for_hash`] as soon as they have obtained access to the
 	/// preimage of the given payment hash. If they're unable to obtain the preimage, they *MUST*
 	/// immediately fail the payment via [`fail_for_hash`].
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	/// [`Config::manually_claim_unknown_bolt11_payments`]: crate::config::Config::manually_claim_unknown_bolt11_payments
+	/// [`Config::manually_handle_unknown_bolt11_payments`]: crate::config::Config::manually_handle_unknown_bolt11_payments
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash
@@ -775,7 +775,7 @@ impl Bolt11Payment {
 	/// parts-per-million millisatoshis, we allow the LSP to take for opening the channel to us.
 	/// We'll use its cheapest offer otherwise.
 	///
-	/// If [`Config::manually_claim_unknown_bolt11_payments`] is enabled, a
+	/// If [`Config::manually_handle_unknown_bolt11_payments`] is enabled, a
 	/// [`PaymentClaimable`] event will be emitted once the inbound payment arrives. Otherwise, the
 	/// inbound payment will be failed back when it arrives. The check that
 	/// [`counterparty_skimmed_fee_msat`] is within the limits is performed *before* emitting the
@@ -784,13 +784,13 @@ impl Bolt11Payment {
 	/// **Warning:** it is the user's responsibility to never reuse the same payment hash. Reusing a
 	/// payment hash is unsafe and can lead to loss of funds.
 	///
-	/// **Note:** if manual claiming is enabled, users *MUST* handle this event and claim the
+	/// **Note:** if manual handling is enabled, users *MUST* handle this event and claim the
 	/// payment manually via [`claim_for_hash`] as soon as they have obtained access to the
 	/// preimage of the given payment hash. If they're unable to obtain the preimage, they *MUST*
 	/// immediately fail the payment via [`fail_for_hash`].
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	/// [`Config::manually_claim_unknown_bolt11_payments`]: crate::config::Config::manually_claim_unknown_bolt11_payments
+	/// [`Config::manually_handle_unknown_bolt11_payments`]: crate::config::Config::manually_handle_unknown_bolt11_payments
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`claim_for_hash`]: Self::claim_for_hash
 	/// [`fail_for_hash`]: Self::fail_for_hash

@@ -155,7 +155,7 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_
 /// | `route_parameters`                     | None                                 |
 /// | `tor_config`                           | None                                 |
 /// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
-/// | `manually_claim_unknown_bolt11_payments` | false                              |
+/// | `manually_handle_unknown_bolt11_payments` | false                              |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
 /// respective default values.
@@ -230,7 +230,7 @@ pub struct Config {
 	/// failed, or times out.
 	///
 	/// [`Event::PaymentClaimable`]: crate::Event::PaymentClaimable
-	pub manually_claim_unknown_bolt11_payments: bool,
+	pub manually_handle_unknown_bolt11_payments: bool,
 }
 
 impl Default for Config {
@@ -247,7 +247,7 @@ impl Default for Config {
 			route_parameters: None,
 			node_alias: None,
 			hrn_config: HumanReadableNamesConfig::default(),
-			manually_claim_unknown_bolt11_payments: false,
+			manually_handle_unknown_bolt11_payments: false,
 		}
 	}
 }

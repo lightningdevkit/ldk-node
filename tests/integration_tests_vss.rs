@@ -36,7 +36,7 @@ async fn channel_full_cycle_with_vss_store() {
 
 	println!("\n== Node B ==");
 	let mut config_b = common::random_config();
-	config_b.node_config.manually_claim_unknown_bolt11_payments = true;
+	config_b.node_config.manually_handle_unknown_bolt11_payments = true;
 	let mut builder_b = Builder::from_config(config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
 	let node_b = builder_b

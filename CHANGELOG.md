@@ -14,7 +14,7 @@
   versions need to drain pending events before the upgrade.
 - Applications using the BOLT 11 manual-claiming receive APIs
   (`receive_*_for_hash`) now need to set
-  `Config::manually_claim_unknown_bolt11_payments` to `true`. Otherwise
+  `Config::manually_handle_unknown_bolt11_payments` to `true`. Otherwise
   matching inbound HTLCs will be failed back instead of emitting
   `Event::PaymentClaimable`.
 
