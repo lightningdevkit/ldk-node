@@ -13,6 +13,281 @@
 //
 // TODO(@benthecarman) Bring back after 0.8 is cut.
 
+#![cfg(not(feature = "uniffi"))]
+
+mod common;
+
+use std::str::FromStr;
+use std::time::Duration;
+
+use crate::common::{
+	expect_channel_pending_event, expect_channel_ready_event, expect_event,
+	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
+	generate_blocks_and_wait, generate_listening_addresses, premine_and_distribute_funds,
+	random_config, random_storage_path, setup_bitcoind_and_electrsd, setup_node, wait_for_tx,
+	TestChainSource,
+};
+use bitcoin::hashes::sha256::Hash as Sha256;
+use bitcoin::hashes::Hash;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::Amount;
+use ldk_node::config::Config;
+use ldk_node::entropy::NodeEntropy;
+use ldk_node::lightning::ln::channelmanager::PaymentId;
+use ldk_node::lightning::ln::msgs::SocketAddress as CurrentSocketAddress;
+use ldk_node::lightning_invoice::Bolt11Invoice as CurrentBolt11Invoice;
+use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
+use ldk_node::{Builder, Event, Node};
+use lightning_types::payment::{PaymentHash, PaymentPreimage};
+use lightning_types_0_3::payment::PaymentHash as OldPaymentHash;
+
+const RECEIVER_SEED_BYTES: [u8; 64] = [43; 64];
+const CHANNEL_AMOUNT_SAT: u64 = 500_000;
+const CLAIM_AMOUNT_MSAT: u64 = 100_000;
+const FAIL_AMOUNT_MSAT: u64 = 200_000;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn v0_7_for_hash_payments_can_be_manually_resolved_after_upgrade() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let payer_config = random_config();
+	let payer = setup_node(&chain_source, payer_config);
+
+	let receiver_storage_path = random_storage_path().to_str().unwrap().to_owned();
+	let receiver_addresses = generate_listening_addresses();
+	let old_receiver_addresses = to_v0_7_socket_addresses(&receiver_addresses);
+	let old_receiver =
+		build_v0_7_receiver(receiver_storage_path.clone(), old_receiver_addresses, &esplora_url);
+
+	let payer_addr = payer.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![payer_addr],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	payer.sync_wallets().unwrap();
+	old_receiver.sync_wallets().unwrap();
+
+	let old_receiver_addr = to_current_socket_address(
+		old_receiver.listening_addresses().unwrap().first().unwrap().clone(),
+	);
+	payer
+		.open_channel(
+			old_receiver.node_id(),
+			old_receiver_addr.clone(),
+			CHANNEL_AMOUNT_SAT,
+			None,
+			None,
+		)
+		.unwrap();
+
+	let funding_txo_a = expect_channel_pending_event!(payer, old_receiver.node_id());
+	let funding_txo_b = expect_v0_7_channel_pending(&old_receiver, payer.node_id()).await;
+	assert_eq!(funding_txo_a, funding_txo_b);
+	wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	payer.sync_wallets().unwrap();
+	old_receiver.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer, old_receiver.node_id());
+	expect_v0_7_channel_ready(&old_receiver, payer.node_id()).await;
+	wait_for_current_channel_usable(&payer, old_receiver.node_id(), CLAIM_AMOUNT_MSAT).await;
+
+	let invoice_description = ldk_node_070::lightning_invoice::Bolt11InvoiceDescription::Direct(
+		ldk_node_070::lightning_invoice::Description::new("upgrade manual".to_owned()).unwrap(),
+	);
+	let claim_preimage = [42u8; 32];
+	let claim_hash = payment_hash_from_preimage(claim_preimage);
+	let claim_invoice = old_receiver
+		.bolt11_payment()
+		.receive_for_hash(
+			CLAIM_AMOUNT_MSAT,
+			&invoice_description,
+			3600,
+			OldPaymentHash(claim_hash.0),
+		)
+		.unwrap()
+		.to_string();
+
+	let fail_preimage = [43u8; 32];
+	let fail_hash = payment_hash_from_preimage(fail_preimage);
+	let fail_invoice = old_receiver
+		.bolt11_payment()
+		.receive_for_hash(FAIL_AMOUNT_MSAT, &invoice_description, 3600, OldPaymentHash(fail_hash.0))
+		.unwrap()
+		.to_string();
+
+	old_receiver.stop().unwrap();
+
+	let receiver = build_current_receiver(receiver_storage_path, receiver_addresses, &esplora_url);
+	assert_eq!(receiver.node_id(), old_receiver.node_id());
+	assert_legacy_manual_payment(&receiver, claim_hash, CLAIM_AMOUNT_MSAT);
+	assert_legacy_manual_payment(&receiver, fail_hash, FAIL_AMOUNT_MSAT);
+
+	payer.connect(receiver.node_id(), old_receiver_addr, true).unwrap();
+	wait_for_current_channel_usable(&payer, receiver.node_id(), CLAIM_AMOUNT_MSAT).await;
+
+	let claim_invoice = CurrentBolt11Invoice::from_str(&claim_invoice).unwrap();
+	let payer_claim_id = payer.bolt11_payment().send(&claim_invoice, None).unwrap();
+	let (claim_payment_id, claimable_amount_msat) =
+		expect_payment_claimable_event!(receiver, claim_hash, CLAIM_AMOUNT_MSAT);
+	assert_eq!(claim_payment_id, PaymentId(claim_hash.0));
+	receiver
+		.bolt11_payment()
+		.claim_for_id(claim_payment_id, claimable_amount_msat, PaymentPreimage(claim_preimage))
+		.unwrap();
+	let received_payment_id = expect_payment_received_event!(receiver, CLAIM_AMOUNT_MSAT);
+	assert_eq!(received_payment_id, claim_payment_id);
+	expect_payment_successful_event!(payer, payer_claim_id, None);
+	assert_eq!(receiver.payment(&claim_payment_id).unwrap().status, PaymentStatus::Succeeded);
+
+	let fail_invoice = CurrentBolt11Invoice::from_str(&fail_invoice).unwrap();
+	let payer_fail_id = payer.bolt11_payment().send(&fail_invoice, None).unwrap();
+	let (fail_payment_id, _) =
+		expect_payment_claimable_event!(receiver, fail_hash, FAIL_AMOUNT_MSAT);
+	assert_eq!(fail_payment_id, PaymentId(fail_hash.0));
+	receiver.bolt11_payment().fail_for_id(fail_payment_id).unwrap();
+	expect_event!(payer, PaymentFailed);
+	assert_eq!(payer.payment(&payer_fail_id).unwrap().status, PaymentStatus::Failed);
+	assert_eq!(receiver.payment(&fail_payment_id).unwrap().status, PaymentStatus::Failed);
+
+	payer.stop().unwrap();
+	receiver.stop().unwrap();
+}
+
+fn build_v0_7_receiver(
+	storage_path: String,
+	listening_addresses: Vec<ldk_node_070::lightning::ln::msgs::SocketAddress>, esplora_url: &str,
+) -> ldk_node_070::Node {
+	let mut config = ldk_node_070::config::Config::default();
+	config.network = bitcoin::Network::Regtest;
+	config.storage_dir_path = storage_path;
+	config.anchor_channels_config = None;
+
+	let mut builder = ldk_node_070::Builder::from_config(config);
+	builder.set_entropy_seed_bytes(RECEIVER_SEED_BYTES);
+	builder.set_listening_addresses(listening_addresses).unwrap();
+	builder.set_node_alias("upgrade-receiver".to_string()).unwrap();
+	builder.set_chain_source_esplora(esplora_url.to_owned(), None);
+
+	let node = builder.build().unwrap();
+	node.start().unwrap();
+	node
+}
+
+fn build_current_receiver(
+	storage_path: String, listening_addresses: Vec<CurrentSocketAddress>, esplora_url: &str,
+) -> Node {
+	let mut config = Config::default();
+	config.network = bitcoin::Network::Regtest;
+	config.storage_dir_path = storage_path;
+	config.listening_addresses = Some(listening_addresses);
+	config.node_alias = common::random_node_alias();
+
+	let mut builder = Builder::from_config(config);
+	builder.set_chain_source_esplora(esplora_url.to_owned(), None);
+	let node = builder.build(NodeEntropy::from_seed_bytes(RECEIVER_SEED_BYTES)).unwrap();
+	node.start().unwrap();
+	node
+}
+
+fn payment_hash_from_preimage(preimage: [u8; 32]) -> PaymentHash {
+	PaymentHash(Sha256::hash(&preimage).to_byte_array())
+}
+
+fn assert_legacy_manual_payment(node: &Node, payment_hash: PaymentHash, amount_msat: u64) {
+	let payment_id = PaymentId(payment_hash.0);
+	let payment = node.payment(&payment_id).unwrap();
+	assert_eq!(payment.id, payment_id);
+	assert_eq!(payment.amount_msat, Some(amount_msat));
+	assert_eq!(payment.direction, PaymentDirection::Inbound);
+	assert_eq!(payment.status, PaymentStatus::Pending);
+	assert!(matches!(payment.kind, PaymentKind::Bolt11 { preimage: None, .. }));
+}
+
+fn to_current_socket_address(
+	address: ldk_node_070::lightning::ln::msgs::SocketAddress,
+) -> CurrentSocketAddress {
+	match address {
+		ldk_node_070::lightning::ln::msgs::SocketAddress::TcpIpV4 { addr, port } => {
+			CurrentSocketAddress::TcpIpV4 { addr, port }
+		},
+		_ => panic!("unexpected non-IPv4 test address: {:?}", address),
+	}
+}
+
+fn to_v0_7_socket_addresses(
+	addresses: &[CurrentSocketAddress],
+) -> Vec<ldk_node_070::lightning::ln::msgs::SocketAddress> {
+	addresses
+		.iter()
+		.map(|address| match address {
+			CurrentSocketAddress::TcpIpV4 { addr, port } => {
+				ldk_node_070::lightning::ln::msgs::SocketAddress::TcpIpV4 {
+					addr: *addr,
+					port: *port,
+				}
+			},
+			_ => panic!("unexpected non-IPv4 test address: {:?}", address),
+		})
+		.collect()
+}
+
+async fn expect_v0_7_channel_pending(
+	node: &ldk_node_070::Node, expected_counterparty: PublicKey,
+) -> bitcoin::OutPoint {
+	match next_v0_7_event(node).await {
+		ldk_node_070::Event::ChannelPending { counterparty_node_id, funding_txo, .. } => {
+			assert_eq!(counterparty_node_id, expected_counterparty);
+			node.event_handled().unwrap();
+			funding_txo
+		},
+		event => panic!("{} got unexpected event: {:?}", node.node_id(), event),
+	}
+}
+
+async fn expect_v0_7_channel_ready(node: &ldk_node_070::Node, expected_counterparty: PublicKey) {
+	match next_v0_7_event(node).await {
+		ldk_node_070::Event::ChannelReady { counterparty_node_id, .. } => {
+			assert_eq!(counterparty_node_id, Some(expected_counterparty));
+			node.event_handled().unwrap();
+		},
+		event => panic!("{} got unexpected event: {:?}", node.node_id(), event),
+	}
+}
+
+async fn next_v0_7_event(node: &ldk_node_070::Node) -> ldk_node_070::Event {
+	tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), node.next_event_async())
+		.await
+		.unwrap_or_else(|_| panic!("{} timed out waiting for event", node.node_id()))
+}
+
+async fn wait_for_current_channel_usable(
+	node: &Node, counterparty_node_id: PublicKey, min_outbound_amount_msat: u64,
+) {
+	let deadline = tokio::time::Instant::now() + Duration::from_secs(180);
+	while tokio::time::Instant::now() < deadline {
+		let is_usable = node.list_channels().iter().any(|c| {
+			c.counterparty.node_id == counterparty_node_id
+				&& c.is_usable
+				&& c.next_outbound_htlc_limit_msat >= min_outbound_amount_msat
+		});
+		if is_usable {
+			return;
+		}
+		tokio::time::sleep(Duration::from_millis(100)).await;
+	}
+	panic!(
+		"channel from {} to {} not ready to send {} msat within 180s",
+		node.node_id(),
+		counterparty_node_id,
+		min_outbound_amount_msat
+	);
+}
+
 // To keep monitoring whether the serialized node/channel/payment state remains
 // understandable by v0.7.0, these tests intentionally write current state through
 // the legacy v1 filesystem-store implementation via `build_with_store`, then
