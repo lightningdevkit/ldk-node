@@ -656,7 +656,8 @@ mod tests {
 
 	#[test]
 	fn payment_leases_roundtrip() {
-		let lease = lease(2, 48, 100, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS + 60);
+		let lease =
+			lease(2, 48, 100, Some(1_000), now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60);
 
 		let encoded = lease.encode();
 		let decoded = PaymentLease::read(&mut &encoded[..]).unwrap();
@@ -666,16 +667,16 @@ mod tests {
 
 	#[test]
 	fn fixed_and_variable_lease_pools_are_isolated() {
-		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let valid_until = now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60;
 		let fixed = lease(2, 49, 100, Some(1_000), valid_until);
 		let variable = lease(3, 50, 50, None, valid_until);
 		let mut state = LSPS2LeaseState::from_leases(vec![fixed.clone(), variable.clone()]);
 
-		let (selected_fixed, _) = state.fixed_amount(1_000, None).unwrap();
+		let (selected_fixed, _) = state.fixed_amount(1_000, None, 1).unwrap();
 		assert_eq!(selected_fixed.id, fixed.id);
-		assert!(state.fixed_amount(1_000, None).is_none());
+		assert!(state.fixed_amount(1_000, None, 1).is_none());
 
-		let (selected_variable, _) = state.variable_amount(None, None).unwrap();
+		let (selected_variable, _) = state.variable_amount(None, None, 1).unwrap();
 		assert_eq!(selected_variable.id, variable.id);
 	}
 
