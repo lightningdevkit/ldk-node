@@ -21,7 +21,7 @@ use crate::logger::{log_error, LdkLogger};
 use crate::types::DynStore;
 use crate::Error;
 
-pub(crate) const MIN_LEASE_REMAINING_SECS: u64 = 24 * 60 * 60;
+pub(crate) const MIN_CACHED_LEASE_REMAINING_SECS: u64 = 24 * 60 * 60;
 
 pub(crate) type PaymentLeaseStore<L> = DataStore<PaymentLease, L>;
 
@@ -376,24 +376,17 @@ impl LSPS2LeaseState {
 		self.leases.insert(lease.id, lease);
 	}
 
-	pub(crate) fn take_valid(&mut self, id: &PaymentLeaseId) -> Option<PaymentLease> {
-		if self.leases.get(id).map_or(false, is_lease_usable) {
-			self.leases.remove(id)
-		} else {
-			None
-		}
-	}
-
 	/// Selects and removes a fixed-amount lease in one operation.
 	pub(crate) fn fixed_amount(
-		&mut self, amount_msat: u64, max_fee_msat: Option<u64>, available_lsps: &[PublicKey],
+		&mut self, amount_msat: u64, max_fee_msat: Option<u64>, min_remaining_secs: u64,
+		available_lsps: &[PublicKey],
 	) -> Option<(PaymentLease, u64)> {
 		let (id, fee_msat) = self
 			.leases
 			.iter()
 			.filter(|(id, _)| available_lsps.contains(&id.lsp_node_id))
 			.filter(|(_, lease)| lease.payment_size_msat == Some(amount_msat))
-			.filter(|(_, lease)| is_lease_usable(lease))
+			.filter(|(_, lease)| is_lease_valid_for(lease, min_remaining_secs))
 			.filter_map(|(id, lease)| {
 				compute_opening_fee(
 					amount_msat,
@@ -411,7 +404,7 @@ impl LSPS2LeaseState {
 		self.leases
 			.values()
 			.filter(|lease| lease.payment_size_msat == Some(amount_msat))
-			.filter(|lease| is_lease_usable(lease))
+			.filter(|lease| is_lease_cacheable(lease))
 			.filter_map(|lease| {
 				compute_opening_fee(
 					amount_msat,
@@ -425,14 +418,14 @@ impl LSPS2LeaseState {
 	/// Selects and removes a variable-amount lease in one operation.
 	pub(crate) fn variable_amount(
 		&mut self, amount_msat: Option<u64>, max_total_fee_msat: Option<u64>,
-		available_lsps: &[PublicKey],
+		min_remaining_secs: u64, available_lsps: &[PublicKey],
 	) -> Option<(PaymentLease, u64)> {
 		let (id, selection_fee) = self
 			.leases
 			.iter()
 			.filter(|(id, _)| available_lsps.contains(&id.lsp_node_id))
 			.filter(|(_, lease)| lease.payment_size_msat.is_none())
-			.filter(|(_, lease)| is_lease_usable(lease))
+			.filter(|(_, lease)| is_lease_valid_for(lease, min_remaining_secs))
 			.filter_map(|(id, lease)| {
 				let selection_fee = if let Some(amount_msat) = amount_msat {
 					if amount_msat < lease.params.min_payment_size_msat
@@ -464,7 +457,7 @@ impl LSPS2LeaseState {
 		self.leases
 			.values()
 			.filter(|lease| lease.payment_size_msat.is_none())
-			.filter(|lease| is_lease_usable(lease))
+			.filter(|lease| is_lease_cacheable(lease))
 			.filter_map(|lease| {
 				if let Some(amount_msat) = amount_msat {
 					if amount_msat < lease.params.min_payment_size_msat
@@ -485,17 +478,24 @@ impl LSPS2LeaseState {
 	}
 
 	pub(crate) fn prune(&mut self) {
-		self.leases.retain(|_, lease| is_lease_usable(lease));
+		self.leases.retain(|_, lease| is_lease_cacheable(lease));
 	}
 }
 
 pub(crate) fn is_lease_usable(lease: &PaymentLease) -> bool {
-	checked_cltv_expiry_delta(lease.cltv_expiry_delta).is_some()
-		&& lease.valid_until.saturating_sub(now_secs()) >= MIN_LEASE_REMAINING_SECS
+	checked_cltv_expiry_delta(lease.cltv_expiry_delta).is_some() && lease.valid_until > now_secs()
 }
 
 pub(crate) fn checked_cltv_expiry_delta(cltv_expiry_delta: u32) -> Option<u16> {
 	cltv_expiry_delta.try_into().ok()
+}
+
+pub(crate) fn is_lease_valid_for(lease: &PaymentLease, min_remaining_secs: u64) -> bool {
+	is_lease_usable(lease) && lease.valid_until.saturating_sub(now_secs()) >= min_remaining_secs
+}
+
+pub(crate) fn is_lease_cacheable(lease: &PaymentLease) -> bool {
+	is_lease_valid_for(lease, MIN_CACHED_LEASE_REMAINING_SECS)
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -588,91 +588,137 @@ mod tests {
 
 	#[test]
 	fn leases_are_consumed_once() {
-		let lease = lease(2, 42, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS + 60);
-		let id = lease.id;
+		let lease = lease(2, 42, 1, Some(1_000), now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60);
+		let available_lsps = [lease.id.lsp_node_id];
 		let mut state = LSPS2LeaseState::default();
 		state.insert(lease);
-		assert!(state.take_valid(&id).is_some());
-		assert!(state.take_valid(&id).is_none());
+		assert!(state.fixed_amount(1_000, None, 1, &available_lsps).is_some());
+		assert!(state.fixed_amount(1_000, None, 1, &available_lsps).is_none());
+	}
+
+	#[test]
+	fn lease_can_be_usable_without_being_cacheable() {
+		let invoice_lifetime_secs = 2 * 60 * 60;
+		let lease = lease(2, 53, 1, Some(1_000), now_secs() + invoice_lifetime_secs + 60);
+
+		assert!(
+			is_lease_usable(&lease),
+			"a live lease covering the invoice lifetime should be usable"
+		);
+		assert!(is_lease_valid_for(&lease, invoice_lifetime_secs));
+		assert!(!is_lease_cacheable(&lease));
+	}
+
+	#[test]
+	fn lease_selection_honors_invoice_lifetime() {
+		let invoice_lifetime_secs = 2 * 60 * 60;
+		let short_validity = now_secs() + invoice_lifetime_secs - 1;
+		let sufficient_validity = now_secs() + invoice_lifetime_secs + 60;
+		let cheap_fixed = lease(2, 54, 1, Some(1_000), short_validity);
+		let fixed = lease(3, 55, 2, Some(1_000), sufficient_validity);
+		let cheap_variable = lease(4, 56, 1, None, short_validity);
+		let variable = lease(5, 57, 2, None, sufficient_validity);
+		let available_lsps = [
+			cheap_fixed.id.lsp_node_id,
+			fixed.id.lsp_node_id,
+			cheap_variable.id.lsp_node_id,
+			variable.id.lsp_node_id,
+		];
+		let mut state = LSPS2LeaseState::from_leases(vec![
+			cheap_fixed,
+			fixed.clone(),
+			cheap_variable,
+			variable.clone(),
+		]);
+
+		assert_eq!(
+			state.fixed_amount(1_000, None, invoice_lifetime_secs, &available_lsps).unwrap().0.id,
+			fixed.id
+		);
+		assert_eq!(
+			state.variable_amount(None, None, invoice_lifetime_secs, &available_lsps).unwrap().0.id,
+			variable.id
+		);
 	}
 
 	#[test]
 	fn selected_leases_cannot_be_consumed_twice() {
-		let lease = lease(2, 52, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS + 60);
+		let lease = lease(2, 52, 1, Some(1_000), now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60);
 		let available_lsps = [lease.id.lsp_node_id];
 		let mut state = LSPS2LeaseState::from_leases(vec![lease]);
 
-		assert!(state.fixed_amount(1_000, None, &available_lsps).is_some());
+		assert!(state.fixed_amount(1_000, None, 1, &available_lsps).is_some());
 		assert!(
-			state.fixed_amount(1_000, None, &available_lsps).is_none(),
+			state.fixed_amount(1_000, None, 1, &available_lsps).is_none(),
 			"single-use lease was handed out twice"
 		);
 	}
 
 	#[test]
 	fn prunes_leases_close_to_expiry() {
-		let lease = lease(2, 43, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS - 1);
-		let id = lease.id;
+		let lease = lease(2, 43, 1, Some(1_000), now_secs() + MIN_CACHED_LEASE_REMAINING_SECS - 1);
+		let available_lsps = [lease.id.lsp_node_id];
 		let mut state = LSPS2LeaseState::default();
 		state.insert(lease);
 		state.prune();
-		assert!(state.take_valid(&id).is_none());
+		assert!(state.fixed_amount(1_000, None, 1, &available_lsps).is_none());
 	}
 
 	#[test]
 	fn rejects_unsupported_cltv_delta() {
-		let mut lease = lease(2, 53, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS + 60);
+		let mut lease =
+			lease(2, 53, 1, Some(1_000), now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60);
 		lease.cltv_expiry_delta = u16::MAX as u32 + 1;
-		let id = lease.id;
+		let available_lsps = [lease.id.lsp_node_id];
 		let mut state = LSPS2LeaseState::from_leases(vec![lease]);
 
 		assert!(
-			state.take_valid(&id).is_none(),
+			state.fixed_amount(1_000, None, 1, &available_lsps).is_none(),
 			"lease with an unsupported CLTV delta remained usable"
 		);
 	}
 
 	#[test]
 	fn selects_cheapest_matching_lease_across_lsps() {
-		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let valid_until = now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60;
 		let expensive = lease(2, 44, 100, Some(1_000), valid_until);
 		let cheap = lease(3, 45, 50, Some(1_000), valid_until);
 		let mut state = LSPS2LeaseState::from_leases(vec![expensive.clone(), cheap.clone()]);
-
 		let available_lsps = [expensive.id.lsp_node_id, cheap.id.lsp_node_id];
-		let (selected, _) = state.fixed_amount(1_000, None, &available_lsps).unwrap();
+		let (selected, _) = state.fixed_amount(1_000, None, 1, &available_lsps).unwrap();
 		assert_eq!(selected.id, cheap.id);
-		let (remaining, _) = state.fixed_amount(1_000, None, &available_lsps).unwrap();
+		let (remaining, _) = state.fixed_amount(1_000, None, 1, &available_lsps).unwrap();
 		assert_eq!(remaining.id, expensive.id);
 	}
 
 	#[test]
 	fn ignores_leases_from_unavailable_lsps() {
-		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let valid_until = now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60;
 		let unavailable = lease(2, 46, 1, Some(1_000), valid_until);
 		let available = lease(3, 47, 2, Some(1_000), valid_until);
 		let mut state = LSPS2LeaseState::from_leases(vec![unavailable, available.clone()]);
 
-		let (selected, _) = state.fixed_amount(1_000, None, &[available.id.lsp_node_id]).unwrap();
+		let (selected, _) =
+			state.fixed_amount(1_000, None, 1, &[available.id.lsp_node_id]).unwrap();
 		assert_eq!(selected.id, available.id, "lease selection ignored the set of available LSPs");
 	}
 
 	#[test]
 	fn variable_lease_honors_total_fee_limit() {
-		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let valid_until = now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60;
 		let variable = lease(2, 46, 50, None, valid_until);
 		let mut state = LSPS2LeaseState::from_leases(vec![variable.clone()]);
 		let available_lsps = [variable.id.lsp_node_id];
-		assert!(state.variable_amount(None, Some(49), &available_lsps).is_none());
+		assert!(state.variable_amount(None, Some(49), 1, &available_lsps).is_none());
 		assert_eq!(
-			state.variable_amount(None, Some(50), &available_lsps).unwrap().0.id,
+			state.variable_amount(None, Some(50), 1, &available_lsps).unwrap().0.id,
 			variable.id
 		);
 	}
 
 	#[test]
 	fn variable_lease_matches_resolved_payment_amount() {
-		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let valid_until = now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60;
 		let mut incompatible = lease(2, 47, 1, None, valid_until);
 		incompatible.params.max_payment_size_msat = 1_000;
 		let mut compatible = lease(3, 48, 2, None, valid_until);
@@ -680,10 +726,9 @@ mod tests {
 		compatible.params.max_payment_size_msat = 3_000;
 		let available_lsps = [incompatible.id.lsp_node_id, compatible.id.lsp_node_id];
 		let mut state = LSPS2LeaseState::from_leases(vec![incompatible, compatible.clone()]);
-
-		assert!(state.variable_amount(Some(2_000), Some(999), &available_lsps).is_none());
+		assert!(state.variable_amount(Some(2_000), Some(999), 1, &available_lsps).is_none());
 		let (selected, total_fee_msat) =
-			state.variable_amount(Some(2_000), None, &available_lsps).unwrap();
+			state.variable_amount(Some(2_000), None, 1, &available_lsps).unwrap();
 		assert_eq!(
 			selected.id, compatible.id,
 			"selected variable lease must accept the resolved payment amount"
@@ -693,7 +738,7 @@ mod tests {
 
 	#[test]
 	fn detects_cached_leases_for_refill() {
-		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let valid_until = now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60;
 		let fixed = lease(2, 46, 100, Some(1_000), valid_until);
 		let variable = lease(3, 47, 50, None, valid_until);
 		let state = LSPS2LeaseState::from_leases(vec![fixed, variable]);
