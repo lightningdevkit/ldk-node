@@ -30,7 +30,8 @@ use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
 use crate::config::{
 	AddressTypeRuntimeConfig, Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP,
 	BDK_ELECTRUM_CLIENT_BATCH_SIZE, BDK_WALLET_SYNC_TIMEOUT_SECS,
-	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
+	DEFAULT_ELECTRUM_CONNECTION_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
+	LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
 };
 use crate::error::Error;
 use crate::fee_estimator::{
@@ -43,6 +44,30 @@ use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::NodeMetrics;
 
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
+
+fn effective_connection_timeout_secs(configured_timeout_secs: u64, logger: &Logger) -> u8 {
+	let requested_timeout = if configured_timeout_secs == 0 {
+		log_warn!(
+			logger,
+			"Electrum connection_timeout_secs is 0; using the safe default of {} seconds.",
+			DEFAULT_ELECTRUM_CONNECTION_TIMEOUT_SECS,
+		);
+		DEFAULT_ELECTRUM_CONNECTION_TIMEOUT_SECS
+	} else {
+		configured_timeout_secs
+	};
+	let capped_timeout = requested_timeout.min(u8::MAX as u64) as u8;
+	if capped_timeout as u64 != requested_timeout {
+		log_warn!(
+			logger,
+			"Electrum connection_timeout_secs ({}) exceeds maximum of {}; capping to {}.",
+			requested_timeout,
+			u8::MAX,
+			capped_timeout,
+		);
+	}
+	capped_timeout
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FullScanSettings {
@@ -612,28 +637,13 @@ impl ElectrumRuntimeClient {
 		server_url: String, runtime_handle: Handle, config: Arc<Config>, logger: Arc<Logger>,
 		connection_timeout_secs: u64,
 	) -> Result<Self, Error> {
-		// 0 disables the socket timeout entirely. Values above u8::MAX are capped to 255
-		// because the electrum_client crate's timeout field is a u8.
-		let timeout_opt = match connection_timeout_secs {
-			0 => None,
-			n => {
-				let capped = n.min(u8::MAX as u64) as u8;
-				if capped as u64 != n {
-					log_warn!(
-						logger,
-						"Electrum connection_timeout_secs ({}) exceeds maximum of {}; capping to {}.",
-						n,
-						u8::MAX,
-						capped,
-					);
-				}
-				Some(capped)
-			},
-		};
+		// Every socket operation needs a finite bound so a cancelled blocking job eventually
+		// completes and cannot hold owned-runtime shutdown open indefinitely.
+		let timeout = effective_connection_timeout_secs(connection_timeout_secs, logger.as_ref());
 
 		let electrum_config = ElectrumConfigBuilder::new()
 			.retry(ELECTRUM_CLIENT_NUM_RETRIES)
-			.timeout(timeout_opt)
+			.timeout(Some(timeout))
 			.build();
 
 		let electrum_client = Arc::new(
@@ -1020,6 +1030,18 @@ mod tests {
 			additional_wallet_full_scan_settings(&config),
 			FullScanSettings { stop_gap: 1_000, batch_size: 100 }
 		);
+	}
+
+	#[test]
+	fn electrum_connection_timeout_is_always_finite_and_bounded() {
+		let logger = Logger::new_log_facade();
+
+		assert_eq!(
+			effective_connection_timeout_secs(0, &logger),
+			DEFAULT_ELECTRUM_CONNECTION_TIMEOUT_SECS as u8
+		);
+		assert_eq!(effective_connection_timeout_secs(1, &logger), 1);
+		assert_eq!(effective_connection_timeout_secs(300, &logger), u8::MAX);
 	}
 
 	#[test]

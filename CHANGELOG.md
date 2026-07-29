@@ -1,10 +1,8 @@
-# 0.7.0-rc.59 (Synonym Fork)
+# 0.7.0-rc.60 (Synonym Fork)
 
 ## Bug Fixes
 
-- Prevented an owned Tokio runtime from being dropped by its own Electrum chain-sync worker
-  during shutdown. Electrum clients now retain a non-owning runtime handle, preventing the
-  release-mode panic from aborting Android processes.
+- Prevented Electrum runtime self-drop crashes and unbounded shutdown waits.
 - Scaled Electrum full-scan timeouts for additional wallets with the configured stop gap and batch
   size.
 - Return `OnchainWalletAccountNotRegistered` consistently for unloaded derived-account operations.
