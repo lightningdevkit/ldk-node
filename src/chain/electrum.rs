@@ -24,12 +24,14 @@ use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::log_warn;
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::ElectrumSyncClient;
+use tokio::runtime::Handle;
 
 use super::{periodically_archive_fully_resolved_monitors, WalletSyncStatus};
 use crate::config::{
 	AddressTypeRuntimeConfig, Config, ElectrumSyncConfig, BDK_CLIENT_STOP_GAP,
 	BDK_ELECTRUM_CLIENT_BATCH_SIZE, BDK_WALLET_SYNC_TIMEOUT_SECS,
-	FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS, LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
+	DEFAULT_ELECTRUM_CONNECTION_TIMEOUT_SECS, FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
+	LDK_WALLET_SYNC_TIMEOUT_SECS, TX_BROADCAST_TIMEOUT_SECS,
 };
 use crate::error::Error;
 use crate::fee_estimator::{
@@ -38,11 +40,34 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::write_node_metrics;
 use crate::logger::{log_bytes, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::runtime::Runtime;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::NodeMetrics;
 
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
+
+fn effective_connection_timeout_secs(configured_timeout_secs: u64, logger: &Logger) -> u8 {
+	let requested_timeout = if configured_timeout_secs == 0 {
+		log_warn!(
+			logger,
+			"Electrum connection_timeout_secs is 0; using the safe default of {} seconds.",
+			DEFAULT_ELECTRUM_CONNECTION_TIMEOUT_SECS,
+		);
+		DEFAULT_ELECTRUM_CONNECTION_TIMEOUT_SECS
+	} else {
+		configured_timeout_secs
+	};
+	let capped_timeout = requested_timeout.min(u8::MAX as u64) as u8;
+	if capped_timeout as u64 != requested_timeout {
+		log_warn!(
+			logger,
+			"Electrum connection_timeout_secs ({}) exceeds maximum of {}; capping to {}.",
+			requested_timeout,
+			u8::MAX,
+			capped_timeout,
+		);
+	}
+	capped_timeout
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FullScanSettings {
@@ -130,10 +155,10 @@ impl ElectrumChainSource {
 		}
 	}
 
-	pub(super) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
+	pub(super) fn start(&self, runtime_handle: Handle) -> Result<(), Error> {
 		self.electrum_runtime_status.write().unwrap().start(
 			self.server_url.clone(),
-			Arc::clone(&runtime),
+			runtime_handle,
 			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 			self.sync_config.connection_timeout_secs,
@@ -537,14 +562,14 @@ impl ElectrumRuntimeStatus {
 	}
 
 	pub(super) fn start(
-		&mut self, server_url: String, runtime: Arc<Runtime>, config: Arc<Config>,
+		&mut self, server_url: String, runtime_handle: Handle, config: Arc<Config>,
 		logger: Arc<Logger>, connection_timeout_secs: u64,
 	) -> Result<(), Error> {
 		match self {
 			Self::Stopped { pending_registered_txs, pending_registered_outputs } => {
 				let client = Arc::new(ElectrumRuntimeClient::new(
 					server_url.clone(),
-					runtime,
+					runtime_handle,
 					config,
 					logger,
 					connection_timeout_secs,
@@ -602,38 +627,23 @@ struct ElectrumRuntimeClient {
 	electrum_client: Arc<ElectrumClient>,
 	bdk_electrum_client: Arc<BdkElectrumClient<Arc<ElectrumClient>>>,
 	tx_sync: Arc<ElectrumSyncClient<Arc<Logger>>>,
-	runtime: Arc<Runtime>,
+	runtime_handle: Handle,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
 }
 
 impl ElectrumRuntimeClient {
 	fn new(
-		server_url: String, runtime: Arc<Runtime>, config: Arc<Config>, logger: Arc<Logger>,
+		server_url: String, runtime_handle: Handle, config: Arc<Config>, logger: Arc<Logger>,
 		connection_timeout_secs: u64,
 	) -> Result<Self, Error> {
-		// 0 disables the socket timeout entirely. Values above u8::MAX are capped to 255
-		// because the electrum_client crate's timeout field is a u8.
-		let timeout_opt = match connection_timeout_secs {
-			0 => None,
-			n => {
-				let capped = n.min(u8::MAX as u64) as u8;
-				if capped as u64 != n {
-					log_warn!(
-						logger,
-						"Electrum connection_timeout_secs ({}) exceeds maximum of {}; capping to {}.",
-						n,
-						u8::MAX,
-						capped,
-					);
-				}
-				Some(capped)
-			},
-		};
+		// Every socket operation needs a finite bound so a cancelled blocking job eventually
+		// completes and cannot hold owned-runtime shutdown open indefinitely.
+		let timeout = effective_connection_timeout_secs(connection_timeout_secs, logger.as_ref());
 
 		let electrum_config = ElectrumConfigBuilder::new()
 			.retry(ELECTRUM_CLIENT_NUM_RETRIES)
-			.timeout(timeout_opt)
+			.timeout(Some(timeout))
 			.build();
 
 		let electrum_client = Arc::new(
@@ -660,7 +670,7 @@ impl ElectrumRuntimeClient {
 				},
 			)?,
 		);
-		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime, config, logger })
+		Ok(Self { electrum_client, bdk_electrum_client, tx_sync, runtime_handle, config, logger })
 	}
 
 	pub(crate) async fn get_address_balance(&self, address: &bitcoin::Address) -> Option<u64> {
@@ -670,7 +680,7 @@ impl ElectrumRuntimeClient {
 		let electrum_client = Arc::clone(&self.electrum_client);
 		let script_clone = script.clone();
 		let balance_result = self
-			.runtime
+			.runtime_handle
 			.spawn_blocking(move || {
 				electrum_client
 					.script_get_balance(&script_clone)
@@ -694,7 +704,7 @@ impl ElectrumRuntimeClient {
 		let now = Instant::now();
 
 		let tx_sync = Arc::clone(&self.tx_sync);
-		let spawn_fut = self.runtime.spawn_blocking(move || tx_sync.sync(confirmables));
+		let spawn_fut = self.runtime_handle.spawn_blocking(move || tx_sync.sync(confirmables));
 		let timeout_fut =
 			tokio::time::timeout(Duration::from_secs(LDK_WALLET_SYNC_TIMEOUT_SECS), spawn_fut);
 
@@ -730,7 +740,7 @@ impl ElectrumRuntimeClient {
 		let bdk_electrum_client = Arc::clone(&self.bdk_electrum_client);
 		bdk_electrum_client.populate_tx_cache(cached_txs);
 
-		let spawn_fut = self.runtime.spawn_blocking(move || {
+		let spawn_fut = self.runtime_handle.spawn_blocking(move || {
 			bdk_electrum_client.full_scan(request, settings.stop_gap, settings.batch_size, true)
 		});
 		let wallet_sync_timeout_fut = tokio::time::timeout(timeout, spawn_fut);
@@ -760,7 +770,7 @@ impl ElectrumRuntimeClient {
 		bdk_electrum_client.populate_tx_cache(cached_txs);
 
 		let spawn_fut = self
-			.runtime
+			.runtime_handle
 			.spawn_blocking(move || bdk_electrum_client.sync(request, batch_size, true));
 		let wallet_sync_timeout_fut = tokio::time::timeout(timeout, spawn_fut);
 
@@ -787,7 +797,7 @@ impl ElectrumRuntimeClient {
 		let tx_bytes = tx.encode();
 
 		let spawn_fut =
-			self.runtime.spawn_blocking(move || electrum_client.transaction_broadcast(&tx));
+			self.runtime_handle.spawn_blocking(move || electrum_client.transaction_broadcast(&tx));
 		let timeout_fut =
 			tokio::time::timeout(Duration::from_secs(TX_BROADCAST_TIMEOUT_SECS), spawn_fut);
 
@@ -833,7 +843,8 @@ impl ElectrumRuntimeClient {
 			batch.estimate_fee(num_blocks);
 		}
 
-		let spawn_fut = self.runtime.spawn_blocking(move || electrum_client.batch_call(&batch));
+		let spawn_fut =
+			self.runtime_handle.spawn_blocking(move || electrum_client.batch_call(&batch));
 
 		let timeout_fut = tokio::time::timeout(
 			Duration::from_secs(FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS),
@@ -916,7 +927,87 @@ impl Filter for ElectrumRuntimeClient {
 
 #[cfg(test)]
 mod tests {
+	use std::net::TcpListener;
+	use std::process::Command;
+	use std::sync::mpsc::sync_channel;
+	use std::thread;
+
 	use super::*;
+	use crate::runtime::Runtime;
+
+	const RUNTIME_SELF_DROP_CHILD_ENV: &str = "LDK_NODE_ELECTRUM_RUNTIME_SELF_DROP_CHILD";
+
+	#[test]
+	fn inflight_electrum_worker_does_not_own_runtime_lifecycle() {
+		if std::env::var_os(RUNTIME_SELF_DROP_CHILD_ENV).is_some() {
+			run_inflight_electrum_worker_drop();
+			return;
+		}
+
+		let status = Command::new(std::env::current_exe().unwrap())
+			.args([
+				"--exact",
+				"chain::electrum::tests::inflight_electrum_worker_does_not_own_runtime_lifecycle",
+				"--nocapture",
+			])
+			.env(RUNTIME_SELF_DROP_CHILD_ENV, "1")
+			.status()
+			.unwrap();
+
+		assert!(status.success(), "in-flight Electrum worker aborted during runtime teardown");
+	}
+
+	fn run_inflight_electrum_worker_drop() {
+		std::panic::set_hook(Box::new(|panic_info| {
+			eprintln!("{panic_info}");
+			std::process::exit(101);
+		}));
+
+		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+		let server_url = format!("tcp://{}", listener.local_addr().unwrap());
+		let (release_server_tx, release_server_rx) = sync_channel(0);
+		let server_thread = thread::spawn(move || {
+			let connections = [listener.accept().unwrap().0, listener.accept().unwrap().0];
+			let _ = release_server_rx.recv();
+			drop(connections);
+		});
+
+		let logger = Arc::new(Logger::new_log_facade());
+		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
+		let client = Arc::new(
+			ElectrumRuntimeClient::new(
+				server_url,
+				runtime.handle().clone(),
+				Arc::new(Config::default()),
+				logger,
+				1,
+			)
+			.unwrap(),
+		);
+		let (worker_started_tx, worker_started_rx) = sync_channel(0);
+		let (release_worker_tx, release_worker_rx) = tokio::sync::oneshot::channel();
+
+		runtime.spawn_background_task(async move {
+			worker_started_tx.send(()).unwrap();
+			let _ = release_worker_rx.await;
+			drop(client);
+		});
+		worker_started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+
+		let release_thread = thread::spawn(move || {
+			thread::sleep(Duration::from_millis(100));
+			let _ = release_worker_tx.send(());
+		});
+
+		// A runtime handle lets this drop cancel the in-flight worker from the caller thread. An
+		// Arc<Runtime> stored by the Electrum client would instead defer the last runtime drop to
+		// the worker itself and abort the subprocess.
+		drop(runtime);
+		release_thread.join().unwrap();
+		let _ = release_server_tx.send(());
+		server_thread.join().unwrap();
+		thread::sleep(Duration::from_millis(500));
+	}
 
 	#[test]
 	fn additional_full_scan_settings_do_not_change_primary_defaults() {
@@ -939,6 +1030,18 @@ mod tests {
 			additional_wallet_full_scan_settings(&config),
 			FullScanSettings { stop_gap: 1_000, batch_size: 100 }
 		);
+	}
+
+	#[test]
+	fn electrum_connection_timeout_is_always_finite_and_bounded() {
+		let logger = Logger::new_log_facade();
+
+		assert_eq!(
+			effective_connection_timeout_secs(0, &logger),
+			DEFAULT_ELECTRUM_CONNECTION_TIMEOUT_SECS as u8
+		);
+		assert_eq!(effective_connection_timeout_secs(1, &logger), 1);
+		assert_eq!(effective_connection_timeout_secs(300, &logger), u8::MAX);
 	}
 
 	#[test]

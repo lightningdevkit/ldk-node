@@ -1,7 +1,8 @@
-# 0.7.0-rc.58 (Synonym Fork)
+# 0.7.0-rc.60 (Synonym Fork)
 
 ## Bug Fixes
 
+- Prevented Electrum runtime self-drop crashes and unbounded shutdown waits.
 - Scaled Electrum full-scan timeouts for additional wallets with the configured stop gap and batch
   size.
 - Return `OnchainWalletAccountNotRegistered` consistently for unloaded derived-account operations.

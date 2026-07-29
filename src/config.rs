@@ -841,10 +841,10 @@ pub struct ElectrumSyncConfig {
 	/// indefinitely under total packet loss, eventually exhausting Tokio's blocking thread pool
 	/// and causing subsequent `sync_wallets` calls to block indefinitely.
 	///
-	/// Set to `0` to disable the socket timeout entirely. The effective maximum is 255 seconds
-	/// (the underlying `electrum_client` crate uses a `u8`); larger values are capped with a
-	/// warning. Note that two TCP connections are opened at node start (on-chain and Lightning
-	/// sync), so budget accordingly when tuning this value. Defaults to 10 seconds.
+	/// Set to `0` to use the safe 10-second default. The effective maximum is 255 seconds (the
+	/// underlying `electrum_client` crate uses a `u8`); larger values are capped with a warning.
+	/// Note that two TCP connections are opened at node start (on-chain and Lightning sync), so
+	/// budget accordingly when tuning this value. Defaults to 10 seconds.
 	pub connection_timeout_secs: u64,
 	/// Batch size for Electrum full scans of non-primary wallets.
 	///

@@ -97,15 +97,6 @@ impl Runtime {
 		*background_processor_task = Some(handle);
 	}
 
-	pub fn spawn_blocking<F, R>(&self, func: F) -> JoinHandle<R>
-	where
-		F: FnOnce() -> R + Send + 'static,
-		R: Send + 'static,
-	{
-		let handle = self.handle();
-		handle.spawn_blocking(func)
-	}
-
 	pub fn block_on<F: Future>(&self, future: F) -> F::Output {
 		// While we generally decided not to overthink via which call graph users would enter our
 		// runtime context, we'd still try to reuse whatever current context would be present
@@ -207,7 +198,7 @@ impl Runtime {
 		);
 	}
 
-	fn handle(&self) -> &tokio::runtime::Handle {
+	pub(crate) fn handle(&self) -> &tokio::runtime::Handle {
 		match &self.mode {
 			RuntimeMode::Owned(rt) => rt.handle(),
 			RuntimeMode::Handle(handle) => handle,
@@ -218,4 +209,23 @@ impl Runtime {
 enum RuntimeMode {
 	Owned(tokio::runtime::Runtime),
 	Handle(tokio::runtime::Handle),
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn runtime_handle_does_not_retain_runtime_owner() {
+		let runtime = Arc::new(Runtime::new(Arc::new(Logger::new_log_facade())).unwrap());
+		let weak_runtime = Arc::downgrade(&runtime);
+
+		let runtime_handle = runtime.handle().clone();
+
+		assert_eq!(Arc::strong_count(&runtime), 1);
+		drop(runtime);
+		assert!(weak_runtime.upgrade().is_none());
+
+		drop(runtime_handle);
+	}
 }
