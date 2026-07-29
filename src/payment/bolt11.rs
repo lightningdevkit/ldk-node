@@ -19,7 +19,6 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::outbound_payment::{Bolt11PaymentError, Retry, RetryableSendFailure};
 use lightning::routing::router::{PaymentParameters, RouteParameters, RouteParametersConfig};
-use lightning::sign::EntropySource;
 use lightning_invoice::{
 	Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescription as LdkBolt11InvoiceDescription,
 };
@@ -38,7 +37,7 @@ use crate::payment::store::{
 };
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
-use crate::types::{ChannelManager, KeysManager, PaymentStore};
+use crate::types::{ChannelManager, PaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11Invoice = LdkBolt11Invoice;
@@ -70,7 +69,6 @@ impl_writeable_tlv_based!(PaymentMetadata, {
 pub struct Bolt11Payment {
 	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
-	keys_manager: Arc<KeysManager>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
@@ -83,7 +81,7 @@ pub struct Bolt11Payment {
 impl Bolt11Payment {
 	pub(crate) fn new(
 		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
-		keys_manager: Arc<KeysManager>, connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
+		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
 		peer_store: Arc<PeerStore<Arc<Logger>>>, config: Arc<Config>,
 		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
@@ -91,7 +89,6 @@ impl Bolt11Payment {
 		Self {
 			runtime,
 			channel_manager,
-			keys_manager,
 			connection_manager,
 			liquidity_source,
 			payment_store,
@@ -210,7 +207,15 @@ impl Bolt11Payment {
 		}
 
 		let payment_hash = invoice.payment_hash();
-		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
+		let payment_id = PaymentId(invoice.payment_hash().0);
+		if let Some(payment) = self.payment_store.get(&payment_id) {
+			if payment.status == PaymentStatus::Pending
+				|| payment.status == PaymentStatus::Succeeded
+			{
+				log_error!(self.logger, "Payment error: an invoice must not be paid twice.");
+				return Err(Error::DuplicatePayment);
+			}
+		}
 
 		let route_params_config =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();

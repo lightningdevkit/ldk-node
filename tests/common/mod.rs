@@ -1271,6 +1271,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nA send");
 	let outbound_payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
+	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice, None));
 
 	assert!(!node_a.list_payments_with_filter(|p| p.id == outbound_payment_id).is_empty());
 
