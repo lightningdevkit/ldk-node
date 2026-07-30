@@ -1650,34 +1650,54 @@ impl Wallet {
 	async fn apply_funding_status_update(
 		&self, payment_id: PaymentId, event_txid: Txid, confirmation_status: ConfirmationStatus,
 	) -> Result<bool, Error> {
-		let Some(mut payment) = self.payment_store.get(&payment_id) else {
+		// The funding-type gate, the candidate lookup, and the write share the store's mutation
+		// lock: against a separate `get`, a classification merging in between would have its
+		// `tx_type` and contribution figures clobbered by this stale snapshot.
+		let mut handled = None;
+		self.payment_store
+			.mutate(&payment_id, |existing| {
+				let payment = existing?;
+				let tx_type = match &payment.kind {
+					PaymentKind::Onchain {
+						tx_type:
+							tx_type @ Some(
+								TransactionType::Funding { .. }
+								| TransactionType::InteractiveFunding { .. },
+							),
+						..
+					} => tx_type.clone(),
+					_ => return None,
+				};
+				// Report the figures of the candidate that actually confirmed, which need not be
+				// the last one broadcast (an earlier, lower-fee candidate may win) and may carry
+				// no figures at all (`None`) for a round we didn't contribute to. (`direction` is
+				// invariant across a splice's candidates and cannot be changed through the store
+				// anyway.)
+				let mut target = payment.clone();
+				if let Some(pending) = self.pending_payment_store.get(&payment_id) {
+					if let Some(candidate) = pending.candidate(event_txid) {
+						target.amount_msat = candidate.amount_msat;
+						target.fee_paid_msat = candidate.fee_paid_msat;
+					}
+				}
+				target.kind =
+					PaymentKind::Onchain { txid: event_txid, status: confirmation_status, tx_type };
+
+				// Merge through the update machinery so its rules (e.g. which fields a merge may
+				// touch) keep applying, and skip the write when nothing changed.
+				let mut merged = payment.clone();
+				if merged.update(target.to_update()) {
+					handled = Some(merged.clone());
+					Some(merged)
+				} else {
+					handled = Some(payment.clone());
+					None
+				}
+			})
+			.await?;
+		let Some(payment) = handled else {
 			return Ok(false);
 		};
-		let tx_type = match &payment.kind {
-			PaymentKind::Onchain {
-				tx_type:
-					tx_type @ Some(
-						TransactionType::Funding { .. }
-						| TransactionType::InteractiveFunding { .. },
-					),
-				..
-			} => tx_type.clone(),
-			_ => return Ok(false),
-		};
-		// Report the figures of the candidate that actually confirmed, which need not be the last
-		// one broadcast (an earlier, lower-fee candidate may win) and may carry no figures at all
-		// (`None`) for a round we didn't contribute to. (`direction` is invariant across a splice's
-		// candidates and cannot be changed through the store anyway.)
-		if let Some(pending) = self.pending_payment_store.get(&payment_id) {
-			if let Some(candidate) = pending.candidate(event_txid) {
-				payment.amount_msat = candidate.amount_msat;
-				payment.fee_paid_msat = candidate.fee_paid_msat;
-			}
-		}
-
-		payment.kind =
-			PaymentKind::Onchain { txid: event_txid, status: confirmation_status, tx_type };
-		self.payment_store.insert_or_update(payment.clone()).await?;
 		// Mirror the refreshed confirmation status onto the pending entry: `ChainTipChanged`
 		// graduates by reading the pending entry's details, so it must see the new status. This is
 		// the same dual-write the default `TxConfirmed` path performs; an empty conflicting-txids
