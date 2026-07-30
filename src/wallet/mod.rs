@@ -518,6 +518,36 @@ impl Wallet {
 		Ok(address_info.address)
 	}
 
+	/// Returns a new address, persisting the revealed derivation index in the background rather
+	/// than waiting on it.
+	///
+	/// This exists for sync callbacks (e.g., [`SignerProvider`]) that LDK invokes on runtime
+	/// worker threads while holding channel locks. Blocking such a callback on persistence can
+	/// deadlock the runtime: other tasks blocking synchronously on the same channel locks capture
+	/// the remaining workers, leaving none to drive the persistence future the callback waits on.
+	///
+	/// If the node crashes before the background flush lands, the revealed index is lost and the
+	/// address may be handed out again after restart. BDK's keychain lookahead still detects any
+	/// funds it receives.
+	pub(crate) fn get_new_address_deferring_persist(self: &Arc<Self>) -> bitcoin::Address {
+		let address_info =
+			self.inner.lock().expect("lock").reveal_next_address(KeychainKind::External);
+
+		// Leave the change set staged: whichever flow next takes the persister lock and calls
+		// `take_staged` (possibly the task spawned here) persists the reveal, preserving the
+		// ordering that serializing those two steps under the persister lock establishes.
+		let wallet = Arc::clone(self);
+		self.runtime.spawn_background_task(async move {
+			let mut locked_persister = wallet.persister.lock().await;
+			let change_set = wallet.inner.lock().expect("lock").take_staged().unwrap_or_default();
+			if let Err(e) = locked_persister.persist_changeset(change_set).await {
+				log_error!(wallet.logger, "Failed to persist wallet: {}", e);
+			}
+		});
+
+		address_info.address
+	}
+
 	pub(crate) async fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
 		let mut locked_persister = self.persister.lock().await;
 		let (address_info, change_set) = {
@@ -2090,16 +2120,16 @@ impl SignerProvider for WalletKeysManager {
 	}
 
 	fn get_destination_script(&self, _channel_keys_id: [u8; 32]) -> Result<ScriptBuf, ()> {
-		let address = self.wallet.runtime.block_on(self.wallet.get_new_address()).map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
-		})?;
+		// LDK may invoke this callback on a runtime worker thread while holding channel locks.
+		// It must not block on the runtime, or the runtime can deadlock.
+		let address = self.wallet.get_new_address_deferring_persist();
 		Ok(address.script_pubkey())
 	}
 
 	fn get_shutdown_scriptpubkey(&self) -> Result<ShutdownScript, ()> {
-		let address = self.wallet.runtime.block_on(self.wallet.get_new_address()).map_err(|e| {
-			log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
-		})?;
+		// LDK may invoke this callback on a runtime worker thread while holding channel locks.
+		// It must not block on the runtime, or the runtime can deadlock.
+		let address = self.wallet.get_new_address_deferring_persist();
 
 		match address.witness_program() {
 			Some(program) => ShutdownScript::new_witness_program(&program).map_err(|e| {
