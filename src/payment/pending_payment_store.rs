@@ -296,7 +296,8 @@ mod tests {
 		);
 
 		// The narrow classification update merges the candidates while preserving the
-		// confirmation state wallet sync owns and the confirmed candidate's figures.
+		// confirmation state wallet sync owns. It names the confirmed txid, so its
+		// contribution-derived figures replace the mirrored wallet-view ones.
 		let mut merged = mirrored.clone();
 		let narrow_update = PendingPaymentDetailsUpdate {
 			id: payment_id,
@@ -313,7 +314,7 @@ mod tests {
 			"a narrow classification update must not downgrade a mirrored confirmation",
 		);
 		assert_eq!(merged.candidates, candidates);
-		assert_eq!(merged.details.amount_msat, Some(2_000_000));
-		assert_eq!(merged.details.fee_paid_msat, Some(999));
+		assert_eq!(merged.details.amount_msat, Some(1_000));
+		assert_eq!(merged.details.fee_paid_msat, Some(100));
 	}
 }

@@ -246,11 +246,15 @@ impl StorableObject for PaymentDetails {
 		// Once an on-chain record is confirmed, its txid and figures describe the candidate that
 		// confirmed, which need not be the last one broadcast. An update that doesn't assert the
 		// confirmation state was built without knowing it — e.g. a late funding classification
-		// whose candidate lost to the counterparty's broadcast — so it must not move them.
+		// whose candidate lost to the counterparty's broadcast — so it must not move them. The
+		// exception is an update naming the confirmed txid itself: its figures describe the very
+		// candidate that confirmed and correct the wallet-view amount/fee a sync-created record
+		// carries, which cannot represent our contribution to a shared funding output.
 		let keep_confirmed_figures = update.confirmation_status.is_none()
 			&& matches!(
 				self.kind,
-				PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
+				PaymentKind::Onchain { txid, status: ConfirmationStatus::Confirmed { .. }, .. }
+					if update.txid != Some(txid)
 			);
 
 		if !keep_confirmed_figures {
@@ -1142,10 +1146,11 @@ mod tests {
 			),
 			"reclassification must preserve the confirmation status and keep the funding tx_type",
 		);
-		// The confirmed record's figures describe the candidate that confirmed, so the late
-		// classification must not replace them either.
-		assert_eq!(merged.amount_msat, Some(2_000_000));
-		assert_eq!(merged.fee_paid_msat, Some(999));
+		// The late classification names the confirmed txid, so its contribution-derived figures
+		// replace the record's; only an update for a different candidate leaves them in place
+		// (covered by `funding_reclassification_keeps_confirmed_candidate_figures`).
+		assert_eq!(merged.amount_msat, Some(1_000_000));
+		assert_eq!(merged.fee_paid_msat, Some(500));
 	}
 
 	#[test]
@@ -1233,6 +1238,74 @@ mod tests {
 		assert_eq!(unconfirmed.fee_paid_msat, Some(500));
 	}
 
+	#[test]
+	fn funding_reclassification_merges_figures_for_the_confirmed_candidate() {
+		use bitcoin::hashes::Hash;
+		use std::str::FromStr;
+
+		// Wallet sync confirmed the transaction before classification ran, so the record carries
+		// the wallet's own view of amount/fee, which cannot represent our contribution to a shared
+		// funding output.
+		let confirmed_txid = Txid::from_byte_array([7u8; 32]);
+		let id = PaymentId(confirmed_txid.to_byte_array());
+		let mut record = PaymentDetails::new(
+			id,
+			PaymentKind::Onchain {
+				txid: confirmed_txid,
+				status: ConfirmationStatus::Confirmed {
+					block_hash: BlockHash::from_byte_array([8u8; 32]),
+					height: 100,
+					timestamp: 1,
+				},
+				tx_type: None,
+			},
+			Some(2_000_000),
+			Some(999),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+
+		// The late classification names the candidate that confirmed, so its contribution-derived
+		// figures are authoritative and must replace the wallet-view ones; only an update for a
+		// different (losing) candidate leaves a confirmed record's figures in place.
+		let tx_type = Some(TransactionType::InteractiveFunding {
+			channels: vec![Channel {
+				counterparty_node_id: PublicKey::from_str(
+					"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+				)
+				.unwrap(),
+				channel_id: ChannelId([3u8; 32]),
+			}],
+		});
+		let classified = PaymentDetails::new(
+			id,
+			PaymentKind::Onchain {
+				txid: confirmed_txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type,
+			},
+			Some(1_000_000),
+			Some(500),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+
+		assert!(record.update(PaymentDetailsUpdate::funding_reclassification(classified)));
+		assert!(
+			matches!(
+				record.kind,
+				PaymentKind::Onchain {
+					txid,
+					status: ConfirmationStatus::Confirmed { .. },
+					tx_type: Some(TransactionType::InteractiveFunding { .. }),
+				} if txid == confirmed_txid
+			),
+			"the confirmed txid, confirmation state, and classification must all be in place",
+		);
+		assert_eq!(record.amount_msat, Some(1_000_000));
+		assert_eq!(record.fee_paid_msat, Some(500));
+	}
+
 	#[tokio::test]
 	async fn funding_classification_update_or_insert_preserves_advanced_record() {
 		use bitcoin::hashes::Hash;
@@ -1308,7 +1381,8 @@ mod tests {
 
 		// `update_or_insert` applies only the narrow reclassification when a record exists — no
 		// matter when it appeared — setting the `tx_type` while preserving the confirmation
-		// state wallet sync owns and the confirmed candidate's figures.
+		// state wallet sync owns. The update names the confirmed txid, so its
+		// contribution-derived figures replace the record's wallet-view ones.
 		let store = new_store(vec![advanced.clone()]);
 		let update = PaymentDetailsUpdate::funding_reclassification(fresh.clone());
 		assert_eq!(
@@ -1325,8 +1399,8 @@ mod tests {
 				..
 			}
 		));
-		assert_eq!(merged.amount_msat, Some(2_000_000));
-		assert_eq!(merged.fee_paid_msat, Some(999));
+		assert_eq!(merged.amount_msat, Some(1_000_000));
+		assert_eq!(merged.fee_paid_msat, Some(500));
 
 		// And it inserts the fresh details when no record exists yet.
 		let store = new_store(Vec::new());

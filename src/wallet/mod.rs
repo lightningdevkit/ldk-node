@@ -1405,10 +1405,14 @@ impl Wallet {
 		// the write, and a full merge of the fresh Pending/Unconfirmed details would then
 		// downgrade the confirmation state the wallet-sync events own. `update_or_insert` holds
 		// the store's mutation lock across the whole decision: when a record exists — no matter
-		// when it appeared — only the classification (`tx_type`) and, while the record is still
-		// unconfirmed, the broadcast txid and our contribution figures are merged; otherwise the
-		// fresh details are inserted.
-		let update = PaymentDetailsUpdate::funding_reclassification(details.clone());
+		// when it appeared — only the classification (`tx_type`) and the figures of whichever
+		// candidate the record's state makes authoritative are merged; otherwise the fresh
+		// details are inserted.
+		let update = funding_reclassification_update(
+			details.clone(),
+			&candidates,
+			self.payment_store.get(&details.id).as_ref(),
+		);
 		let pending_update = PendingPaymentDetailsUpdate {
 			id: update.id,
 			payment_update: Some(update.clone()),
@@ -2186,4 +2190,137 @@ fn ldk_to_bdk_satisfaction_weight(ldk_satisfaction_weight: u64) -> Weight {
 		ldk_satisfaction_weight
 			.saturating_sub(EMPTY_SCRIPT_SIG_WEIGHT + EMPTY_WITNESS_COUNT_WEIGHT),
 	)
+}
+
+/// Builds the payment-store update for a freshly classified funding payment. `details` describes
+/// the actively broadcast candidate, but when the record already confirmed a *different*
+/// candidate — wallet sync saw it win before this classification ran — the update instead carries
+/// the confirmed candidate's txid and figures from the candidate history, mirroring what
+/// [`Wallet::apply_funding_status_update`] reports when confirmation arrives after classification.
+///
+/// `current` is an unlocked snapshot; that is safe because [`PaymentDetails::update`] only lets
+/// figures onto a confirmed record when the update names the confirmed txid, so an update built
+/// against a stale snapshot cannot misapply figures if the record's confirmation moves before the
+/// update lands.
+fn funding_reclassification_update(
+	details: PaymentDetails, candidates: &[FundingTxCandidate], current: Option<&PaymentDetails>,
+) -> PaymentDetailsUpdate {
+	let mut update = PaymentDetailsUpdate::funding_reclassification(details);
+	if let Some(PaymentKind::Onchain {
+		txid: confirmed_txid,
+		status: ConfirmationStatus::Confirmed { .. },
+		..
+	}) = current.map(|payment| &payment.kind)
+	{
+		if update.txid != Some(*confirmed_txid) {
+			if let Some(candidate) = candidates.iter().find(|c| c.txid == *confirmed_txid) {
+				update.txid = Some(candidate.txid);
+				update.amount_msat = Some(candidate.amount_msat);
+				update.fee_paid_msat = Some(candidate.fee_paid_msat);
+			}
+		}
+	}
+	update
+}
+
+#[cfg(test)]
+mod tests {
+	use bitcoin::hashes::Hash;
+
+	use super::*;
+
+	fn onchain_details(txid: Txid, status: ConfirmationStatus) -> PaymentDetails {
+		PaymentDetails::new(
+			PaymentId([42u8; 32]),
+			PaymentKind::Onchain { txid, status, tx_type: None },
+			Some(1_000_000),
+			Some(500),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		)
+	}
+
+	fn confirmed_status() -> ConfirmationStatus {
+		ConfirmationStatus::Confirmed {
+			block_hash: bitcoin::BlockHash::from_byte_array([8u8; 32]),
+			height: 100,
+			timestamp: 1,
+		}
+	}
+
+	#[test]
+	fn funding_reclassification_update_substitutes_the_confirmed_candidate() {
+		let confirmed_txid = Txid::from_byte_array([1u8; 32]);
+		let active_txid = Txid::from_byte_array([2u8; 32]);
+		let candidates = vec![
+			FundingTxCandidate {
+				txid: confirmed_txid,
+				amount_msat: Some(2_000_000),
+				fee_paid_msat: Some(999),
+			},
+			FundingTxCandidate {
+				txid: active_txid,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+			},
+		];
+		let details = onchain_details(active_txid, ConfirmationStatus::Unconfirmed);
+
+		// The record confirmed an earlier candidate: the update reports that candidate, not the
+		// active one.
+		let current = onchain_details(confirmed_txid, confirmed_status());
+		let update = funding_reclassification_update(details.clone(), &candidates, Some(&current));
+		assert_eq!(update.txid, Some(confirmed_txid));
+		assert_eq!(update.amount_msat, Some(Some(2_000_000)));
+		assert_eq!(update.fee_paid_msat, Some(Some(999)));
+
+		// A confirmed candidate we did not contribute to still substitutes, with empty figures —
+		// the same figures a confirmation arriving after classification would report.
+		let uncontributed = vec![FundingTxCandidate {
+			txid: confirmed_txid,
+			amount_msat: None,
+			fee_paid_msat: None,
+		}];
+		let update =
+			funding_reclassification_update(details.clone(), &uncontributed, Some(&current));
+		assert_eq!(update.txid, Some(confirmed_txid));
+		assert_eq!(update.amount_msat, Some(None));
+		assert_eq!(update.fee_paid_msat, Some(None));
+	}
+
+	#[test]
+	fn funding_reclassification_update_keeps_the_active_candidate() {
+		let active_txid = Txid::from_byte_array([2u8; 32]);
+		let candidates = vec![FundingTxCandidate {
+			txid: active_txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let details = onchain_details(active_txid, ConfirmationStatus::Unconfirmed);
+
+		// No record yet: the update describes the active candidate.
+		let update = funding_reclassification_update(details.clone(), &candidates, None);
+		assert_eq!(update.txid, Some(active_txid));
+		assert_eq!(update.amount_msat, Some(Some(1_000_000)));
+
+		// An unconfirmed record: still the active candidate (RBF rotation).
+		let unconfirmed =
+			onchain_details(Txid::from_byte_array([1u8; 32]), ConfirmationStatus::Unconfirmed);
+		let update =
+			funding_reclassification_update(details.clone(), &candidates, Some(&unconfirmed));
+		assert_eq!(update.txid, Some(active_txid));
+
+		// The record confirmed the active candidate itself: nothing to substitute.
+		let current = onchain_details(active_txid, confirmed_status());
+		let update = funding_reclassification_update(details.clone(), &candidates, Some(&current));
+		assert_eq!(update.txid, Some(active_txid));
+		assert_eq!(update.amount_msat, Some(Some(1_000_000)));
+
+		// A confirmed txid outside the candidate history (e.g. the record is an unrelated
+		// same-id payment): fall back to the active candidate; `PaymentDetails::update` keeps
+		// the confirmed figures in place on mismatch.
+		let foreign = onchain_details(Txid::from_byte_array([9u8; 32]), confirmed_status());
+		let update = funding_reclassification_update(details, &candidates, Some(&foreign));
+		assert_eq!(update.txid, Some(active_txid));
+	}
 }
