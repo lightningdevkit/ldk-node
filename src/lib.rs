@@ -240,8 +240,22 @@ impl RgsPeerRecoveryExclusions {
 		self.node_ids.write().await
 	}
 
+	#[cfg(test)]
 	async fn exclude_after_disconnect(&self, node_id: PublicKey) {
 		self.write().await.insert(node_id);
+	}
+
+	async fn remove_peer_and_exclude_after_disconnect<L>(
+		&self, peer_store: &PeerStore<L>, node_id: PublicKey,
+	) -> Result<(), Error>
+	where
+		L: Deref,
+		L::Target: LdkLogger,
+	{
+		let mut excluded_node_ids = self.write().await;
+		peer_store.remove_peer(&node_id).await?;
+		excluded_node_ids.insert(node_id);
+		Ok(())
 	}
 
 	async fn exclude_after_last_channel_close(&self, node_id: PublicKey) {
@@ -1473,6 +1487,9 @@ impl Node {
 	/// in the network graph, startup may persist the peer again so the channel can reconnect.
 	/// Background RGS retries will not re-persist the peer during this node instance unless the
 	/// peer is explicitly connected with persistence enabled or a new channel is opened.
+	///
+	/// Returns [`Error::PersistenceFailed`] without disconnecting the peer if removing the peer from
+	/// persistent storage fails.
 	pub fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
 		if !*self.is_running.read().unwrap() {
 			return Err(Error::NotRunning);
@@ -1481,14 +1498,11 @@ impl Node {
 		log_info!(self.logger, "Disconnecting peer {}..", counterparty_node_id);
 
 		self.runtime.block_on(
-			self.rgs_peer_recovery_exclusions.exclude_after_disconnect(counterparty_node_id),
-		);
-		match self.runtime.block_on(self.peer_store.remove_peer(&counterparty_node_id)) {
-			Ok(()) => {},
-			Err(e) => {
-				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
-			},
-		}
+			self.rgs_peer_recovery_exclusions.remove_peer_and_exclude_after_disconnect(
+				self.peer_store.as_ref(),
+				counterparty_node_id,
+			),
+		)?;
 
 		self.peer_manager.disconnect_by_node_id(counterparty_node_id);
 		Ok(())
@@ -2632,11 +2646,96 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 
 #[cfg(test)]
 mod tests {
+	use std::future::Future;
+	use std::pin::Pin;
 	use std::str::FromStr;
+	use std::sync::atomic::{AtomicBool, Ordering};
 	use std::sync::Arc;
 	use std::time::Duration;
 
+	use bitcoin::Network;
+	use lightning::io;
+	use lightning::util::persist::{KVStore, KVStoreSync};
+
 	use super::*;
+	use crate::builder::NodeBuilder;
+	use crate::config::Config;
+	use crate::io::test_utils::InMemoryStore;
+
+	struct FailNextWriteStore {
+		inner: InMemoryStore,
+		fail_next_write: AtomicBool,
+	}
+
+	impl FailNextWriteStore {
+		fn new() -> Self {
+			Self { inner: InMemoryStore::new(), fail_next_write: AtomicBool::new(false) }
+		}
+
+		fn fail_next_write(&self) {
+			self.fail_next_write.store(true, Ordering::Relaxed);
+		}
+	}
+
+	impl KVStore for FailNextWriteStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send>> {
+			KVStore::read(&self.inner, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
+			if self.fail_next_write.swap(false, Ordering::Relaxed) {
+				return Box::pin(async {
+					Err(io::Error::new(io::ErrorKind::Other, "Injected write failure"))
+				});
+			}
+			KVStore::write(&self.inner, primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
+			KVStore::remove(&self.inner, primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + 'static + Send>> {
+			KVStore::list(&self.inner, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl KVStoreSync for FailNextWriteStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> io::Result<Vec<u8>> {
+			KVStoreSync::read(&self.inner, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> io::Result<()> {
+			if self.fail_next_write.swap(false, Ordering::Relaxed) {
+				return Err(io::Error::new(io::ErrorKind::Other, "Injected write failure"));
+			}
+			KVStoreSync::write(&self.inner, primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> io::Result<()> {
+			KVStoreSync::remove(&self.inner, primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> io::Result<Vec<String>> {
+			KVStoreSync::list(&self.inner, primary_namespace, secondary_namespace)
+		}
+	}
 
 	fn test_node_id() -> PublicKey {
 		PublicKey::from_str("0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993")
@@ -2653,6 +2752,33 @@ mod tests {
 			node_id,
 			address: SocketAddress::from_str(&format!("127.0.0.1:{port}")).unwrap(),
 		}
+	}
+
+	#[test]
+	fn disconnect_propagates_peer_removal_persistence_failure() {
+		let config = Config { network: Network::Regtest, ..Config::default() };
+		let mut builder = NodeBuilder::from_config(config);
+		builder.set_chain_source_esplora("http://127.0.0.1:1".to_string(), None);
+		builder.set_entropy_seed_bytes([42u8; 64]);
+		builder.set_log_facade_logger();
+
+		let store = Arc::new(FailNextWriteStore::new());
+		let dyn_store: Arc<DynStore> = store.clone();
+		let node = builder.build_with_store(dyn_store).unwrap();
+		let node_id = test_node_id();
+		let peer_info = test_peer_info(node_id, 9738);
+		node.runtime.block_on(node.peer_store.add_peer(peer_info.clone())).unwrap();
+		*node.is_running.write().unwrap() = true;
+
+		store.fail_next_write();
+		assert!(matches!(node.disconnect(node_id), Err(Error::PersistenceFailed)));
+		assert_eq!(node.peer_store.get_peer(&node_id), Some(peer_info));
+		assert!(!node.runtime.block_on(node.rgs_peer_recovery_exclusions.contains(&node_id)));
+
+		node.disconnect(node_id).unwrap();
+		assert!(node.peer_store.get_peer(&node_id).is_none());
+		assert!(node.runtime.block_on(node.rgs_peer_recovery_exclusions.contains(&node_id)));
+		*node.is_running.write().unwrap() = false;
 	}
 
 	#[tokio::test]
