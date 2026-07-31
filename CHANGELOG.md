@@ -1,4 +1,4 @@
-# 0.7.0-rc.61 (Synonym Fork)
+# 0.7.0-rc.62 (Synonym Fork)
 
 ## Bug Fixes
 
@@ -70,6 +70,8 @@
 
 ## Synonym Fork Additions
 
+- Made explicit peer disconnect atomic with durable peer-store removal so persistence failures remain
+  visible and retryable.
 - Added stable GNU build IDs to every Android ABI.
 - Added rolling lookahead for derived on-chain accounts after their initial full scan.
 - Added configurable Electrum batch size and stop gap for full scans of non-primary on-chain
