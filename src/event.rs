@@ -2146,7 +2146,8 @@ where
 							&self.network_graph,
 							&self.peer_store,
 							self.logger.clone(),
-						);
+						)
+						.await;
 					}
 				}
 			},

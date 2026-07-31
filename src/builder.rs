@@ -2590,12 +2590,12 @@ fn build_with_store_internal(
 		},
 	};
 
-	persist_missing_channel_peers(
+	runtime.block_on(persist_missing_channel_peers(
 		channel_manager.list_channels().into_iter().map(|channel| channel.counterparty.node_id),
 		&network_graph,
 		&peer_store,
 		Arc::clone(&logger),
-	);
+	));
 
 	let om_mailbox = if let Some(AsyncPaymentsRole::Server) = async_payments_role {
 		Some(Arc::new(OnionMessageMailbox::new()))
