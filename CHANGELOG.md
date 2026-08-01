@@ -1,7 +1,8 @@
-# 0.7.0-rc.60 (Synonym Fork)
+# 0.7.0-rc.62 (Synonym Fork)
 
 ## Bug Fixes
 
+- Moved peer persistence to async KV storage so slow writes no longer hold the peer-store lock.
 - Prevented Electrum runtime self-drop crashes and unbounded shutdown waits.
 - Scaled Electrum full-scan timeouts for additional wallets with the configured stop gap and batch
   size.
@@ -69,6 +70,8 @@
 
 ## Synonym Fork Additions
 
+- Made explicit peer disconnect atomic with durable peer-store removal so persistence failures remain
+  visible and retryable.
 - Added stable GNU build IDs to every Android ABI.
 - Added rolling lookahead for derived on-chain accounts after their initial full scan.
 - Added configurable Electrum batch size and stop gap for full scans of non-primary on-chain

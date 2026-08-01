@@ -1,6 +1,6 @@
 [project]
 name = "ldk_node"
-version = "0.7.0-rc.60"
+version = "0.7.0-rc.62"
 authors = [
   { name="Elias Rohrer", email="dev@tnull.de" },
 ]
