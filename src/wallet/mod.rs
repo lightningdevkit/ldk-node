@@ -398,35 +398,41 @@ impl Wallet {
 					self.payment_store.insert_or_update(payment.clone()).await?;
 
 					if payment_status == PaymentStatus::Pending {
-						let pending_payment =
-							self.create_pending_payment_from_tx(payment, Vec::new());
-
-						self.pending_payment_store.insert_or_update(pending_payment).await?;
+						self.upsert_pending_payment(payment, Vec::new()).await?;
 					}
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
 					let pending_payments: Vec<PendingPaymentDetails> = self
 						.pending_payment_store
-						.list_filter(|p| {
-							debug_assert!(
-								p.details.status == PaymentStatus::Pending,
-								"Non-pending payment {:?} found in pending store",
-								p.details.id,
-							);
-							p.details.status == PaymentStatus::Pending
-								&& matches!(p.details.kind, PaymentKind::Onchain { .. })
+						.list_filter(|p| match p.details() {
+							// A pre-broadcast splice intent carries no payment yet and cannot
+							// graduate.
+							None => false,
+							Some(details) => {
+								debug_assert!(
+									details.status == PaymentStatus::Pending,
+									"Non-pending payment {:?} found in pending store",
+									details.id,
+								);
+								details.status == PaymentStatus::Pending
+									&& matches!(details.kind, PaymentKind::Onchain { .. })
+							},
 						})
 						.await;
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
 
 					for payment in pending_payments {
-						match payment.details.kind {
+						// The filter admits only Tracked funding payments.
+						let PendingPaymentDetails::Tracked { ref details, .. } = payment else {
+							continue;
+						};
+						match details.kind {
 							PaymentKind::Onchain {
 								status: ConfirmationStatus::Confirmed { height, .. },
 								..
 							} => {
-								let payment_id = payment.details.id;
+								let payment_id = details.id;
 								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
 									// Graduate from the live record, not the snapshot listed
 									// above: a classification landing since then must not have
@@ -476,7 +482,7 @@ impl Wallet {
 								{
 									continue;
 								}
-								if payment.details.direction == PaymentDirection::Outbound {
+								if details.direction == PaymentDirection::Outbound {
 									unconfirmed_outbound_txids.push(txid);
 								}
 							},
@@ -560,10 +566,8 @@ impl Wallet {
 							ConfirmationStatus::Unconfirmed,
 						)
 					};
-					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.payment_store.insert_or_update(payment).await?;
-					self.pending_payment_store.insert_or_update(pending_payment).await?;
+					self.payment_store.insert_or_update(payment.clone()).await?;
+					self.upsert_pending_payment(payment, Vec::new()).await?;
 				},
 				WalletEvent::TxReplaced { txid, conflicts, .. } => {
 					// See `TxConfirmed`: id resolution and the writes below must not interleave
@@ -610,10 +614,7 @@ impl Wallet {
 						continue;
 					}
 
-					let pending_payment_details =
-						self.create_pending_payment_from_tx(payment, conflict_txids.clone());
-
-					self.pending_payment_store.insert_or_update(pending_payment_details).await?;
+					self.upsert_pending_payment(payment, conflict_txids).await?;
 				},
 				WalletEvent::TxDropped { txid, tx } => {
 					// See `TxConfirmed`: id resolution and the writes below must not interleave
@@ -665,10 +666,8 @@ impl Wallet {
 							ConfirmationStatus::Unconfirmed,
 						)
 					};
-					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.payment_store.insert_or_update(payment).await?;
-					self.pending_payment_store.insert_or_update(pending_payment).await?;
+					self.payment_store.insert_or_update(payment.clone()).await?;
+					self.upsert_pending_payment(payment, Vec::new()).await?;
 				},
 				_ => {
 					continue;
@@ -729,19 +728,22 @@ impl Wallet {
 	async fn fail_funding_payment_lost_to_conflict(
 		&self, payment: &PendingPaymentDetails, tip_height: u32,
 	) -> Result<bool, Error> {
-		match payment.details.kind {
-			PaymentKind::Onchain {
-				status: ConfirmationStatus::Unconfirmed,
-				tx_type:
-					Some(
-						TransactionType::Funding { .. }
-						| TransactionType::InteractiveFunding { .. },
-					),
-				..
-			} => {},
-			_ => return Ok(false),
-		}
-		if payment.conflicting_txids.is_empty() {
+		let payment_id = match payment.details() {
+			Some(details) => match details.kind {
+				PaymentKind::Onchain {
+					status: ConfirmationStatus::Unconfirmed,
+					tx_type:
+						Some(
+							TransactionType::Funding { .. }
+							| TransactionType::InteractiveFunding { .. },
+						),
+					..
+				} => details.id,
+				_ => return Ok(false),
+			},
+			None => return Ok(false),
+		};
+		if payment.conflicting_txids().is_empty() {
 			return Ok(false);
 		}
 
@@ -751,11 +753,15 @@ impl Wallet {
 		let _guard = self.funding_payment_update_lock.lock().await;
 
 		// Re-read the entry under the lock; the listing snapshot may predate a record write.
-		let entry = match self.pending_payment_store.get(&payment.details.id).await? {
+		let entry = match self.pending_payment_store.get(&payment_id).await? {
 			Some(entry) => entry,
 			None => return Ok(false),
 		};
-		let record_txid = match entry.details.kind {
+		let PendingPaymentDetails::Tracked { details, conflicting_txids, candidates, .. } = &entry
+		else {
+			return Ok(false);
+		};
+		let record_txid = match details.kind {
 			PaymentKind::Onchain {
 				txid,
 				status: ConfirmationStatus::Unconfirmed,
@@ -768,8 +774,7 @@ impl Wallet {
 			_ => return Ok(false),
 		};
 
-		let foreign_conflicts: Vec<Txid> = entry
-			.conflicting_txids
+		let foreign_conflicts: Vec<Txid> = conflicting_txids
 			.iter()
 			.copied()
 			.filter(|conflict| *conflict != record_txid && entry.candidate(*conflict).is_none())
@@ -783,7 +788,7 @@ impl Wallet {
 			// `get_tx` is canonical-only: a transaction that lost to a confirmed conflict
 			// returns `None`, while one that can still confirm is `Some`.
 			let a_candidate_is_live = locked_wallet.get_tx(record_txid).is_some()
-				|| entry.candidates.iter().any(|c| locked_wallet.get_tx(c.txid).is_some());
+				|| candidates.iter().any(|c| locked_wallet.get_tx(c.txid).is_some());
 			!a_candidate_is_live
 				&& foreign_conflicts.iter().any(|conflict| {
 					match locked_wallet.get_tx(*conflict).map(|tx| tx.chain_position) {
@@ -798,7 +803,7 @@ impl Wallet {
 			return Ok(false);
 		}
 
-		let payment_id = entry.details.id;
+		let payment_id = entry.id();
 		let outcome =
 			self.fail_unconfirmed_funding_payment_locked(&_guard, payment_id, record_txid).await?;
 		match outcome {
@@ -937,8 +942,12 @@ impl Wallet {
 		let entries =
 			self.pending_payment_store.list_filter(|entry| tracks_channel(entry, channel_id)).await;
 		for entry in entries {
-			let payment_id = entry.details.id;
-			let record_txid = match &entry.details.kind {
+			let details = match entry.details() {
+				Some(details) => details,
+				None => continue,
+			};
+			let payment_id = details.id;
+			let record_txid = match &details.kind {
 				PaymentKind::Onchain {
 					txid,
 					status: ConfirmationStatus::Unconfirmed,
@@ -959,13 +968,13 @@ impl Wallet {
 			// only where no candidate records it.
 			let recorded_round = entry.candidate(record_txid).is_none().then_some(record_txid);
 			let mut rounds_of_ours = entry
-				.candidates
+				.candidates()
 				.iter()
 				.filter(|candidate| candidate.amount_msat.is_some())
 				.map(|candidate| candidate.txid)
 				.chain(recorded_round);
 			if let Some(kept) = rounds_of_ours
-				.find(|txid| held_rounds.contains(txid) || entry.locked_rounds.contains(txid))
+				.find(|txid| held_rounds.contains(txid) || entry.locked_rounds().contains(txid))
 			{
 				log_info!(
 					self.logger,
@@ -1078,18 +1087,17 @@ impl Wallet {
 			.list_filter(|entry| {
 				tracks_channel(entry, channel_id)
 					&& entry.candidate(txid).is_some()
-					&& !entry.locked_rounds.contains(&txid)
+					&& !entry.locked_rounds().contains(&txid)
 			})
 			.await;
 		for entry in entries {
-			let payment_id = entry.details.id;
+			let payment_id = entry.id();
 			self.pending_payment_store
 				.mutate(&payment_id, |existing| {
 					let mut entry = existing?.clone();
-					if entry.locked_rounds.contains(&txid) {
+					if !entry.record_locked_round(txid) {
 						return None;
 					}
-					entry.locked_rounds.push(txid);
 					Some(entry)
 				})
 				.await?;
@@ -2315,7 +2323,7 @@ impl Wallet {
 		// pushed before this signing event and has been handled by now. Should LDK ever reorder
 		// them, this would clear the mark of a round whose event has not been handled yet.
 		let mut recorded =
-			prior_pending.as_ref().map(|entry| entry.candidates.clone()).unwrap_or_default();
+			prior_pending.as_ref().map(|entry| entry.candidates().to_vec()).unwrap_or_default();
 		for candidate in history {
 			match recorded.iter_mut().find(|stored| stored.txid == candidate.txid) {
 				Some(stored) => *stored = candidate,
@@ -2381,12 +2389,14 @@ impl Wallet {
 			})
 			.await;
 		for entry in entries {
-			let payment_id = entry.details.id;
+			let payment_id = entry.id();
 			self.pending_payment_store
 				.mutate(&payment_id, |existing| {
 					let mut entry = existing?.clone();
-					let round = entry
-						.candidates
+					let PendingPaymentDetails::Tracked { candidates, .. } = &mut entry else {
+						return None;
+					};
+					let round = candidates
 						.iter_mut()
 						.find(|candidate| candidate.txid == txid && candidate.awaiting_broadcast)?;
 					round.awaiting_broadcast = false;
@@ -2448,12 +2458,15 @@ impl Wallet {
 			.pending_payment_store
 			.list_filter(|entry| {
 				tracks_channel(entry, channel_id)
-					&& entry.candidates.iter().any(|candidate| candidate.awaiting_broadcast)
+					&& entry.candidates().iter().any(|candidate| candidate.awaiting_broadcast)
 			})
 			.await;
 
 		for entry in entries {
-			let payment_id = entry.details.id;
+			let payment_id = match entry.details() {
+				Some(details) => details.id,
+				None => continue,
+			};
 			let (abandoned, remaining): (Vec<FundingTxCandidate>, Vec<FundingTxCandidate>) = {
 				let locked_wallet = self.inner.lock().expect("lock");
 				// TODO(#1037): the graph learns a round LDK broadcast from wallet sync alone
@@ -2462,10 +2475,10 @@ impl Wallet {
 				// sweep or a live event — runs the drop, only once the `InteractiveFunding`
 				// broadcast arm applies the round to the graph, which #1037 does not do: it
 				// prepares only `Funding`-typed packages.
-				entry.candidates.iter().cloned().partition(|candidate| {
+				entry.candidates().iter().cloned().partition(|candidate| {
 					candidate.awaiting_broadcast
 						&& !held_rounds.contains(&candidate.txid)
-						&& !entry.locked_rounds.contains(&candidate.txid)
+						&& !entry.locked_rounds().contains(&candidate.txid)
 						&& locked_wallet.tx_graph().get_tx(candidate.txid).is_none()
 				})
 			};
@@ -2546,9 +2559,11 @@ impl Wallet {
 			self.pending_payment_store
 				.mutate(&payment_id, |existing| {
 					let mut entry = existing?.clone();
-					entry.candidates.retain(|c| !abandoned_txids.contains(&c.txid));
-					if let Some(mirrored) = mirrored {
-						entry.details = mirrored;
+					if let PendingPaymentDetails::Tracked { details, candidates, .. } = &mut entry {
+						candidates.retain(|c| !abandoned_txids.contains(&c.txid));
+						if let Some(mirrored) = mirrored {
+							*details = mirrored;
+						}
 					}
 					Some(entry)
 				})
@@ -2577,15 +2592,15 @@ impl Wallet {
 		let channels: HashSet<ChannelId> = self
 			.pending_payment_store
 			.list_filter(|entry| {
-				entry.candidates.iter().any(|candidate| candidate.awaiting_broadcast)
+				entry.candidates().iter().any(|candidate| candidate.awaiting_broadcast)
 			})
 			.await
 			.iter()
-			.flat_map(|entry| match &entry.details.kind {
-				PaymentKind::Onchain {
+			.flat_map(|entry| match entry.details().map(|details| &details.kind) {
+				Some(PaymentKind::Onchain {
 					tx_type: Some(TransactionType::InteractiveFunding { channels }),
 					..
-				} => channels.iter().map(|channel| channel.channel_id).collect(),
+				}) => channels.iter().map(|channel| channel.channel_id).collect(),
 				_ => Vec::new(),
 			})
 			.collect();
@@ -2768,6 +2783,7 @@ impl Wallet {
 							payment_update: Some(update),
 							conflicting_txids: None,
 							candidates,
+							splice_intent: None,
 						};
 						entry.update(pending_update).then_some(entry)
 					},
@@ -2839,10 +2855,52 @@ impl Wallet {
 		PaymentDetails::new(payment_id, kind, amount_msat, fee_paid_msat, direction, payment_status)
 	}
 
-	fn create_pending_payment_from_tx(
+	/// Inserts or refreshes the pending-store entry tracking `payment` toward graduation,
+	/// atomically with reading the entry's current state.
+	async fn upsert_pending_payment(
 		&self, payment: PaymentDetails, conflicting_txids: Vec<Txid>,
-	) -> PendingPaymentDetails {
-		PendingPaymentDetails::new(payment, conflicting_txids, Vec::new())
+	) -> Result<(), Error> {
+		let id = payment.id;
+		let payment_store = Arc::clone(&self.payment_store);
+		self.pending_payment_store
+			.mutate_async(&id, move |existing| async move {
+				// Only `Pending` payments belong in the pending store. Like in
+				// [`Self::persist_funding_payment`], the authoritative status is re-read inside
+				// the store's critical section, where it cannot go stale against graduation.
+				let is_pending = payment_store
+					.get(&id)
+					.await?
+					.map_or(payment.status == PaymentStatus::Pending, |recorded| {
+						recorded.status == PaymentStatus::Pending
+					});
+				if !is_pending {
+					return Ok(None);
+				}
+				Ok(match existing {
+					None => {
+						Some(PendingPaymentDetails::new(payment, conflicting_txids, Vec::new()))
+					},
+					// Promote a pre-broadcast splice intent: wallet sync saw the splice
+					// transaction before this node recorded it as a funding payment. Carrying the
+					// intent into the `Tracked` record makes the entry visible to txid lookups
+					// while the retrier keeps the intent until the splice locks.
+					Some(PendingPaymentDetails::PendingSplice { intent, .. }) => {
+						Some(PendingPaymentDetails::tracked(
+							payment,
+							conflicting_txids,
+							Vec::new(),
+							Some(intent),
+						))
+					},
+					Some(mut tracked @ PendingPaymentDetails::Tracked { .. }) => {
+						let fresh =
+							PendingPaymentDetails::new(payment, conflicting_txids, Vec::new());
+						tracked.update(fresh.to_update()).then_some(tracked)
+					},
+				})
+			})
+			.await?;
+		Ok(())
 	}
 
 	async fn find_payment_by_txid(&self, target_txid: Txid) -> Result<Option<PaymentId>, Error> {
@@ -2854,8 +2912,9 @@ impl Wallet {
 		if let Some(replaced_details) = self
 			.pending_payment_store
 			.list_filter(|p| {
-				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
-					|| p.conflicting_txids.contains(&target_txid)
+				p.details().is_some_and(
+					|d| matches!(d.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid),
+				) || p.conflicting_txids().contains(&target_txid)
 					// A middle RBF round is not the record's current txid and may never have
 					// received a `TxReplaced` event of its own, so map any of its candidate
 					// txids (an earlier RBF round may confirm) back to the record.
@@ -2864,7 +2923,7 @@ impl Wallet {
 			.await
 			.first()
 		{
-			return Ok(Some(replaced_details.details.id));
+			return Ok(Some(replaced_details.id()));
 		}
 
 		// The pending store only indexes in-flight records — graduation removes the entry — so a
@@ -2974,8 +3033,7 @@ impl Wallet {
 		// the same dual-write the default `TxConfirmed` path performs; an empty conflicting-txids
 		// list leaves any stored conflicts intact (the update treats absent as "unchanged").
 		if payment.status == PaymentStatus::Pending {
-			let pending = self.create_pending_payment_from_tx(payment, Vec::new());
-			self.pending_payment_store.insert_or_update(pending).await?;
+			self.upsert_pending_payment(payment, Vec::new()).await?;
 		}
 		Ok(FundingStatusUpdate::Applied)
 	}
@@ -3218,8 +3276,6 @@ impl Wallet {
 			ConfirmationStatus::Unconfirmed,
 		);
 
-		let pending_payment_store =
-			self.create_pending_payment_from_tx(new_payment.clone(), Vec::new());
 		let change_set = locked_wallet.take_staged().unwrap_or_default();
 		drop(locked_wallet);
 		locked_persister.persist_changeset(change_set).await.map_err(|e| {
@@ -3227,8 +3283,8 @@ impl Wallet {
 			Error::PersistenceFailed
 		})?;
 
-		self.payment_store.insert_or_update(new_payment).await?;
-		self.pending_payment_store.insert_or_update(pending_payment_store).await?;
+		self.payment_store.insert_or_update(new_payment.clone()).await?;
+		self.upsert_pending_payment(new_payment, Vec::new()).await?;
 
 		self.broadcaster.broadcast_unclassified_transaction(fee_bumped_tx);
 
@@ -3282,11 +3338,11 @@ fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
 
 /// Whether `entry` is the funding payment of a splice into `channel_id`.
 fn tracks_channel(entry: &PendingPaymentDetails, channel_id: ChannelId) -> bool {
-	match &entry.details.kind {
-		PaymentKind::Onchain {
+	match entry.details().map(|details| &details.kind) {
+		Some(PaymentKind::Onchain {
 			tx_type: Some(TransactionType::InteractiveFunding { channels }),
 			..
-		} => channels.iter().any(|channel| channel.channel_id == channel_id),
+		}) => channels.iter().any(|channel| channel.channel_id == channel_id),
 		_ => false,
 	}
 }
@@ -5088,7 +5144,7 @@ mod tests {
 		}
 		let record = wallet.pending_payment_store.get(&id).await.unwrap().expect("record");
 		assert_eq!(
-			record.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(),
+			record.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(),
 			vec![prior_txid, txid]
 		);
 		let prior = record.candidate(prior_txid).unwrap();
@@ -5149,7 +5205,7 @@ mod tests {
 		assert_eq!(payment.status, PaymentStatus::Pending);
 		assert!(matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == bump_txid));
 		let entry = wallet.pending_payment_store.get(&bump_id).await.unwrap().expect("entry");
-		assert_eq!(entry.details, payment);
+		assert_eq!(entry.details(), Some(&payment));
 		assert!(entry.candidate(bump_txid).expect("candidate").awaiting_broadcast);
 		let failed =
 			wallet.payment_store.get(&failed_id).await.unwrap().expect("the failed record stays");
@@ -5186,7 +5242,7 @@ mod tests {
 		assert_eq!(wallet.payment_store.get(&id).await.unwrap(), Some(payment));
 		let record = wallet.pending_payment_store.get(&id).await.unwrap().expect("record");
 		assert_eq!(
-			record.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(),
+			record.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(),
 			vec![prior_txid, txid]
 		);
 		assert!(!record.candidate(txid).unwrap().awaiting_broadcast);
@@ -5400,7 +5456,7 @@ mod tests {
 		assert_eq!(payments[0].amount_msat, Some(400_700_000));
 		let record = wallet.pending_payment_store.get(&id).await.unwrap().expect("record");
 		assert_eq!(
-			record.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(),
+			record.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(),
 			vec![prior_txid, txid, next_txid]
 		);
 		assert_eq!(record.candidate(txid).unwrap().amount_msat, Some(500_300_000));
@@ -5474,7 +5530,7 @@ mod tests {
 		wallet.drop_abandoned_splice_rounds(channel_id, &[txid]).await.unwrap();
 
 		let record = wallet.pending_payment_store.get(&id).await.unwrap().expect("record");
-		assert_eq!(record.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
+		assert_eq!(record.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
 		let payment = wallet.payment_store.get(&id).await.unwrap().expect("payment");
 		assert!(
 			matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == txid),
@@ -5482,7 +5538,7 @@ mod tests {
 		);
 		assert_eq!(payment.amount_msat, Some(500_300_000));
 		assert_eq!(payment.fee_paid_msat, Some(300_000));
-		assert_eq!(record.details, payment);
+		assert_eq!(record.details(), Some(&payment));
 		assert_eq!(wallet.find_payment_by_txid(bump_txid).await.unwrap(), None);
 		assert_eq!(wallet.find_payment_by_txid(txid).await.unwrap(), Some(id));
 	}
@@ -5510,7 +5566,7 @@ mod tests {
 		wallet.drop_abandoned_splice_rounds(channel_id, &[]).await.unwrap();
 
 		let record = wallet.pending_payment_store.get(&id).await.unwrap().expect("record");
-		assert_eq!(record.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
+		assert_eq!(record.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
 		let payment = wallet.payment_store.get(&id).await.unwrap().expect("payment");
 		assert!(matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == txid));
 		assert_eq!(payment.status, PaymentStatus::Pending);
@@ -5549,7 +5605,7 @@ mod tests {
 		wallet.drop_abandoned_splice_rounds(channel_id, &[]).await.unwrap();
 
 		let record = wallet.pending_payment_store.get(&id).await.unwrap().expect("record");
-		assert_eq!(record.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
+		assert_eq!(record.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
 		let payment = wallet.payment_store.get(&id).await.unwrap().expect("payment");
 		assert!(matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == txid));
 		assert_eq!(payment.amount_msat, Some(500_300_000));
@@ -5632,8 +5688,8 @@ mod tests {
 
 		assert_eq!(wallet.payment_store.get(&id).await.unwrap(), Some(payment.clone()));
 		let record = wallet.pending_payment_store.get(&id).await.unwrap().expect("record");
-		assert_eq!(record.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
-		assert_eq!(record.details, payment);
+		assert_eq!(record.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
+		assert_eq!(record.details(), Some(&payment));
 		assert_eq!(wallet.find_payment_by_txid(bump_txid).await.unwrap(), None);
 	}
 
@@ -5697,18 +5753,19 @@ mod tests {
 		update.fee_paid_msat = Some(Some(300_000));
 		wallet.payment_store.update(update).await.unwrap();
 		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("entry");
-		assert!(
-			matches!(entry.details.kind, PaymentKind::Onchain { txid: t, .. } if t == bump_txid)
-		);
+		assert!(matches!(
+			entry.details().map(|details| &details.kind),
+			Some(PaymentKind::Onchain { txid: t, .. }) if *t == bump_txid
+		));
 
 		wallet.drop_abandoned_splice_rounds(channel_id, &[txid]).await.unwrap();
 
 		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("entry");
-		assert_eq!(entry.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
+		assert_eq!(entry.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
 		let payment = wallet.payment_store.get(&id).await.unwrap().expect("payment");
 		assert!(matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == txid));
 		assert_eq!(payment.amount_msat, Some(500_300_000));
-		assert_eq!(entry.details, payment);
+		assert_eq!(entry.details(), Some(&payment));
 		assert_eq!(wallet.find_payment_by_txid(bump_txid).await.unwrap(), None);
 	}
 
@@ -5902,8 +5959,8 @@ mod tests {
 		assert_eq!(payment.status, PaymentStatus::Succeeded);
 		assert!(matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == bump_txid));
 		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("entry");
-		assert_eq!(entry.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
-		assert_eq!(entry.details.status, PaymentStatus::Pending);
+		assert_eq!(entry.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
+		assert_eq!(entry.details().map(|details| details.status), Some(PaymentStatus::Pending));
 	}
 
 	/// The signing write failed between its two stores and the rollback failed as well, leaving
@@ -5965,7 +6022,7 @@ mod tests {
 		let payment = wallet.payment_store.get(&id).await.unwrap().expect("payment");
 		assert!(matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == txid));
 		let record = wallet.pending_payment_store.get(&id).await.unwrap().expect("record");
-		assert_eq!(record.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
+		assert_eq!(record.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
 	}
 
 	/// The same failure while signing a fee bump: the record is put back to the original round,
@@ -6002,7 +6059,7 @@ mod tests {
 
 		assert_eq!(wallet.payment_store.get(&id).await.unwrap(), Some(prior));
 		let record = wallet.pending_payment_store.get(&id).await.unwrap().expect("record");
-		assert_eq!(record.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
+		assert_eq!(record.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
 		assert_eq!(wallet.find_payment_by_txid(bump_txid).await.unwrap(), None);
 	}
 
@@ -6397,6 +6454,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -6466,6 +6524,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -6537,6 +6596,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![bumped_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -6588,6 +6648,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -6647,6 +6708,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![conflict_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -6917,6 +6979,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7716,8 +7779,8 @@ mod tests {
 		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
 		assert_eq!(payment.status, PaymentStatus::Pending);
 		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
-		assert_eq!(entry.candidates.len(), 2);
-		assert_eq!(entry.locked_rounds, vec![txid]);
+		assert_eq!(entry.candidates().len(), 2);
+		assert_eq!(entry.locked_rounds(), &[txid]);
 	}
 
 	/// LDK promoted a sibling this node did not contribute to — the counterparty's round locked on
@@ -7927,7 +7990,7 @@ mod tests {
 		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
 		assert_eq!(payment.status, PaymentStatus::Pending);
 		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
-		assert_eq!(entry.locked_rounds, vec![counterparty_txid]);
+		assert_eq!(entry.locked_rounds(), &[counterparty_txid]);
 
 		wallet
 			.resolve_closed_channel_splice_rounds(channel_id, &[counterparty_txid])
@@ -7969,7 +8032,7 @@ mod tests {
 			assert_eq!(payment.status, PaymentStatus::Pending);
 			let entry =
 				wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
-			assert_eq!(entry.locked_rounds, vec![locked]);
+			assert_eq!(entry.locked_rounds(), &[locked]);
 		}
 
 		wallet.resolve_closed_channel_splice_rounds(channel_id, &[second_txid]).await.unwrap();
@@ -8015,8 +8078,8 @@ mod tests {
 		assert!(matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == first_txid));
 		assert_eq!((payment.amount_msat, payment.fee_paid_msat), first_figures);
 		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
-		assert_eq!(entry.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![first_txid]);
-		assert_eq!(entry.locked_rounds, vec![first_txid]);
+		assert_eq!(entry.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(), vec![first_txid]);
+		assert_eq!(entry.locked_rounds(), &[first_txid]);
 	}
 
 	/// A zero-conf splice round of ours locked before its transaction confirmed and a later splice
@@ -8041,7 +8104,7 @@ mod tests {
 				.unwrap();
 		}
 		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
-		assert_eq!(entry.locked_rounds, vec![txid]);
+		assert_eq!(entry.locked_rounds(), &[txid]);
 
 		wallet
 			.resolve_closed_channel_splice_rounds(channel_id, &[later_funding_txid])
@@ -8118,7 +8181,7 @@ mod tests {
 		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
 		assert_eq!(payment.status, PaymentStatus::Pending);
 		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
-		assert_eq!(entry.candidates.len(), 2);
+		assert_eq!(entry.candidates().len(), 2);
 
 		// At the close the monitor has settled on the funding and watches neither round.
 		wallet.resolve_closed_channel_splice_rounds(channel_id, &[funding_txid]).await.unwrap();
@@ -8155,7 +8218,7 @@ mod tests {
 		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
 		assert_eq!(payment.status, PaymentStatus::Pending);
 		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
-		assert_eq!(entry.candidates.len(), 2);
+		assert_eq!(entry.candidates().len(), 2);
 	}
 
 	/// The close does not touch a payment that no longer waits on an unconfirmed round: one whose
