@@ -11,6 +11,7 @@ use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bitcoin::hashes::{sha256, Hash, HashEngine};
 use lightning::io;
 use lightning::util::persist::{
 	KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
@@ -44,6 +45,18 @@ const PAGE_SIZE: usize = 50;
 // Keep this small while still allowing progress if one runtime worker blocks on sync store access.
 const INTERNAL_RUNTIME_WORKERS: usize = 2;
 
+fn advisory_lock_id(db_name: &str, kv_table_name: &str) -> i64 {
+	let mut engine = sha256::Hash::engine();
+	engine.input(b"ldk-node:postgres-store");
+	for component in [db_name, kv_table_name] {
+		engine.input(&(component.len() as u64).to_be_bytes());
+		engine.input(component.as_bytes());
+	}
+
+	let hash = sha256::Hash::from_engine(engine).to_byte_array();
+	i64::from_be_bytes(hash[..8].try_into().expect("SHA-256 prefix has the expected length"))
+}
+
 fn sql_identifier(identifier: &str) -> io::Result<String> {
 	if identifier.is_empty() || identifier.contains('\0') {
 		return Err(io::Error::new(
@@ -70,26 +83,44 @@ fn sql_table_identifier(table_name: &str) -> io::Result<String> {
 	Ok(quoted_parts?.join("."))
 }
 
-/// Runs a tokio-postgres query and, if the connection dropped mid-flight, reconnects and retries
-/// once. `$store` is the [`PostgresStoreInner`], `$locked` the held client slot guard,
-/// `$err_map` an `Fn(PgError) -> io::Error` (called at most once), and `$query` an expression
-/// that yields a fresh `Future<Output = Result<_, PgError>>` each time it's evaluated. `$query`
-/// may be evaluated up to twice (once normally, once on retry), so it must be side-effect-free
-/// outside of issuing the query itself.
+/// Runs a tokio-postgres query and, if the pooled connection dropped mid-flight, reconnects and
+/// retries once after asserting that the store's advisory-lock connection is still open. `$store`
+/// is the [`PostgresStoreInner`], `$locked` the held client slot guard, `$err_map` an
+/// `Fn(PgError) -> io::Error` (called at most once), and `$query` an expression that yields a fresh
+/// `Future<Output = Result<_, PgError>>` each time it is evaluated. `$query` may be evaluated up to
+/// twice (once normally, once on retry), so it must be side-effect-free outside of issuing the
+/// query itself.
 macro_rules! query_with_retry {
 	($store:expr, $locked:ident, $err_map:expr, $query:expr) => {{
 		match $query.await {
 			Ok(v) => Ok(v),
 			Err(e) if $locked.is_closed() || e.is_closed() => {
+				$store.assert_store_lock();
 				if let Some(logger) = $store.logger.as_ref() {
 					log_debug!(logger, "Reconnecting to PostgreSQL after error: {e}");
 				}
 				*$locked = make_config_connection(&$store.config, &$store.tls).await?;
+				// Recheck after awaiting the connection in case the store lock was lost while
+				// reconnecting.
+				$store.assert_store_lock();
 				$query.await.map_err($err_map)
 			},
 			Err(e) => Err($err_map(e)),
 		}
 	}};
+}
+
+fn handle_runtime_task_result<T>(
+	result: Result<io::Result<T>, tokio::task::JoinError>,
+) -> io::Result<T> {
+	match result {
+		Ok(result) => result,
+		Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+		Err(e) => Err(io::Error::new(
+			io::ErrorKind::Other,
+			format!("PostgreSQL runtime task failed: {e}"),
+		)),
+	}
 }
 
 /// A [`KVStore`] implementation that writes to and reads from a [PostgreSQL] database.
@@ -128,6 +159,14 @@ impl PostgresStore {
 	/// the default `postgres` database to create it.
 	///
 	/// The given `kv_table_name` will be used or default to [`DEFAULT_KV_TABLE_NAME`].
+	///
+	/// # Warning
+	///
+	/// Do not point multiple [`PostgresStore`] instances at the same database and table. Concurrent
+	/// access is unsafe and can corrupt stored data. You must make sure that only one store accesses
+	/// each database and table. The store uses a PostgreSQL advisory lock to reduce this risk. This
+	/// lock is only a temporary safeguard and does not make concurrent access safe.
+	/// Stores using a different database or table on the same PostgreSQL server may coexist.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
@@ -231,15 +270,11 @@ impl KVStore for PostgresStore {
 		let inner = Arc::clone(&self.inner);
 		let runtime = self.internal_runtime();
 		async move {
+			inner.assert_store_lock();
 			let task = runtime.spawn(async move {
 				inner.read_internal(&primary_namespace, &secondary_namespace, &key).await
 			});
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
-				)
-			})?
+			handle_runtime_task_result(task.await)
 		}
 	}
 
@@ -254,6 +289,7 @@ impl KVStore for PostgresStore {
 		let inner = Arc::clone(&self.inner);
 		let runtime = self.internal_runtime();
 		async move {
+			inner.assert_store_lock();
 			let task = runtime.spawn(async move {
 				inner
 					.write_internal(
@@ -267,12 +303,7 @@ impl KVStore for PostgresStore {
 					)
 					.await
 			});
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
-				)
-			})?
+			handle_runtime_task_result(task.await)
 		}
 	}
 
@@ -287,6 +318,7 @@ impl KVStore for PostgresStore {
 		let inner = Arc::clone(&self.inner);
 		let runtime = self.internal_runtime();
 		async move {
+			inner.assert_store_lock();
 			let task = runtime.spawn(async move {
 				inner
 					.remove_internal(
@@ -299,12 +331,7 @@ impl KVStore for PostgresStore {
 					)
 					.await
 			});
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
-				)
-			})?
+			handle_runtime_task_result(task.await)
 		}
 	}
 
@@ -316,15 +343,11 @@ impl KVStore for PostgresStore {
 		let inner = Arc::clone(&self.inner);
 		let runtime = self.internal_runtime();
 		async move {
+			inner.assert_store_lock();
 			let task = runtime.spawn(async move {
 				inner.list_internal(&primary_namespace, &secondary_namespace).await
 			});
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
-				)
-			})?
+			handle_runtime_task_result(task.await)
 		}
 	}
 }
@@ -338,17 +361,13 @@ impl PaginatedKVStore for PostgresStore {
 		let inner = Arc::clone(&self.inner);
 		let runtime = self.internal_runtime();
 		async move {
+			inner.assert_store_lock();
 			let task = runtime.spawn(async move {
 				inner
 					.list_paginated_internal(&primary_namespace, &secondary_namespace, page_token)
 					.await
 			});
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
-				)
-			})?
+			handle_runtime_task_result(task.await)
 		}
 	}
 }
@@ -360,19 +379,18 @@ impl MigratableKVStore for PostgresStore {
 		let inner = Arc::clone(&self.inner);
 		let runtime = self.internal_runtime();
 		async move {
+			inner.assert_store_lock();
 			let task = runtime.spawn(async move { inner.list_all_keys_internal().await });
-			task.await.map_err(|e| {
-				io::Error::new(
-					io::ErrorKind::Other,
-					format!("PostgreSQL runtime task failed: {}", e),
-				)
-			})?
+			handle_runtime_task_result(task.await)
 		}
 	}
 }
 
 struct PostgresStoreInner {
 	pool: SmallPool,
+	// PostgreSQL advisory locks are session-scoped, so keep the connection that acquired our lock
+	// alive for the lifetime of the store.
+	lock_client: ClientConnection,
 	config: Config,
 	kv_table_name_sql: String,
 	tls: PgTlsConnector,
@@ -426,6 +444,23 @@ impl PostgresStoreInner {
 		Self::create_database_if_not_exists(&config, &tls, logger.as_deref()).await?;
 
 		let client = make_config_connection(&config, &tls).await?;
+		let lock_id = advisory_lock_id(&db_name, &kv_table_name);
+		let row = client.query_one("SELECT pg_try_advisory_lock($1)", &[&lock_id]).await.map_err(
+			|e| {
+				let msg = format!(
+					"Failed to acquire PostgreSQL store lock for database {db_name} and table {kv_table_name}: {e}"
+				);
+				io::Error::new(io::ErrorKind::Other, msg)
+			},
+		)?;
+		if !row.get::<_, bool>(0) {
+			return Err(io::Error::new(
+				io::ErrorKind::AlreadyExists,
+				format!(
+					"PostgreSQL store for database {db_name} and table {kv_table_name} is already in use"
+				),
+			));
+		}
 
 		// Create the KV data table if it doesn't exist. `sort_order` uses BIGSERIAL so
 		// the database assigns a fresh, monotonically increasing value on each INSERT and
@@ -502,12 +537,18 @@ impl PostgresStoreInner {
 			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
-		// Drop the setup client; the pool builds its own POOL_SIZE fresh connections.
-		drop(client);
 		let pool = SmallPool::new(&config, &tls).await?;
 
 		let write_version_locks = Mutex::new(HashMap::new());
-		Ok(Self { pool, config, kv_table_name_sql, tls, write_version_locks, logger })
+		Ok(Self {
+			pool,
+			lock_client: client,
+			config,
+			kv_table_name_sql,
+			tls,
+			write_version_locks,
+			logger,
+		})
 	}
 
 	async fn create_database_if_not_exists(
@@ -589,7 +630,18 @@ impl PostgresStoreInner {
 	}
 
 	async fn locked_client(&self) -> io::Result<tokio::sync::MutexGuard<'_, ClientConnection>> {
-		self.pool.get(&self.config, &self.tls, self.logger.as_deref()).await
+		let client = self.pool.get(&self.config, &self.tls, self.logger.as_deref()).await?;
+		// Recheck after any runtime queue, per-key write lock, and pool wait, immediately before
+		// the caller accesses PostgreSQL.
+		self.assert_store_lock();
+		Ok(client)
+	}
+
+	fn assert_store_lock(&self) {
+		assert!(
+			!self.lock_client.is_closed(),
+			"PostgreSQL store lock connection closed; continuing may corrupt node state"
+		);
 	}
 
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
@@ -927,6 +979,29 @@ mod tests {
 		assert!(sql_table_identifier("schema.").is_err());
 	}
 
+	#[test]
+	fn test_postgres_advisory_lock_id_uses_database_and_table() {
+		let lock_id = advisory_lock_id("database_a", "table_a");
+		assert_eq!(lock_id, advisory_lock_id("database_a", "table_a"));
+		assert_ne!(lock_id, advisory_lock_id("database_b", "table_a"));
+		assert_ne!(lock_id, advisory_lock_id("database_a", "table_b"));
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_postgres_store_advisory_lock() {
+		let table_name = "test_pg_advisory_lock";
+		let store = create_test_store(table_name).await;
+
+		let err =
+			PostgresStore::new(test_connection_string(), None, Some(table_name.to_string()), None)
+				.await
+				.err()
+				.expect("a second store using the same database and table must fail");
+		assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+
+		cleanup_store(&store).await;
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn read_write_remove_list_persist() {
 		let store = create_test_store("test_rwrl").await;
@@ -975,6 +1050,14 @@ mod tests {
 		}
 	}
 
+	async fn kill_lock_connection(store: &PostgresStore) {
+		let client = &store.inner.lock_client;
+		let _ = client.execute("SELECT pg_terminate_backend(pg_backend_pid())", &[]).await;
+		while !client.is_closed() {
+			tokio::task::yield_now().await;
+		}
+	}
+
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_postgres_store_auto_reconnect() {
 		let store = create_test_store("test_pg_reconnect").await;
@@ -997,6 +1080,53 @@ mod tests {
 		assert_eq!(data, vec![2u8; 8]);
 
 		cleanup_store(&store).await;
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	#[should_panic(
+		expected = "PostgreSQL store lock connection closed; continuing may corrupt node state"
+	)]
+	async fn test_postgres_store_panics_when_lock_connection_closes() {
+		let table_name = "test_pg_lock_connection_closed";
+		let store = create_test_store(table_name).await;
+
+		kill_lock_connection(&store).await;
+		cleanup_store(&store).await;
+		KVStore::write(&store, "test_ns", "test_sub", "key", vec![1u8]).await.unwrap();
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_queued_write_rechecks_closed_lock_connection() {
+		let table_name = "test_pg_queued_write_lock_connection_closed";
+		let store = create_test_store(table_name).await;
+		let locking_key = store.build_locking_key("test_ns", "test_sub", "key");
+		let inner_lock_ref = store.inner.get_inner_lock_ref(locking_key);
+		let inner_lock = inner_lock_ref.lock().await;
+
+		let mut write = Box::pin(KVStore::write(&store, "test_ns", "test_sub", "key", vec![1u8]));
+		// Poll the public method once so its initial check passes and its internal write is queued
+		// on the per-key lock before closing the store lock connection.
+		std::future::poll_fn(|cx| match write.as_mut().poll(cx) {
+			std::task::Poll::Pending => std::task::Poll::Ready(()),
+			std::task::Poll::Ready(result) => {
+				panic!("the write must be queued on the per-key lock, got {result:?}")
+			},
+		})
+		.await;
+
+		kill_lock_connection(&store).await;
+		let second_store = create_test_store(table_name).await;
+		drop(inner_lock);
+
+		let write_task = tokio::spawn(write);
+		let err = write_task.await.expect_err("the queued write must panic after the lock is lost");
+		assert!(err.is_panic());
+		let err = KVStore::read(&second_store, "test_ns", "test_sub", "key")
+			.await
+			.expect_err("the queued write must not access PostgreSQL");
+		assert_eq!(err.kind(), io::ErrorKind::NotFound);
+
+		cleanup_store(&second_store).await;
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

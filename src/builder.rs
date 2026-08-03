@@ -696,6 +696,14 @@ impl NodeBuilder {
 	/// The given `kv_table_name` will be used or default to
 	/// [`DEFAULT_KV_TABLE_NAME`](io::postgres_store::DEFAULT_KV_TABLE_NAME).
 	///
+	/// # Warning
+	///
+	/// Do not point multiple [`Node`] instances at the same database and table. Concurrent access is
+	/// unsafe and can corrupt node state. You must make sure that only one node accesses each
+	/// database and table. The store uses a PostgreSQL advisory lock to reduce this risk. This lock
+	/// is only a temporary safeguard and does not make concurrent access safe.
+	/// Nodes using a different database or table on the same server may coexist.
+	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
 	/// certificates (it does not replace them). If `certificate_pem` is `None`, connections
@@ -1229,6 +1237,14 @@ impl ArcedNodeBuilder {
 	///
 	/// The given `kv_table_name` will be used or default to
 	/// [`DEFAULT_KV_TABLE_NAME`](io::postgres_store::DEFAULT_KV_TABLE_NAME).
+	///
+	/// # Warning
+	///
+	/// Do not point multiple [`Node`] instances at the same database and table. Concurrent access is
+	/// unsafe and can corrupt node state. You must make sure that only one node accesses each
+	/// database and table. The store uses a PostgreSQL advisory lock to reduce this risk. This lock
+	/// is only a temporary safeguard and does not make concurrent access safe.
+	/// Nodes using a different database or table on the same server may coexist.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
