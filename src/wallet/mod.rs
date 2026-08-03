@@ -54,6 +54,7 @@ use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
 use crate::config::Config;
+use crate::data_store::StorableObject;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::pending_payment_store::PendingPaymentDetailsUpdate;
@@ -1412,13 +1413,8 @@ impl Wallet {
 			&candidates,
 			self.payment_store.get(&details.id).as_ref(),
 		);
-		let pending_update = PendingPaymentDetailsUpdate {
-			id: update.id,
-			payment_update: Some(update.clone()),
-			conflicting_txids: None,
-			candidates: candidates.clone(),
-		};
-		self.payment_store.update_or_insert(update, details.clone()).await?;
+		let id = update.id;
+		self.payment_store.update_or_insert(update.clone(), details.clone()).await?;
 
 		// The pending index must exist exactly while the authoritative record is Pending:
 		// graduation and rebroadcast read it, and a graduated payment must not be re-indexed.
@@ -1426,20 +1422,43 @@ impl Wallet {
 		// repairs a missing index — a crash or failed write between the two stores leaves a
 		// Pending record with no entry, and a merge alone would never recreate it, leaving the
 		// payment unable to graduate and its txids unmapped.
-		let recorded = self.payment_store.get(&details.id).unwrap_or(details);
-		if recorded.status == PaymentStatus::Pending {
-			// Wallet sync can still land between the payment-store write above and this one and
-			// mirror an advanced confirmation into the pending store, so this write makes the
-			// same atomic decision: merge narrowly into an entry that appeared, insert otherwise.
-			// The inserted entry embeds the post-write record rather than the fresh details, so a
-			// confirmation wallet sync already recorded keeps driving graduation.
-			let pending = PendingPaymentDetails::new(recorded, Vec::new(), candidates);
-			self.pending_payment_store.update_or_insert(pending_update, pending).await?;
-		} else {
-			// The payment already advanced beyond Pending: the graduation path removed the
-			// entry, and `update`'s no-op on absence must not re-create it.
-			self.pending_payment_store.update(pending_update).await?;
-		}
+		//
+		// The status must be read inside the pending store's critical section. Graduation writes
+		// `Succeeded` before removing the entry, so a read there that still observes `Pending`
+		// is ordered before the removal, which then also deletes anything inserted here. A
+		// status read taken before this write goes stale when graduation lands in between, and
+		// would re-index the graduated payment.
+		self.pending_payment_store
+			.mutate(&id, |existing| {
+				// The record was written above and payment records are never removed, so absence
+				// means the write failed out; fall back to the fresh details.
+				let recorded = self.payment_store.get(&id).unwrap_or(details);
+				match existing {
+					// The inserted entry embeds the post-write record rather than the fresh
+					// details, so a confirmation wallet sync already recorded keeps driving
+					// graduation.
+					None if recorded.status == PaymentStatus::Pending => {
+						Some(PendingPaymentDetails::new(recorded, Vec::new(), candidates))
+					},
+					// The payment already advanced beyond Pending: the graduation path removed
+					// the entry and it must not be re-created.
+					None => None,
+					// Wallet sync can land between the payment-store write above and this one
+					// and mirror an advanced confirmation into the pending store: merge only the
+					// classification into the entry that appeared.
+					Some(entry) => {
+						let pending_update = PendingPaymentDetailsUpdate {
+							id,
+							payment_update: Some(update),
+							conflicting_txids: None,
+							candidates,
+						};
+						let mut updated = entry.clone();
+						updated.update(pending_update).then_some(updated)
+					},
+				}
+			})
+			.await?;
 		Ok(())
 	}
 
