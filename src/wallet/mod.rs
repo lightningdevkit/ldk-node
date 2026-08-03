@@ -1574,7 +1574,11 @@ impl Wallet {
 			return Ok(());
 		}
 
-		let payment_id = PaymentId(txid.to_byte_array());
+		// A user-initiated splice's record is keyed by the PaymentId chosen at splice time, not
+		// by its funding txid — e.g. LDK re-broadcasts a promoted-but-unconfirmed 0conf splice
+		// through this generic funding path. Resolve to the existing record so the rebroadcast
+		// merges into it rather than minting a duplicate under the txid-derived id.
+		let payment_id = self.find_payment_by_txid(txid).unwrap_or(PaymentId(txid.to_byte_array()));
 
 		// A promoted-but-unconfirmed 0conf splice comes back through this generic path re-typed
 		// and carrying wallet-view figures; `funding_reclassification_update` declines the
@@ -1617,6 +1621,24 @@ impl Wallet {
 			channel_id,
 		);
 		Ok(())
+	}
+
+	/// Returns the `PaymentId` of a user-initiated splice intent for one of the channels in
+	/// `candidate`, if any, so a classified splice adopts the id chosen at splice time rather than
+	/// deriving one from the first candidate's txid. A fee bump reuses the channel's existing intent,
+	/// so at most one in-flight intent matches and the first is unambiguous.
+	fn find_splice_payment_id(&self, candidate: &FundingCandidate) -> Option<PaymentId> {
+		self.pending_payment_store
+			.list_filter(|p| {
+				p.splice_intent().is_some_and(|intent| {
+					candidate.channels.iter().any(|channel| {
+						channel.channel_id == intent.channel_id
+							&& channel.counterparty_node_id == intent.counterparty_node_id
+					})
+				})
+			})
+			.first()
+			.map(|p| p.id())
 	}
 
 	/// Records an interactive-funding broadcast (splice, or a V2 dual-funded open) as a pending
@@ -1669,9 +1691,18 @@ impl Wallet {
 			return Ok(());
 		}
 
-		// Anchor the `PaymentId` to the first negotiated candidate so the record stays stable
-		// across RBF replacements.
-		let payment_id = PaymentId(first.txid.to_byte_array());
+		// Adopt the `PaymentId` generated when the splice was initiated so its retry intent, funding
+		// payment, and candidate history share one record. If the intent is already gone (e.g. the
+		// splice locked before this classification ran), adopt the id of a record wallet sync
+		// created for any candidate rather than minting a divergent one. Fall back to the first
+		// negotiated candidate's txid for splices we did not originate (counterparty-initiated or
+		// V2 opens), which keeps that id stable across RBF replacements.
+		let payment_id = self
+			.find_splice_payment_id(active)
+			.or_else(|| {
+				candidates.iter().find_map(|candidate| self.find_payment_by_txid(candidate.txid))
+			})
+			.unwrap_or_else(|| PaymentId(first.txid.to_byte_array()));
 
 		// Record every candidate's figures (`None` for any round we didn't contribute to, e.g. a
 		// counterparty-initiated splice our `splice_in` later joined via RBF) so the confirmed
@@ -1798,23 +1829,45 @@ impl Wallet {
 		self.pending_payment_store
 			.mutate(&id, |existing| {
 				// The record was written above and payment records are never removed, so absence
-				// means the write failed out; fall back to the fresh details.
+				// means the write failed out; fall back to the fresh details. A promoted or
+				// (re)created entry embeds this post-write record rather than the fresh
+				// Unconfirmed details, so a confirmation wallet sync already recorded keeps
+				// driving graduation.
 				let recorded = self.payment_store.get(&id).unwrap_or(details);
 				match existing {
-					// The inserted entry embeds the post-write record rather than the fresh
-					// details, so a confirmation wallet sync already recorded keeps driving
-					// graduation.
-					None if recorded.status == PaymentStatus::Pending => {
-						Some(PendingPaymentDetails::new(recorded, Vec::new(), candidates))
+					// First time we record this funding payment — or a crash between the two
+					// store writes left a Pending record with no index entry: (re)create it so
+					// the payment can graduate and its candidate txids stay mapped. A graduated
+					// payment is never `Pending`, so absence with an advanced record means the
+					// graduation path removed the entry and it must not be re-indexed.
+					None => (recorded.status == PaymentStatus::Pending).then(|| {
+						PendingPaymentDetails::tracked(recorded, Vec::new(), candidates, None)
+					}),
+					// A user-initiated splice has a pre-broadcast `PendingSplice` intent under
+					// this id; carry its intent into the `Tracked` record so the retrier can
+					// still clear it once the splice locks. If the payment already advanced
+					// beyond `Pending` (wallet sync confirmed it through `ANTI_REORG_DELAY`
+					// first), it must not enter the pending store; the intent stays for
+					// `ChannelReady` or `reconcile` to clear.
+					Some(PendingPaymentDetails::PendingSplice { intent, .. }) => {
+						if recorded.status == PaymentStatus::Pending {
+							Some(PendingPaymentDetails::tracked(
+								recorded,
+								Vec::new(),
+								candidates,
+								Some(intent.clone()),
+							))
+						} else {
+							None
+						}
 					},
-					// The payment already advanced beyond Pending: the graduation path removed
-					// the entry and it must not be re-created.
-					None => None,
-					// The entry predates this classification — wallet sync recorded the
-					// transaction before it was classified (its arms and this write pair
-					// serialize on the cross-store lock, so nothing lands in between): merge
-					// only the classification into the existing entry.
-					Some(entry) => {
+					// An earlier candidate's classification or wallet sync recorded this payment
+					// before this classification ran (sync's arms and this write pair serialize
+					// on the cross-store lock, so nothing lands in between): merge only the
+					// classification (`tx_type`, candidate history and the figures of whichever
+					// candidate the record's state makes authoritative) into it.
+					Some(tracked @ PendingPaymentDetails::Tracked { .. }) => {
+						let mut updated = tracked.clone();
 						let pending_update = PendingPaymentDetailsUpdate {
 							id,
 							payment_update: Some(update),
@@ -1822,7 +1875,6 @@ impl Wallet {
 							candidates,
 							splice_intent: None,
 						};
-						let mut updated = entry.clone();
 						updated.update(pending_update).then_some(updated)
 					},
 				}
@@ -1954,8 +2006,9 @@ impl Wallet {
 					|d| matches!(d.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid),
 				) || p.conflicting_txids().contains(&target_txid)
 					// A middle RBF round is not the record's current txid and may never have
-					// received a `TxReplaced` event of its own, so map any of its candidate
-					// txids (an earlier RBF round may confirm) back to the record.
+					// received a `TxReplaced` event of its own, and a splice keyed by a generated
+					// PaymentId is not found by the txid-derived id above: map any of the
+					// candidate txids (an earlier RBF round may confirm) back to the record.
 					|| p.candidate(target_txid).is_some()
 			})
 			.first()
@@ -4108,6 +4161,53 @@ mod tests {
 		wallet.update_payment_store(vec![event]).await.unwrap();
 		wallet.classify_funding(&tx, &channels, tx_type).await.unwrap();
 		assert_unchanged(true);
+	}
+
+	/// A user-initiated splice's record is keyed by the PaymentId chosen at splice time, not by
+	/// its funding txid. The generic funding path must resolve a rebroadcast of that funding tx
+	/// back to the existing record rather than minting a duplicate under the txid-derived id.
+	#[tokio::test]
+	async fn classify_funding_resolves_the_splice_time_payment_id() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let script_pubkey = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::External)
+			.address
+			.script_pubkey();
+		let tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: Vec::new(),
+			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
+		};
+		let txid = tx.compute_txid();
+
+		let payment_id = PaymentId([21u8; 32]);
+		let candidates = vec![FundingTxCandidate {
+			txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let details = interactive_funding_details(payment_id, txid, Some(1_000_000), Some(500));
+		wallet.persist_funding_payment(details, candidates).await.unwrap();
+
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channels = vec![(counterparty_node_id, ChannelId([7u8; 32]))];
+		let tx_type = TransactionType::Funding { channels: vec![] };
+		wallet.classify_funding(&tx, &channels, tx_type).await.unwrap();
+
+		let payments = wallet.payment_store.list_filter(|_| true);
+		assert_eq!(payments.len(), 1, "the rebroadcast must not mint a second record");
+		assert_eq!(payments[0].id, payment_id);
+		assert_eq!(payments[0].amount_msat, Some(1_000_000));
+		assert_eq!(payments[0].fee_paid_msat, Some(500));
 	}
 
 	/// Barrier test, classification-first ordering: wallet sync's confirmation handling must
