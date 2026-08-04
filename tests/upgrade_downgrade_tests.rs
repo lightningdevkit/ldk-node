@@ -38,8 +38,8 @@ use ldk_node::lightning::ln::msgs::SocketAddress as CurrentSocketAddress;
 use ldk_node::lightning_invoice::Bolt11Invoice as CurrentBolt11Invoice;
 use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{Builder, Event, Node};
+use ldk_node_070::lightning_types::payment::PaymentHash as OldPaymentHash;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
-use lightning_types_0_3::payment::PaymentHash as OldPaymentHash;
 
 const RECEIVER_SEED_BYTES: [u8; 64] = [43; 64];
 const CHANNEL_AMOUNT_SAT: u64 = 500_000;
