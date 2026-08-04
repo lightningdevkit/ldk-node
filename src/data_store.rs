@@ -40,6 +40,13 @@ pub(crate) enum DataStoreUpdateResult {
 	NotFound,
 }
 
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+pub(crate) enum DataStoreUpdateOrInsertResult {
+	Inserted,
+	Updated,
+	Unchanged,
+}
+
 pub(crate) struct DataStore<SO: StorableObject, L: Deref>
 where
 	L::Target: LdkLogger,
@@ -81,6 +88,11 @@ where
 		Ok(updated)
 	}
 
+	/// Like [`Self::insert`], but when an entry with the object's id already exists, merges the
+	/// object's full update ([`StorableObject::to_update`]) into it instead of replacing it.
+	///
+	/// Unlike [`Self::update_or_insert`], the caller does not choose what is merged into an
+	/// existing entry: the full update is always applied.
 	pub(crate) async fn insert_or_update(&self, object: SO) -> Result<bool, Error> {
 		let _guard = self.mutation_lock.lock().await;
 
@@ -168,6 +180,76 @@ where
 		let mut locked_objects = self.objects.lock().expect("lock");
 		locked_objects.insert(id, updated_object);
 		Ok(DataStoreUpdateResult::Updated)
+	}
+
+	/// Applies `update` when an object with its id already exists, or inserts `object` when none
+	/// does.
+	///
+	/// Like [`Self::update`], but falls back to inserting `object` instead of returning
+	/// [`DataStoreUpdateResult::NotFound`]. Unlike [`Self::insert_or_update`], the caller chooses
+	/// exactly what is merged into an existing entry: `update` may carry less than the full
+	/// object.
+	///
+	/// The existence check and the write share one critical section of the mutation lock, so a
+	/// concurrent writer cannot land in between and later have its state clobbered by the insert
+	/// fallback — the check-then-act race that separate [`Self::contains_key`] +
+	/// [`Self::insert_or_update`] calls reintroduce.
+	pub(crate) async fn update_or_insert(
+		&self, update: SO::Update, object: SO,
+	) -> Result<DataStoreUpdateOrInsertResult, Error> {
+		debug_assert!(update.id() == object.id(), "update and object must share an id");
+		let _guard = self.mutation_lock.lock().await;
+
+		let id = update.id();
+		let (data_to_persist, result) = {
+			let locked_objects = self.objects.lock().expect("lock");
+			match locked_objects.get(&id) {
+				Some(existing_object) => {
+					let mut updated_object = existing_object.clone();
+					if updated_object.update(update) {
+						(Some(updated_object), DataStoreUpdateOrInsertResult::Updated)
+					} else {
+						(None, DataStoreUpdateOrInsertResult::Unchanged)
+					}
+				},
+				None => (Some(object), DataStoreUpdateOrInsertResult::Inserted),
+			}
+		};
+
+		if let Some(object) = data_to_persist {
+			self.persist(&object).await?;
+			self.objects.lock().expect("lock").insert(id, object);
+		}
+		Ok(result)
+	}
+
+	/// Atomically transforms the entry for `id` through `f` and persists the result.
+	///
+	/// `f` receives the current entry (`None` when absent) and returns the new state to write;
+	/// returning `None` leaves the store untouched. The read, the closure, and the write share one
+	/// critical section of the mutation lock, so no concurrent writer can land in between — unlike
+	/// a separate [`Self::get`] followed by an insert or update. Keep the closure cheap and
+	/// non-blocking, and do not call back into this store from it.
+	///
+	/// Returns the written object, or `None` when the closure declined to write.
+	pub(crate) async fn mutate<F: FnOnce(Option<&SO>) -> Option<SO>>(
+		&self, id: &SO::Id, f: F,
+	) -> Result<Option<SO>, Error> {
+		let _guard = self.mutation_lock.lock().await;
+
+		let new_object = {
+			let locked_objects = self.objects.lock().expect("lock");
+			match f(locked_objects.get(id)) {
+				Some(new_object) => new_object,
+				None => return Ok(None),
+			}
+		};
+		debug_assert!(new_object.id() == *id, "mutate closure must not change the object's id");
+
+		self.persist(&new_object).await?;
+		let mut locked_objects = self.objects.lock().expect("lock");
+		locked_objects.insert(new_object.id(), new_object.clone());
+		Ok(Some(new_object))
 	}
 
 	/// Returns in-memory objects matching `f`.
@@ -401,6 +483,199 @@ mod tests {
 		let mut new_iou_object = iou_object;
 		new_iou_object.data[0] += 1;
 		assert_eq!(Ok(true), data_store.insert_or_update(new_iou_object).await);
+	}
+
+	#[tokio::test]
+	async fn update_or_insert_inserts_when_absent() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let primary_namespace = "datastore_test_primary".to_string();
+		let secondary_namespace = "datastore_test_secondary".to_string();
+		let data_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
+			Vec::new(),
+			primary_namespace.clone(),
+			secondary_namespace.clone(),
+			Arc::clone(&store),
+			logger,
+		);
+
+		let id = TestObjectId { id: [42u8; 4] };
+		let object = TestObject { id, data: [23u8; 3] };
+		let update = TestObjectUpdate { id, data: [25u8; 3] };
+		assert_eq!(
+			Ok(DataStoreUpdateOrInsertResult::Inserted),
+			data_store.update_or_insert(update, object).await
+		);
+
+		// The insert path stores the fallback object as-is; the update is not applied to it.
+		assert_eq!(Some(object), data_store.get(&id));
+		let store_key = id.encode_to_hex_str();
+		assert!(KVStore::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
+			.await
+			.is_ok());
+	}
+
+	#[tokio::test]
+	async fn update_or_insert_applies_update_when_present() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let id = TestObjectId { id: [42u8; 4] };
+		let existing_object = TestObject { id, data: [23u8; 3] };
+		let data_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
+			vec![existing_object],
+			"datastore_test_primary".to_string(),
+			"datastore_test_secondary".to_string(),
+			store,
+			logger,
+		);
+
+		// When an entry exists, only the update is applied; the fallback object must not replace
+		// it.
+		let update = TestObjectUpdate { id, data: [24u8; 3] };
+		let object = TestObject { id, data: [99u8; 3] };
+		assert_eq!(
+			Ok(DataStoreUpdateOrInsertResult::Updated),
+			data_store.update_or_insert(update, object).await
+		);
+		assert_eq!(data_store.get(&id).unwrap().data, [24u8; 3]);
+	}
+
+	#[tokio::test]
+	async fn update_or_insert_returns_unchanged_without_persisting() {
+		let id = TestObjectId { id: [42u8; 4] };
+		let existing_object = TestObject { id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![existing_object]);
+
+		// A no-op update returns `Unchanged` without attempting to persist (the store fails all
+		// writes) and without falling back to the object.
+		let update = TestObjectUpdate { id, data: [23u8; 3] };
+		let object = TestObject { id, data: [99u8; 3] };
+		assert_eq!(
+			Ok(DataStoreUpdateOrInsertResult::Unchanged),
+			data_store.update_or_insert(update, object).await
+		);
+		assert_eq!(Some(existing_object), data_store.get(&id));
+	}
+
+	#[tokio::test]
+	async fn update_or_insert_does_not_mutate_memory_if_persist_fails() {
+		let existing_id = TestObjectId { id: [42u8; 4] };
+		let existing_object = TestObject { id: existing_id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![existing_object]);
+
+		let update = TestObjectUpdate { id: existing_id, data: [24u8; 3] };
+		let object = TestObject { id: existing_id, data: [24u8; 3] };
+		assert_eq!(
+			Err(Error::PersistenceFailed),
+			data_store.update_or_insert(update, object).await
+		);
+		assert_eq!(Some(existing_object), data_store.get(&existing_id));
+
+		let new_id = TestObjectId { id: [55u8; 4] };
+		let new_object = TestObject { id: new_id, data: [34u8; 3] };
+		let new_update = TestObjectUpdate { id: new_id, data: [34u8; 3] };
+		assert_eq!(
+			Err(Error::PersistenceFailed),
+			data_store.update_or_insert(new_update, new_object).await
+		);
+		assert!(data_store.get(&new_id).is_none());
+	}
+
+	#[tokio::test]
+	async fn mutate_inserts_when_absent() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let primary_namespace = "datastore_test_primary".to_string();
+		let secondary_namespace = "datastore_test_secondary".to_string();
+		let data_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
+			Vec::new(),
+			primary_namespace.clone(),
+			secondary_namespace.clone(),
+			Arc::clone(&store),
+			logger,
+		);
+
+		let id = TestObjectId { id: [42u8; 4] };
+		let object = TestObject { id, data: [23u8; 3] };
+		let result = data_store
+			.mutate(&id, |existing| {
+				assert!(existing.is_none());
+				Some(object)
+			})
+			.await;
+		assert_eq!(Ok(Some(object)), result);
+
+		assert_eq!(Some(object), data_store.get(&id));
+		let store_key = id.encode_to_hex_str();
+		assert!(KVStore::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
+			.await
+			.is_ok());
+	}
+
+	#[tokio::test]
+	async fn mutate_transforms_existing_entry() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let id = TestObjectId { id: [42u8; 4] };
+		let existing_object = TestObject { id, data: [23u8; 3] };
+		let data_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
+			vec![existing_object],
+			"datastore_test_primary".to_string(),
+			"datastore_test_secondary".to_string(),
+			store,
+			logger,
+		);
+
+		// The closure sees the current entry and derives the new state from it.
+		let result = data_store
+			.mutate(&id, |existing| {
+				let mut new_object = *existing.unwrap();
+				new_object.data[0] += 1;
+				Some(new_object)
+			})
+			.await;
+		let expected = TestObject { id, data: [24u8, 23u8, 23u8] };
+		assert_eq!(Ok(Some(expected)), result);
+		assert_eq!(Some(expected), data_store.get(&id));
+	}
+
+	#[tokio::test]
+	async fn mutate_persists_nothing_when_closure_declines() {
+		let id = TestObjectId { id: [42u8; 4] };
+		let existing_object = TestObject { id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![existing_object]);
+
+		// Returning `None` must not attempt a write (the store fails all writes) nor touch memory.
+		let result = data_store
+			.mutate(&id, |existing| {
+				assert_eq!(Some(&existing_object), existing);
+				None
+			})
+			.await;
+		assert_eq!(Ok(None), result);
+		assert_eq!(Some(existing_object), data_store.get(&id));
+	}
+
+	#[tokio::test]
+	async fn mutate_does_not_mutate_memory_if_persist_fails() {
+		let existing_id = TestObjectId { id: [42u8; 4] };
+		let existing_object = TestObject { id: existing_id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![existing_object]);
+
+		let changed = TestObject { id: existing_id, data: [24u8; 3] };
+		assert_eq!(
+			Err(Error::PersistenceFailed),
+			data_store.mutate(&existing_id, |_| Some(changed)).await
+		);
+		assert_eq!(Some(existing_object), data_store.get(&existing_id));
+
+		let new_id = TestObjectId { id: [55u8; 4] };
+		let new_object = TestObject { id: new_id, data: [34u8; 3] };
+		assert_eq!(
+			Err(Error::PersistenceFailed),
+			data_store.mutate(&new_id, |_| Some(new_object)).await
+		);
+		assert!(data_store.get(&new_id).is_none());
 	}
 
 	#[tokio::test]
