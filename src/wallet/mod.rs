@@ -54,6 +54,7 @@ use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
 use crate::config::Config;
+use crate::event::{Event, EventQueue};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::store::ConfirmationStatus;
@@ -91,6 +92,7 @@ pub(crate) struct Wallet {
 	payment_store: Arc<PaymentStore>,
 	runtime: Arc<Runtime>,
 	config: Arc<Config>,
+	event_queue: Arc<EventQueue<Arc<Logger>>>,
 	logger: Arc<Logger>,
 	pending_payment_store: Arc<PendingPaymentStore>,
 }
@@ -101,7 +103,8 @@ impl Wallet {
 		wallet_persister: KVStoreWalletPersister, broadcaster: Arc<Broadcaster>,
 		fee_estimator: Arc<OnchainFeeEstimator>, chain_source: Arc<ChainSource>,
 		payment_store: Arc<PaymentStore>, runtime: Arc<Runtime>, config: Arc<Config>,
-		logger: Arc<Logger>, pending_payment_store: Arc<PendingPaymentStore>,
+		event_queue: Arc<EventQueue<Arc<Logger>>>, logger: Arc<Logger>,
+		pending_payment_store: Arc<PendingPaymentStore>,
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = tokio::sync::Mutex::new(wallet_persister);
@@ -114,6 +117,7 @@ impl Wallet {
 			payment_store,
 			runtime,
 			config,
+			event_queue,
 			logger,
 			pending_payment_store,
 		}
@@ -278,12 +282,16 @@ impl Wallet {
 						)
 					};
 
-					self.payment_store.insert_or_update(payment.clone()).await?;
+					let (updated, stored_payment) =
+						self.payment_store.insert_or_update_and_get(payment).await?;
+
+					if updated && payment_status == PaymentStatus::Succeeded {
+						self.emit_onchain_payment_event(&stored_payment).await?;
+					}
 
 					if payment_status == PaymentStatus::Pending {
 						let pending_payment =
-							self.create_pending_payment_from_tx(payment, Vec::new());
-
+							self.create_pending_payment_from_tx(stored_payment, Vec::new());
 						self.pending_payment_store.insert_or_update(pending_payment).await?;
 					}
 				},
@@ -302,15 +310,21 @@ impl Wallet {
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
 
 					for mut payment in pending_payments {
-						match payment.details.kind {
+						match &payment.details.kind {
 							PaymentKind::Onchain {
 								status: ConfirmationStatus::Confirmed { height, .. },
 								..
 							} => {
 								let payment_id = payment.details.id;
-								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
+								if new_tip.height >= *height + ANTI_REORG_DELAY - 1 {
 									payment.details.status = PaymentStatus::Succeeded;
-									self.payment_store.insert_or_update(payment.details).await?;
+									let (updated, stored_payment) = self
+										.payment_store
+										.insert_or_update_and_get(payment.details)
+										.await?;
+									if updated {
+										self.emit_onchain_payment_event(&stored_payment).await?;
+									}
 									self.pending_payment_store.remove(&payment_id).await?;
 								}
 							},
@@ -319,7 +333,7 @@ impl Wallet {
 								status: ConfirmationStatus::Unconfirmed,
 								..
 							} if payment.details.direction == PaymentDirection::Outbound => {
-								unconfirmed_outbound_txids.push(txid);
+								unconfirmed_outbound_txids.push(*txid);
 							},
 							_ => {},
 						}
@@ -1470,6 +1484,53 @@ impl Wallet {
 		&self, payment: PaymentDetails, conflicting_txids: Vec<Txid>,
 	) -> PendingPaymentDetails {
 		PendingPaymentDetails::new(payment, conflicting_txids, Vec::new())
+	}
+
+	async fn emit_onchain_payment_event(&self, payment: &PaymentDetails) -> Result<(), Error> {
+		if payment.status != PaymentStatus::Succeeded {
+			return Ok(());
+		}
+
+		let (txid, block_hash, block_height) = match &payment.kind {
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Confirmed { block_hash, height, .. },
+				tx_type: None,
+			} => (*txid, *block_hash, *height),
+			_ => return Ok(()),
+		};
+
+		let Some(amount_msat) = payment.amount_msat else {
+			log_error!(
+				self.logger,
+				"Skipping on-chain payment event for {} due to missing amount",
+				payment.id
+			);
+			return Ok(());
+		};
+
+		let event = match payment.direction {
+			PaymentDirection::Outbound => Event::OnchainPaymentSuccessful {
+				payment_id: payment.id,
+				txid,
+				amount_msat,
+				fee_paid_msat: payment.fee_paid_msat,
+				block_hash,
+				block_height,
+			},
+			PaymentDirection::Inbound => Event::OnchainPaymentReceived {
+				payment_id: payment.id,
+				txid,
+				amount_msat,
+				block_hash,
+				block_height,
+			},
+		};
+
+		self.event_queue.add_event(event).await.map_err(|e| {
+			log_error!(self.logger, "Failed to push on-chain payment event: {}", e);
+			Error::PersistenceFailed
+		})
 	}
 
 	fn find_payment_by_txid(&self, target_txid: Txid) -> Option<PaymentId> {

@@ -9,8 +9,10 @@ use bitcoin::Amount;
 use common::{
 	expect_channel_ready_event, generate_blocks_and_wait, premine_and_distribute_funds,
 	random_chain_source, setup_bitcoind_and_electrsd, setup_two_nodes_with_store,
+	ExpectOnchainPaymentEvent, OnchainPaymentEvent,
 };
 use criterion::{criterion_group, criterion_main, Criterion};
+use ldk_node::lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use ldk_node::{Event, Node};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use rand::RngCore;
@@ -137,7 +139,7 @@ fn payment_benchmark(c: &mut Criterion) {
 	runtime.block_on(async move {
 		let address_a = node_a_cloned.onchain_payment().new_address().unwrap();
 		let premine_sat = 25_000_000;
-		premine_and_distribute_funds(
+		let premine_txid = premine_and_distribute_funds(
 			&bitcoind.client,
 			&electrsd.client,
 			vec![address_a],
@@ -146,6 +148,18 @@ fn payment_benchmark(c: &mut Criterion) {
 		.await;
 		node_a_cloned.sync_wallets().unwrap();
 		node_b_cloned.sync_wallets().unwrap();
+		generate_blocks_and_wait(
+			&bitcoind.client,
+			&electrsd.client,
+			(ANTI_REORG_DELAY - 1) as usize,
+		)
+		.await;
+		node_a_cloned.sync_wallets().unwrap();
+		node_b_cloned.sync_wallets().unwrap();
+		assert_eq!(
+			node_a_cloned.expect_onchain_payment_event(OnchainPaymentEvent::Received).await,
+			premine_txid,
+		);
 		open_channel_push_amt(
 			&node_a_cloned,
 			&node_b_cloned,

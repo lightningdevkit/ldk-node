@@ -226,6 +226,28 @@ class LibraryTest {
         node1.syncWallets()
         node2.syncWallets()
 
+        val onchainPaymentReceivedEvent1 = node1.waitNextEvent()
+        println("Got event: $onchainPaymentReceivedEvent1")
+        when (onchainPaymentReceivedEvent1) {
+            is Event.OnchainPaymentReceived -> {
+                assertEquals(txid1, onchainPaymentReceivedEvent1.txid)
+                assertEquals(100000000uL, onchainPaymentReceivedEvent1.amountMsat)
+            }
+            else -> error("Expected initial on-chain payment event")
+        }
+        node1.eventHandled()
+
+        val onchainPaymentReceivedEvent2 = node2.waitNextEvent()
+        println("Got event: $onchainPaymentReceivedEvent2")
+        when (onchainPaymentReceivedEvent2) {
+            is Event.OnchainPaymentReceived -> {
+                assertEquals(txid2, onchainPaymentReceivedEvent2.txid)
+                assertEquals(100000000uL, onchainPaymentReceivedEvent2.amountMsat)
+            }
+            else -> error("Expected initial on-chain payment event")
+        }
+        node2.eventHandled()
+
         val spendableBalance1 = node1.listBalances().spendableOnchainBalanceSats
         val spendableBalance2 = node2.listBalances().spendableOnchainBalanceSats
         val totalBalance1 = node1.listBalances().totalOnchainBalanceSats
@@ -328,6 +350,24 @@ class LibraryTest {
         assert(spendableBalance1AfterClose > 95000u)
         assert(spendableBalance1AfterClose < 100000u)
         assertEquals(102500uL, spendableBalance2AfterClose)
+
+        val externalAddress = bitcoinCli("getnewaddress")
+        val onchainTxid = node1.onchainPayment().sendToAddress(externalAddress, 10000u, null)
+        waitForTx(esploraEndpoint, onchainTxid)
+        mineAndWait(esploraEndpoint, 6u)
+        node1.syncWallets()
+
+        val onchainPaymentSuccessfulEvent = node1.waitNextEvent()
+        println("Got event: $onchainPaymentSuccessfulEvent")
+        when (onchainPaymentSuccessfulEvent) {
+            is Event.OnchainPaymentSuccessful -> {
+                assertEquals(onchainTxid, onchainPaymentSuccessfulEvent.txid)
+                assertEquals(10000000uL, onchainPaymentSuccessfulEvent.amountMsat)
+                assertTrue(onchainPaymentSuccessfulEvent.feePaidMsat != null)
+            }
+            else -> error("Expected successful on-chain payment event")
+        }
+        node1.eventHandled()
 
         assertTrue(logWriter1.getLogMessages().isNotEmpty())
         assertTrue(logWriter2.getLogMessages().isNotEmpty())

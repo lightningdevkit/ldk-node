@@ -13,8 +13,9 @@ use bitcoin::Amount;
 use common::{
 	expect_channel_ready_event, expect_payment_successful_event, generate_blocks_and_wait,
 	open_channel, premine_and_distribute_funds, random_chain_source, setup_bitcoind_and_electrsd,
-	setup_two_nodes, TestChainSource,
+	setup_two_nodes, ExpectOnchainPaymentEvent, OnchainPaymentEvent, TestChainSource,
 };
+use ldk_node::lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use ldk_node::payment::UnifiedPaymentResult;
 use ldk_node::Event;
 use lightning::ln::channelmanager::PaymentId;
@@ -29,7 +30,7 @@ async fn unified_send_to_hrn() {
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let premined_sats = 5_000_000;
 
-	premine_and_distribute_funds(
+	let premine_txid = premine_and_distribute_funds(
 		&bitcoind.client,
 		&electrsd.client,
 		vec![address_a],
@@ -38,6 +39,13 @@ async fn unified_send_to_hrn() {
 	.await;
 
 	node_a.sync_wallets().unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, (ANTI_REORG_DELAY - 1) as usize)
+		.await;
+	node_a.sync_wallets().unwrap();
+	assert_eq!(
+		node_a.expect_onchain_payment_event(OnchainPaymentEvent::Received).await,
+		premine_txid,
+	);
 	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
