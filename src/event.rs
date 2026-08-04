@@ -10,6 +10,7 @@ use core::task::{Poll, Waker};
 use std::collections::VecDeque;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
@@ -34,7 +35,9 @@ use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
-use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
+use crate::config::{
+	may_announce_channel, Config, ForwardedPaymentTrackingMode, PEER_RECONNECTION_INTERVAL,
+};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
 use crate::fee_estimator::ConfirmationTarget;
@@ -51,11 +54,12 @@ use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
-use crate::payment::PaymentMetadata;
+use crate::payment::{ChannelForwardingStats, ForwardedPaymentDetails, PaymentMetadata};
 use crate::probing::Prober;
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	ChannelForwardingStatsStore, CustomTlvRecord, DynStore, ForwardedPaymentStore, KeysManager,
+	OnionMessenger, PaymentStore, Sweeper, Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -535,6 +539,8 @@ where
 	network_graph: Arc<Graph>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	forwarded_payment_store: Arc<ForwardedPaymentStore>,
+	channel_forwarding_stats_store: Arc<ChannelForwardingStatsStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
 	static_invoice_store: Option<StaticInvoiceStore>,
@@ -556,6 +562,8 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
+		forwarded_payment_store: Arc<ForwardedPaymentStore>,
+		channel_forwarding_stats_store: Arc<ChannelForwardingStatsStore>,
 		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
@@ -571,6 +579,8 @@ where
 			network_graph,
 			liquidity_source,
 			payment_store,
+			forwarded_payment_store,
+			channel_forwarding_stats_store,
 			peer_store,
 			keys_manager,
 			static_invoice_store,
@@ -1539,6 +1549,110 @@ where
 						.await;
 				}
 
+				if let (
+					[prev_htlc],
+					[next_htlc],
+					Some(outbound_amount_msat),
+					Some(fee_earned_msat),
+				) = (
+					prev_htlcs.as_slice(),
+					next_htlcs.as_slice(),
+					outbound_amount_forwarded_msat,
+					total_fee_earned_msat,
+				) {
+					let forwarded_at_timestamp = SystemTime::now()
+						.duration_since(UNIX_EPOCH)
+						.expect("current time should not be earlier than the Unix epoch")
+						.as_secs();
+					let inbound_amount_msat = outbound_amount_msat.saturating_add(fee_earned_msat);
+
+					// Inbound and outbound stats are persisted separately. A partial persistence
+					// failure may replay this event and count an update that already succeeded again.
+					// Persist the outbound update first so a failure between the writes cannot
+					// overcount fee revenue.
+					self.channel_forwarding_stats_store
+						.insert_or_update(ChannelForwardingStats {
+							channel_id: next_htlc.channel_id,
+							counterparty_node_id: next_htlc.node_id,
+							inbound_payments_forwarded: 0,
+							outbound_payments_forwarded: 1,
+							total_inbound_amount_msat: 0,
+							total_outbound_amount_msat: outbound_amount_msat,
+							total_fee_earned_msat: Some(0),
+							total_skimmed_fee_msat: 0,
+							onchain_claims_count: u64::from(claim_from_onchain_tx),
+							first_forwarded_at_timestamp: forwarded_at_timestamp,
+							last_forwarded_at_timestamp: forwarded_at_timestamp,
+						})
+						.await
+						.map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to update outbound channel forwarding stats: {e}"
+							);
+							ReplayEvent()
+						})?;
+
+					self.channel_forwarding_stats_store
+						.insert_or_update(ChannelForwardingStats {
+							channel_id: prev_htlc.channel_id,
+							counterparty_node_id: prev_htlc.node_id,
+							inbound_payments_forwarded: 1,
+							outbound_payments_forwarded: 0,
+							total_inbound_amount_msat: inbound_amount_msat,
+							total_outbound_amount_msat: 0,
+							total_fee_earned_msat: Some(fee_earned_msat),
+							total_skimmed_fee_msat: skimmed_fee_msat.unwrap_or(0),
+							onchain_claims_count: 0,
+							first_forwarded_at_timestamp: forwarded_at_timestamp,
+							last_forwarded_at_timestamp: forwarded_at_timestamp,
+						})
+						.await
+						.map_err(|e| {
+							log_error!(
+								self.logger,
+								"Failed to update inbound channel forwarding stats: {e}"
+							);
+							ReplayEvent()
+						})?;
+
+					if matches!(
+						self.config.forwarded_payment_tracking_mode,
+						ForwardedPaymentTrackingMode::Detailed
+					) {
+						self.forwarded_payment_store
+							.insert_with(|| ForwardedPaymentDetails {
+								id: hex_utils::to_string(
+									&self.keys_manager.get_secure_random_bytes(),
+								),
+								prev_channel_id: prev_htlc.channel_id,
+								next_channel_id: next_htlc.channel_id,
+								prev_user_channel_id: prev_htlc.user_channel_id.map(UserChannelId),
+								next_user_channel_id: next_htlc.user_channel_id.map(UserChannelId),
+								prev_node_id: prev_htlc.node_id,
+								next_node_id: next_htlc.node_id,
+								inbound_amount_forwarded_msat: Some(inbound_amount_msat),
+								total_fee_earned_msat: Some(fee_earned_msat),
+								skimmed_fee_msat,
+								claim_from_onchain_tx,
+								outbound_amount_forwarded_msat: Some(outbound_amount_msat),
+								forwarded_at_timestamp,
+							})
+							.await
+							.map_err(|e| {
+								log_error!(self.logger, "Failed to store forwarded payment: {e}");
+								ReplayEvent()
+							})?;
+					}
+				} else {
+					log_debug!(
+						self.logger,
+						"Skipping forwarding payment tracking for forward with {} inbound and {} outbound HTLCs because tracking requires a single HTLC in each direction with known amounts",
+						prev_htlcs.len(),
+						next_htlcs.len()
+					);
+				}
+
 				let event = Event::PaymentForwarded {
 					prev_htlcs: prev_htlcs.into_iter().map(HTLCLocator::from).collect(),
 					next_htlcs: next_htlcs.into_iter().map(HTLCLocator::from).collect(),
@@ -2025,6 +2139,14 @@ mod tests {
 	use crate::payment::store::LSPS2Parameters;
 	use crate::types::DynStoreWrapper;
 
+	fn ldk_htlc_locator(channel_byte: u8) -> LdkHtlcLocator {
+		LdkHtlcLocator {
+			channel_id: ChannelId([channel_byte; 32]),
+			user_channel_id: Some(channel_byte as u128),
+			node_id: None,
+		}
+	}
+
 	#[test]
 	fn lsps2_payment_metadata_decodes_total_fee_limit() {
 		let metadata = PaymentMetadata {
@@ -2120,6 +2242,14 @@ mod tests {
 			counterparty_node_id: Option<PublicKey>,
 			reason: Option<ClosureReason>,
 		},
+		PaymentForwarded {
+			prev_htlcs: Vec<HTLCLocator>,
+			next_htlcs: Vec<HTLCLocator>,
+			total_fee_earned_msat: Option<u64>,
+			skimmed_fee_msat: Option<u64>,
+			claim_from_onchain_tx: bool,
+			outbound_amount_forwarded_msat: Option<u64>,
+		},
 	}
 
 	impl_writeable_tlv_based_enum!(LegacyEvent,
@@ -2128,6 +2258,14 @@ mod tests {
 			(1, counterparty_node_id, option),
 			(2, user_channel_id, required),
 			(3, reason, upgradable_option),
+		},
+		(7, PaymentForwarded) => {
+			(8, total_fee_earned_msat, option),
+			(10, skimmed_fee_msat, option),
+			(12, claim_from_onchain_tx, required),
+			(14, outbound_amount_forwarded_msat, option),
+			(15, prev_htlcs, (default_value_vec, Vec::new())),
+			(17, next_htlcs, (default_value_vec, Vec::new())),
 		},
 	);
 
@@ -2188,6 +2326,52 @@ mod tests {
 
 		let res = EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger));
 		assert!(res.is_err());
+	}
+
+	#[test]
+	fn event_queue_reads_legacy_multi_htlc_forward() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let prev_htlcs =
+			vec![HTLCLocator::from(ldk_htlc_locator(1)), HTLCLocator::from(ldk_htlc_locator(2))];
+		let next_htlcs = vec![HTLCLocator::from(ldk_htlc_locator(3))];
+		let legacy_event = LegacyEvent::PaymentForwarded {
+			prev_htlcs: prev_htlcs.clone(),
+			next_htlcs: next_htlcs.clone(),
+			total_fee_earned_msat: Some(200),
+			skimmed_fee_msat: None,
+			claim_from_onchain_tx: false,
+			outbound_amount_forwarded_msat: Some(800),
+		};
+		let persisted_bytes = encode_legacy_event_queue(legacy_event);
+
+		let event_queue =
+			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
+		assert_eq!(
+			event_queue.next_event(),
+			Some(Event::PaymentForwarded {
+				prev_htlcs,
+				next_htlcs,
+				total_fee_earned_msat: Some(200),
+				skimmed_fee_msat: None,
+				claim_from_onchain_tx: false,
+				outbound_amount_forwarded_msat: Some(800),
+			})
+		);
+	}
+
+	#[test]
+	fn payment_forwarded_event_roundtrips() {
+		let event = Event::PaymentForwarded {
+			prev_htlcs: vec![HTLCLocator::from(ldk_htlc_locator(1))],
+			next_htlcs: vec![HTLCLocator::from(ldk_htlc_locator(2))],
+			total_fee_earned_msat: Some(200),
+			skimmed_fee_msat: None,
+			claim_from_onchain_tx: false,
+			outbound_amount_forwarded_msat: Some(800),
+		};
+
+		assert_eq!(Event::read(&mut &event.encode()[..]).unwrap(), event);
 	}
 
 	#[tokio::test]

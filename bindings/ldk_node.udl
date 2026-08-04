@@ -11,6 +11,8 @@ typedef dictionary ElectrumSyncConfig;
 
 typedef dictionary TorConfig;
 
+typedef enum ForwardedPaymentTrackingMode;
+
 typedef interface NodeEntropy;
 
 typedef interface ProbingConfig;
@@ -113,6 +115,7 @@ interface Node {
 	OnchainPayment onchain_payment();
 	UnifiedPayment unified_payment();
 	Liquidity liquidity();
+	Forwarding forwarding();
 	[Throws=NodeError]
 	void lnurl_auth(string lnurl);
 	[Throws=NodeError]
@@ -183,6 +186,8 @@ interface FeeRate {
 typedef interface UnifiedPayment;
 
 typedef interface Liquidity;
+
+typedef interface Forwarding;
 
 [Error]
 enum NodeError {
@@ -408,6 +413,9 @@ typedef string PaymentSecret;
 typedef string ChannelId;
 
 [Custom]
+typedef string PageToken;
+
+[Custom]
 typedef string UserChannelId;
 
 [Custom]
@@ -433,3 +441,15 @@ typedef enum Event;
 typedef interface HRNResolverConfig;
 
 typedef dictionary HumanReadableNamesConfig;
+
+typedef dictionary ForwardedPaymentDetails;
+
+typedef dictionary ChannelForwardingStats;
+
+typedef dictionary ChannelPairForwardingStats;
+
+typedef dictionary ForwardedPaymentDetailsPage;
+
+typedef dictionary ChannelForwardingStatsPage;
+
+typedef dictionary ChannelPairForwardingStatsPage;
