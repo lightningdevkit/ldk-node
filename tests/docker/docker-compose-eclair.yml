@@ -77,4 +77,5 @@ services:
         -Declair.bitcoind.zmqtx=tcp://127.0.0.1:28333
         -Declair.features.keysend=optional
         -Declair.on-chain-fees.confirmation-priority.funding=slow
+        ${ECLAIR_EXTRA_JAVA_OPTS:-}
         -Declair.printToConsole
