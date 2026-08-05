@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use bip39::Mnemonic;
+use bip39::{rand::rngs::OsRng, Language, Mnemonic};
 
 use crate::config::WALLET_KEYS_SEED_LEN;
 use crate::io;
@@ -128,7 +128,8 @@ impl fmt::Debug for NodeEntropy {
 /// [`Node`]: crate::Node
 pub fn generate_entropy_mnemonic(word_count: Option<WordCount>) -> Mnemonic {
 	let word_count = word_count.unwrap_or(WordCount::Words24).word_count();
-	Mnemonic::generate(word_count).expect("Failed to generate mnemonic")
+	Mnemonic::generate_in_with(&mut OsRng, Language::English, word_count)
+		.expect("Failed to generate mnemonic")
 }
 
 /// Supported BIP39 mnemonic word counts for entropy generation.
