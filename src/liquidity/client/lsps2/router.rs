@@ -13,6 +13,7 @@ use lightning::blinded_path::payment::{
 	BlindedPaymentPath, ForwardTlvs, PaymentConstraints, PaymentContext, PaymentForwardNode,
 	PaymentRelay, ReceiveTlvs,
 };
+use lightning::blinded_path::IntroductionNode;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{PaymentId, MIN_FINAL_CLTV_EXPIRY_DELTA};
@@ -100,6 +101,23 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 		first_hops: Vec<ChannelDetails>, tlvs: ReceiveTlvs, amount_msats: Option<u64>,
 		secp_ctx: &Secp256k1<T>,
 	) -> Result<Vec<BlindedPaymentPath>, ()> {
+		let parameters = self.payment_parameters(&tlvs.payment_context);
+		let allow_mpp = parameters.iter().all(|params| params.payment_size_msat.is_some());
+		let direct_path_has_sufficient_liquidity = amount_msats.map_or(true, |amount_msats| {
+			if allow_mpp {
+				first_hops
+					.iter()
+					.map(|channel| channel.inbound_capacity_msat)
+					.fold(0u64, u64::saturating_add)
+					>= amount_msats
+			} else {
+				first_hops.iter().any(|channel| {
+					channel.inbound_capacity_msat >= amount_msats
+						&& channel.inbound_htlc_minimum_msat.unwrap_or(0) <= amount_msats
+						&& channel.inbound_htlc_maximum_msat.unwrap_or(u64::MAX) >= amount_msats
+				})
+			}
+		});
 		let inner_paths = self.inner_router.create_blinded_payment_paths(
 			recipient,
 			local_node_receive_key,
@@ -108,19 +126,31 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 			amount_msats,
 			secp_ctx,
 		);
-		// The inner router was given the resolved payment amount and only returns ordinary paths when
-		// the existing inbound liquidity can receive all of it. Always prefer those paths. Besides
-		// avoiding an unnecessary channel open, this prevents an MPP payer from splitting one payment
-		// across regular and JIT paths. The LSP only opens its channel after receiving the complete
-		// negotiated amount on the intercept SCID, so a partial JIT shard could otherwise remain stuck
-		// indefinitely.
-		if matches!(&inner_paths, Ok(paths) if !paths.is_empty()) {
+		let is_direct_recipient_path = matches!(
+			&inner_paths,
+			Ok(paths) if paths.len() == 1 && matches!(
+				paths[0].introduction_node(),
+				IntroductionNode::NodeId(node_id) if *node_id == recipient
+			)
+		);
+		// The default router may fall back to a direct path for an announced recipient even when no
+		// channel-backed paths have enough inbound liquidity. Only accept that fallback when the
+		// locally known channels can receive the resolved amount: across channels when MPP is allowed,
+		// or on one channel, including its HTLC bounds, when MPP is disabled. Otherwise it would hide
+		// the need for a JIT path and leave an invoice that cannot be paid.
+		//
+		// Always prefer usable ordinary paths. Besides avoiding an unnecessary channel open, this
+		// prevents an MPP payer from splitting one payment across regular and JIT paths. The LSP only
+		// opens its channel after receiving the complete negotiated amount on the intercept SCID, so a
+		// partial JIT shard could otherwise remain stuck indefinitely.
+		if matches!(&inner_paths, Ok(paths) if !paths.is_empty())
+			&& (!is_direct_recipient_path || direct_path_has_sufficient_liquidity)
+		{
 			return inner_paths;
 		}
 
-		let parameters = self.payment_parameters(&tlvs.payment_context);
 		if parameters.is_empty() {
-			return inner_paths;
+			return if is_direct_recipient_path { Err(()) } else { inner_paths };
 		}
 		let Some(amount_msats) = amount_msats else {
 			// Invoice construction supplies the resolved amount even for a variable-amount offer. Without
@@ -210,7 +240,14 @@ mod tests {
 
 	struct MockRouter {
 		calls: AtomicUsize,
-		return_regular_path: bool,
+		path_kind: MockPathKind,
+	}
+
+	#[derive(Clone, Copy)]
+	enum MockPathKind {
+		None,
+		ChannelBacked,
+		DirectRecipient,
 	}
 
 	impl Router for MockRouter {
@@ -227,8 +264,9 @@ mod tests {
 			secp_ctx: &Secp256k1<T>,
 		) -> Result<Vec<BlindedPaymentPath>, ()> {
 			self.calls.fetch_add(1, Ordering::AcqRel);
-			if self.return_regular_path {
-				BlindedPaymentPath::one_hop(
+			match self.path_kind {
+				MockPathKind::None => Err(()),
+				MockPathKind::DirectRecipient => BlindedPaymentPath::one_hop(
 					recipient,
 					local_node_receive_key,
 					tlvs,
@@ -236,9 +274,38 @@ mod tests {
 					TestEntropy,
 					secp_ctx,
 				)
-				.map(|path| vec![path])
-			} else {
-				Err(())
+				.map(|path| vec![path]),
+				MockPathKind::ChannelBacked => {
+					let forward_node = PaymentForwardNode {
+						tlvs: ForwardTlvs {
+							short_channel_id: 43,
+							payment_relay: PaymentRelay {
+								cltv_expiry_delta: 18,
+								fee_proportional_millionths: 0,
+								fee_base_msat: 0,
+							},
+							payment_constraints: PaymentConstraints {
+								max_cltv_expiry: 118,
+								htlc_minimum_msat: 0,
+							},
+							features: BlindedHopFeatures::empty(),
+							next_blinding_override: None,
+						},
+						node_id: pubkey(12),
+						htlc_maximum_msat: u64::MAX,
+					};
+					BlindedPaymentPath::new(
+						&[forward_node],
+						recipient,
+						local_node_receive_key,
+						tlvs,
+						u64::MAX,
+						MIN_FINAL_CLTV_EXPIRY_DELTA,
+						TestEntropy,
+						secp_ctx,
+					)
+					.map(|path| vec![path])
+				},
 			}
 		}
 	}
@@ -280,7 +347,7 @@ mod tests {
 			valid_until: u64::MAX,
 		};
 		let metadata = payment_metadata(parameters);
-		let inner_router = MockRouter { calls: AtomicUsize::new(0), return_regular_path: false };
+		let inner_router = MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::None };
 		let router = LSPS2Router::new(inner_router, TestEntropy);
 
 		let paths = router
@@ -315,7 +382,7 @@ mod tests {
 			valid_until: u64::MAX,
 		};
 		let metadata = payment_metadata(parameters);
-		let inner_router = MockRouter { calls: AtomicUsize::new(0), return_regular_path: false };
+		let inner_router = MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::None };
 		let router = LSPS2Router::new(inner_router, TestEntropy);
 
 		assert!(router
@@ -340,7 +407,7 @@ mod tests {
 			valid_until: u64::MAX,
 		};
 		let metadata = payment_metadata(parameters);
-		let inner_router = MockRouter { calls: AtomicUsize::new(0), return_regular_path: false };
+		let inner_router = MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::None };
 		let router = LSPS2Router::new(inner_router, TestEntropy);
 
 		let paths = router
@@ -369,7 +436,8 @@ mod tests {
 			valid_until: u64::MAX,
 		};
 		let metadata = payment_metadata(parameters);
-		let inner_router = MockRouter { calls: AtomicUsize::new(0), return_regular_path: true };
+		let inner_router =
+			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::ChannelBacked };
 		let router = LSPS2Router::new(inner_router, TestEntropy);
 		let recipient = pubkey(10);
 
@@ -389,6 +457,61 @@ mod tests {
 		assert_ne!(
 			paths[0].introduction_node(),
 			&lightning::blinded_path::IntroductionNode::NodeId(lsp_node_id)
+		);
+	}
+
+	#[test]
+	fn rejects_insufficient_direct_recipient_fallback() {
+		let recipient = pubkey(10);
+		let inner_router =
+			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
+		let router = LSPS2Router::new(inner_router, TestEntropy);
+
+		assert!(
+			router
+				.create_blinded_payment_paths(
+					recipient,
+					ReceiveAuthKey([3; 32]),
+					Vec::new(),
+					payment_tlvs(BTreeMap::new()),
+					Some(3_000),
+					&Secp256k1::new(),
+				)
+				.is_err(),
+			"announced-recipient fallback hid missing inbound liquidity"
+		);
+	}
+
+	#[test]
+	fn replaces_insufficient_direct_fallback_with_jit_path() {
+		let recipient = pubkey(10);
+		let lsp_node_id = pubkey(11);
+		let parameters = LSPS2LeaseParameters {
+			lsp_node_id,
+			intercept_scid: 42,
+			cltv_expiry_delta: 48,
+			payment_size_msat: Some(3_000),
+			valid_until: u64::MAX,
+		};
+		let inner_router =
+			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
+		let router = LSPS2Router::new(inner_router, TestEntropy);
+
+		let paths = router
+			.create_blinded_payment_paths(
+				recipient,
+				ReceiveAuthKey([3; 32]),
+				Vec::new(),
+				payment_tlvs(payment_metadata(parameters)),
+				Some(3_000),
+				&Secp256k1::new(),
+			)
+			.unwrap();
+
+		assert_eq!(
+			paths[0].introduction_node(),
+			&lightning::blinded_path::IntroductionNode::NodeId(lsp_node_id),
+			"insufficient direct fallback hid the JIT path"
 		);
 	}
 }
