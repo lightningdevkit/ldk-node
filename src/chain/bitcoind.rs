@@ -1194,9 +1194,14 @@ impl BlockSource for BitcoindClient {
 			BitcoindClient::Rpc { rpc_client, .. } => {
 				Box::pin(async move { rpc_client.get_header(header_hash, height_hint).await })
 			},
-			BitcoindClient::Rest { rest_client, .. } => {
-				Box::pin(async move { rest_client.get_header(header_hash, height_hint).await })
-			},
+			BitcoindClient::Rest { rest_client, rpc_client, .. } => Box::pin(async move {
+				match rest_client.get_header(header_hash, height_hint).await {
+					Err(e) if e.kind() == BlockSourceErrorKind::Persistent => {
+						rpc_client.get_header(header_hash, height_hint).await
+					},
+					result => result,
+				}
+			}),
 		}
 	}
 
