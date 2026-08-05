@@ -1280,8 +1280,13 @@ impl BlockSource for BitcoindClient {
 				BitcoindClient::Rpc { rpc_client, .. } => {
 					rpc_client.get_header(header_hash, height_hint).await
 				},
-				BitcoindClient::Rest { rest_client, .. } => {
-					rest_client.get_header(header_hash, height_hint).await
+				BitcoindClient::Rest { rest_client, rpc_client, .. } => {
+					match rest_client.get_header(header_hash, height_hint).await {
+						Err(e) if e.kind() == BlockSourceErrorKind::Persistent => {
+							rpc_client.get_header(header_hash, height_hint).await
+						},
+						result => result,
+					}
 				},
 			}
 		}
