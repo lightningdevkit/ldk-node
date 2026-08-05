@@ -1400,21 +1400,33 @@ impl Wallet {
 	async fn persist_funding_payment(
 		&self, details: PaymentDetails, candidates: Vec<FundingTxCandidate>,
 	) -> Result<(), Error> {
-		// Deciding between a fresh insert and a merge must be atomic with the write: a racing
-		// wallet sync can record and advance this payment between a separate existence check and
-		// the write, and a full merge of the fresh Pending/Unconfirmed details would then
-		// downgrade the confirmation state the wallet-sync events own. `update_or_insert` holds
-		// the store's mutation lock across the whole decision: when a record exists — no matter
-		// when it appeared — only the classification (`tx_type`) and the figures of whichever
-		// candidate the record's state makes authoritative are merged; otherwise the fresh
-		// details are inserted.
-		let update = funding_reclassification_update(
-			details.clone(),
-			&candidates,
-			self.payment_store.get(&details.id).as_ref(),
-		);
-		let id = update.id;
-		self.payment_store.update_or_insert(update.clone(), details.clone()).await?;
+		// Everything this write does depends on the record's current state, so all of it must be
+		// decided inside the store's critical section. When a record exists — no matter when it
+		// appeared — only the classification (`tx_type`) and the figures of whichever candidate
+		// the record's state makes authoritative are merged: a full merge of the fresh
+		// Pending/Unconfirmed details would downgrade the confirmation state the wallet-sync
+		// events own. Which candidate is authoritative is equally stateful: substituting the
+		// confirmed candidate's figures requires seeing the confirmation. Selected from a read
+		// taken before the lock, the choice goes stale when a confirmation lands in between —
+		// the update still names the actively-broadcast candidate, the confirmed-figures guard
+		// then rightly refuses it, and the record is left with figures no classification derived.
+		let id = details.id;
+		let mut update = None;
+		self.payment_store
+			.mutate(&id, |existing| {
+				let reclassification =
+					funding_reclassification_update(details.clone(), &candidates, existing);
+				update = Some(reclassification.clone());
+				match existing {
+					None => Some(details.clone()),
+					Some(current) => {
+						let mut updated = current.clone();
+						updated.update(reclassification).then_some(updated)
+					},
+				}
+			})
+			.await?;
+		let update = update.expect("the mutate closure always runs");
 
 		// The pending index must exist exactly while the authoritative record is Pending:
 		// graduation and rebroadcast read it, and a graduated payment must not be re-indexed.

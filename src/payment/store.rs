@@ -1307,13 +1307,13 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn funding_classification_update_or_insert_preserves_advanced_record() {
+	async fn funding_classification_merge_preserves_advanced_record() {
 		use bitcoin::hashes::Hash;
 		use lightning::util::test_utils::TestLogger;
 		use std::str::FromStr;
 		use std::sync::Arc;
 
-		use crate::data_store::{DataStore, DataStoreUpdateOrInsertResult};
+		use crate::data_store::DataStore;
 		use crate::io::test_utils::InMemoryStore;
 		use crate::types::{DynStore, DynStoreWrapper};
 
@@ -1379,16 +1379,22 @@ mod tests {
 			"a full merge of a fresh classification downgrades an advanced record",
 		);
 
-		// `update_or_insert` applies only the narrow reclassification when a record exists — no
-		// matter when it appeared — setting the `tx_type` while preserving the confirmation
+		// Classification instead applies only the narrow reclassification when a record exists —
+		// no matter when it appeared — setting the `tx_type` while preserving the confirmation
 		// state wallet sync owns. The update names the confirmed txid, so its
 		// contribution-derived figures replace the record's wallet-view ones.
 		let store = new_store(vec![advanced.clone()]);
 		let update = PaymentDetailsUpdate::funding_reclassification(fresh.clone());
-		assert_eq!(
-			Ok(DataStoreUpdateOrInsertResult::Updated),
-			store.update_or_insert(update, fresh.clone()).await
-		);
+		let written = store
+			.mutate(&id, |existing| match existing {
+				Some(current) => {
+					let mut updated = current.clone();
+					updated.update(update).then_some(updated)
+				},
+				None => Some(fresh.clone()),
+			})
+			.await;
+		assert!(matches!(written, Ok(Some(_))), "the reclassification must merge");
 		let merged = store.get(&id).unwrap();
 		assert_eq!(merged.status, PaymentStatus::Succeeded);
 		assert!(matches!(
@@ -1405,10 +1411,16 @@ mod tests {
 		// And it inserts the fresh details when no record exists yet.
 		let store = new_store(Vec::new());
 		let update = PaymentDetailsUpdate::funding_reclassification(fresh.clone());
-		assert_eq!(
-			Ok(DataStoreUpdateOrInsertResult::Inserted),
-			store.update_or_insert(update, fresh).await
-		);
+		let written = store
+			.mutate(&id, |existing| match existing {
+				Some(current) => {
+					let mut updated = current.clone();
+					updated.update(update).then_some(updated)
+				},
+				None => Some(fresh.clone()),
+			})
+			.await;
+		assert!(matches!(written, Ok(Some(_))), "the fresh details must insert");
 		let inserted = store.get(&id).unwrap();
 		assert_eq!(inserted.status, PaymentStatus::Pending);
 		assert!(matches!(
