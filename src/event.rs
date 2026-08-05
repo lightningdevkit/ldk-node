@@ -68,6 +68,10 @@ use crate::{
 pub struct HTLCLocator {
 	/// The channel that the HTLC was sent or received on.
 	pub channel_id: ChannelId,
+	/// The amount, in milli-satoshis, of the HTLC that was sent or received, if known.
+	///
+	/// This will be `None` for events serialized by LDK Node v0.7.0 and prior.
+	pub amount_msat: Option<u64>,
 	/// The `user_channel_id` for the channel.
 	///
 	/// Will only be `None` for events serialized with LDK Node v0.3.0 or prior, or if the
@@ -84,12 +88,14 @@ impl_writeable_tlv_based!(HTLCLocator, {
 	(1, channel_id, required),
 	(3, user_channel_id, option),
 	(5, node_id, option),
+	(7, amount_msat, option),
 });
 
 impl From<LdkHtlcLocator> for HTLCLocator {
 	fn from(value: LdkHtlcLocator) -> Self {
 		HTLCLocator {
 			channel_id: value.channel_id,
+			amount_msat: value.amount_msat,
 			user_channel_id: value.user_channel_id.map(|u| UserChannelId(u)),
 			node_id: value.node_id,
 		}
@@ -355,11 +361,13 @@ impl_writeable_tlv_based_enum!(Event,
 		(14, outbound_amount_forwarded_msat, (default_value, 0)),
 		(15, prev_htlcs, (default_value_vec, vec![HTLCLocator {
 			channel_id: legacy_prev_channel_id.ok_or(lightning::ln::msgs::DecodeError::InvalidValue)?,
+			amount_msat: None,
 			user_channel_id: legacy_prev_user_channel_id.map(UserChannelId),
 			node_id: legacy_prev_node_id,
 		}])),
 		(17, next_htlcs, (default_value_vec, vec![HTLCLocator {
 			channel_id: legacy_next_channel_id.ok_or(lightning::ln::msgs::DecodeError::InvalidValue)?,
+			amount_msat: None,
 			user_channel_id: legacy_next_user_channel_id.map(UserChannelId),
 			node_id: legacy_next_node_id,
 		}])),
@@ -2214,11 +2222,13 @@ mod tests {
 		let logger = Arc::new(TestLogger::new());
 		let prev_htlcs = vec![HTLCLocator {
 			channel_id: ChannelId([1; 32]),
+			amount_msat: None,
 			user_channel_id: None,
 			node_id: None,
 		}];
 		let next_htlcs = vec![HTLCLocator {
 			channel_id: ChannelId([2; 32]),
+			amount_msat: None,
 			user_channel_id: None,
 			node_id: None,
 		}];
