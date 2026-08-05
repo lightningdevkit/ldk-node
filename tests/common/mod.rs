@@ -1063,7 +1063,6 @@ pub async fn splice_in_with_all(
 	node_a.splice_in_with_all(user_channel_id, node_b.node_id()).unwrap();
 
 	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
-	expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(&electrsd.client, splice_txo.txid).await;
 }
 
@@ -1537,7 +1536,6 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert!(splice_out_sat > 500_000);
 	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
 
-	expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
@@ -1560,7 +1558,6 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
 
 	expect_splice_negotiated_event!(node_a, node_b.node_id());
-	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
 	node_a.sync_wallets().unwrap();

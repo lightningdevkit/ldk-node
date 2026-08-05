@@ -1754,8 +1754,7 @@ async fn splice_channel() {
 	// Splice-in funds for Node B so that it has outbound liquidity to make a payment
 	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).unwrap();
 
-	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
-	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	let txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	// Node B contributed to this splice, so wait for its funding broadcast to be classified before
 	// syncing — otherwise a sync racing the broadcaster's queue records a generic on-chain payment.
@@ -1815,7 +1814,6 @@ async fn splice_channel() {
 	node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, amount_msat / 1000).unwrap();
 
 	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
-	expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	// Node A contributed to this splice, so wait for its funding broadcast to be classified before
 	// syncing — otherwise a sync racing the broadcaster's queue records a generic on-chain payment.
@@ -1928,8 +1926,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// Initiate a splice-in to create a pending splice
 	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
 
-	let original_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
-	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	let original_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	// Sync so the original splice candidate is recorded as a canonical wallet transaction before
 	// the RBF below replaces it. The post-RBF sync then observes the original candidate being
@@ -1966,8 +1963,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// bump_channel_funding_fee should succeed when there's a pending splice
 	node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id()).unwrap();
 
-	let rbf_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
-	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	let rbf_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 
 	assert_ne!(original_txo, rbf_txo, "RBF should produce a different funding txo");
 
@@ -2172,8 +2168,7 @@ async fn splice_payment_reorged_to_unconfirmed() {
 
 	// node_b splices in, recording a funding payment it contributed to.
 	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
-	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
-	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	let splice_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(&electrsd.client, splice_txo.txid).await;
 	// Ensure node_b classified the splice before syncing so the test exercises a funding payment's
 	// reorg rather than a generic on-chain payment's.
@@ -2250,8 +2245,7 @@ async fn splice_in_rbf_joins_counterparty_splice() {
 	// node_b (which didn't fund the channel open, so holds the on-chain balance) initiates a
 	// splice-in; node_a does not contribute to this first candidate.
 	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
-	let counterparty_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
-	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	let counterparty_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(&electrsd.client, counterparty_txo.txid).await;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();

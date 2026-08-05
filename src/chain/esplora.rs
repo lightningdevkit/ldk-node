@@ -56,16 +56,24 @@ impl EsploraChainSource {
 		let mut client_builder = esplora_client::Builder::new(&server_url);
 		client_builder =
 			client_builder.timeout(sync_config.timeouts_config.per_request_timeout_secs as u64);
+		let mut ldk_client_builder = ldk_esplora_client::Builder::new(&server_url);
+		ldk_client_builder = ldk_client_builder.timeout(Duration::from_secs(
+			sync_config.timeouts_config.per_request_timeout_secs as u64,
+		));
 
 		for (header_name, header_value) in &headers {
 			client_builder = client_builder.header(header_name, header_value);
+			ldk_client_builder = ldk_client_builder.header(header_name, header_value);
 		}
 
 		let esplora_client = client_builder.build_async().map_err(|e| {
 			log_error!(logger, "Failed to build Esplora client: {}", e);
 		})?;
+		let ldk_esplora_client = ldk_client_builder.build_async().map_err(|e| {
+			log_error!(logger, "Failed to build LDK Esplora client: {}", e);
+		})?;
 		let tx_sync =
-			Arc::new(EsploraSyncClient::from_client(esplora_client.clone(), Arc::clone(&logger)));
+			Arc::new(EsploraSyncClient::from_client(ldk_esplora_client, Arc::clone(&logger)));
 
 		let onchain_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
 		let lightning_wallet_sync_status = Mutex::new(WalletSyncStatus::Completed);
