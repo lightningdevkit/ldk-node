@@ -37,6 +37,7 @@ use lightning::offers::static_invoice::StaticInvoice as LdkStaticInvoice;
 use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::PageToken as LdkPageToken;
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning_invoice::{Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescriptionRef};
 pub use lightning_invoice::{Description, SignedRawBolt11Invoice};
@@ -78,6 +79,34 @@ pub enum VssHeaderProviderError {
 		/// The error message.
 		error: String,
 	},
+}
+
+/// An opaque token used to continue paginated listing operations.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Display)]
+pub struct PageToken {
+	pub(crate) inner: LdkPageToken,
+}
+
+#[uniffi::export]
+impl PageToken {
+	/// Creates a page token from its opaque string representation.
+	#[uniffi::constructor]
+	pub fn new(token: String) -> Self {
+		Self { inner: LdkPageToken::new(token) }
+	}
+}
+
+impl From<LdkPageToken> for PageToken {
+	fn from(token: LdkPageToken) -> Self {
+		Self { inner: token }
+	}
+}
+
+impl std::fmt::Display for PageToken {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.inner)
+	}
 }
 
 impl std::fmt::Display for VssHeaderProviderError {
