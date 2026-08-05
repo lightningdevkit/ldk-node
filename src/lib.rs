@@ -2046,9 +2046,40 @@ impl Node {
 		self.eltoo.manager.force_close_channel(channel_id);
 	}
 
-	/// Drains the pending eltoo events (channels becoming ready, payment outcomes, ...).
+	/// Drains the pending eltoo events (channels becoming ready, payment outcomes,
+	/// transactions broadcast, ...).
 	pub fn eltoo_events(&self) -> Vec<lightning::ln::eltoo::channelmanager::EltooEvent> {
 		self.eltoo.take_events()
+	}
+
+	/// Lists all eltoo channels with a point-in-time summary of each.
+	pub fn list_eltoo_channels(
+		&self,
+	) -> Vec<lightning::ln::eltoo::channelmanager::EltooChannelDetails> {
+		self.eltoo.manager.list_channels()
+	}
+
+	/// Returns the given eltoo channel's latest fully-signed update transaction and its
+	/// P2A anchor outpoint, exactly as a force-close would broadcast them right now —
+	/// without broadcasting anything. A caller can hold the result while the channel
+	/// advances further and later hand it to [`Node::broadcast_eltoo_package`] to
+	/// deliberately publish a stale state (for demos/testing of the rebind response).
+	pub fn eltoo_signed_update_package(
+		&self, channel_id: ChannelId,
+	) -> Result<(bitcoin::Transaction, bitcoin::OutPoint), Error> {
+		self.eltoo.manager.signed_update_package(channel_id).ok_or(Error::InvalidChannelId)
+	}
+
+	/// Broadcasts an eltoo update transaction, attaching a wallet-funded CPFP child on
+	/// its P2A anchor for fees.
+	pub fn broadcast_eltoo_package(
+		&self, tx: bitcoin::Transaction, anchor_outpoint: bitcoin::OutPoint,
+	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+		self.runtime.block_on(self.eltoo.broadcast_package(tx, Some(anchor_outpoint)));
+		Ok(())
 	}
 
 	/// Close a previously opened channel.

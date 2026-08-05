@@ -343,32 +343,49 @@ impl EltooRuntime {
 	async fn pump_events(&self) {
 		for event in self.manager.get_and_clear_events() {
 			match event {
-				EltooEvent::BroadcastTransaction { tx, anchor_outpoint: None } => {
-					self.tx_broadcaster.broadcast_transactions(&[(
-						&tx,
-						TransactionType::Sweep { channels: vec![] },
-					)]);
-				},
-				EltooEvent::BroadcastTransaction { tx, anchor_outpoint: Some(anchor) } => {
-					match self.build_anchor_child(&tx, anchor).await {
-						Ok(child) => {
-							self.tx_broadcaster.broadcast_transactions(&[
-								(&tx, TransactionType::Sweep { channels: vec![] }),
-								(&child, TransactionType::Sweep { channels: vec![] }),
-							]);
-						},
-						Err(()) => {
-							log_error!(
-								self.logger,
-								"Failed to build CPFP child for eltoo tx {}",
-								tx.compute_txid()
-							);
-						},
-					}
+				EltooEvent::BroadcastTransaction { tx, anchor_outpoint } => {
+					self.broadcast_package(tx, anchor_outpoint).await;
 				},
 				other => self.events.lock().unwrap().push(other),
 			}
 		}
+	}
+
+	/// Broadcasts an eltoo transaction — packaged with a wallet-funded CPFP child when
+	/// it carries a P2A anchor — and, on success, queues the broadcast as a user event
+	/// so the txid can be followed on-chain.
+	pub(crate) async fn broadcast_package(
+		&self, tx: Transaction, anchor_outpoint: Option<OutPoint>,
+	) {
+		match anchor_outpoint {
+			None => {
+				self.tx_broadcaster
+					.broadcast_transactions(&[(&tx, TransactionType::Sweep { channels: vec![] })]);
+			},
+			Some(anchor) => match self.build_anchor_child(&tx, anchor).await {
+				Ok(child) => {
+					log_debug!(
+						self.logger,
+						"Broadcasting eltoo package: parent {}, CPFP child {}",
+						tx.compute_txid(),
+						child.compute_txid()
+					);
+					self.tx_broadcaster.broadcast_transactions(&[
+						(&tx, TransactionType::Sweep { channels: vec![] }),
+						(&child, TransactionType::Sweep { channels: vec![] }),
+					]);
+				},
+				Err(()) => {
+					log_error!(
+						self.logger,
+						"Failed to build CPFP child for eltoo tx {}",
+						tx.compute_txid()
+					);
+					return;
+				},
+			},
+		}
+		self.events.lock().unwrap().push(EltooEvent::BroadcastTransaction { tx, anchor_outpoint });
 	}
 
 	/// Builds the CPFP child spending the P2A anchor (empty witness) plus one
