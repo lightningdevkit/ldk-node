@@ -95,6 +95,14 @@ pub(crate) struct Wallet {
 	config: Arc<Config>,
 	logger: Arc<Logger>,
 	pending_payment_store: Arc<PendingPaymentStore>,
+	// Serializes the writers that must observe the payment record and its pending-store entry
+	// (candidate history included) as one consistent unit: classification's two-store write pair
+	// and wallet sync's funding-confirmation handling. Without it, a confirmation landing between
+	// classification's payment-store write and its pending-store write sees the record classified
+	// but the candidate history absent, and stamps the confirmed candidate with another
+	// candidate's figures — which nothing afterwards repairs. Writers that touch only one store
+	// (e.g. graduation) stay safe through the per-store gates instead and need not take this.
+	funding_payment_update_lock: tokio::sync::Mutex<()>,
 }
 
 impl Wallet {
@@ -118,6 +126,7 @@ impl Wallet {
 			config,
 			logger,
 			pending_payment_store,
+			funding_payment_update_lock: tokio::sync::Mutex::new(()),
 		}
 	}
 
@@ -1400,6 +1409,10 @@ impl Wallet {
 	async fn persist_funding_payment(
 		&self, details: PaymentDetails, candidates: Vec<FundingTxCandidate>,
 	) -> Result<(), Error> {
+		// Hold the cross-store lock across both writes so a funding confirmation never observes
+		// the record classified but the candidate history it needs still missing.
+		let _guard = self.funding_payment_update_lock.lock().await;
+
 		// Everything this write does depends on the record's current state, so all of it must be
 		// decided inside the store's critical section. When a record exists — no matter when it
 		// appeared — only the classification (`tx_type`) and the figures of whichever candidate
@@ -1571,6 +1584,11 @@ impl Wallet {
 	async fn apply_funding_status_update(
 		&self, payment_id: PaymentId, event_txid: Txid, confirmation_status: ConfirmationStatus,
 	) -> Result<bool, Error> {
+		// The cross-store lock orders this against classification's two-store write pair: the
+		// candidate whose figures are reported below is only reliable once the classification
+		// that recorded the candidate history has fully landed.
+		let _guard = self.funding_payment_update_lock.lock().await;
+
 		// The funding-type gate, the candidate lookup, and the write share the store's mutation
 		// lock: against a separate `get`, a classification merging in between would have its
 		// `tx_type` and contribution figures clobbered by this stale snapshot.
