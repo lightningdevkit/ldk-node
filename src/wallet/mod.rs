@@ -537,13 +537,13 @@ impl Wallet {
 					// cycle, and an id resolved through the candidate history comes from a
 					// classification whose payment-store write strictly precedes the candidate
 					// history it was resolved from. So we can safely fetch it here.
+					let stored_payment = self.payment_store.get(&payment_id);
 					debug_assert!(
-						self.payment_store.get(&payment_id).is_some(),
+						stored_payment.is_some(),
 						"Payment {:?} expected in store during WalletEvent::TxReplaced but not found",
 						payment_id,
 					);
-					let payment =
-						self.payment_store.get(&payment_id).ok_or(Error::InvalidPaymentId)?;
+					let payment = stored_payment.ok_or(Error::InvalidPaymentId)?;
 					let pending_payment_details =
 						self.create_pending_payment_from_tx(payment, conflict_txids.clone());
 
