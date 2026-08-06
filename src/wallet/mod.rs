@@ -432,9 +432,11 @@ impl Wallet {
 						conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
 
 					conflict_txids.push(txid);
-					// The payment already exists in the store at this point: `bump_fee_rbf` updates
-					// the payment store with the replacement txid before the next sync cycle, so we
-					// can safely fetch it here.
+					// The payment already exists in the store at this point: `bump_fee_rbf`
+					// updates the payment store with the replacement txid before the next sync
+					// cycle, and an id resolved through the candidate history comes from a
+					// classification whose payment-store write strictly precedes the candidate
+					// history it was resolved from. So we can safely fetch it here.
 					debug_assert!(
 						self.payment_store.get(&payment_id).is_some(),
 						"Payment {:?} expected in store during WalletEvent::TxReplaced but not found",
@@ -1595,6 +1597,10 @@ impl Wallet {
 			.list_filter(|p| {
 				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
 					|| p.conflicting_txids.contains(&target_txid)
+					// A middle RBF round is not the record's current txid and may never have
+					// received a `TxReplaced` event of its own, so map any of its candidate
+					// txids (an earlier RBF round may confirm) back to the record.
+					|| p.candidate(target_txid).is_some()
 			})
 			.first()
 		{
@@ -2608,6 +2614,46 @@ mod tests {
 		let foreign = onchain_details(Txid::from_byte_array([9u8; 32]), confirmed_status());
 		let update = funding_reclassification_update(details, &candidates, Some(&foreign));
 		assert_eq!(update.txid, Some(active_txid));
+	}
+
+	/// A middle RBF candidate must map back to the funding record: it is neither the record's
+	/// id (derived from the first candidate), nor its current txid (the active candidate), nor
+	/// in `conflicting_txids` (it never got a `TxReplaced` event of its own).
+	#[tokio::test]
+	async fn find_payment_by_txid_maps_candidate_txids() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store).await;
+
+		let txid1 = Txid::from_byte_array([1u8; 32]);
+		let txid2 = Txid::from_byte_array([2u8; 32]);
+		let txid3 = Txid::from_byte_array([3u8; 32]);
+		let payment_id = PaymentId(txid1.to_byte_array());
+		let candidates = vec![
+			FundingTxCandidate {
+				txid: txid1,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+			},
+			FundingTxCandidate {
+				txid: txid2,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(600),
+			},
+			FundingTxCandidate {
+				txid: txid3,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(700),
+			},
+		];
+		let details = interactive_funding_details(payment_id, txid3, Some(1_000_000), Some(700));
+		let entry = PendingPaymentDetails::new(details, Vec::new(), candidates);
+		wallet.pending_payment_store.insert_or_update(entry).await.unwrap();
+
+		// The first candidate resolves via the txid-derived id and the active candidate via the
+		// record's current txid; the middle one must resolve through the candidate history.
+		assert_eq!(wallet.find_payment_by_txid(txid1), Some(payment_id));
+		assert_eq!(wallet.find_payment_by_txid(txid3), Some(payment_id));
+		assert_eq!(wallet.find_payment_by_txid(txid2), Some(payment_id));
 	}
 
 	/// Barrier test, classification-first ordering: wallet sync's confirmation handling must
