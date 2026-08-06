@@ -8,6 +8,7 @@
 //! Objects for configuring the node.
 
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -47,6 +48,14 @@ pub(crate) const DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS: u64 = 10;
 
 // The default timeout after which we abort a transaction broadcast operation.
 pub(crate) const DEFAULT_TX_BROADCAST_TIMEOUT_SECS: u64 = 10;
+
+// The number of payments we keep in memory.
+//
+// The payment history grows for the lifetime of a node, so we cache only the most recently used
+// payments and read the rest back from the store as they are needed. At roughly 400 to 500 bytes
+// per cached payment, this bounds the payment store's share of memory at well under a megabyte,
+// while still covering the recent payments a node actually works with.
+pub(crate) const PAYMENT_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1000).unwrap();
 
 // The default {Esplora,Electrum} client timeout we're using.
 const DEFAULT_PER_REQUEST_TIMEOUT_SECS: u8 = 10;

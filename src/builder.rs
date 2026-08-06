@@ -50,10 +50,10 @@ use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
 	TorConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
-	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT,
+	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT, PAYMENT_CACHE_CAPACITY,
 };
 use crate::connection::ConnectionManager;
-use crate::data_store::KeepAllEntries;
+use crate::data_store::{KeepAllEntries, KeepLeastRecentlyUsed};
 use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
@@ -1456,15 +1456,9 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res, address_pool_res) = runtime
-		.block_on(async move {
+	let (node_metris_res, pending_payment_store_res, address_pool_res) =
+		runtime.block_on(async move {
 			tokio::join!(
-				read_all_objects(
-					&*kv_store_ref,
-					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					Arc::clone(&logger_ref),
-				),
 				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
 				read_all_objects(
 					&*kv_store_ref,
@@ -1489,20 +1483,17 @@ fn build_with_store_internal(
 		},
 	};
 
-	let payment_store = match payment_store_res {
-		Ok(payments) => Arc::new(PaymentStore::new(
-			payments,
-			KeepAllEntries,
-			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
-			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
-			Arc::clone(&kv_store),
-			Arc::clone(&logger),
-		)),
-		Err(e) => {
-			log_error!(logger, "Failed to read payment data from store: {}", e);
-			return Err(BuildError::ReadFailed);
-		},
-	};
+	// The payment store caches a bounded number of payments and reads the rest back on demand, so
+	// we start it empty rather than paying to read a node's entire payment history at startup only
+	// to immediately drop all but the most recent entries.
+	let payment_store = Arc::new(PaymentStore::new(
+		Vec::new(),
+		KeepLeastRecentlyUsed::new(PAYMENT_CACHE_CAPACITY),
+		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+		PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+		Arc::clone(&kv_store),
+		Arc::clone(&logger),
+	));
 
 	let (chain_source, chain_tip_opt) = match chain_data_source_config {
 		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {

@@ -54,9 +54,9 @@ use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
 use crate::config::{Config, ADDRESS_POOL_SIZE};
-#[cfg(test)]
-use crate::data_store::KeepAllEntries;
 use crate::data_store::StorableObject;
+#[cfg(test)]
+use crate::data_store::{KeepAllEntries, KeepLeastRecentlyUsed};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::pending_payment_store::PendingPaymentDetailsUpdate;
@@ -2695,7 +2695,7 @@ mod tests {
 	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 
 	use super::*;
-	use crate::config::EsploraSyncConfig;
+	use crate::config::{EsploraSyncConfig, PAYMENT_CACHE_CAPACITY};
 	use crate::io::test_utils::InMemoryStore;
 	use crate::io::{
 		BDK_WALLET_ADDRESS_POOL_KEY, BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
@@ -2821,7 +2821,7 @@ mod tests {
 		.unwrap();
 		let payment_store = Arc::new(PaymentStore::new(
 			Vec::new(),
-			KeepAllEntries,
+			KeepLeastRecentlyUsed::new(PAYMENT_CACHE_CAPACITY),
 			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
 			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&store),
@@ -3960,7 +3960,7 @@ mod tests {
 
 		// No inputs or outputs involve the wallet: nothing to record.
 		wallet.classify_funding(&dummy_tx(), &channels, tx_type.clone()).await.unwrap();
-		assert!(wallet.payment_store.list_filter(|_| true).await.is_empty());
+		assert!(wallet.payment_store.list_page(None).await.unwrap().objects.is_empty());
 		assert!(wallet.pending_payment_store.list_filter(|_| true).await.is_empty());
 
 		// A computable fee is not wallet participation. The wallet can resolve a splice's shared
@@ -3984,7 +3984,7 @@ mod tests {
 			}],
 		};
 		wallet.classify_funding(&splice_tx, &channels, tx_type.clone()).await.unwrap();
-		assert!(wallet.payment_store.list_filter(|_| true).await.is_empty());
+		assert!(wallet.payment_store.list_page(None).await.unwrap().objects.is_empty());
 
 		// Control: a funding transaction the wallet participates in is still recorded.
 		let script_pubkey = wallet
@@ -4001,7 +4001,7 @@ mod tests {
 			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
 		};
 		wallet.classify_funding(&funded_tx, &channels, tx_type).await.unwrap();
-		let payments = wallet.payment_store.list_filter(|_| true).await;
+		let payments = wallet.payment_store.list_page(None).await.unwrap().objects;
 		assert_eq!(payments.len(), 1);
 		assert_eq!(payments[0].id, PaymentId(funded_tx.compute_txid().to_byte_array()));
 	}
@@ -4051,7 +4051,7 @@ mod tests {
 		let tx_type = TransactionType::Funding { channels: vec![] };
 
 		async fn assert_unchanged(wallet: &Wallet, payment_id: PaymentId, confirmed: bool) {
-			let payments = wallet.payment_store.list_filter(|_| true).await;
+			let payments = wallet.payment_store.list_page(None).await.unwrap().objects;
 			assert_eq!(payments.len(), 1, "the rebroadcast must not mint a second record");
 			let payment = &payments[0];
 			assert_eq!(payment.id, payment_id);
@@ -4093,7 +4093,7 @@ mod tests {
 	async fn funding_confirmation_waits_for_classification() {
 		let gated = NamespaceGatedStore::new(PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(gated.clone()));
-		let wallet = new_test_wallet(store, false).await;
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
 
 		let txid1 = Txid::from_byte_array([1u8; 32]);
 		let txid2 = Txid::from_byte_array([2u8; 32]);
@@ -4138,7 +4138,14 @@ mod tests {
 		// Liveness sanity only (both pre- and post-fix stall here): while classification is
 		// parked, no second record may have been committed.
 		tokio::time::sleep(Duration::from_millis(250)).await;
-		assert!(wallet.payment_store.list_filter(|_| true).await.len() <= 1);
+		let payment_keys = KVStore::list(
+			&*store,
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+		)
+		.await
+		.unwrap();
+		assert!(payment_keys.len() <= 1);
 
 		drop(gate_guard);
 		classification.await.unwrap().unwrap();
@@ -4147,9 +4154,15 @@ mod tests {
 		// Both writers converge on the classified record: the confirmation refreshes it in
 		// place with the confirmed candidate's figures rather than minting a second record
 		// keyed by the event txid.
-		let payments = wallet.payment_store.list_filter(|_| true).await;
-		assert_eq!(payments.len(), 1, "the confirmation must not mint a duplicate record");
-		let payment = &payments[0];
+		let payment_keys = KVStore::list(
+			&*store,
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+		)
+		.await
+		.unwrap();
+		assert_eq!(payment_keys.len(), 1, "the confirmation must not mint a duplicate record");
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
 		assert_eq!(payment.id, payment_id);
 		assert_eq!(payment.amount_msat, Some(2_000_000));
 		assert_eq!(payment.fee_paid_msat, Some(999));
@@ -4172,7 +4185,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn funding_classification_waits_for_wallet_sync() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let wallet = new_test_wallet(store, false).await;
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
 
 		let txid = Txid::from_byte_array([3u8; 32]);
 		let payment_id = PaymentId(txid.to_byte_array());
@@ -4211,9 +4224,15 @@ mod tests {
 		// Both writers converge on one record carrying the classification: the generic
 		// fallback must not clobber the contribution-derived figures with its wallet-derived
 		// view of the transaction.
-		let payments = wallet.payment_store.list_filter(|_| true).await;
-		assert_eq!(payments.len(), 1);
-		let payment = &payments[0];
+		let payment_keys = KVStore::list(
+			&*store,
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+		)
+		.await
+		.unwrap();
+		assert_eq!(payment_keys.len(), 1);
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
 		assert_eq!(payment.id, payment_id);
 		assert_eq!(
 			payment.amount_msat,

@@ -88,12 +88,10 @@ impl CachePolicy for KeepAllEntries {
 /// [`KVStore`] whenever a lookup misses.
 ///
 /// Suitable for namespaces that grow without bound over a node's lifetime.
-#[allow(dead_code)] // Constructed once a store opts into a bounded cache.
 pub(crate) struct KeepLeastRecentlyUsed {
 	capacity: NonZeroUsize,
 }
 
-#[allow(dead_code)] // See above.
 impl KeepLeastRecentlyUsed {
 	pub(crate) fn new(capacity: NonZeroUsize) -> Self {
 		Self { capacity }
@@ -718,12 +716,12 @@ where
 	}
 
 	#[cfg(test)]
-	fn cached_len(&self) -> usize {
+	pub(crate) fn cached_len(&self) -> usize {
 		self.cache.lock().expect("lock").len()
 	}
 
 	#[cfg(test)]
-	fn is_cached(&self, id: &SO::Id) -> bool {
+	pub(crate) fn is_cached(&self, id: &SO::Id) -> bool {
 		self.cache.lock().expect("lock").contains(id)
 	}
 }
