@@ -102,7 +102,9 @@ pub(crate) struct Wallet {
 	// writes sees the record classified but the candidate history absent — resolving the wrong
 	// payment id or stamping the confirmed candidate with another candidate's figures — and a
 	// classification landing inside an arm's decision sequence gets overwritten by the arm's
-	// stale generic fallback.
+	// stale generic fallback. Graduation stays off this lock: it decides from the live record
+	// under the payment store's mutation lock and writes only the status, so it carries nothing
+	// a concurrent classification could lose.
 	funding_payment_update_lock: tokio::sync::Mutex<()>,
 }
 
@@ -324,7 +326,7 @@ impl Wallet {
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
 
-					for mut payment in pending_payments {
+					for payment in pending_payments {
 						match payment.details.kind {
 							PaymentKind::Onchain {
 								status: ConfirmationStatus::Confirmed { height, .. },
@@ -332,9 +334,41 @@ impl Wallet {
 							} => {
 								let payment_id = payment.details.id;
 								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
-									payment.details.status = PaymentStatus::Succeeded;
-									self.payment_store.insert_or_update(payment.details).await?;
-									self.pending_payment_store.remove(&payment_id).await?;
+									// Graduate from the live record, not the snapshot listed
+									// above: a classification landing since then must not have
+									// its figures rolled back. The status-only update carries
+									// no figures/txid/confirmation, so nothing a concurrent
+									// writer wrote can be clobbered; the update machinery bumps
+									// `latest_update_timestamp` and no-ops when the record is
+									// already `Succeeded`. A record that has diverged from the
+									// snapshot (or was removed) declines, leaving future
+									// events to drive it.
+									let mut graduated = false;
+									self.payment_store
+										.mutate(&payment_id, |existing| {
+											let current = existing?;
+											match current.kind {
+												PaymentKind::Onchain {
+													status:
+														ConfirmationStatus::Confirmed { height, .. },
+													..
+												} if new_tip.height
+													>= height + ANTI_REORG_DELAY - 1 =>
+												{
+													graduated = true;
+													let mut update =
+														PaymentDetailsUpdate::new(payment_id);
+													update.status = Some(PaymentStatus::Succeeded);
+													let mut updated = current.clone();
+													updated.update(update).then_some(updated)
+												},
+												_ => None,
+											}
+										})
+										.await?;
+									if graduated {
+										self.pending_payment_store.remove(&payment_id).await?;
+									}
 								}
 							},
 							PaymentKind::Onchain {
@@ -2614,6 +2648,108 @@ mod tests {
 		let foreign = onchain_details(Txid::from_byte_array([9u8; 32]), confirmed_status());
 		let update = funding_reclassification_update(details, &candidates, Some(&foreign));
 		assert_eq!(update.txid, Some(active_txid));
+	}
+
+	/// Graduation must decide from the live record and write only the status: a pending-store
+	/// snapshot taken before a concurrent classification landed must not roll the record's
+	/// figures back when the payment graduates to `Succeeded`.
+	#[tokio::test]
+	async fn graduation_preserves_classified_figures() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store).await;
+
+		let txid = Txid::from_byte_array([4u8; 32]);
+		let payment_id = PaymentId(txid.to_byte_array());
+		let confirmed = ConfirmationStatus::Confirmed {
+			block_hash: bitcoin::BlockHash::from_byte_array([9u8; 32]),
+			height: 5,
+			timestamp: 100,
+		};
+		let tx_type = Some(TransactionType::InteractiveFunding { channels: vec![] });
+
+		// The live record carries the classification: contribution-derived figures, confirmed.
+		let mut recorded =
+			interactive_funding_details(payment_id, txid, Some(2_000_000), Some(999));
+		recorded.kind = PaymentKind::Onchain { txid, status: confirmed, tx_type: tx_type.clone() };
+		recorded.latest_update_timestamp = 0;
+		wallet.payment_store.insert_or_update(recorded).await.unwrap();
+
+		// The pending entry embeds a stale snapshot: wallet-derived figures recorded before the
+		// classification above landed.
+		let mut stale = interactive_funding_details(payment_id, txid, Some(0), Some(0));
+		stale.kind = PaymentKind::Onchain { txid, status: confirmed, tx_type };
+		let entry = PendingPaymentDetails::new(stale, Vec::new(), Vec::new());
+		wallet.pending_payment_store.insert_or_update(entry).await.unwrap();
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged { old_tip: block_id(9), new_tip: block_id(10) };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).unwrap();
+		assert_eq!(payment.status, PaymentStatus::Succeeded);
+		assert_eq!(
+			payment.amount_msat,
+			Some(2_000_000),
+			"graduation must not roll figures back to the snapshot's"
+		);
+		assert_eq!(payment.fee_paid_msat, Some(999));
+		assert!(payment.latest_update_timestamp > 0, "the graduation write must timestamp");
+		assert!(wallet.pending_payment_store.get(&payment_id).is_none());
+	}
+
+	/// When the live record has diverged from the pending-store snapshot — here the snapshot
+	/// says Confirmed at graduation depth while the record says Unconfirmed — graduation must
+	/// decline and keep the entry rather than force-writing `Succeeded` from stale state. The
+	/// seeded divergence is synthetic (no current production writer downgrades a record's
+	/// confirmation); the test pins the hardening that comes with deciding from the live record.
+	#[tokio::test]
+	async fn graduation_declines_on_diverged_record() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store).await;
+
+		let txid = Txid::from_byte_array([5u8; 32]);
+		let payment_id = PaymentId(txid.to_byte_array());
+		let confirmed = ConfirmationStatus::Confirmed {
+			block_hash: bitcoin::BlockHash::from_byte_array([9u8; 32]),
+			height: 5,
+			timestamp: 100,
+		};
+
+		// The live record is Unconfirmed...
+		let recorded = interactive_funding_details(payment_id, txid, Some(2_000_000), Some(999));
+		wallet.payment_store.insert_or_update(recorded).await.unwrap();
+
+		// ...while the pending entry's snapshot claims a graduation-deep confirmation.
+		let mut snapshot =
+			interactive_funding_details(payment_id, txid, Some(2_000_000), Some(999));
+		snapshot.kind = PaymentKind::Onchain {
+			txid,
+			status: confirmed,
+			tx_type: Some(TransactionType::InteractiveFunding { channels: vec![] }),
+		};
+		let entry = PendingPaymentDetails::new(snapshot, Vec::new(), Vec::new());
+		wallet.pending_payment_store.insert_or_update(entry).await.unwrap();
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged { old_tip: block_id(9), new_tip: block_id(10) };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).unwrap();
+		assert_eq!(
+			payment.status,
+			PaymentStatus::Pending,
+			"a diverged snapshot must not force-graduate the record"
+		);
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
+		));
+		assert!(
+			wallet.pending_payment_store.get(&payment_id).is_some(),
+			"the entry must survive for future events to drive"
+		);
 	}
 
 	/// A middle RBF candidate must map back to the funding record: it is neither the record's
