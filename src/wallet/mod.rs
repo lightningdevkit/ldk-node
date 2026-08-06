@@ -2340,10 +2340,11 @@ fn ldk_to_bdk_satisfaction_weight(ldk_satisfaction_weight: u64) -> Weight {
 /// [`Wallet::apply_funding_status_update_locked`] reports when confirmation arrives after
 /// classification.
 ///
-/// `current` is an unlocked snapshot; that is safe because [`PaymentDetails::update`] only lets
-/// figures onto a confirmed record when the update names the confirmed txid, so an update built
-/// against a stale snapshot cannot misapply figures if the record's confirmation moves before the
-/// update lands.
+/// `current` is the record as observed inside the payment store's `mutate` critical section — its
+/// sole caller, [`Wallet::persist_funding_payment`], builds and applies the update within one
+/// closure — so the candidate choice cannot go stale against a concurrent confirmation before the
+/// update lands. [`PaymentDetails::update`]'s confirmed-figures rule still arbitrates which
+/// figures may land on the record.
 fn funding_reclassification_update(
 	details: PaymentDetails, candidates: &[FundingTxCandidate], current: Option<&PaymentDetails>,
 ) -> PaymentDetailsUpdate {
