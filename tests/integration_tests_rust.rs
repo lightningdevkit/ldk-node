@@ -315,6 +315,60 @@ async fn start_stop_reinit() {
 	reinitialized_node.stop().unwrap();
 }
 
+// The Electrum chain source drops its runtime client - and with it the tx-sync client holding all
+// `Filter` registrations - when stopped. As `ChannelMonitor`s only register their watched
+// transactions and outputs while being loaded in `Builder::build`, nothing would re-register them
+// on the next `start`, leaving the node blind to confirmations and spends of, e.g., its funding
+// outputs. So here we assert the chain source replays its registrations across a `stop`/`start`
+// cycle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn electrum_registrations_survive_chain_source_restart() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Electrum(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	// Opening the channel registers the funding transaction and output with the chain source's
+	// `Filter`. We leave it unconfirmed for now, so watching for it is still pending.
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+
+	// Restart node A repeatedly, which tears down and recreates its Electrum chain source every time.
+	// Note that the `ChannelMonitor`s are not reloaded here, so the registrations have to survive in
+	// the chain source itself, and they have to survive more than a single cycle, i.e., replaying
+	// them mustn't consume them.
+	for _ in 0..3 {
+		node_a.stop().unwrap();
+		node_a.start().unwrap();
+	}
+
+	// Reconnect eagerly rather than waiting on the background reconnection interval.
+	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	node_a.connect(node_b.node_id(), node_addr_b, false).unwrap();
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Node A can only learn that the funding transaction confirmed if its registrations survived
+	// the restart.
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
