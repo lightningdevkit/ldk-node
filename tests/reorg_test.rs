@@ -12,7 +12,8 @@ use serde_json::json;
 use crate::common::{
 	expect_event, exponential_backoff_poll, generate_blocks_and_wait, invalidate_blocks,
 	open_channel, premine_and_distribute_funds, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_node, wait_for_outpoint_spend, wait_for_tx, TestChainSource,
+	setup_bitcoind_and_electrsd, setup_node, wait_for_outpoint_spend, wait_for_tx, NodePaymentExt,
+	TestChainSource,
 };
 
 #[test]
@@ -176,7 +177,7 @@ proptest! {
 			for (i, node) in nodes.iter().enumerate() {
 				assert_eq!(
 					node
-						.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+						.list_payments_matching(|p| p.direction == PaymentDirection::Outbound
 							&& matches!(p.kind, PaymentKind::Onchain { .. }))
 						.len(),
 					1

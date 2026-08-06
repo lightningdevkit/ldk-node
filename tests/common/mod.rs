@@ -43,7 +43,9 @@ use ldk_node::config::{
 };
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus, TransactionType};
+use ldk_node::payment::{
+	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, TransactionType,
+};
 use ldk_node::probing::ProbingConfig;
 use ldk_node::{
 	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
@@ -440,8 +442,37 @@ pub(crate) type TestNode = Arc<Node>;
 #[cfg(not(feature = "uniffi"))]
 pub(crate) type TestNode = Node;
 
+/// Payment listing helpers for tests.
+///
+/// These exist so that tests state *what* they want from the payment history rather than how it is
+/// retrieved, and so that the retrieval can change in one place.
+pub(crate) trait NodePaymentExt {
+	/// Returns all known payments, from most recently created to least recently created.
+	fn list_all_payments(&self) -> Vec<PaymentDetails>;
+
+	/// Returns all known payments matching `f`, from most recently created to least recently
+	/// created.
+	fn list_payments_matching<F: FnMut(&&PaymentDetails) -> bool>(
+		&self, f: F,
+	) -> Vec<PaymentDetails>;
+}
+
+// Implemented on `Node` rather than on `TestNode` so that it applies both when `TestNode` is a
+// `Node` and when it is an `Arc<Node>`.
+impl NodePaymentExt for Node {
+	fn list_all_payments(&self) -> Vec<PaymentDetails> {
+		self.list_payments()
+	}
+
+	fn list_payments_matching<F: FnMut(&&PaymentDetails) -> bool>(
+		&self, f: F,
+	) -> Vec<PaymentDetails> {
+		self.list_payments_with_filter(f)
+	}
+}
+
 fn has_onchain_tx_type<F: Fn(&TransactionType) -> bool>(node: &TestNode, predicate: F) -> bool {
-	node.list_payments().into_iter().any(|payment| {
+	node.list_all_payments().into_iter().any(|payment| {
 		matches!(
 			payment.kind,
 			PaymentKind::Onchain { tx_type: Some(ref tx_type), .. } if predicate(tx_type)
@@ -459,7 +490,7 @@ fn assert_any_node_has_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>(
 	let observed: Vec<String> = nodes
 		.iter()
 		.flat_map(|(name, node)| {
-			node.list_payments().into_iter().filter_map(move |payment| match payment.kind {
+			node.list_all_payments().into_iter().filter_map(move |payment| match payment.kind {
 				PaymentKind::Onchain { tx_type, .. } => Some(format!("{}:{:?}", name, tx_type)),
 				_ => None,
 			})
@@ -478,7 +509,7 @@ fn assert_all_nodes_have_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>
 	let observed: Vec<String> = nodes
 		.iter()
 		.flat_map(|(name, node)| {
-			node.list_payments().into_iter().filter_map(move |payment| match payment.kind {
+			node.list_all_payments().into_iter().filter_map(move |payment| match payment.kind {
 				PaymentKind::Onchain { tx_type, .. } => Some(format!("{}:{:?}", name, tx_type)),
 				_ => None,
 			})
@@ -1121,28 +1152,28 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	// Check we saw the node funding transactions.
 	assert_eq!(
 		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		1
 	);
 	assert_eq!(
 		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Outbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		0
 	);
 	assert_eq!(
 		node_b
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		1
 	);
 	assert_eq!(
 		node_b
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Outbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		0
@@ -1195,7 +1226,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	// Check we now see the channel funding transaction as outbound.
 	assert_eq!(
 		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Outbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		1
@@ -1273,24 +1304,24 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let outbound_payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
 	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice, None));
 
-	assert!(!node_a.list_payments_with_filter(|p| p.id == outbound_payment_id).is_empty());
+	assert!(!node_a.list_payments_matching(|p| p.id == outbound_payment_id).is_empty());
 
-	let outbound_payments_a = node_a.list_payments_with_filter(|p| {
+	let outbound_payments_a = node_a.list_payments_matching(|p| {
 		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
 	});
 	assert_eq!(outbound_payments_a.len(), 1);
 
-	let inbound_payments_a = node_a.list_payments_with_filter(|p| {
+	let inbound_payments_a = node_a.list_payments_matching(|p| {
 		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
 	});
 	assert_eq!(inbound_payments_a.len(), 0);
 
-	let outbound_payments_b = node_b.list_payments_with_filter(|p| {
+	let outbound_payments_b = node_b.list_payments_matching(|p| {
 		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
 	});
 	assert_eq!(outbound_payments_b.len(), 0);
 
-	let inbound_payments_b = node_b.list_payments_with_filter(|p| {
+	let inbound_payments_b = node_b.list_payments_matching(|p| {
 		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
 	});
 	assert_eq!(inbound_payments_b.len(), 0);
@@ -1510,23 +1541,19 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(received_keysend_payment.amount_msat, Some(keysend_amount_msat));
 	assert!(matches!(&received_keysend_payment.kind, PaymentKind::Spontaneous { .. }));
 	assert_eq!(
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
+		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
 		5
 	);
 	assert_eq!(
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
+		node_b.list_payments_matching(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
 		5
 	);
 	assert_eq!(
-		node_a
-			.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Spontaneous { .. }))
-			.len(),
+		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Spontaneous { .. })).len(),
 		1
 	);
 	assert_eq!(
-		node_b
-			.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Spontaneous { .. }))
-			.len(),
+		node_b.list_payments_matching(|p| matches!(p.kind, PaymentKind::Spontaneous { .. })).len(),
 		1
 	);
 
@@ -1552,7 +1579,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	assert_eq!(
 		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		2
@@ -1574,7 +1601,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	assert_eq!(
 		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Outbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		2
@@ -1751,13 +1778,13 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	// Now we should have seen the channel closing transaction on-chain.
 	let node_a_inbound_onchain_count = node_a
-		.list_payments_with_filter(|p| {
+		.list_payments_matching(|p| {
 			p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. })
 		})
 		.len();
 	let node_b_inbound_onchain_count = node_b
-		.list_payments_with_filter(|p| {
+		.list_payments_matching(|p| {
 			p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. })
 		})
