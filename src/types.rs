@@ -45,7 +45,7 @@ use lightning_types::features::ChannelTypeFeatures;
 use crate::chain::bitcoind::UtxoSourceClient;
 use crate::chain::ChainSource;
 use crate::config::{AnchorChannelsConfig, ChannelConfig};
-use crate::data_store::{DataStore, KeepAllEntries};
+use crate::data_store::{DataStore, KeepAllEntries, KeepLeastRecentlyUsed};
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
 use crate::logger::Logger;
@@ -375,7 +375,7 @@ pub(crate) type BumpTransactionEventHandler =
 		Arc<Logger>,
 	>;
 
-pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>, KeepAllEntries>;
+pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>, KeepLeastRecentlyUsed>;
 
 /// A local, potentially user-provided, identifier of a channel.
 ///
