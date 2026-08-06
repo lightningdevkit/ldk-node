@@ -49,8 +49,12 @@ use crate::{Error, PersistedNodeMetrics};
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
 const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
 
+type BitcoindSpvClient =
+	SpvClient<ChainPoller<Arc<BitcoindClient>, BitcoindClient>, Arc<ChainListener>>;
+
 pub(super) struct BitcoindChainSource {
 	api_client: Arc<BitcoindClient>,
+	spv_client: tokio::sync::Mutex<Option<BitcoindSpvClient>>,
 	latest_chain_tip: RwLock<Option<ValidatedBlockHeader>>,
 	wallet_polling_status: Mutex<WalletSyncStatus>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
@@ -74,9 +78,11 @@ impl BitcoindChainSource {
 		));
 
 		let latest_chain_tip = RwLock::new(None);
+		let spv_client = tokio::sync::Mutex::new(None);
 		let wallet_polling_status = Mutex::new(WalletSyncStatus::Completed);
 		Self {
 			api_client,
+			spv_client,
 			latest_chain_tip,
 			wallet_polling_status,
 			fee_estimator,
@@ -103,10 +109,12 @@ impl BitcoindChainSource {
 		));
 
 		let latest_chain_tip = RwLock::new(None);
+		let spv_client = tokio::sync::Mutex::new(None);
 		let wallet_polling_status = Mutex::new(WalletSyncStatus::Completed);
 
 		Self {
 			api_client,
+			spv_client,
 			latest_chain_tip,
 			wallet_polling_status,
 			fee_estimator,
@@ -210,7 +218,16 @@ impl BitcoindChainSource {
 			)
 			.await
 			{
-				Ok((_header_cache, chain_tip)) => {
+				Ok((header_cache, chain_tip)) => {
+					let spv_client = self.new_spv_client(
+						chain_tip,
+						header_cache,
+						Arc::clone(&onchain_wallet),
+						Arc::clone(&channel_manager),
+						Arc::clone(&chain_monitor),
+						Arc::clone(&output_sweeper),
+					);
+					*self.spv_client.lock().await = Some(spv_client);
 					{
 						let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
 						log_info!(
@@ -415,19 +432,24 @@ impl BitcoindChainSource {
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
-		let latest_chain_tip_opt = self.latest_chain_tip.read().expect("lock").clone();
-		let chain_tip =
-			if let Some(tip) = latest_chain_tip_opt { tip } else { self.poll_chain_tip().await? };
-
-		let chain_poller = ChainPoller::new(Arc::clone(&self.api_client), self.config.network);
-		let chain_listener = ChainListener {
-			onchain_wallet: Arc::clone(&onchain_wallet),
-			channel_manager: Arc::clone(&channel_manager),
-			chain_monitor: Arc::clone(&chain_monitor),
-			output_sweeper,
-		};
-		let mut spv_client =
-			SpvClient::new(chain_tip, chain_poller, HeaderCache::new(), &chain_listener);
+		let mut spv_client_lock = self.spv_client.lock().await;
+		if spv_client_lock.is_none() {
+			let latest_chain_tip_opt = self.latest_chain_tip.read().expect("lock").clone();
+			let chain_tip = if let Some(tip) = latest_chain_tip_opt {
+				tip
+			} else {
+				self.poll_chain_tip().await?
+			};
+			*spv_client_lock = Some(self.new_spv_client(
+				chain_tip,
+				HeaderCache::new(),
+				Arc::clone(&onchain_wallet),
+				Arc::clone(&channel_manager),
+				chain_monitor,
+				output_sweeper,
+			));
+		}
+		let spv_client = spv_client_lock.as_mut().expect("initialized above");
 
 		let now = SystemTime::now();
 		match spv_client.poll_best_tip().await {
@@ -442,6 +464,7 @@ impl BitcoindChainSource {
 				return Err(Error::TxSyncFailed);
 			},
 		}
+		drop(spv_client_lock);
 
 		let cur_height = channel_manager.current_best_block().height;
 
@@ -483,6 +506,21 @@ impl BitcoindChainSource {
 		.await?;
 
 		Ok(())
+	}
+
+	fn new_spv_client(
+		&self, chain_tip: ValidatedBlockHeader, header_cache: HeaderCache,
+		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
+		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+	) -> BitcoindSpvClient {
+		let chain_poller = ChainPoller::new(Arc::clone(&self.api_client), self.config.network);
+		let chain_listener = Arc::new(ChainListener {
+			onchain_wallet: Arc::downgrade(&onchain_wallet),
+			channel_manager: Arc::downgrade(&channel_manager),
+			chain_monitor: Arc::downgrade(&chain_monitor),
+			output_sweeper: Arc::downgrade(&output_sweeper),
+		});
+		SpvClient::new(chain_tip, chain_poller, header_cache, chain_listener)
 	}
 
 	pub(super) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
@@ -1467,10 +1505,23 @@ pub(crate) enum FeeRateEstimationMode {
 }
 
 pub(crate) struct ChainListener {
-	pub(crate) onchain_wallet: Arc<Wallet>,
-	pub(crate) channel_manager: Arc<ChannelManager>,
-	pub(crate) chain_monitor: Arc<ChainMonitor>,
-	pub(crate) output_sweeper: Arc<Sweeper>,
+	pub(crate) onchain_wallet: std::sync::Weak<Wallet>,
+	pub(crate) channel_manager: std::sync::Weak<ChannelManager>,
+	pub(crate) chain_monitor: std::sync::Weak<ChainMonitor>,
+	pub(crate) output_sweeper: std::sync::Weak<Sweeper>,
+}
+
+impl ChainListener {
+	fn upgrade(
+		&self,
+	) -> Option<(Arc<Wallet>, Arc<ChannelManager>, Arc<ChainMonitor>, Arc<Sweeper>)> {
+		Some((
+			self.onchain_wallet.upgrade()?,
+			self.channel_manager.upgrade()?,
+			self.chain_monitor.upgrade()?,
+			self.output_sweeper.upgrade()?,
+		))
+	}
 }
 
 impl Listen for ChainListener {
@@ -1478,23 +1529,35 @@ impl Listen for ChainListener {
 		&self, header: &bitcoin::block::Header,
 		txdata: &lightning::chain::transaction::TransactionData, height: u32,
 	) {
-		self.onchain_wallet.filtered_block_connected(header, txdata, height);
-		self.channel_manager.filtered_block_connected(header, txdata, height);
-		self.chain_monitor.filtered_block_connected(header, txdata, height);
-		self.output_sweeper.filtered_block_connected(header, txdata, height);
+		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
+			self.upgrade()
+		{
+			onchain_wallet.filtered_block_connected(header, txdata, height);
+			channel_manager.filtered_block_connected(header, txdata, height);
+			chain_monitor.filtered_block_connected(header, txdata, height);
+			output_sweeper.filtered_block_connected(header, txdata, height);
+		}
 	}
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
-		self.onchain_wallet.block_connected(block, height);
-		self.channel_manager.block_connected(block, height);
-		self.chain_monitor.block_connected(block, height);
-		self.output_sweeper.block_connected(block, height);
+		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
+			self.upgrade()
+		{
+			onchain_wallet.block_connected(block, height);
+			channel_manager.block_connected(block, height);
+			chain_monitor.block_connected(block, height);
+			output_sweeper.block_connected(block, height);
+		}
 	}
 
 	fn blocks_disconnected(&self, fork_point_block: lightning::chain::BlockLocator) {
-		self.onchain_wallet.blocks_disconnected(fork_point_block);
-		self.channel_manager.blocks_disconnected(fork_point_block);
-		self.chain_monitor.blocks_disconnected(fork_point_block);
-		self.output_sweeper.blocks_disconnected(fork_point_block);
+		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
+			self.upgrade()
+		{
+			onchain_wallet.blocks_disconnected(fork_point_block);
+			channel_manager.blocks_disconnected(fork_point_block);
+			chain_monitor.blocks_disconnected(fork_point_block);
+			output_sweeper.blocks_disconnected(fork_point_block);
+		}
 	}
 }
 
