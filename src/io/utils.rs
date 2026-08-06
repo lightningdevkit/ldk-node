@@ -7,6 +7,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
@@ -26,8 +27,8 @@ use lightning::routing::scoring::{
 	ChannelLiquidities, ProbabilisticScorer, ProbabilisticScoringDecayParameters,
 };
 use lightning::util::persist::{
-	migrate_kv_store_data_async, KVStore, KVSTORE_NAMESPACE_KEY_ALPHABET,
-	KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
+	migrate_kv_store_data_async, KVStore, PageToken, PaginatedKVStore,
+	KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
 	OUTPUT_SWEEPER_PERSISTENCE_KEY, OUTPUT_SWEEPER_PERSISTENCE_PRIMARY_NAMESPACE,
 	OUTPUT_SWEEPER_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
@@ -282,7 +283,8 @@ where
 	Ok(())
 }
 
-/// Read all objects of type `T` from the given namespace, spawning reads in parallel.
+/// Reads all objects of type `T` from the given namespace, ordered from most recently created to
+/// least recently created.
 pub(crate) async fn read_all_objects<T, L>(
 	kv_store: &DynStore, primary_namespace: &str, secondary_namespace: &str, logger: L,
 ) -> Result<Vec<T>, std::io::Error>
@@ -291,18 +293,108 @@ where
 	L: Deref,
 	L::Target: LdkLogger,
 {
-	let type_name = std::any::type_name::<T>();
-	let mut res = Vec::new();
+	read_objects_internal(kv_store, primary_namespace, secondary_namespace, None, logger).await
+}
 
-	let stored_keys = KVStore::list(&*kv_store, primary_namespace, secondary_namespace).await?;
-	// Preserve the prior `Vec::pop` order.
-	let reads = stored_keys.into_iter().rev().map(|key| ((), key));
+/// Reads the `num_objects` most recently created objects of type `T` from the given namespace,
+/// ordered from most recently created to least recently created.
+///
+/// Returns fewer objects if the namespace holds fewer than `num_objects`.
+pub(crate) async fn read_n_objects<T, L>(
+	kv_store: &DynStore, primary_namespace: &str, secondary_namespace: &str,
+	num_objects: NonZeroUsize, logger: L,
+) -> Result<Vec<T>, std::io::Error>
+where
+	T: Readable,
+	L: Deref,
+	L::Target: LdkLogger,
+{
+	read_objects_internal(
+		kv_store,
+		primary_namespace,
+		secondary_namespace,
+		Some(num_objects),
+		logger,
+	)
+	.await
+}
+
+/// Reads up to `num_objects` objects of type `T` from the given namespace, or all of them if
+/// `None`, spawning reads in parallel.
+///
+/// Objects are returned in the store's own creation order, most recently created first. Note we
+/// take the keys from [`PaginatedKVStore::list_paginated`] rather than [`KVStore::list`], because
+/// the latter is documented to return them in arbitrary order, which would make "the newest
+/// `num_objects`" meaningless.
+async fn read_objects_internal<T, L>(
+	kv_store: &DynStore, primary_namespace: &str, secondary_namespace: &str,
+	num_objects: Option<NonZeroUsize>, logger: L,
+) -> Result<Vec<T>, std::io::Error>
+where
+	T: Readable,
+	L: Deref,
+	L::Target: LdkLogger,
+{
+	let type_name = std::any::type_name::<T>();
+	let max_objects = num_objects.map_or(usize::MAX, |num_objects| num_objects.get());
+
+	// Collect the keys we're after, page by page, so that a bounded read doesn't pay for keys it
+	// would never look at.
+	let mut stored_keys: Vec<String> = Vec::new();
+	let mut page_token: Option<PageToken> = None;
+	loop {
+		let response = PaginatedKVStore::list_paginated(
+			&*kv_store,
+			primary_namespace,
+			secondary_namespace,
+			page_token.clone(),
+		)
+		.await?;
+
+		let remaining = max_objects.saturating_sub(stored_keys.len());
+		stored_keys.extend(response.keys.into_iter().take(remaining));
+
+		if stored_keys.len() >= max_objects {
+			break;
+		}
+
+		match response.next_page_token {
+			// A token that doesn't advance would have us ask for the same page for as long as the
+			// store cares to hand it back, and this runs during `Builder::build`. Give up on the
+			// store rather than never returning.
+			Some(next_page_token) if page_token.as_ref() == Some(&next_page_token) => {
+				log_error!(
+					logger,
+					"Failed to read {}: listing {}/{} handed back a page token that does not advance",
+					type_name,
+					primary_namespace,
+					secondary_namespace
+				);
+				return Err(std::io::Error::new(
+					std::io::ErrorKind::InvalidData,
+					format!(
+						"Non-advancing page token while listing {}/{}",
+						PrintableString(primary_namespace),
+						PrintableString(secondary_namespace)
+					),
+				));
+			},
+			Some(next_page_token) => page_token = Some(next_page_token),
+			None => break,
+		}
+	}
+
+	// Reads are tracked by slot, as the order in which they finish says nothing about the order we
+	// promised to return them in.
+	let mut objects: Vec<Option<T>> = Vec::new();
+	objects.resize_with(stored_keys.len(), || None);
+	let reads = stored_keys.into_iter().enumerate();
 	process_kv_store_reads(
 		kv_store,
 		primary_namespace,
 		secondary_namespace,
 		reads,
-		|(), _key, read_res| -> Result<(), std::io::Error> {
+		|idx, _key, read_res| -> Result<(), std::io::Error> {
 			let reader = read_res.map_err(|e| {
 				log_error!(logger, "Failed to read {}: {}", type_name, e);
 				std::io::Error::from(e)
@@ -314,7 +406,7 @@ where
 					format!("Failed to deserialize {}", type_name),
 				)
 			})?;
-			res.push(object);
+			objects[idx] = Some(object);
 			Ok(())
 		},
 		|e| {
@@ -324,7 +416,9 @@ where
 	)
 	.await?;
 
-	Ok(res)
+	debug_assert!(objects.iter().all(|object| object.is_some()));
+
+	Ok(objects.into_iter().flatten().collect())
 }
 
 /// Read `OutputSweeper` state from the store.
@@ -939,5 +1033,245 @@ mod tests {
 		.await
 		.unwrap();
 		v1_store
+	}
+}
+
+#[cfg(test)]
+mod read_objects_tests {
+	use std::num::NonZeroUsize;
+	use std::sync::Arc;
+
+	use lightning::impl_writeable_tlv_based;
+	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+	use lightning::util::ser::Writeable;
+	use lightning::util::test_utils::TestLogger;
+
+	use super::test_utils::{InMemoryStore, IN_MEMORY_PAGE_SIZE};
+	use super::{read_all_objects, read_n_objects};
+	use crate::hex_utils;
+	use crate::types::{DynStore, DynStoreWrapper};
+
+	const TEST_PRIMARY_NAMESPACE: &str = "read_objects_test_primary";
+	const TEST_SECONDARY_NAMESPACE: &str = "read_objects_test_secondary";
+
+	#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+	struct TestObject {
+		id: u32,
+	}
+	impl_writeable_tlv_based!(TestObject, { (0, id, required) });
+
+	/// Writes `num_objects` objects with ascending ids, so that the highest id is the most
+	/// recently created one.
+	async fn store_with_objects(num_objects: u32) -> (Arc<DynStore>, Vec<TestObject>) {
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut objects = Vec::new();
+		for id in 0..num_objects {
+			let object = TestObject { id };
+			KVStore::write(
+				&*kv_store,
+				TEST_PRIMARY_NAMESPACE,
+				TEST_SECONDARY_NAMESPACE,
+				&hex_utils::to_string(&id.to_be_bytes()),
+				object.encode(),
+			)
+			.await
+			.unwrap();
+			objects.push(object);
+		}
+		(kv_store, objects)
+	}
+
+	fn newest_first(objects: &[TestObject], num_objects: usize) -> Vec<TestObject> {
+		objects.iter().rev().take(num_objects).cloned().collect()
+	}
+
+	async fn read_n(kv_store: &DynStore, num_objects: usize) -> Vec<TestObject> {
+		read_n_objects(
+			kv_store,
+			TEST_PRIMARY_NAMESPACE,
+			TEST_SECONDARY_NAMESPACE,
+			NonZeroUsize::new(num_objects).unwrap(),
+			Arc::new(TestLogger::new()),
+		)
+		.await
+		.unwrap()
+	}
+
+	#[tokio::test]
+	async fn reads_the_newest_objects_within_a_single_page() {
+		let (kv_store, objects) = store_with_objects(IN_MEMORY_PAGE_SIZE as u32).await;
+		assert_eq!(newest_first(&objects, 10), read_n(&*kv_store, 10).await);
+	}
+
+	#[tokio::test]
+	async fn reads_the_newest_objects_across_several_pages() {
+		let num_objects = 3 * IN_MEMORY_PAGE_SIZE + 7;
+		let (kv_store, objects) = store_with_objects(num_objects as u32).await;
+
+		// Spanning more than one page is where paging the keys, rather than listing them all,
+		// actually has to work.
+		let wanted = 2 * IN_MEMORY_PAGE_SIZE + 3;
+		assert_eq!(newest_first(&objects, wanted), read_n(&*kv_store, wanted).await);
+	}
+
+	#[tokio::test]
+	async fn reading_more_than_is_stored_returns_everything() {
+		let (kv_store, objects) = store_with_objects(5).await;
+		assert_eq!(newest_first(&objects, 5), read_n(&*kv_store, 500).await);
+	}
+
+	#[tokio::test]
+	async fn reads_all_objects_newest_first() {
+		let num_objects = 2 * IN_MEMORY_PAGE_SIZE + 11;
+		let (kv_store, objects) = store_with_objects(num_objects as u32).await;
+
+		let read: Vec<TestObject> = read_all_objects(
+			&*kv_store,
+			TEST_PRIMARY_NAMESPACE,
+			TEST_SECONDARY_NAMESPACE,
+			Arc::new(TestLogger::new()),
+		)
+		.await
+		.unwrap();
+		assert_eq!(newest_first(&objects, num_objects), read);
+	}
+
+	#[tokio::test]
+	async fn reading_an_empty_namespace_yields_nothing() {
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		assert!(read_n(&*kv_store, 10).await.is_empty());
+
+		let all: Vec<TestObject> = read_all_objects(
+			&*kv_store,
+			TEST_PRIMARY_NAMESPACE,
+			TEST_SECONDARY_NAMESPACE,
+			Arc::new(TestLogger::new()),
+		)
+		.await
+		.unwrap();
+		assert!(all.is_empty());
+	}
+
+	#[tokio::test]
+	async fn an_undecodable_object_is_an_error() {
+		let (kv_store, _objects) = store_with_objects(3).await;
+		KVStore::write(
+			&*kv_store,
+			TEST_PRIMARY_NAMESPACE,
+			TEST_SECONDARY_NAMESPACE,
+			&hex_utils::to_string(&99u32.to_be_bytes()),
+			vec![0xff; 2],
+		)
+		.await
+		.unwrap();
+
+		let res = read_n_objects::<TestObject, _>(
+			&*kv_store,
+			TEST_PRIMARY_NAMESPACE,
+			TEST_SECONDARY_NAMESPACE,
+			NonZeroUsize::new(10).unwrap(),
+			Arc::new(TestLogger::new()),
+		)
+		.await;
+		assert_eq!(std::io::ErrorKind::InvalidData, res.unwrap_err().kind());
+	}
+
+	/// A store whose `list_paginated` ignores the token it is given and keeps handing back the
+	/// same page along with the same token, standing in for a custom backend that got pagination
+	/// wrong.
+	///
+	/// It stops after `stuck_pages` calls so that a reader which does not notice terminates
+	/// instead of hanging this test.
+	struct StuckTokenStore {
+		inner: InMemoryStore,
+		stuck_pages: usize,
+		calls: std::sync::Mutex<usize>,
+	}
+
+	impl KVStore for StuckTokenStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl std::future::Future<Output = Result<Vec<u8>, lightning::io::Error>> + 'static + Send
+		{
+			self.inner.read(primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl std::future::Future<Output = Result<(), lightning::io::Error>> + 'static + Send
+		{
+			self.inner.write(primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl std::future::Future<Output = Result<(), lightning::io::Error>> + 'static + Send
+		{
+			self.inner.remove(primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl std::future::Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send
+		{
+			self.inner.list(primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for StuckTokenStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			_page_token: Option<PageToken>,
+		) -> impl std::future::Future<Output = Result<PaginatedListResponse, lightning::io::Error>>
+		       + 'static
+		       + Send {
+			let call = {
+				let mut calls = self.calls.lock().unwrap();
+				*calls += 1;
+				*calls
+			};
+			let give_up = call > self.stuck_pages;
+			// Always list the very first page, whatever we were asked to continue from.
+			let inner_fut = self.inner.list_paginated(primary_namespace, secondary_namespace, None);
+			async move {
+				let mut response = inner_fut.await?;
+				response.next_page_token =
+					if give_up { None } else { Some(PageToken::new("stuck".to_string())) };
+				Ok(response)
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn a_page_token_that_does_not_advance_is_an_error() {
+		let stuck = StuckTokenStore {
+			inner: InMemoryStore::new(),
+			stuck_pages: 5,
+			calls: std::sync::Mutex::new(0),
+		};
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(stuck));
+		for id in 0..3u32 {
+			KVStore::write(
+				&*kv_store,
+				TEST_PRIMARY_NAMESPACE,
+				TEST_SECONDARY_NAMESPACE,
+				&hex_utils::to_string(&id.to_be_bytes()),
+				TestObject { id }.encode(),
+			)
+			.await
+			.unwrap();
+		}
+
+		// Without a guard this walks the same page over and over, and only terminates here
+		// because the store eventually relents. A real one would not, and the read would never
+		// return.
+		let res: Result<Vec<TestObject>, _> = read_all_objects(
+			&*kv_store,
+			TEST_PRIMARY_NAMESPACE,
+			TEST_SECONDARY_NAMESPACE,
+			Arc::new(TestLogger::new()),
+		)
+		.await;
+		assert_eq!(std::io::ErrorKind::InvalidData, res.unwrap_err().kind());
 	}
 }

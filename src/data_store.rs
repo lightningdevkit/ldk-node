@@ -291,6 +291,10 @@ where
 	/// `objects` seeds the cache and must already be persisted under that namespace: under a
 	/// bounded policy any object beyond `cache_policy`'s capacity is dropped from memory
 	/// immediately, and is only recoverable by reading it back from the store.
+	///
+	/// They are taken in ascending order of recency, i.e., the last one given is treated as the
+	/// most recently used and is therefore the last to be evicted. Callers seeding from a
+	/// newest-first source have to reverse it.
 	pub(crate) fn new(
 		objects: Vec<SO>, cache_policy: P, primary_namespace: String, secondary_namespace: String,
 		kv_store: Arc<DynStore>, logger: L,
@@ -1609,6 +1613,30 @@ mod tests {
 		)
 		.await
 		.is_err());
+	}
+
+	#[tokio::test]
+	async fn lru_seeding_treats_the_last_object_as_most_recently_used() {
+		// The builder relies on this to hand a newest-first read over in reverse: whichever
+		// objects are given last must be the ones that survive, or seeding the cache would
+		// preferentially throw away the newest entries.
+		let kv_store = in_memory_store();
+		let seed_store = new_data_store(Arc::clone(&kv_store), KeepAllEntries, Vec::new());
+		let mut objects = Vec::new();
+		for i in 0..5u8 {
+			let object = TestObject::new(test_id(i), [i; 3]);
+			seed_store.insert(object).await.unwrap();
+			objects.push(object);
+		}
+
+		let data_store = new_data_store(kv_store, keep_lru(2), objects.clone());
+
+		assert_eq!(2, data_store.cached_len());
+		assert!(data_store.is_cached(&objects[3].id));
+		assert!(data_store.is_cached(&objects[4].id));
+		for object in objects.iter().take(3) {
+			assert!(!data_store.is_cached(&object.id));
+		}
 	}
 
 	#[tokio::test]
