@@ -1383,7 +1383,7 @@ mod tests {
 		// wallet sync already advanced the record — downgrades it.
 		let store = new_store(vec![advanced.clone()]);
 		store.insert_or_update(fresh.clone()).await.unwrap();
-		let downgraded = store.get(&id).unwrap();
+		let downgraded = store.get(&id).await.unwrap().unwrap();
 		assert_eq!(
 			downgraded.status,
 			PaymentStatus::Pending,
@@ -1406,7 +1406,7 @@ mod tests {
 			})
 			.await;
 		assert!(matches!(written, Ok(Some(_))), "the reclassification must merge");
-		let merged = store.get(&id).unwrap();
+		let merged = store.get(&id).await.unwrap().unwrap();
 		assert_eq!(merged.status, PaymentStatus::Succeeded);
 		assert!(matches!(
 			merged.kind,
@@ -1432,7 +1432,7 @@ mod tests {
 			})
 			.await;
 		assert!(matches!(written, Ok(Some(_))), "the fresh details must insert");
-		let inserted = store.get(&id).unwrap();
+		let inserted = store.get(&id).await.unwrap().unwrap();
 		assert_eq!(inserted.status, PaymentStatus::Pending);
 		assert!(matches!(
 			inserted.kind,

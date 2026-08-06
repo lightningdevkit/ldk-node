@@ -147,6 +147,7 @@ interface Node {
 	void update_channel_config([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
 	[Throws=NodeError]
 	void sync_wallets();
+	[Throws=NodeError]
 	PaymentDetails? payment([ByRef]PaymentId payment_id);
 	[Throws=NodeError]
 	void remove_payment([ByRef]PaymentId payment_id);

@@ -2136,9 +2136,10 @@ impl Node {
 
 	/// Retrieve the details of a specific payment with the given id.
 	///
-	/// Returns `Some` if the payment was known and `None` otherwise.
-	pub fn payment(&self, payment_id: &PaymentId) -> Option<PaymentDetails> {
-		self.payment_store.get(payment_id)
+	/// Returns `Ok(Some(..))` if the payment was known and `Ok(None)` otherwise. Returns an error
+	/// if the payment could not be retrieved from the store.
+	pub fn payment(&self, payment_id: &PaymentId) -> Result<Option<PaymentDetails>, Error> {
+		self.runtime.block_on(self.payment_store.get(payment_id))
 	}
 
 	/// Remove the payment with the given id from the store.
@@ -2220,12 +2221,12 @@ impl Node {
 	pub fn list_payments_with_filter<F: FnMut(&&PaymentDetails) -> bool>(
 		&self, f: F,
 	) -> Vec<PaymentDetails> {
-		self.payment_store.list_filter(f)
+		self.runtime.block_on(self.payment_store.list_filter(f))
 	}
 
 	/// Retrieves all payments.
 	pub fn list_payments(&self) -> Vec<PaymentDetails> {
-		self.payment_store.list_filter(|_| true)
+		self.list_payments_with_filter(|_| true)
 	}
 
 	/// Retrieves a list of known peers.

@@ -208,7 +208,7 @@ impl Bolt11Payment {
 
 		let payment_hash = invoice.payment_hash();
 		let payment_id = PaymentId(invoice.payment_hash().0);
-		if let Some(payment) = self.payment_store.get(&payment_id) {
+		if let Some(payment) = self.runtime.block_on(self.payment_store.get(&payment_id))? {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
 			{
@@ -423,14 +423,15 @@ impl Bolt11Payment {
 	pub fn claim_for_id(
 		&self, payment_id: PaymentId, claimable_amount_msat: u64, preimage: PaymentPreimage,
 	) -> Result<(), Error> {
-		let details = self.payment_store.get(&payment_id).ok_or_else(|| {
-			log_error!(
-				self.logger,
-				"Failed to manually claim unknown payment with ID: {}",
-				payment_id
-			);
-			Error::InvalidPaymentId
-		})?;
+		let details =
+			self.runtime.block_on(self.payment_store.get(&payment_id))?.ok_or_else(|| {
+				log_error!(
+					self.logger,
+					"Failed to manually claim unknown payment with ID: {}",
+					payment_id
+				);
+				Error::InvalidPaymentId
+			})?;
 
 		let payment_hash = match details.kind {
 			PaymentKind::Bolt11 { hash, .. } => hash,
@@ -488,14 +489,15 @@ impl Bolt11Payment {
 	///
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	pub fn fail_for_id(&self, payment_id: PaymentId) -> Result<(), Error> {
-		let details = self.payment_store.get(&payment_id).ok_or_else(|| {
-			log_error!(
-				self.logger,
-				"Failed to manually fail unknown payment with ID {}",
-				payment_id,
-			);
-			Error::InvalidPaymentId
-		})?;
+		let details =
+			self.runtime.block_on(self.payment_store.get(&payment_id))?.ok_or_else(|| {
+				log_error!(
+					self.logger,
+					"Failed to manually fail unknown payment with ID {}",
+					payment_id,
+				);
+				Error::InvalidPaymentId
+			})?;
 
 		let payment_hash = match details.kind {
 			PaymentKind::Bolt11 { hash, .. } => hash,
