@@ -172,8 +172,8 @@ use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
-	UnifiedPayment,
+	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, PaymentDetailsPage,
+	SpontaneousPayment, UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
 #[cfg(feature = "uniffi")]
@@ -192,7 +192,7 @@ pub use types::{
 pub use vss_client;
 
 use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY};
-use crate::ffi::maybe_wrap;
+use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
@@ -2195,13 +2195,26 @@ impl Node {
 		}
 	}
 
-	/// Retrieves all payments that match the given predicate.
+	/// Retrieves a page of payments, ordered from most recently created to least recently created.
+	///
+	/// Pass `None` to start at the most recently created payment, and the
+	/// [`PaymentDetailsPage::next_page_token`] returned by the previous call to continue from
+	/// where it left off. Ordering and pagination are backed by the configured storage backend, so
+	/// a token stays valid across restarts of the node.
+	///
+	/// Payments created or removed while paginating may or may not be observed. Because the
+	/// ordering is by creation, a payment that exists throughout is never skipped nor returned
+	/// twice, but a page may hold fewer payments than the backend's page size. Iterate until
+	/// `next_page_token` is `None` rather than until a short page.
+	///
+	/// Note that migrating between storage backends does not preserve the relative creation order
+	/// of pre-existing payments, so their order may change once after such a migration.
 	///
 	/// For example, you could retrieve all stored outbound payments as follows:
 	/// ```
 	/// # use ldk_node::Builder;
 	/// # use ldk_node::config::Config;
-	/// # use ldk_node::payment::PaymentDirection;
+	/// # use ldk_node::payment::{PaymentDetails, PaymentDirection};
 	/// # use ldk_node::bitcoin::Network;
 	/// # use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 	/// # use rand::distr::Alphanumeric;
@@ -2216,17 +2229,29 @@ impl Node {
 	/// # let mnemonic = generate_entropy_mnemonic(None);
 	/// # let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 	/// # let node = builder.build(node_entropy.into()).unwrap();
-	/// node.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound);
+	/// let mut outbound = Vec::new();
+	/// let mut page_token = None;
+	/// loop {
+	/// 	let page = node.list_payments(page_token)?;
+	/// 	outbound.extend(
+	/// 		page.payments.into_iter().filter(|p| p.direction == PaymentDirection::Outbound),
+	/// 	);
+	/// 	match page.next_page_token {
+	/// 		Some(token) => page_token = Some(token),
+	/// 		None => break,
+	/// 	}
+	/// }
+	/// # Ok::<(), ldk_node::NodeError>(())
 	/// ```
-	pub fn list_payments_with_filter<F: FnMut(&&PaymentDetails) -> bool>(
-		&self, f: F,
-	) -> Vec<PaymentDetails> {
-		self.runtime.block_on(self.payment_store.list_filter(f))
-	}
-
-	/// Retrieves all payments.
-	pub fn list_payments(&self) -> Vec<PaymentDetails> {
-		self.list_payments_with_filter(|_| true)
+	pub fn list_payments(
+		&self, page_token: Option<payment::PageToken>,
+	) -> Result<PaymentDetailsPage, Error> {
+		let ldk_page_token = page_token.as_ref().map(|token| maybe_deref(token).clone());
+		let page = self.runtime.block_on(self.payment_store.list_page(ldk_page_token))?;
+		Ok(PaymentDetailsPage {
+			payments: page.objects,
+			next_page_token: page.next_page_token.map(maybe_wrap),
+		})
 	}
 
 	/// Retrieves a list of known peers.

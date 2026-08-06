@@ -23,7 +23,7 @@ pub use onchain::OnchainPayment;
 pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
 pub use spontaneous::SpontaneousPayment;
 pub use store::{
-	Channel, ConfirmationStatus, LSPS2Parameters, PaymentDetails, PaymentDirection, PaymentKind,
-	PaymentStatus, TransactionType,
+	Channel, ConfirmationStatus, LSPS2Parameters, PageToken, PaymentDetails, PaymentDetailsPage,
+	PaymentDirection, PaymentKind, PaymentStatus, TransactionType,
 };
 pub use unified::{UnifiedPayment, UnifiedPaymentResult};

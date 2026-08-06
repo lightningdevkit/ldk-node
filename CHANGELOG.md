@@ -1,6 +1,10 @@
 # Pending
 
 ## Compatibility Notes
+- Migrating between storage backends does not preserve the relative creation order of
+  pre-existing payments, as the generic KV store migration copies entries in an unspecified
+  order. Expect the order in which `Node::list_payments` returns pre-existing payments to
+  change once after such a migration. Payment contents and completeness are unaffected.
 - Pending JIT-channel payments created before upgrading may fail after upgrade because the
   prior LSPS2 fee-limit state stored in `PaymentKind::Bolt11Jit` is not migrated.
 - Upgrading from LDK Node v0.1 is no longer supported if the event queue still contains
@@ -9,6 +13,13 @@
   `v0.1.0-alpha.0` before upgrading LDK Node.
 
 ## Feature and API updates
+- `Node::list_payments` is now paginated: it takes an optional `PageToken` and returns a
+  `PaymentDetailsPage` holding one page of payments, ordered from most recently created to
+  least recently created, plus the token for the next page. Ordering and page tokens come
+  from the configured storage backend, so a token stays valid across restarts. This replaces
+  the previous unpaginated `Node::list_payments`, and `Node::list_payments_with_filter` has
+  been removed; filter the returned pages instead.
+- `Node::payment` now returns a `Result`, as retrieving a payment may fail.
 - The Bitcoin Core RPC and REST chain-source builder methods now accept an optional
   `wallet_rescan_from_height` argument. Passing a height lets fresh wallets rescan from a known
   birthday block instead of checkpointing at the current tip, which is useful when restoring a

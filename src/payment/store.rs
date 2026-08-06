@@ -25,6 +25,39 @@ use lightning_types::string::UntrustedString;
 use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate};
 use crate::hex_utils;
 
+/// An opaque token used to continue a paginated listing.
+///
+/// See [`Node::list_payments`] for how to use it.
+///
+/// [`Node::list_payments`]: crate::Node::list_payments
+#[cfg(not(feature = "uniffi"))]
+pub type PageToken = lightning::util::persist::PageToken;
+/// An opaque token used to continue a paginated listing.
+///
+/// See [`Node::list_payments`] for how to use it.
+///
+/// [`Node::list_payments`]: crate::Node::list_payments
+#[cfg(feature = "uniffi")]
+pub type PageToken = std::sync::Arc<crate::ffi::PageToken>;
+
+/// A page of payments, as returned by [`Node::list_payments`].
+///
+/// [`Node::list_payments`]: crate::Node::list_payments
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PaymentDetailsPage {
+	/// The payments in this page, ordered from most recently created to least recently created.
+	///
+	/// Note this may hold fewer payments than the storage backend's page size even when further
+	/// pages remain, so iterate until `next_page_token` is `None` rather than until a short page.
+	pub payments: Vec<PaymentDetails>,
+	/// The token to pass to the next [`Node::list_payments`] call, or `None` if this was the last
+	/// page.
+	///
+	/// [`Node::list_payments`]: crate::Node::list_payments
+	pub next_page_token: Option<PageToken>,
+}
+
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -151,6 +184,10 @@ impl Readable for PaymentDetails {
 impl StorableObjectId for PaymentId {
 	fn encode_to_hex_str(&self) -> String {
 		hex_utils::to_string(&self.0)
+	}
+
+	fn decode_from_hex_str(s: &str) -> Option<Self> {
+		hex_utils::to_vec(s)?.try_into().ok().map(PaymentId)
 	}
 }
 impl StorableObject for PaymentDetails {

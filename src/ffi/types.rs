@@ -37,6 +37,7 @@ use lightning::offers::static_invoice::StaticInvoice as LdkStaticInvoice;
 use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
 pub use lightning::routing::gossip::{NodeAlias, NodeId, RoutingFees};
 pub use lightning::routing::router::RouteParametersConfig;
+use lightning::util::persist::PageToken as LdkPageToken;
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning_invoice::{Bolt11Invoice as LdkBolt11Invoice, Bolt11InvoiceDescriptionRef};
 pub use lightning_invoice::{Description, SignedRawBolt11Invoice};
@@ -2743,5 +2744,52 @@ mod tests {
 
 		let hrn3 = hrn1;
 		assert_eq!(hrn1, hrn3);
+	}
+}
+
+/// An opaque token used to continue a paginated listing.
+///
+/// Obtain one from the page returned by a listing call and pass it back to retrieve the next page.
+/// The value returned by `to_string` may be persisted and handed to the constructor later, so that
+/// pagination can be resumed after a restart.
+///
+/// The representation is defined by the storage backend and must be treated as opaque. A token is
+/// only meaningful to the backend that issued it.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Display, Eq)]
+pub struct PageToken {
+	pub(crate) inner: LdkPageToken,
+}
+
+#[uniffi::export]
+impl PageToken {
+	/// Constructs a token from the representation previously obtained via `to_string`.
+	#[uniffi::constructor]
+	pub fn new(token: String) -> Self {
+		Self { inner: LdkPageToken::new(token) }
+	}
+}
+
+impl From<LdkPageToken> for PageToken {
+	fn from(inner: LdkPageToken) -> Self {
+		Self { inner }
+	}
+}
+
+impl From<PageToken> for LdkPageToken {
+	fn from(wrapper: PageToken) -> Self {
+		wrapper.inner
+	}
+}
+
+impl AsRef<LdkPageToken> for PageToken {
+	fn as_ref(&self) -> &LdkPageToken {
+		&self.inner
+	}
+}
+
+impl std::fmt::Display for PageToken {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.inner)
 	}
 }

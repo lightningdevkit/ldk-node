@@ -431,13 +431,36 @@ pub(crate) trait NodePaymentExt {
 // `Node` and when it is an `Arc<Node>`.
 impl NodePaymentExt for Node {
 	fn list_all_payments(&self) -> Vec<PaymentDetails> {
-		self.list_payments()
+		let mut all = Vec::new();
+		let mut seen = HashSet::new();
+		let mut page_token = None;
+		let mut num_pages = 0;
+		loop {
+			let page = self.list_payments(page_token).unwrap();
+			for payment in page.payments {
+				// Every test that looks at payments now exercises pagination, so assert the
+				// properties it is supposed to have while we are here.
+				assert!(
+					seen.insert(payment.id),
+					"Payment {:?} was returned on more than one page",
+					payment.id
+				);
+				all.push(payment);
+			}
+			num_pages += 1;
+			assert!(num_pages < 1_000, "Pagination did not terminate after {} pages", num_pages);
+			match page.next_page_token {
+				Some(token) => page_token = Some(token),
+				None => break,
+			}
+		}
+		all
 	}
 
 	fn list_payments_matching<F: FnMut(&&PaymentDetails) -> bool>(
-		&self, f: F,
+		&self, mut f: F,
 	) -> Vec<PaymentDetails> {
-		self.list_payments_with_filter(f)
+		self.list_all_payments().into_iter().filter(|p| f(&p)).collect()
 	}
 }
 

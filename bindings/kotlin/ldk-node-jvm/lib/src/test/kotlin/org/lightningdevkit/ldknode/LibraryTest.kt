@@ -301,8 +301,12 @@ class LibraryTest {
         assert(paymentReceivedEvent is Event.PaymentReceived)
         node2.eventHandled()
 
-        assert(node1.listPayments().size == 3)
-        assert(node2.listPayments().size == 2)
+        assert(node1.listPayments(null).payments.size == 3)
+        assert(node2.listPayments(null).payments.size == 2)
+
+        // A page token has to survive a round trip through a string, so that an app can persist
+        // one and resume paginating after a restart.
+        assert(PageToken("some-page-token").toString() == "some-page-token")
 
         node2.closeChannel(userChannelId, nodeId1)
 
