@@ -13,10 +13,11 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use lightning::io::ErrorKind;
-use lightning::util::persist::KVStore;
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore};
 use lightning::util::ser::{Readable, Writeable};
 
-use crate::logger::{log_error, LdkLogger};
+use crate::io::utils::process_kv_store_reads;
+use crate::logger::{log_debug, log_error, LdkLogger};
 use crate::types::DynStore;
 use crate::Error;
 
@@ -29,8 +30,15 @@ pub(crate) trait StorableObject: Clone + Readable + Writeable {
 	fn to_update(&self) -> Self::Update;
 }
 
-pub(crate) trait StorableObjectId: Clone + std::hash::Hash + PartialEq + Eq {
+pub(crate) trait StorableObjectId: Clone + std::hash::Hash + PartialEq + Eq + Sized {
 	fn encode_to_hex_str(&self) -> String;
+
+	/// Recovers an id from the representation produced by [`Self::encode_to_hex_str`].
+	///
+	/// Returns `None` if `s` is not one. Callers listing a namespace must treat that as a cache
+	/// miss and read the object instead, whose own id is authoritative, rather than assume the
+	/// store only ever hands back keys we wrote.
+	fn decode_from_hex_str(s: &str) -> Option<Self>;
 }
 
 pub(crate) trait StorableObjectUpdate<SO: StorableObject> {
@@ -195,6 +203,14 @@ impl<SO: StorableObject> ObjectCache<SO> {
 		}
 	}
 
+	/// Returns the cached object for `id`, without marking it as most recently used.
+	fn peek(&self, id: &SO::Id) -> Option<SO> {
+		match self {
+			Self::KeepAll(objects) => objects.get(id).cloned(),
+			Self::BoundedLru(lru) => lru.entries.get(id).map(|(object, _)| object.clone()),
+		}
+	}
+
 	/// Returns whether `id` is cached, without marking it as most recently used.
 	fn contains(&self, id: &SO::Id) -> bool {
 		match self {
@@ -239,6 +255,15 @@ impl<SO: StorableObject> ObjectCache<SO> {
 			Self::BoundedLru(lru) => lru.entries.len(),
 		}
 	}
+}
+
+/// A page of objects, as returned by [`DataStore::list_page`].
+pub(crate) struct DataStorePage<SO> {
+	/// The objects in this page, ordered from most recently created to least recently created.
+	pub objects: Vec<SO>,
+	/// The token to pass to the next [`DataStore::list_page`] call, or `None` if this was the
+	/// last page.
+	pub next_page_token: Option<PageToken>,
 }
 
 pub(crate) struct DataStore<SO: StorableObject, L: Deref, P: CachePolicy = KeepAllEntries>
@@ -436,6 +461,141 @@ where
 		self.contains(id).await
 	}
 
+	/// Returns a page of objects, ordered from most recently created to least recently created.
+	///
+	/// Pass `None` to start at the most recently created object, and the returned
+	/// [`DataStorePage::next_page_token`] to continue from where the previous call left off.
+	///
+	/// The ordering and the tokens are the storage backend's own: we hand its opaque token back to
+	/// it unchanged and never derive an order of our own. This keeps pagination independent of our
+	/// caching, while the token lifetime remains the storage backend's own. The backend's creation
+	/// ordering is also why an object updated mid-pagination cannot shift position and so be skipped
+	/// or returned twice.
+	///
+	/// Note this deliberately does not hold the mutation lock across its reads: a listing must not
+	/// block every writer for the duration of a round trip to a remote backend. Objects created or
+	/// removed while paginating may or may not be observed. Likewise, a page is not a point-in-time
+	/// snapshot: concurrently updated objects may reflect different moments depending on whether
+	/// they came from the cache or the storage backend.
+	///
+	/// Note also that a page may hold fewer objects than the backend's page size, because objects
+	/// removed between listing the keys and reading them are skipped. Iterate until
+	/// `next_page_token` is `None` rather than until a short page.
+	pub(crate) async fn list_page(
+		&self, page_token: Option<PageToken>,
+	) -> Result<DataStorePage<SO>, Error> {
+		let response = PaginatedKVStore::list_paginated(
+			&*self.kv_store,
+			&self.primary_namespace,
+			&self.secondary_namespace,
+			page_token,
+		)
+		.await
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Listing objects under {}/{} failed due to: {}",
+				&self.primary_namespace,
+				&self.secondary_namespace,
+				e
+			);
+			// The backend rejects a token it didn't issue, which is the caller's problem rather
+			// than a persistence failure.
+			if e.kind() == ErrorKind::InvalidInput {
+				Error::InvalidPageToken
+			} else {
+				Error::PersistenceFailed
+			}
+		})?;
+
+		// Serve whatever we already hold, and note the rest to read below. We take the mutation
+		// lock only for this, so that we observe a consistent view of the cache without holding up
+		// writers while we read.
+		let mut objects: Vec<Option<SO>> = vec![None; response.keys.len()];
+		let mut missing = Vec::with_capacity(response.keys.len());
+		{
+			let _guard = self.mutation_lock.read().await;
+			let locked_cache = self.cache.lock().expect("lock");
+			for (idx, key) in response.keys.iter().enumerate() {
+				// Note we deliberately peek rather than `get` here: a listing sweep walks the whole
+				// namespace, so letting it count as "use" would evict the working set it walks past.
+				match SO::Id::decode_from_hex_str(key).and_then(|id| locked_cache.peek(&id)) {
+					Some(object) => objects[idx] = Some(object),
+					None => missing.push((idx, key.clone())),
+				}
+			}
+		}
+
+		self.read_missing(&mut objects, missing).await?;
+
+		Ok(DataStorePage {
+			objects: objects.into_iter().flatten().collect(),
+			next_page_token: response.next_page_token,
+		})
+	}
+
+	/// Reads the objects we couldn't serve from the cache into their slots in `objects`.
+	///
+	/// Reads run concurrently but are tracked by slot, as the order in which they finish says
+	/// nothing about the order of the page. Note the objects read here are deliberately *not*
+	/// cached, see [`Self::list_page`].
+	async fn read_missing(
+		&self, objects: &mut [Option<SO>], missing: Vec<(usize, String)>,
+	) -> Result<(), Error> {
+		process_kv_store_reads(
+			&*self.kv_store,
+			&self.primary_namespace,
+			&self.secondary_namespace,
+			missing,
+			|idx, key, read_res| {
+				match read_res {
+					Ok(bytes) => match SO::read(&mut &bytes[..]) {
+						Ok(object) => objects[idx] = Some(object),
+						Err(e) => {
+							log_error!(
+								self.logger,
+								"Failed to deserialize object for key {}/{}/{}: {}",
+								&self.primary_namespace,
+								&self.secondary_namespace,
+								key,
+								e
+							);
+							return Err(Error::PersistenceFailed);
+						},
+					},
+					// The object was removed between us listing the keys and reading it, which is
+					// indistinguishable from it having been removed just before the listing. Skip it.
+					Err(e) if e.kind() == ErrorKind::NotFound => {
+						log_debug!(
+							self.logger,
+							"Skipping concurrently removed key {}/{}/{}",
+							&self.primary_namespace,
+							&self.secondary_namespace,
+							key
+						);
+					},
+					Err(e) => {
+						log_error!(
+							self.logger,
+							"Read for key {}/{}/{} failed due to: {}",
+							&self.primary_namespace,
+							&self.secondary_namespace,
+							key,
+							e
+						);
+						return Err(Error::PersistenceFailed);
+					},
+				}
+				Ok(())
+			},
+			|e| {
+				log_error!(self.logger, "Failed to join object read task: {}", e);
+				Error::PersistenceFailed
+			},
+		)
+		.await
+	}
+
 	/// Returns the object stored under `id`, reading through to the [`KVStore`] if the cache is
 	/// not authoritative and misses.
 	///
@@ -595,7 +755,7 @@ mod tests {
 
 	use super::*;
 	use crate::hex_utils;
-	use crate::io::test_utils::InMemoryStore;
+	use crate::io::test_utils::{InMemoryStore, IN_MEMORY_PAGE_SIZE};
 	use crate::types::DynStoreWrapper;
 
 	const TEST_PRIMARY_NAMESPACE: &str = "datastore_test_primary";
@@ -634,6 +794,10 @@ mod tests {
 	impl StorableObjectId for TestObjectId {
 		fn encode_to_hex_str(&self) -> String {
 			hex_utils::to_string(&self.id)
+		}
+
+		fn decode_from_hex_str(s: &str) -> Option<Self> {
+			hex_utils::to_vec(s)?.try_into().ok().map(|id| Self { id })
 		}
 	}
 	impl_writeable_tlv_based!(TestObjectId, { (0, id, required) });
@@ -1560,5 +1724,287 @@ mod tests {
 		lru.remove(&second);
 		assert_eq!(1, lru.entries.len());
 		assert_eq!(1, lru.recency.len());
+	}
+
+	/// A store that reports one key from `list_paginated` that it will then fail to read, standing
+	/// in for an entry removed between the two calls.
+	struct PhantomKeyStore {
+		inner: InMemoryStore,
+		phantom_key: String,
+	}
+
+	impl KVStore for PhantomKeyStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			self.inner.read(primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			self.inner.write(primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			self.inner.remove(primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			self.inner.list(primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for PhantomKeyStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
+			let phantom_key = self.phantom_key.clone();
+			let inner_fut =
+				self.inner.list_paginated(primary_namespace, secondary_namespace, page_token);
+			async move {
+				let mut response = inner_fut.await?;
+				response.keys.insert(0, phantom_key);
+				Ok(response)
+			}
+		}
+	}
+
+	/// Sweeps every page and returns the objects in the order they were listed.
+	async fn list_all_pages<P: CachePolicy>(
+		data_store: &DataStore<TestObject, Arc<TestLogger>, P>,
+	) -> Vec<TestObject> {
+		let mut all = Vec::new();
+		let mut page_token = None;
+		loop {
+			let page = data_store.list_page(page_token).await.unwrap();
+			all.extend(page.objects);
+			match page.next_page_token {
+				Some(token) => page_token = Some(token),
+				None => break,
+			}
+		}
+		all
+	}
+
+	/// Inserts `num_objects` objects with ascending ids through `data_store`.
+	async fn insert_ascending<P: CachePolicy>(
+		data_store: &DataStore<TestObject, Arc<TestLogger>, P>, num_objects: usize,
+	) -> Vec<TestObject> {
+		let mut objects = Vec::new();
+		for i in 0..num_objects {
+			let id = TestObjectId { id: (i as u32).to_be_bytes() };
+			let object = TestObject::new(id, [7u8; 3]);
+			data_store.insert(object).await.unwrap();
+			objects.push(object);
+		}
+		objects
+	}
+
+	#[tokio::test]
+	async fn list_page_walks_pages_in_reverse_creation_order() {
+		let data_store = new_data_store(in_memory_store(), KeepAllEntries, Vec::new());
+		let num_objects = 2 * IN_MEMORY_PAGE_SIZE + 25;
+		let inserted = insert_ascending(&data_store, num_objects).await;
+
+		// Check the pages themselves are sized and terminated as expected.
+		let first = data_store.list_page(None).await.unwrap();
+		assert_eq!(IN_MEMORY_PAGE_SIZE, first.objects.len());
+		let second = data_store.list_page(first.next_page_token).await.unwrap();
+		assert_eq!(IN_MEMORY_PAGE_SIZE, second.objects.len());
+		let third = data_store.list_page(second.next_page_token).await.unwrap();
+		assert_eq!(25, third.objects.len());
+		assert!(third.next_page_token.is_none());
+
+		let mut expected = inserted;
+		expected.reverse();
+		assert_eq!(expected, list_all_pages(&data_store).await);
+	}
+
+	#[tokio::test]
+	async fn list_page_orders_by_creation_not_by_update() {
+		let data_store = new_data_store(in_memory_store(), KeepAllEntries, Vec::new());
+		let inserted = insert_ascending(&data_store, IN_MEMORY_PAGE_SIZE + 10).await;
+
+		// Touch the oldest object. Ordering by update time would move it to the front and so drop
+		// or duplicate entries across pages; ordering by creation must leave it where it is.
+		let oldest = inserted.first().unwrap();
+		let update = TestObjectUpdate { id: oldest.id, data: [99u8; 3], extra: None };
+		assert_eq!(Ok(DataStoreUpdateResult::Updated), data_store.update(update).await);
+
+		let listed = list_all_pages(&data_store).await;
+		assert_eq!(inserted.len(), listed.len());
+		assert_eq!(oldest.id, listed.last().unwrap().id);
+		assert_eq!([99u8; 3], listed.last().unwrap().data);
+	}
+
+	#[tokio::test]
+	async fn list_page_token_survives_a_restart() {
+		let kv_store = in_memory_store();
+		let num_objects = IN_MEMORY_PAGE_SIZE + 10;
+		let inserted = {
+			let data_store = new_data_store(Arc::clone(&kv_store), KeepAllEntries, Vec::new());
+			insert_ascending(&data_store, num_objects).await
+		};
+
+		let first_page = {
+			let data_store = new_data_store(Arc::clone(&kv_store), KeepAllEntries, Vec::new());
+			data_store.list_page(None).await.unwrap()
+		};
+		let token = first_page.next_page_token.clone().unwrap();
+
+		// Resume from a *fresh* store, i.e., with nothing in memory, as an app would after being
+		// restarted between two pages. Because the ordering and the token are the backend's own,
+		// and not something we number ourselves, the continuation must still line up exactly.
+		let data_store = new_data_store(Arc::clone(&kv_store), KeepAllEntries, Vec::new());
+		let second_page = data_store.list_page(Some(token)).await.unwrap();
+
+		let mut expected = inserted;
+		expected.reverse();
+		assert_eq!(expected[..IN_MEMORY_PAGE_SIZE], first_page.objects[..]);
+		assert_eq!(expected[IN_MEMORY_PAGE_SIZE..], second_page.objects[..]);
+		assert!(second_page.next_page_token.is_none());
+	}
+
+	#[tokio::test]
+	async fn list_page_does_not_repeat_entries_after_removals_and_a_restart() {
+		let kv_store = in_memory_store();
+		let num_objects = IN_MEMORY_PAGE_SIZE + 10;
+		let inserted = {
+			let data_store = new_data_store(Arc::clone(&kv_store), KeepAllEntries, Vec::new());
+			insert_ascending(&data_store, num_objects).await
+		};
+
+		let data_store = new_data_store(Arc::clone(&kv_store), KeepAllEntries, inserted.clone());
+		let first_page = data_store.list_page(None).await.unwrap();
+		let token = first_page.next_page_token.clone().unwrap();
+		let seen: Vec<TestObjectId> = first_page.objects.iter().map(|o| o.id).collect();
+
+		// Remove the oldest objects, including the one the token points at, then resume from a
+		// fresh store. An implementation that renumbered its own ordering on load would hand back
+		// entries from the first page again here.
+		let cursor_id = seen.last().copied().unwrap();
+		data_store.remove(&cursor_id).await.unwrap();
+		for object in inserted.iter().take(5) {
+			data_store.remove(&object.id).await.unwrap();
+		}
+
+		let resumed = new_data_store(Arc::clone(&kv_store), KeepAllEntries, Vec::new());
+		let second_page = resumed.list_page(Some(token)).await.unwrap();
+		for object in &second_page.objects {
+			assert!(
+				!seen.contains(&object.id),
+				"Object {:?} was returned on more than one page",
+				object.id
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn list_page_serves_entries_that_are_not_in_memory() {
+		// The point of doing this against the store rather than an ordering of our own: a bounded
+		// store can only hold a fraction of the namespace, yet must still list all of it.
+		let data_store = new_data_store(in_memory_store(), keep_lru(10), Vec::new());
+		let inserted = insert_ascending(&data_store, 2 * IN_MEMORY_PAGE_SIZE + 25).await;
+		assert_eq!(10, data_store.cached_len());
+
+		let mut expected = inserted;
+		expected.reverse();
+		assert_eq!(expected, list_all_pages(&data_store).await);
+	}
+
+	#[tokio::test]
+	async fn list_page_does_not_disturb_the_cache() {
+		let data_store = new_data_store(in_memory_store(), keep_lru(2), Vec::new());
+		let first = test_id(1);
+		let second = test_id(2);
+		data_store.insert(TestObject::new(first, [1u8; 3])).await.unwrap();
+		data_store.insert(TestObject::new(second, [2u8; 3])).await.unwrap();
+
+		// Make `first` the most recently used, then sweep the whole namespace.
+		assert!(data_store.get(&first).await.unwrap().is_some());
+		assert_eq!(2, list_all_pages(&data_store).await.len());
+		assert_eq!(2, data_store.cached_len());
+
+		// The sweep must not have counted as use, so `second` is still the one to evict.
+		let third = test_id(3);
+		data_store.insert(TestObject::new(third, [3u8; 3])).await.unwrap();
+		assert!(data_store.is_cached(&first));
+		assert!(!data_store.is_cached(&second));
+		assert!(data_store.is_cached(&third));
+	}
+
+	#[tokio::test]
+	async fn list_page_skips_concurrently_removed_keys() {
+		let phantom_id = test_id(200);
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(PhantomKeyStore {
+			inner: InMemoryStore::new(),
+			phantom_key: phantom_id.encode_to_hex_str(),
+		}));
+		let data_store = new_data_store(kv_store, keep_lru(1), Vec::new());
+		let inserted = insert_ascending(&data_store, 3).await;
+
+		// A key that vanished between being listed and being read is skipped rather than failing
+		// the whole listing.
+		let page = data_store.list_page(None).await.unwrap();
+		assert_eq!(3, page.objects.len());
+		for object in inserted {
+			assert!(page.objects.contains(&object));
+		}
+	}
+
+	#[tokio::test]
+	async fn list_page_reports_failures() {
+		let failing =
+			new_data_store(Arc::new(DynStoreWrapper(FailingStore)), KeepAllEntries, Vec::new());
+		assert_eq!(Err(Error::PersistenceFailed), failing.list_page(None).await.map(|_| ()));
+	}
+
+	#[tokio::test]
+	async fn list_page_rejects_a_malformed_token() {
+		let data_store = new_data_store(in_memory_store(), KeepAllEntries, Vec::new());
+		insert_ascending(&data_store, 1).await;
+
+		let token = PageToken::new("not-a-token".to_string());
+		assert_eq!(
+			Err(Error::InvalidPageToken),
+			data_store.list_page(Some(token)).await.map(|_| ())
+		);
+	}
+
+	#[tokio::test]
+	async fn list_page_reports_undecodable_objects() {
+		let kv_store = in_memory_store();
+		let data_store = new_data_store(Arc::clone(&kv_store), keep_lru(1), Vec::new());
+		insert_ascending(&data_store, 2).await;
+
+		// Corrupt an object that is no longer cached, so that listing has to read it back.
+		let corrupted_id = TestObjectId { id: 0u32.to_be_bytes() };
+		assert!(!data_store.is_cached(&corrupted_id));
+		KVStore::write(
+			&*kv_store,
+			TEST_PRIMARY_NAMESPACE,
+			TEST_SECONDARY_NAMESPACE,
+			&corrupted_id.encode_to_hex_str(),
+			vec![0xff; 3],
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(Err(Error::PersistenceFailed), data_store.list_page(None).await.map(|_| ()));
+	}
+
+	#[tokio::test]
+	async fn list_page_on_an_empty_store() {
+		let data_store = new_data_store(in_memory_store(), KeepAllEntries, Vec::new());
+		let page = data_store.list_page(None).await.unwrap();
+		assert!(page.objects.is_empty());
+		assert!(page.next_page_token.is_none());
 	}
 }
