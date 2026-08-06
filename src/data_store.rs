@@ -46,7 +46,12 @@ where
 	L::Target: LdkLogger,
 {
 	objects: Mutex<HashMap<SO::Id, SO>>,
-	mutation_lock: tokio::sync::Mutex<()>,
+	// Serializes mutations against each other and against readers. Writers hold the write guard
+	// across both the store write and the subsequent in-memory update, so readers taking the read
+	// guard never observe the window in between, in which the store is already ahead of memory.
+	//
+	// Note the `objects` lock is always taken *inside* this one, and never held across an `.await`.
+	mutation_lock: tokio::sync::RwLock<()>,
 	primary_namespace: String,
 	secondary_namespace: String,
 	kv_store: Arc<DynStore>,
@@ -65,7 +70,7 @@ where
 			Mutex::new(HashMap::from_iter(objects.into_iter().map(|obj| (obj.id(), obj))));
 		Self {
 			objects,
-			mutation_lock: tokio::sync::Mutex::new(()),
+			mutation_lock: tokio::sync::RwLock::new(()),
 			primary_namespace,
 			secondary_namespace,
 			kv_store,
@@ -74,7 +79,7 @@ where
 	}
 
 	pub(crate) async fn insert(&self, object: SO) -> Result<bool, Error> {
-		let _guard = self.mutation_lock.lock().await;
+		let _guard = self.mutation_lock.write().await;
 
 		self.persist(&object).await?;
 		let mut locked_objects = self.objects.lock().expect("lock");
@@ -85,7 +90,7 @@ where
 	/// Like [`Self::insert`], but when an entry with the object's id already exists, merges the
 	/// object's full update ([`StorableObject::to_update`]) into it instead of replacing it.
 	pub(crate) async fn insert_or_update(&self, object: SO) -> Result<bool, Error> {
-		let _guard = self.mutation_lock.lock().await;
+		let _guard = self.mutation_lock.write().await;
 
 		let id = object.id();
 		let data_to_persist = {
@@ -115,7 +120,7 @@ where
 	}
 
 	pub(crate) async fn remove(&self, id: &SO::Id) -> Result<(), Error> {
-		let _guard = self.mutation_lock.lock().await;
+		let _guard = self.mutation_lock.write().await;
 		let should_remove = { self.objects.lock().expect("lock").contains_key(id) };
 		if should_remove {
 			let store_key = id.encode_to_hex_str();
@@ -144,16 +149,13 @@ where
 	}
 
 	/// Returns the object stored under `id`, if any.
-	///
-	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
-	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
-	/// caught up to a write in progress.
 	pub(crate) async fn get(&self, id: &SO::Id) -> Result<Option<SO>, Error> {
+		let _guard = self.mutation_lock.read().await;
 		Ok(self.objects.lock().expect("lock").get(id).cloned())
 	}
 
 	pub(crate) async fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
-		let _guard = self.mutation_lock.lock().await;
+		let _guard = self.mutation_lock.write().await;
 		let id = update.id();
 		let updated_object = {
 			let locked_objects = self.objects.lock().expect("lock");
@@ -225,11 +227,8 @@ where
 	}
 
 	/// Returns all stored objects matching `f`.
-	///
-	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
-	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
-	/// caught up to a write in progress.
 	pub(crate) async fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
+		let _guard = self.mutation_lock.read().await;
 		self.objects.lock().expect("lock").values().filter(f).cloned().collect::<Vec<SO>>()
 	}
 
@@ -266,20 +265,20 @@ where
 	}
 
 	/// Returns whether an object is stored under `id`.
-	///
-	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
-	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
-	/// caught up to a write in progress.
 	pub(crate) async fn contains_key(&self, id: &SO::Id) -> Result<bool, Error> {
+		let _guard = self.mutation_lock.read().await;
 		Ok(self.objects.lock().expect("lock").contains_key(id))
 	}
 }
 
 #[cfg(test)]
 mod tests {
+	use std::time::Duration;
+
 	use lightning::util::persist::{PageToken, PaginatedKVStore, PaginatedListResponse};
 	use lightning::util::test_utils::TestLogger;
 	use lightning::{impl_writeable_tlv_based, io};
+	use tokio::sync::Notify;
 
 	use super::*;
 	use crate::hex_utils;
@@ -389,6 +388,103 @@ mod tests {
 			store,
 			logger,
 		)
+	}
+
+	/// A store that parks every `write` until it is released, so that tests can hold a write in
+	/// flight and observe what concurrent readers see in the meantime.
+	struct GatedStore {
+		inner: InMemoryStore,
+		/// Notified by the store once a `write` has parked.
+		write_parked: Arc<Notify>,
+		/// Awaited by the store; notify to let the parked `write` proceed.
+		release_write: Arc<Notify>,
+	}
+
+	impl KVStore for GatedStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			self.inner.read(primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			let write_parked = Arc::clone(&self.write_parked);
+			let release_write = Arc::clone(&self.release_write);
+			let inner_fut = self.inner.write(primary_namespace, secondary_namespace, key, buf);
+			async move {
+				write_parked.notify_one();
+				release_write.notified().await;
+				inner_fut.await
+			}
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			self.inner.remove(primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			self.inner.list(primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for GatedStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
+			self.inner.list_paginated(primary_namespace, secondary_namespace, page_token)
+		}
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn readers_wait_for_in_flight_writes() {
+		let write_parked = Arc::new(Notify::new());
+		let release_write = Arc::new(Notify::new());
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(GatedStore {
+			inner: InMemoryStore::new(),
+			write_parked: Arc::clone(&write_parked),
+			release_write: Arc::clone(&release_write),
+		}));
+		let logger = Arc::new(TestLogger::new());
+
+		let id = TestObjectId { id: [42u8; 4] };
+		let old_object = TestObject { id, data: [23u8; 3] };
+		let new_object = TestObject { id, data: [24u8; 3] };
+
+		let data_store: Arc<DataStore<TestObject, Arc<TestLogger>>> = Arc::new(DataStore::new(
+			vec![old_object],
+			"datastore_test_primary".to_string(),
+			"datastore_test_secondary".to_string(),
+			store,
+			logger,
+		));
+
+		let writer_store = Arc::clone(&data_store);
+		let writer = tokio::spawn(async move { writer_store.insert(new_object).await });
+
+		// Wait until the write has been handed to the store and parked there, i.e., until the
+		// object has been persisted but the in-memory state has not caught up yet.
+		write_parked.notified().await;
+
+		// A reader must not be able to observe that window: it has to wait for the writer rather
+		// than hand out the pre-write object.
+		let read_res = tokio::time::timeout(Duration::from_millis(200), data_store.get(&id)).await;
+		assert!(
+			read_res.is_err(),
+			"Reader observed {:?} while a write was still in flight",
+			read_res.unwrap()
+		);
+
+		release_write.notify_one();
+		assert_eq!(Ok(true), writer.await.unwrap());
+		assert_eq!(Some(new_object), data_store.get(&id).await.unwrap());
 	}
 
 	#[tokio::test]
