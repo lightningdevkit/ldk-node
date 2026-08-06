@@ -237,6 +237,7 @@ enum NodeError {
 	"InvalidDateTime",
 	"InvalidFeeRate",
 	"InvalidScriptPubKey",
+	"InvalidPageToken",
 	"DuplicatePayment",
 	"UnsupportedCurrency",
 	"InsufficientFunds",
