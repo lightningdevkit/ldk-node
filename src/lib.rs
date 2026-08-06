@@ -121,7 +121,7 @@ pub use bitcoin;
 use bitcoin::secp256k1::PublicKey;
 #[cfg(feature = "uniffi")]
 pub use bitcoin::FeeRate;
-use bitcoin::{Address, Amount, BlockHash, Network};
+use bitcoin::{Address, Amount, BlockHash, Network, Transaction};
 #[cfg(feature = "uniffi")]
 pub use builder::ArcedNodeBuilder as Builder;
 pub use builder::BuildError;
@@ -147,17 +147,20 @@ use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::update_and_persist_node_metrics;
 pub use lightning;
+use lightning::chain::channelmonitor::ChannelMonitorUpdate;
 use lightning::chain::BlockLocator;
 use lightning::impl_writeable_tlv_based;
-use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
+use lightning::ln::chan_utils::{CommitmentTransaction, FUNDING_TRANSACTION_WITNESS_WEIGHT};
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 pub use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
+use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStore;
+use lightning::util::ser::Readable;
 use lightning::util::wallet_utils::{Input, Wallet as LdkWallet};
 use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
@@ -2316,6 +2319,183 @@ impl Node {
 				);
 				Error::PersistenceFailed
 			})
+	}
+
+	/// Returns the counterparty's commitment transactions provided by the given
+	/// [`ChannelMonitorUpdate`] for the channel with the given `channel_id`.
+	///
+	/// This may be empty if the update doesn't include any new counterparty commitments.
+	/// Returned commitment transactions are unsigned.
+	///
+	/// This is provided so that watchtower clients (e.g., an [Eye of Satoshi](https://github.com/talaia-labs/rust-teos)
+	/// tower) are able to build justice transactions for each counterparty commitment. It is
+	/// expected that a watchtower client may use this method to retrieve the latest counterparty
+	/// commitment transaction(s), and then hold the necessary data until the commitment has been
+	/// revoked, at which point a justice transaction spending the `to_local` output can be signed
+	/// via [`Node::sign_to_local_justice_tx`].
+	///
+	/// This will only return a non-empty list for monitor updates that have been created after
+	/// upgrading to LDK 0.0.117+.
+	///
+	/// Returns [`Error::ChannelMonitorNotFound`] if no channel monitor exists for the given
+	/// `channel_id`.
+	pub fn counterparty_commitment_txs_from_update(
+		&self, channel_id: ChannelId, update: ChannelMonitorUpdate,
+	) -> Result<Vec<CommitmentTransaction>, Error> {
+		let monitor = self.chain_monitor.get_monitor(channel_id).map_err(|()| {
+			log_error!(self.logger, "No channel monitor found for channel ID {}", channel_id);
+			Error::ChannelMonitorNotFound
+		})?;
+		Ok(monitor.counterparty_commitment_txs_from_update(&update))
+	}
+
+	/// Returns the counterparty's initial commitment transaction for the channel with the given
+	/// `channel_id`. The returned commitment transaction is unsigned.
+	///
+	/// This is similar to [`Node::counterparty_commitment_txs_from_update`], except that for the
+	/// initial commitment transaction, we don't have a corresponding [`ChannelMonitorUpdate`].
+	///
+	/// This will only return `Some` for channel monitors that have been created after upgrading
+	/// to LDK 0.0.117+.
+	///
+	/// Returns [`Error::ChannelMonitorNotFound`] if no channel monitor exists for the given
+	/// `channel_id`.
+	pub fn initial_counterparty_commitment_tx(
+		&self, channel_id: ChannelId,
+	) -> Result<Option<CommitmentTransaction>, Error> {
+		let monitor = self.chain_monitor.get_monitor(channel_id).map_err(|()| {
+			log_error!(self.logger, "No channel monitor found for channel ID {}", channel_id);
+			Error::ChannelMonitorNotFound
+		})?;
+		Ok(monitor.initial_counterparty_commitment_tx())
+	}
+
+	/// Signs the input at `input_idx` of the given `justice_tx`, claiming the `to_local` output
+	/// of a revoked counterparty commitment transaction of the channel with the given
+	/// `channel_id`.
+	///
+	/// This is a wrapper around
+	/// [`ChannelMonitor::sign_to_local_justice_tx`] intended to
+	/// allow watchtower clients to finalize justice transactions they built from counterparty
+	/// commitment transactions retrieved via [`Node::counterparty_commitment_txs_from_update`]
+	/// or [`Node::initial_counterparty_commitment_tx`].
+	///
+	/// Note that this method will only produce a valid signature for a transaction spending the
+	/// `to_local` output of a commitment transaction, i.e., this cannot be used for revoked HTLC
+	/// outputs.
+	///
+	/// `value_sat` is the value, in satoshis, of the output being spent by the input at
+	/// `input_idx`, committed in the BIP 143 signature.
+	///
+	/// This method will only succeed if the channel monitor has received the revocation secret
+	/// for the given `commitment_number`.
+	///
+	/// Returns [`Error::ChannelMonitorNotFound`] if no channel monitor exists for the given
+	/// `channel_id`, and [`Error::OnchainTxSigningFailed`] if signing the justice transaction
+	/// failed.
+	///
+	/// [`ChannelMonitor::sign_to_local_justice_tx`]: lightning::chain::channelmonitor::ChannelMonitor::sign_to_local_justice_tx
+	pub fn sign_to_local_justice_tx(
+		&self, channel_id: ChannelId, justice_tx: Transaction, input_idx: usize, value_sat: u64,
+		commitment_number: u64,
+	) -> Result<Transaction, Error> {
+		let monitor = self.chain_monitor.get_monitor(channel_id).map_err(|()| {
+			log_error!(self.logger, "No channel monitor found for channel ID {}", channel_id);
+			Error::ChannelMonitorNotFound
+		})?;
+		monitor
+			.sign_to_local_justice_tx(justice_tx, input_idx, value_sat, commitment_number)
+			.map_err(|()| {
+				log_error!(
+					self.logger,
+					"Failed to sign justice transaction for channel ID {}",
+					channel_id
+				);
+				Error::OnchainTxSigningFailed
+			})
+	}
+
+	/// Returns all [`ChannelMonitorUpdate`]s persisted for the channel with the given
+	/// `channel_id`, ordered by their update IDs.
+	///
+	/// The returned updates can be passed to [`Node::counterparty_commitment_txs_from_update`]
+	/// to retrieve the corresponding counterparty commitment transactions, e.g., by watchtower
+	/// clients that need to (re-)build justice transaction data for past channel states.
+	///
+	/// Note that the returned list may be empty if no updates have been persisted for the given
+	/// channel, or if the given `channel_id` is unknown.
+	pub fn channel_monitor_updates(
+		&self, channel_id: ChannelId,
+	) -> Result<Vec<ChannelMonitorUpdate>, Error> {
+		use lightning::util::persist::CHANNEL_MONITOR_UPDATE_PERSISTENCE_PRIMARY_NAMESPACE;
+
+		// Channel monitor updates are persisted under a secondary namespace derived from the
+		// funding outpoint for v1 channels, and from the channel ID for v2 channels. As the
+		// channel might have been closed since (and hence might not be returned by
+		// `list_channels` anymore), we fall back to trying the channel ID namespace.
+		let mut namespaces = Vec::with_capacity(2);
+		if let Some(channel) =
+			self.channel_manager.list_channels().into_iter().find(|c| c.channel_id == channel_id)
+		{
+			if let Some(funding_txo) = channel.funding_txo {
+				// Note that this matches `MonitorName`'s encoding, not `OutPoint`'s `Display`.
+				namespaces.push(format!("{}_{}", funding_txo.txid, funding_txo.index));
+			}
+		}
+		namespaces.push(channel_id.to_string());
+
+		let mut updates = Vec::new();
+		for namespace in namespaces {
+			let mut keys = self
+				.runtime
+				.block_on(KVStore::list(
+					&*self.kv_store,
+					CHANNEL_MONITOR_UPDATE_PERSISTENCE_PRIMARY_NAMESPACE,
+					&namespace,
+				))
+				.map_err(|e| {
+					log_error!(
+						self.logger,
+						"Failed to access store while reading channel monitor updates: {}",
+						e
+					);
+					Error::PersistenceFailed
+				})?;
+
+			// Update keys are the string-encoded update IDs.
+			keys.sort_by_key(|k| k.parse::<u64>().unwrap_or(u64::MAX));
+
+			for key in keys {
+				let buf = self
+					.runtime
+					.block_on(KVStore::read(
+						&*self.kv_store,
+						CHANNEL_MONITOR_UPDATE_PERSISTENCE_PRIMARY_NAMESPACE,
+						&namespace,
+						&key,
+					))
+					.map_err(|e| {
+						log_error!(
+							self.logger,
+							"Failed to access store while reading channel monitor update: {}",
+							e
+						);
+						Error::PersistenceFailed
+					})?;
+
+				let update = ChannelMonitorUpdate::read(&mut &buf[..]).map_err(|e| {
+					log_error!(self.logger, "Failed to deserialize channel monitor update: {}", e);
+					Error::PersistenceFailed
+				})?;
+				updates.push(update);
+			}
+
+			if !updates.is_empty() {
+				break;
+			}
+		}
+
+		Ok(updates)
 	}
 
 	/// Return the features used in node announcement.
