@@ -96,12 +96,13 @@ pub(crate) struct Wallet {
 	logger: Arc<Logger>,
 	pending_payment_store: Arc<PendingPaymentStore>,
 	// Serializes the writers that must observe the payment record and its pending-store entry
-	// (candidate history included) as one consistent unit: classification's two-store write pair
-	// and wallet sync's funding-confirmation handling. Without it, a confirmation landing between
-	// classification's payment-store write and its pending-store write sees the record classified
-	// but the candidate history absent, and stamps the confirmed candidate with another
-	// candidate's figures — which nothing afterwards repairs. Writers that touch only one store
-	// (e.g. graduation) stay safe through the per-store gates instead and need not take this.
+	// (candidate history included) as one consistent unit: classification holds it across its
+	// two-store write pair, and wallet sync's event arms hold it from payment-id resolution
+	// through their last write. Without it, a confirmation landing between classification's two
+	// writes sees the record classified but the candidate history absent — resolving the wrong
+	// payment id or stamping the confirmed candidate with another candidate's figures — and a
+	// classification landing inside an arm's decision sequence gets overwritten by the arm's
+	// stale generic fallback.
 	funding_payment_update_lock: tokio::sync::Mutex<()>,
 }
 
@@ -266,12 +267,23 @@ impl Wallet {
 						timestamp: block_time.confirmation_time,
 					};
 
+					// Hold the cross-store lock from payment-id resolution through the last write:
+					// a classification landing in between would leave the id resolved against a
+					// torn candidate index and the generic fallback below overwriting (or
+					// duplicating) the record classification just wrote.
+					let guard = self.funding_payment_update_lock.lock().await;
+
 					let payment_id = self
 						.find_payment_by_txid(txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
-						.apply_funding_status_update(payment_id, txid, confirmation_status)
+						.apply_funding_status_update_locked(
+							&guard,
+							payment_id,
+							txid,
+							confirmation_status,
+						)
 						.await?
 					{
 						continue;
@@ -363,12 +375,17 @@ impl Wallet {
 					}
 				},
 				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
+					// See `TxConfirmed`: id resolution and the writes below must not interleave
+					// with classification.
+					let guard = self.funding_payment_update_lock.lock().await;
+
 					let payment_id = self
 						.find_payment_by_txid(txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
-						.apply_funding_status_update(
+						.apply_funding_status_update_locked(
+							&guard,
 							payment_id,
 							txid,
 							ConfirmationStatus::Unconfirmed,
@@ -395,6 +412,12 @@ impl Wallet {
 					self.pending_payment_store.insert_or_update(pending_payment).await?;
 				},
 				WalletEvent::TxReplaced { txid, conflicts, .. } => {
+					// See `TxConfirmed`: id resolution and the writes below must not interleave
+					// with classification. The pending entry written below embeds a read of the
+					// payment record, which must not go stale against a concurrent
+					// classification either.
+					let _guard = self.funding_payment_update_lock.lock().await;
+
 					let Some(payment_id) = self.find_payment_by_txid(txid) else {
 						log_error!(
 							self.logger,
@@ -425,12 +448,17 @@ impl Wallet {
 					self.pending_payment_store.insert_or_update(pending_payment_details).await?;
 				},
 				WalletEvent::TxDropped { txid, tx } => {
+					// See `TxConfirmed`: id resolution and the writes below must not interleave
+					// with classification.
+					let guard = self.funding_payment_update_lock.lock().await;
+
 					let payment_id = self
 						.find_payment_by_txid(txid)
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
-						.apply_funding_status_update(
+						.apply_funding_status_update_locked(
+							&guard,
 							payment_id,
 							txid,
 							ConfirmationStatus::Unconfirmed,
@@ -1468,9 +1496,10 @@ impl Wallet {
 					// The payment already advanced beyond Pending: the graduation path removed
 					// the entry and it must not be re-created.
 					None => None,
-					// Wallet sync can land between the payment-store write above and this one
-					// and mirror an advanced confirmation into the pending store: merge only the
-					// classification into the entry that appeared.
+					// The entry predates this classification — wallet sync recorded the
+					// transaction before it was classified (its arms and this write pair
+					// serialize on the cross-store lock, so nothing lands in between): merge
+					// only the classification into the existing entry.
 					Some(entry) => {
 						let pending_update = PendingPaymentDetailsUpdate {
 							id,
@@ -1581,14 +1610,15 @@ impl Wallet {
 	/// `sent`/`received` don't capture our contribution to a shared funding output. Returns `true`
 	/// when it handled the payment, so the caller skips the default on-chain path. Graduation to
 	/// `Succeeded` is left to `ChainTipChanged` after `ANTI_REORG_DELAY`.
-	async fn apply_funding_status_update(
-		&self, payment_id: PaymentId, event_txid: Txid, confirmation_status: ConfirmationStatus,
+	///
+	/// The caller must hold [`Self::funding_payment_update_lock`] — from resolving `payment_id`
+	/// through its own last write, not just across this call — so that classification's two-store
+	/// write pair cannot interleave with the caller's decision sequence. The `_guard` parameter
+	/// serves as a reminder of that contract.
+	async fn apply_funding_status_update_locked(
+		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, payment_id: PaymentId, event_txid: Txid,
+		confirmation_status: ConfirmationStatus,
 	) -> Result<bool, Error> {
-		// The cross-store lock orders this against classification's two-store write pair: the
-		// candidate whose figures are reported below is only reliable once the classification
-		// that recorded the candidate history has fully landed.
-		let _guard = self.funding_payment_update_lock.lock().await;
-
 		// The funding-type gate, the candidate lookup, and the write share the store's mutation
 		// lock: against a separate `get`, a classification merging in between would have its
 		// `tx_type` and contribution figures clobbered by this stale snapshot.
@@ -2267,7 +2297,8 @@ fn ldk_to_bdk_satisfaction_weight(ldk_satisfaction_weight: u64) -> Weight {
 /// the actively broadcast candidate, but when the record already confirmed a *different*
 /// candidate — wallet sync saw it win before this classification ran — the update instead carries
 /// the confirmed candidate's txid and figures from the candidate history, mirroring what
-/// [`Wallet::apply_funding_status_update`] reports when confirmation arrives after classification.
+/// [`Wallet::apply_funding_status_update_locked`] reports when confirmation arrives after
+/// classification.
 ///
 /// `current` is an unlocked snapshot; that is safe because [`PaymentDetails::update`] only lets
 /// figures onto a confirmed record when the update names the confirmed txid, so an update built
@@ -2296,9 +2327,193 @@ fn funding_reclassification_update(
 
 #[cfg(test)]
 mod tests {
+	use std::time::Duration;
+
+	use bdk_chain::{BlockId, ConfirmationBlockTime};
 	use bitcoin::hashes::Hash;
+	use bitcoin::Network;
+	use lightning::io;
+	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 
 	use super::*;
+	use crate::config::EsploraSyncConfig;
+	use crate::io::test_utils::InMemoryStore;
+	use crate::io::{
+		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+		PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+		PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	};
+	use crate::tx_broadcaster::TransactionBroadcaster;
+	use crate::types::{DynStore, DynStoreWrapper};
+	use crate::{NodeMetrics, PersistedNodeMetrics};
+
+	const EXTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/0/*)";
+	const INTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/1/*)";
+
+	/// A pass-through [`KVStore`] that parks writes to one namespace: a matching writer first
+	/// signals `parked`, then waits until the test drops its `gate` write guard. Writes to every
+	/// other namespace pass straight through.
+	#[derive(Clone)]
+	struct NamespaceGatedStore {
+		inner: Arc<InMemoryStore>,
+		gated_namespace: String,
+		parked: Arc<tokio::sync::Notify>,
+		gate: Arc<tokio::sync::RwLock<()>>,
+	}
+
+	impl NamespaceGatedStore {
+		fn new(gated_namespace: &str) -> Self {
+			Self {
+				inner: Arc::new(InMemoryStore::new()),
+				gated_namespace: gated_namespace.to_string(),
+				parked: Arc::new(tokio::sync::Notify::new()),
+				gate: Arc::new(tokio::sync::RwLock::new(())),
+			}
+		}
+	}
+
+	impl KVStore for NamespaceGatedStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			let inner = Arc::clone(&self.inner);
+			let gated = primary_namespace == self.gated_namespace;
+			let parked = Arc::clone(&self.parked);
+			let gate = Arc::clone(&self.gate);
+			let primary_namespace = primary_namespace.to_string();
+			let secondary_namespace = secondary_namespace.to_string();
+			let key = key.to_string();
+			async move {
+				if gated {
+					parked.notify_one();
+					let _guard = gate.read().await;
+				}
+				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
+			}
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for NamespaceGatedStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+			PaginatedKVStore::list_paginated(
+				&*self.inner,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+		}
+	}
+
+	/// Builds a [`Wallet`] whose every component is in-memory; nothing performs I/O at
+	/// construction, so wallet-sync and classification entry points can be driven directly.
+	async fn new_test_wallet(kv_store: Arc<DynStore>) -> Wallet {
+		let logger = Arc::new(Logger::new_log_facade());
+		let mut wallet_persister =
+			KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger));
+		let bdk_wallet = bdk_wallet::Wallet::create(EXTERNAL_DESCRIPTOR, INTERNAL_DESCRIPTOR)
+			.network(Network::Regtest)
+			.create_wallet_async(&mut wallet_persister)
+			.await
+			.unwrap();
+		let broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
+		let fee_estimator = Arc::new(OnchainFeeEstimator::new());
+		let config = Arc::new(Config::default());
+		let node_metrics = Arc::new(PersistedNodeMetrics::new(NodeMetrics::default()));
+		let (chain_source, _) = ChainSource::new_esplora(
+			"http://127.0.0.1:1".to_string(),
+			HashMap::new(),
+			EsploraSyncConfig::default(),
+			Arc::clone(&fee_estimator),
+			Arc::clone(&broadcaster),
+			Arc::clone(&kv_store),
+			Arc::clone(&config),
+			Arc::clone(&logger),
+			node_metrics,
+		)
+		.unwrap();
+		let payment_store = Arc::new(PaymentStore::new(
+			Vec::new(),
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		));
+		let pending_payment_store = Arc::new(PendingPaymentStore::new(
+			Vec::new(),
+			PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		));
+		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
+		Wallet::new(
+			bdk_wallet,
+			wallet_persister,
+			broadcaster,
+			fee_estimator,
+			Arc::new(chain_source),
+			payment_store,
+			runtime,
+			config,
+			logger,
+			pending_payment_store,
+		)
+	}
+
+	fn dummy_tx() -> Transaction {
+		Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: Vec::new(),
+			output: Vec::new(),
+		}
+	}
+
+	fn confirmed_block_time(height: u32) -> ConfirmationBlockTime {
+		ConfirmationBlockTime {
+			block_id: BlockId { height, hash: bitcoin::BlockHash::from_byte_array([9u8; 32]) },
+			confirmation_time: 100,
+		}
+	}
+
+	fn interactive_funding_details(
+		id: PaymentId, txid: Txid, amount_msat: Option<u64>, fee_paid_msat: Option<u64>,
+	) -> PaymentDetails {
+		let kind = PaymentKind::Onchain {
+			txid,
+			status: ConfirmationStatus::Unconfirmed,
+			tx_type: Some(TransactionType::InteractiveFunding { channels: vec![] }),
+		};
+		PaymentDetails::new(
+			id,
+			kind,
+			amount_msat,
+			fee_paid_msat,
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		)
+	}
 
 	fn onchain_details(txid: Txid, status: ConfirmationStatus) -> PaymentDetails {
 		PaymentDetails::new(
@@ -2393,5 +2608,149 @@ mod tests {
 		let foreign = onchain_details(Txid::from_byte_array([9u8; 32]), confirmed_status());
 		let update = funding_reclassification_update(details, &candidates, Some(&foreign));
 		assert_eq!(update.txid, Some(active_txid));
+	}
+
+	/// Barrier test, classification-first ordering: wallet sync's confirmation handling must
+	/// wait for classification's two-store write pair. Classification is parked between its
+	/// payment-store and pending-store writes (the torn window) and only then is the
+	/// confirmation of the replacement candidate dispatched; unless the sync arm holds the
+	/// cross-store lock from payment-id resolution onwards, it resolves the id against the
+	/// still-missing pending index and mints a duplicate record keyed by the event txid.
+	#[tokio::test]
+	async fn funding_confirmation_waits_for_classification() {
+		let gated = NamespaceGatedStore::new(PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(gated.clone()));
+		let wallet = Arc::new(new_test_wallet(store).await);
+
+		let txid1 = Txid::from_byte_array([1u8; 32]);
+		let txid2 = Txid::from_byte_array([2u8; 32]);
+		let payment_id = PaymentId(txid1.to_byte_array());
+		let candidates = vec![
+			FundingTxCandidate {
+				txid: txid1,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+			},
+			FundingTxCandidate {
+				txid: txid2,
+				amount_msat: Some(2_000_000),
+				fee_paid_msat: Some(999),
+			},
+		];
+		let details = interactive_funding_details(payment_id, txid2, Some(2_000_000), Some(999));
+
+		// Hold the gate so classification parks on its pending-store write: the payment record
+		// is persisted, the pending entry is not — the torn window a concurrent confirmation
+		// must not observe.
+		let gate_guard = gated.gate.write().await;
+		let classification = tokio::spawn({
+			let wallet = Arc::clone(&wallet);
+			let candidates = candidates.clone();
+			async move { wallet.persist_funding_payment(details, candidates).await }
+		});
+		gated.parked.notified().await;
+
+		// Only now dispatch the confirmation of the candidate that won.
+		let event = WalletEvent::TxConfirmed {
+			txid: txid2,
+			tx: Arc::new(dummy_tx()),
+			block_time: confirmed_block_time(5),
+			old_block_time: None,
+		};
+		let sync = tokio::spawn({
+			let wallet = Arc::clone(&wallet);
+			async move { wallet.update_payment_store(vec![event]).await }
+		});
+
+		// Liveness sanity only (both pre- and post-fix stall here): while classification is
+		// parked, no second record may have been committed.
+		tokio::time::sleep(Duration::from_millis(250)).await;
+		assert!(wallet.payment_store.list_filter(|_| true).len() <= 1);
+
+		drop(gate_guard);
+		classification.await.unwrap().unwrap();
+		sync.await.unwrap().unwrap();
+
+		// Both writers converge on the classified record: the confirmation refreshes it in
+		// place with the confirmed candidate's figures rather than minting a second record
+		// keyed by the event txid.
+		let payments = wallet.payment_store.list_filter(|_| true);
+		assert_eq!(payments.len(), 1, "the confirmation must not mint a duplicate record");
+		let payment = &payments[0];
+		assert_eq!(payment.id, payment_id);
+		assert_eq!(payment.amount_msat, Some(2_000_000));
+		assert_eq!(payment.fee_paid_msat, Some(999));
+		match &payment.kind {
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Confirmed { .. },
+				tx_type: Some(TransactionType::InteractiveFunding { .. }),
+			} => assert_eq!(*txid, txid2),
+			kind => panic!("unexpected kind {:?}", kind),
+		}
+	}
+
+	/// Barrier test, sync-first ordering: classification must wait for wallet sync's complete
+	/// decision-plus-write sequence. Wallet sync is parked inside its generic-fallback window —
+	/// past the funding-status check that found no record, before its writes — by holding the
+	/// BDK wallet lock the fallback needs. Unless the sync arm holds the cross-store lock
+	/// across that window, classification lands in between and the fallback's stale merge
+	/// overwrites the contribution-derived figures with wallet-derived ones.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn funding_classification_waits_for_wallet_sync() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = Arc::new(new_test_wallet(store).await);
+
+		let txid = Txid::from_byte_array([3u8; 32]);
+		let payment_id = PaymentId(txid.to_byte_array());
+		let candidates = vec![FundingTxCandidate {
+			txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let details = interactive_funding_details(payment_id, txid, Some(1_000_000), Some(500));
+
+		// Park wallet sync inside its fallback window: the TxUnconfirmed arm reads no wallet
+		// state before that point, so it passes the funding-status check (no record exists yet)
+		// and then blocks on the wallet lock held here. The sleeps give the tasks time to reach
+		// their parking spots; they make the pre-fix failure deterministic, while the fixed
+		// code converges to the same final state under any arrival order.
+		let inner_guard = wallet.inner.lock().unwrap();
+		let sync = tokio::spawn({
+			let wallet = Arc::clone(&wallet);
+			let event =
+				WalletEvent::TxUnconfirmed { txid, tx: Arc::new(dummy_tx()), old_block_time: None };
+			async move { wallet.update_payment_store(vec![event]).await }
+		});
+		tokio::time::sleep(Duration::from_millis(250)).await;
+
+		let classification = tokio::spawn({
+			let wallet = Arc::clone(&wallet);
+			let candidates = candidates.clone();
+			async move { wallet.persist_funding_payment(details, candidates).await }
+		});
+		tokio::time::sleep(Duration::from_millis(250)).await;
+
+		drop(inner_guard);
+		sync.await.unwrap().unwrap();
+		classification.await.unwrap().unwrap();
+
+		// Both writers converge on one record carrying the classification: the generic
+		// fallback must not clobber the contribution-derived figures with its wallet-derived
+		// view of the transaction.
+		let payments = wallet.payment_store.list_filter(|_| true);
+		assert_eq!(payments.len(), 1);
+		let payment = &payments[0];
+		assert_eq!(payment.id, payment_id);
+		assert_eq!(
+			payment.amount_msat,
+			Some(1_000_000),
+			"wallet sync's fallback must not overwrite contribution figures"
+		);
+		assert_eq!(payment.fee_paid_msat, Some(500));
+		assert!(matches!(
+			&payment.kind,
+			PaymentKind::Onchain { tx_type: Some(TransactionType::InteractiveFunding { .. }), .. }
+		));
 	}
 }

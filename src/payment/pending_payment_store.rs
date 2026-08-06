@@ -253,7 +253,7 @@ mod tests {
 		let payment_id = PaymentId(txid.to_byte_array());
 
 		// A pending entry wallet sync has already mirrored a confirmation into (via
-		// `apply_funding_status_update`) while classification was still writing its two stores.
+		// `apply_funding_status_update_locked`) before classification ran.
 		let confirmed_details = PaymentDetails::new(
 			payment_id,
 			PaymentKind::Onchain {
