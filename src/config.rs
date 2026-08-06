@@ -57,6 +57,13 @@ pub(crate) const DEFAULT_TX_BROADCAST_TIMEOUT_SECS: u64 = 10;
 // while still covering the recent payments a node actually works with.
 pub(crate) const PAYMENT_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1000).unwrap();
 
+// The number of payments we read into the cache when starting up.
+//
+// This matches the storage backends' page size, so warming the cache costs a single page listing
+// and one batch of reads, and the first page of `Node::list_payments` is served without going to
+// the store at all. The remaining capacity fills as payments are used.
+pub(crate) const PAYMENT_CACHE_WARMUP_COUNT: NonZeroUsize = NonZeroUsize::new(50).unwrap();
+
 // The default {Esplora,Electrum} client timeout we're using.
 const DEFAULT_PER_REQUEST_TIMEOUT_SECS: u8 = 10;
 
