@@ -140,13 +140,13 @@ where
 		Ok(())
 	}
 
-	/// Returns the current in-memory object for `id`.
+	/// Returns the object stored under `id`, if any.
 	///
 	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
 	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
 	/// caught up to a write in progress.
-	pub(crate) fn get(&self, id: &SO::Id) -> Option<SO> {
-		self.objects.lock().expect("lock").get(id).cloned()
+	pub(crate) async fn get(&self, id: &SO::Id) -> Result<Option<SO>, Error> {
+		Ok(self.objects.lock().expect("lock").get(id).cloned())
 	}
 
 	pub(crate) async fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
@@ -170,12 +170,12 @@ where
 		Ok(DataStoreUpdateResult::Updated)
 	}
 
-	/// Returns in-memory objects matching `f`.
+	/// Returns all stored objects matching `f`.
 	///
 	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
 	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
 	/// caught up to a write in progress.
-	pub(crate) fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
+	pub(crate) async fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
 		self.objects.lock().expect("lock").values().filter(f).cloned().collect::<Vec<SO>>()
 	}
 
@@ -211,13 +211,13 @@ where
 		Ok(())
 	}
 
-	/// Returns whether the in-memory store contains `id`.
+	/// Returns whether an object is stored under `id`.
 	///
 	/// The async mutation lock serializes writers, but this synchronous reader cannot wait on it.
 	/// Until store reads are async, callers may temporarily see in-memory state that has not yet
 	/// caught up to a write in progress.
-	pub(crate) fn contains_key(&self, id: &SO::Id) -> bool {
-		self.objects.lock().expect("lock").contains_key(id)
+	pub(crate) async fn contains_key(&self, id: &SO::Id) -> Result<bool, Error> {
+		Ok(self.objects.lock().expect("lock").contains_key(id))
 	}
 }
 
@@ -352,7 +352,7 @@ mod tests {
 		);
 
 		let id = TestObjectId { id: [42u8; 4] };
-		assert!(data_store.get(&id).is_none());
+		assert!(data_store.get(&id).await.unwrap().is_none());
 
 		let store_key = id.encode_to_hex_str();
 
@@ -364,7 +364,7 @@ mod tests {
 		// Check we successfully store an object and return `false`
 		let object = TestObject { id, data: [23u8; 3] };
 		assert_eq!(Ok(false), data_store.insert(object.clone()).await);
-		assert_eq!(Some(object), data_store.get(&id));
+		assert_eq!(Some(object), data_store.get(&id).await.unwrap());
 		assert!(KVStore::read(&*store, &primary_namespace, &secondary_namespace, &store_key)
 			.await
 			.is_ok());
@@ -373,12 +373,12 @@ mod tests {
 		let mut override_object = object.clone();
 		override_object.data = [24u8; 3];
 		assert_eq!(Ok(true), data_store.insert(override_object).await);
-		assert_eq!(Some(override_object), data_store.get(&id));
+		assert_eq!(Some(override_object), data_store.get(&id).await.unwrap());
 
 		// Check update returns `Updated`
 		let update = TestObjectUpdate { id, data: [25u8; 3] };
 		assert_eq!(Ok(DataStoreUpdateResult::Updated), data_store.update(update).await);
-		assert_eq!(data_store.get(&id).unwrap().data, [25u8; 3]);
+		assert_eq!(data_store.get(&id).await.unwrap().unwrap().data, [25u8; 3]);
 
 		// Check no-op update yields `Unchanged`
 		let update = TestObjectUpdate { id, data: [25u8; 3] };
@@ -414,12 +414,12 @@ mod tests {
 			Err(Error::PersistenceFailed),
 			data_store.insert_or_update(updated_object).await
 		);
-		assert_eq!(Some(existing_object), data_store.get(&existing_id));
+		assert_eq!(Some(existing_object), data_store.get(&existing_id).await.unwrap());
 
 		let new_id = TestObjectId { id: [55u8; 4] };
 		let new_object = TestObject { id: new_id, data: [34u8; 3] };
 		assert_eq!(Err(Error::PersistenceFailed), data_store.insert_or_update(new_object).await);
-		assert!(data_store.get(&new_id).is_none());
+		assert!(data_store.get(&new_id).await.unwrap().is_none());
 	}
 
 	#[tokio::test]
@@ -429,7 +429,7 @@ mod tests {
 		let data_store = new_failing_data_store(vec![]);
 
 		assert_eq!(Err(Error::PersistenceFailed), data_store.insert(object).await);
-		assert!(data_store.get(&id).is_none());
+		assert!(data_store.get(&id).await.unwrap().is_none());
 	}
 
 	#[tokio::test]
@@ -440,7 +440,7 @@ mod tests {
 
 		let update = TestObjectUpdate { id, data: [24u8; 3] };
 		assert_eq!(Err(Error::PersistenceFailed), data_store.update(update).await);
-		assert_eq!(Some(object), data_store.get(&id));
+		assert_eq!(Some(object), data_store.get(&id).await.unwrap());
 	}
 
 	#[tokio::test]
@@ -450,6 +450,6 @@ mod tests {
 		let data_store = new_failing_data_store(vec![object]);
 
 		assert_eq!(Err(Error::PersistenceFailed), data_store.remove(&id).await);
-		assert_eq!(Some(object), data_store.get(&id));
+		assert_eq!(Some(object), data_store.get(&id).await.unwrap());
 	}
 }

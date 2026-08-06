@@ -793,7 +793,13 @@ where
 				..
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
-				let payment_info = self.payment_store.get(&payment_id);
+				let payment_info = match self.payment_store.get(&payment_id).await {
+					Ok(payment_info) => payment_info,
+					Err(e) => {
+						log_error!(self.logger, "Failed to access payment store: {}", e);
+						return Err(ReplayEvent());
+					},
+				};
 				if let Some(info) = payment_info.as_ref() {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
@@ -1211,24 +1217,31 @@ where
 					},
 				};
 
-				self.payment_store.get(&payment_id).map(|payment| {
-					let amount_msat = payment.amount_msat.expect(
-						"outbound payments should record their amount before they can succeed",
-					);
-					log_info!(
-						self.logger,
-						"Successfully sent payment of {}msat{} from \
-						payment hash {:?} with preimage {:?}",
-						amount_msat,
-						if let Some(fee) = fee_paid_msat {
-							format!(" (fee {} msat)", fee)
-						} else {
-							"".to_string()
-						},
-						hex_utils::to_string(&payment_hash.0),
-						hex_utils::to_string(&payment_preimage.0)
-					);
-				});
+				match self.payment_store.get(&payment_id).await {
+					Ok(Some(payment)) => {
+						let amount_msat = payment.amount_msat.expect(
+							"outbound payments should record their amount before they can succeed",
+						);
+						log_info!(
+							self.logger,
+							"Successfully sent payment of {}msat{} from \
+							payment hash {:?} with preimage {:?}",
+							amount_msat,
+							if let Some(fee) = fee_paid_msat {
+								format!(" (fee {} msat)", fee)
+							} else {
+								"".to_string()
+							},
+							hex_utils::to_string(&payment_hash.0),
+							hex_utils::to_string(&payment_preimage.0)
+						);
+					},
+					Ok(None) => {},
+					Err(e) => {
+						log_error!(self.logger, "Failed to access payment store: {}", e);
+						return Err(ReplayEvent());
+					},
+				};
 				let event = Event::PaymentSuccessful {
 					payment_id: Some(payment_id),
 					payment_hash,

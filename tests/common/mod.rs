@@ -224,7 +224,7 @@ macro_rules! expect_payment_received_event {
 			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(amount_msat, $amount_msat);
-				let payment = $node.payment(&payment_id.unwrap()).unwrap();
+				let payment = $node.payment(&payment_id.unwrap()).unwrap().unwrap();
 				if !matches!(payment.kind, ldk_node::payment::PaymentKind::Onchain { .. }) {
 					assert_eq!(payment.fee_paid_msat, None);
 				}
@@ -292,7 +292,7 @@ macro_rules! expect_payment_successful_event {
 				if let Some(fee_msat) = $fee_paid_msat {
 					assert_eq!(fee_paid_msat, fee_msat);
 				}
-				let payment = $node.payment(&$payment_id.unwrap()).unwrap();
+				let payment = $node.payment(&$payment_id.unwrap()).unwrap().unwrap();
 				assert_eq!(payment.fee_paid_msat, fee_paid_msat);
 				assert_eq!(payment_id, $payment_id);
 				$node.event_handled().unwrap();
@@ -1276,23 +1276,41 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		},
 	}
 	expect_event!(node_b, PaymentReceived);
-	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
-	assert!(matches!(node_a.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
-	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
-	assert!(matches!(node_b.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
+	assert_eq!(node_a.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(
+		node_a.payment(&payment_id).unwrap().unwrap().amount_msat,
+		Some(invoice_amount_1_msat)
+	);
+	assert!(matches!(
+		node_a.payment(&payment_id).unwrap().unwrap().kind,
+		PaymentKind::Bolt11 { .. }
+	));
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(
+		node_b.payment(&payment_id).unwrap().unwrap().amount_msat,
+		Some(invoice_amount_1_msat)
+	);
+	assert!(matches!(
+		node_b.payment(&payment_id).unwrap().unwrap().kind,
+		PaymentKind::Bolt11 { .. }
+	));
 
 	// Assert we fail duplicate outbound payments and check the status hasn't changed.
 	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice, None));
-	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
-	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(invoice_amount_1_msat));
+	assert_eq!(node_a.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(
+		node_a.payment(&payment_id).unwrap().unwrap().amount_msat,
+		Some(invoice_amount_1_msat)
+	);
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(
+		node_b.payment(&payment_id).unwrap().unwrap().amount_msat,
+		Some(invoice_amount_1_msat)
+	);
 
 	// Test under-/overpayment
 	let invoice_amount_2_msat = 2500_000;
@@ -1329,14 +1347,26 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_amount, overpaid_amount_msat);
-	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(overpaid_amount_msat));
-	assert!(matches!(node_a.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
-	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(overpaid_amount_msat));
-	assert!(matches!(node_b.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
+	assert_eq!(node_a.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(
+		node_a.payment(&payment_id).unwrap().unwrap().amount_msat,
+		Some(overpaid_amount_msat)
+	);
+	assert!(matches!(
+		node_a.payment(&payment_id).unwrap().unwrap().kind,
+		PaymentKind::Bolt11 { .. }
+	));
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(
+		node_b.payment(&payment_id).unwrap().unwrap().amount_msat,
+		Some(overpaid_amount_msat)
+	);
+	assert!(matches!(
+		node_b.payment(&payment_id).unwrap().unwrap().kind,
+		PaymentKind::Bolt11 { .. }
+	));
 
 	// Test "zero-amount" invoice payment
 	println!("\nB receive_variable_amount_payment");
@@ -1367,14 +1397,26 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_amount, determined_amount_msat);
-	assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&payment_id).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&payment_id).unwrap().amount_msat, Some(determined_amount_msat));
-	assert!(matches!(node_a.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
-	assert_eq!(node_b.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&payment_id).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&payment_id).unwrap().amount_msat, Some(determined_amount_msat));
-	assert!(matches!(node_b.payment(&payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
+	assert_eq!(node_a.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_a.payment(&payment_id).unwrap().unwrap().direction, PaymentDirection::Outbound);
+	assert_eq!(
+		node_a.payment(&payment_id).unwrap().unwrap().amount_msat,
+		Some(determined_amount_msat)
+	);
+	assert!(matches!(
+		node_a.payment(&payment_id).unwrap().unwrap().kind,
+		PaymentKind::Bolt11 { .. }
+	));
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().direction, PaymentDirection::Inbound);
+	assert_eq!(
+		node_b.payment(&payment_id).unwrap().unwrap().amount_msat,
+		Some(determined_amount_msat)
+	);
+	assert!(matches!(
+		node_b.payment(&payment_id).unwrap().unwrap().kind,
+		PaymentKind::Bolt11 { .. }
+	));
 
 	// Test claiming manually registered payments.
 	let invoice_amount_3_msat = 5_532_000;
@@ -1403,20 +1445,38 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		.unwrap();
 	expect_payment_received_event!(node_b, claimable_amount_msat);
 	expect_payment_successful_event!(node_a, Some(manual_payment_id), None);
-	assert_eq!(node_a.payment(&manual_payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&manual_payment_id).unwrap().direction, PaymentDirection::Outbound);
 	assert_eq!(
-		node_a.payment(&manual_payment_id).unwrap().amount_msat,
+		node_a.payment(&manual_payment_id).unwrap().unwrap().status,
+		PaymentStatus::Succeeded
+	);
+	assert_eq!(
+		node_a.payment(&manual_payment_id).unwrap().unwrap().direction,
+		PaymentDirection::Outbound
+	);
+	assert_eq!(
+		node_a.payment(&manual_payment_id).unwrap().unwrap().amount_msat,
 		Some(invoice_amount_3_msat)
 	);
-	assert!(matches!(node_a.payment(&manual_payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
-	assert_eq!(node_b.payment(&manual_payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&manual_payment_id).unwrap().direction, PaymentDirection::Inbound);
+	assert!(matches!(
+		node_a.payment(&manual_payment_id).unwrap().unwrap().kind,
+		PaymentKind::Bolt11 { .. }
+	));
 	assert_eq!(
-		node_b.payment(&manual_payment_id).unwrap().amount_msat,
+		node_b.payment(&manual_payment_id).unwrap().unwrap().status,
+		PaymentStatus::Succeeded
+	);
+	assert_eq!(
+		node_b.payment(&manual_payment_id).unwrap().unwrap().direction,
+		PaymentDirection::Inbound
+	);
+	assert_eq!(
+		node_b.payment(&manual_payment_id).unwrap().unwrap().amount_msat,
 		Some(invoice_amount_3_msat)
 	);
-	assert!(matches!(node_b.payment(&manual_payment_id).unwrap().kind, PaymentKind::Bolt11 { .. }));
+	assert!(matches!(
+		node_b.payment(&manual_payment_id).unwrap().unwrap().kind,
+		PaymentKind::Bolt11 { .. }
+	));
 
 	// Test failing manually registered payments.
 	let invoice_amount_4_msat = 5_532_000;
@@ -1442,30 +1502,36 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 	node_b.bolt11_payment().fail_for_hash(manual_fail_payment_hash).unwrap();
 	expect_event!(node_a, PaymentFailed);
-	assert_eq!(node_a.payment(&manual_fail_payment_id).unwrap().status, PaymentStatus::Failed);
 	assert_eq!(
-		node_a.payment(&manual_fail_payment_id).unwrap().direction,
+		node_a.payment(&manual_fail_payment_id).unwrap().unwrap().status,
+		PaymentStatus::Failed
+	);
+	assert_eq!(
+		node_a.payment(&manual_fail_payment_id).unwrap().unwrap().direction,
 		PaymentDirection::Outbound
 	);
 	assert_eq!(
-		node_a.payment(&manual_fail_payment_id).unwrap().amount_msat,
+		node_a.payment(&manual_fail_payment_id).unwrap().unwrap().amount_msat,
 		Some(invoice_amount_4_msat)
 	);
 	assert!(matches!(
-		node_a.payment(&manual_fail_payment_id).unwrap().kind,
+		node_a.payment(&manual_fail_payment_id).unwrap().unwrap().kind,
 		PaymentKind::Bolt11 { .. }
 	));
-	assert_eq!(node_b.payment(&manual_fail_payment_id).unwrap().status, PaymentStatus::Failed);
 	assert_eq!(
-		node_b.payment(&manual_fail_payment_id).unwrap().direction,
+		node_b.payment(&manual_fail_payment_id).unwrap().unwrap().status,
+		PaymentStatus::Failed
+	);
+	assert_eq!(
+		node_b.payment(&manual_fail_payment_id).unwrap().unwrap().direction,
 		PaymentDirection::Inbound
 	);
 	assert_eq!(
-		node_b.payment(&manual_fail_payment_id).unwrap().amount_msat,
+		node_b.payment(&manual_fail_payment_id).unwrap().unwrap().amount_msat,
 		Some(invoice_amount_4_msat)
 	);
 	assert!(matches!(
-		node_b.payment(&manual_fail_payment_id).unwrap().kind,
+		node_b.payment(&manual_fail_payment_id).unwrap().unwrap().kind,
 		PaymentKind::Bolt11 { .. }
 	));
 
@@ -1490,19 +1556,37 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_keysend_amount, keysend_amount_msat);
-	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().direction, PaymentDirection::Outbound);
-	assert_eq!(node_a.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));
+	assert_eq!(
+		node_a.payment(&keysend_payment_id).unwrap().unwrap().status,
+		PaymentStatus::Succeeded
+	);
+	assert_eq!(
+		node_a.payment(&keysend_payment_id).unwrap().unwrap().direction,
+		PaymentDirection::Outbound
+	);
+	assert_eq!(
+		node_a.payment(&keysend_payment_id).unwrap().unwrap().amount_msat,
+		Some(keysend_amount_msat)
+	);
 	assert!(matches!(
-		node_a.payment(&keysend_payment_id).unwrap().kind,
+		node_a.payment(&keysend_payment_id).unwrap().unwrap().kind,
 		PaymentKind::Spontaneous { .. }
 	));
 	assert_eq!(received_custom_records, &custom_tlvs);
-	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().status, PaymentStatus::Succeeded);
-	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().direction, PaymentDirection::Inbound);
-	assert_eq!(node_b.payment(&keysend_payment_id).unwrap().amount_msat, Some(keysend_amount_msat));
+	assert_eq!(
+		node_b.payment(&keysend_payment_id).unwrap().unwrap().status,
+		PaymentStatus::Succeeded
+	);
+	assert_eq!(
+		node_b.payment(&keysend_payment_id).unwrap().unwrap().direction,
+		PaymentDirection::Inbound
+	);
+	assert_eq!(
+		node_b.payment(&keysend_payment_id).unwrap().unwrap().amount_msat,
+		Some(keysend_amount_msat)
+	);
 	assert!(matches!(
-		node_b.payment(&keysend_payment_id).unwrap().kind,
+		node_b.payment(&keysend_payment_id).unwrap().unwrap().kind,
 		PaymentKind::Spontaneous { .. }
 	));
 	assert_eq!(

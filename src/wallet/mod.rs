@@ -257,6 +257,7 @@ impl Wallet {
 
 					let payment_id = self
 						.find_payment_by_txid(txid)
+						.await?
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
@@ -288,8 +289,9 @@ impl Wallet {
 					}
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
-					let pending_payments: Vec<PendingPaymentDetails> =
-						self.pending_payment_store.list_filter(|p| {
+					let pending_payments: Vec<PendingPaymentDetails> = self
+						.pending_payment_store
+						.list_filter(|p| {
 							debug_assert!(
 								p.details.status == PaymentStatus::Pending,
 								"Non-pending payment {:?} found in pending store",
@@ -297,7 +299,8 @@ impl Wallet {
 							);
 							p.details.status == PaymentStatus::Pending
 								&& matches!(p.details.kind, PaymentKind::Onchain { .. })
-						});
+						})
+						.await;
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
 
@@ -354,6 +357,7 @@ impl Wallet {
 				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
 					let payment_id = self
 						.find_payment_by_txid(txid)
+						.await?
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
@@ -384,7 +388,7 @@ impl Wallet {
 					self.pending_payment_store.insert_or_update(pending_payment).await?;
 				},
 				WalletEvent::TxReplaced { txid, conflicts, .. } => {
-					let Some(payment_id) = self.find_payment_by_txid(txid) else {
+					let Some(payment_id) = self.find_payment_by_txid(txid).await? else {
 						log_error!(
 							self.logger,
 							"Could not find payment for replaced transaction {}. Skipping.",
@@ -401,7 +405,7 @@ impl Wallet {
 					// The payment already exists in the store at this point: `bump_fee_rbf` updates
 					// the payment store with the replacement txid before the next sync cycle, so we
 					// can safely fetch it here.
-					let stored_payment = self.payment_store.get(&payment_id);
+					let stored_payment = self.payment_store.get(&payment_id).await?;
 					debug_assert!(
 						stored_payment.is_some(),
 						"Payment {:?} expected in store during WalletEvent::TxReplaced but not found",
@@ -416,6 +420,7 @@ impl Wallet {
 				WalletEvent::TxDropped { txid, tx } => {
 					let payment_id = self
 						.find_payment_by_txid(txid)
+						.await?
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
 					if self
@@ -1472,10 +1477,10 @@ impl Wallet {
 		PendingPaymentDetails::new(payment, conflicting_txids, Vec::new())
 	}
 
-	fn find_payment_by_txid(&self, target_txid: Txid) -> Option<PaymentId> {
+	async fn find_payment_by_txid(&self, target_txid: Txid) -> Result<Option<PaymentId>, Error> {
 		let direct_payment_id = PaymentId(target_txid.to_byte_array());
-		if self.pending_payment_store.contains_key(&direct_payment_id) {
-			return Some(direct_payment_id);
+		if self.pending_payment_store.contains_key(&direct_payment_id).await? {
+			return Ok(Some(direct_payment_id));
 		}
 
 		if let Some(replaced_details) = self
@@ -1484,12 +1489,13 @@ impl Wallet {
 				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
 					|| p.conflicting_txids.contains(&target_txid)
 			})
+			.await
 			.first()
 		{
-			return Some(replaced_details.details.id);
+			return Ok(Some(replaced_details.details.id));
 		}
 
-		None
+		Ok(None)
 	}
 
 	/// If `payment_id` refers to a classified funding payment, refreshes its confirmation status
@@ -1501,7 +1507,7 @@ impl Wallet {
 	async fn apply_funding_status_update(
 		&self, payment_id: PaymentId, event_txid: Txid, confirmation_status: ConfirmationStatus,
 	) -> Result<bool, Error> {
-		let Some(mut payment) = self.payment_store.get(&payment_id) else {
+		let Some(mut payment) = self.payment_store.get(&payment_id).await? else {
 			return Ok(false);
 		};
 		let tx_type = match &payment.kind {
@@ -1519,7 +1525,7 @@ impl Wallet {
 		// one broadcast (an earlier, lower-fee candidate may win) and may carry no figures at all
 		// (`None`) for a round we didn't contribute to. (`direction` is invariant across a splice's
 		// candidates and cannot be changed through the store anyway.)
-		if let Some(pending) = self.pending_payment_store.get(&payment_id) {
+		if let Some(pending) = self.pending_payment_store.get(&payment_id).await? {
 			if let Some(candidate) = pending.candidate(event_txid) {
 				payment.amount_msat = candidate.amount_msat;
 				payment.fee_paid_msat = candidate.fee_paid_msat;
@@ -1544,7 +1550,7 @@ impl Wallet {
 	pub(crate) async fn bump_fee_rbf(
 		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>, cur_anchor_reserve_sats: u64,
 	) -> Result<Txid, Error> {
-		let payment = self.payment_store.get(&payment_id).ok_or_else(|| {
+		let payment = self.payment_store.get(&payment_id).await?.ok_or_else(|| {
 			log_error!(self.logger, "Payment {} not found in payment store", payment_id);
 			Error::InvalidPaymentId
 		})?;

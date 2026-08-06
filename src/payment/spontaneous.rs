@@ -68,7 +68,7 @@ impl SpontaneousPayment {
 		let payment_hash = PaymentHash::from(payment_preimage);
 		let payment_id = PaymentId(payment_hash.0);
 
-		if let Some(payment) = self.payment_store.get(&payment_id) {
+		if let Some(payment) = self.runtime.block_on(self.payment_store.get(&payment_id))? {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
 			{
