@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -386,79 +386,78 @@ impl Filter for ElectrumChainSource {
 	}
 }
 
-enum ElectrumRuntimeStatus {
-	Started(Arc<ElectrumRuntimeClient>),
-	Stopped {
-		pending_registered_txs: Vec<(Txid, ScriptBuf)>,
-		pending_registered_outputs: Vec<WatchedOutput>,
-	},
+struct ElectrumRuntimeStatus {
+	client: Option<Arc<ElectrumRuntimeClient>>,
+	// The canonical inventory of all `Filter` entries registered over this chain source's
+	// lifetime.
+	//
+	// We retain these even while started: the `ElectrumRuntimeClient` (and hence the
+	// `ElectrumSyncClient` owning its own copy of the registrations) is dropped on `stop`, so
+	// replaying the inventory on the next `start` is the only way to keep watching the same set
+	// of transactions and outputs across a `stop`/`start` cycle. Note that we can't simply
+	// re-register from `ChannelMonitor::load_outputs_to_watch` instead, as, e.g., the
+	// `OutputSweeper` also registers outputs it wants to see spent.
+	registered_txs: HashMap<Txid, ScriptBuf>,
+	registered_outputs: HashSet<WatchedOutput>,
 }
 
 impl ElectrumRuntimeStatus {
 	fn new() -> Self {
-		let pending_registered_txs = Vec::new();
-		let pending_registered_outputs = Vec::new();
-		Self::Stopped { pending_registered_txs, pending_registered_outputs }
+		let client = None;
+		let registered_txs = HashMap::new();
+		let registered_outputs = HashSet::new();
+		Self { client, registered_txs, registered_outputs }
 	}
 
 	pub(super) fn start(
 		&mut self, server_url: String, sync_config: ElectrumSyncConfig, runtime: Arc<Runtime>,
 		config: Arc<Config>, logger: Arc<Logger>,
 	) -> Result<(), Error> {
-		match self {
-			Self::Stopped { pending_registered_txs, pending_registered_outputs } => {
-				let client = Arc::new(ElectrumRuntimeClient::new(
-					server_url,
-					sync_config,
-					runtime,
-					config,
-					logger,
-				)?);
-
-				// Apply any pending `Filter` entries
-				for (txid, script_pubkey) in pending_registered_txs.drain(..) {
-					client.register_tx(&txid, &script_pubkey);
-				}
-
-				for output in pending_registered_outputs.drain(..) {
-					client.register_output(output)
-				}
-
-				*self = Self::Started(client);
-			},
-			Self::Started(_) => {
-				debug_assert!(false, "We shouldn't call start if we're already started")
-			},
+		if self.client.is_some() {
+			debug_assert!(false, "We shouldn't call start if we're already started");
+			return Ok(());
 		}
+
+		let client =
+			Arc::new(ElectrumRuntimeClient::new(server_url, sync_config, runtime, config, logger)?);
+
+		// (Re-)apply all known `Filter` entries to the fresh client.
+		for (txid, script_pubkey) in self.registered_txs.iter() {
+			client.register_tx(txid, script_pubkey);
+		}
+
+		for output in self.registered_outputs.iter() {
+			client.register_output(output.clone());
+		}
+
+		self.client = Some(client);
+
 		Ok(())
 	}
 
 	pub(super) fn stop(&mut self) {
-		*self = Self::new()
+		// Drop the client, but retain the registration inventory so we can replay it if we're
+		// started again.
+		self.client = None;
 	}
 
 	fn client(&self) -> Option<Arc<ElectrumRuntimeClient>> {
-		match self {
-			Self::Started(client) => Some(Arc::clone(&client)),
-			Self::Stopped { .. } => None,
-		}
+		self.client.as_ref().map(Arc::clone)
 	}
 
 	fn register_tx(&mut self, txid: &Txid, script_pubkey: &Script) {
-		match self {
-			Self::Started(client) => client.register_tx(txid, script_pubkey),
-			Self::Stopped { pending_registered_txs, .. } => {
-				pending_registered_txs.push((*txid, script_pubkey.to_owned()))
-			},
+		self.registered_txs.insert(*txid, script_pubkey.to_owned());
+
+		if let Some(client) = self.client.as_ref() {
+			client.register_tx(txid, script_pubkey);
 		}
 	}
 
 	fn register_output(&mut self, output: lightning::chain::WatchedOutput) {
-		match self {
-			Self::Started(client) => client.register_output(output),
-			Self::Stopped { pending_registered_outputs, .. } => {
-				pending_registered_outputs.push(output)
-			},
+		self.registered_outputs.insert(output.clone());
+
+		if let Some(client) = self.client.as_ref() {
+			client.register_output(output);
 		}
 	}
 }
