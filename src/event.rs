@@ -995,25 +995,14 @@ where
 							PaymentStatus::Pending,
 						);
 
-						match self.payment_store.insert(payment.clone()).await {
-							Ok(false) => (),
-							Ok(true) => {
-								log_error!(
-									self.logger,
-									"Bolt11InvoicePayment with ID {} was previously known",
-									payment_id,
-								);
-								debug_assert!(false);
-							},
-							Err(e) => {
-								log_error!(
-									self.logger,
-									"Failed to insert payment with ID {}: {}",
-									payment_id,
-									e
-								);
-								return Err(ReplayEvent());
-							},
+						if let Err(e) = self.payment_store.insert(payment.clone()).await {
+							log_error!(
+								self.logger,
+								"Failed to insert payment with ID {}: {}",
+								payment_id,
+								e
+							);
+							return Err(ReplayEvent());
 						}
 						payment_info = Some(payment);
 					}
@@ -1096,25 +1085,14 @@ where
 								PaymentStatus::Pending,
 							);
 
-							match self.payment_store.insert(payment).await {
-								Ok(false) => (),
-								Ok(true) => {
-									log_error!(
-										self.logger,
-										"Bolt11InvoicePayment with ID {} was previously known",
-										payment_id,
-									);
-									debug_assert!(false);
-								},
-								Err(e) => {
-									log_error!(
-										self.logger,
-										"Failed to insert payment with ID {}: {}",
-										payment_id,
-										e
-									);
-									return Err(ReplayEvent());
-								},
+							if let Err(e) = self.payment_store.insert(payment).await {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
 							}
 						}
 
@@ -1148,25 +1126,14 @@ where
 								PaymentStatus::Pending,
 							);
 
-							match self.payment_store.insert(payment).await {
-								Ok(false) => (),
-								Ok(true) => {
-									log_error!(
-										self.logger,
-										"Bolt12OfferPayment with ID {} was previously known",
-										payment_id,
-									);
-									debug_assert!(false);
-								},
-								Err(e) => {
-									log_error!(
-										self.logger,
-										"Failed to insert payment with ID {}: {}",
-										payment_id,
-										e
-									);
-									return Err(ReplayEvent());
-								},
+							if let Err(e) = self.payment_store.insert(payment).await {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
 							}
 						}
 						payment_preimage
@@ -1197,25 +1164,14 @@ where
 								PaymentStatus::Pending,
 							);
 
-							match self.payment_store.insert(payment).await {
-								Ok(false) => (),
-								Ok(true) => {
-									log_error!(
-										self.logger,
-										"Bolt12RefundPayment with ID {} was previously known",
-										payment_id,
-									);
-									debug_assert!(false);
-								},
-								Err(e) => {
-									log_error!(
-										self.logger,
-										"Failed to insert payment with ID {}: {}",
-										payment_id,
-										e
-									);
-									return Err(ReplayEvent());
-								},
+							if let Err(e) = self.payment_store.insert(payment).await {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
 							}
 						}
 						payment_preimage
@@ -1236,25 +1192,14 @@ where
 								PaymentStatus::Pending,
 							);
 
-							match self.payment_store.insert(payment).await {
-								Ok(false) => (),
-								Ok(true) => {
-									log_error!(
-										self.logger,
-										"Spontaneous payment with ID {} was previously known",
-										payment_id,
-									);
-									debug_assert!(false);
-								},
-								Err(e) => {
-									log_error!(
-										self.logger,
-										"Failed to insert payment with ID {}: {}",
-										payment_id,
-										e
-									);
-									return Err(ReplayEvent());
-								},
+							if let Err(e) = self.payment_store.insert(payment).await {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
 							}
 						}
 

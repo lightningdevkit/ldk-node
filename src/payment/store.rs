@@ -1324,7 +1324,7 @@ mod tests {
 		use bitcoin::hashes::Hash;
 		use lightning::util::test_utils::TestLogger;
 
-		use crate::data_store::DataStore;
+		use crate::data_store::{DataStore, KeepAllEntries};
 		use crate::io::test_utils::InMemoryStore;
 		use crate::types::{DynStore, DynStoreWrapper};
 
@@ -1372,6 +1372,7 @@ mod tests {
 			let logger = Arc::new(TestLogger::new());
 			DataStore::<PaymentDetails, Arc<TestLogger>>::new(
 				seed,
+				KeepAllEntries,
 				"payment_test_primary".to_string(),
 				"payment_test_secondary".to_string(),
 				store,

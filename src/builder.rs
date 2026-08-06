@@ -53,6 +53,7 @@ use crate::config::{
 	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT,
 };
 use crate::connection::ConnectionManager;
+use crate::data_store::KeepAllEntries;
 use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
@@ -1491,6 +1492,7 @@ fn build_with_store_internal(
 	let payment_store = match payment_store_res {
 		Ok(payments) => Arc::new(PaymentStore::new(
 			payments,
+			KeepAllEntries,
 			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
 			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&kv_store),
@@ -1745,8 +1747,12 @@ fn build_with_store_internal(
 	};
 
 	let pending_payment_store = match pending_payment_store_res {
+		// NOTE: This store must keep all its entries in memory: the wallet scans it in full on
+		// every chain tip change and to resolve replaced transactions. It stays bounded anyway,
+		// as entries are removed once a payment is no longer pending.
 		Ok(pending_payments) => Arc::new(PendingPaymentStore::new(
 			pending_payments,
+			KeepAllEntries,
 			PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
 			PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&kv_store),

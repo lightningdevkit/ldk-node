@@ -54,6 +54,8 @@ use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
 use crate::config::{Config, ADDRESS_POOL_SIZE};
+#[cfg(test)]
+use crate::data_store::KeepAllEntries;
 use crate::data_store::StorableObject;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -2819,6 +2821,7 @@ mod tests {
 		.unwrap();
 		let payment_store = Arc::new(PaymentStore::new(
 			Vec::new(),
+			KeepAllEntries,
 			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
 			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&store),
@@ -2826,6 +2829,7 @@ mod tests {
 		));
 		let pending_payment_store = Arc::new(PendingPaymentStore::new(
 			Vec::new(),
+			KeepAllEntries,
 			PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
 			PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&store),
