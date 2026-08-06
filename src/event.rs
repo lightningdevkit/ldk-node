@@ -1169,6 +1169,9 @@ where
 						..
 					} => {
 						if should_insert_payment {
+							// TODO: Set `payer_note` and `quantity` once LDK v0.4 exposes refund
+							// context via `PaymentClaimable`.
+							// See https://github.com/lightningdevkit/ldk-node/issues/1023.
 							let kind = PaymentKind::Bolt12Refund {
 								hash: Some(payment_hash),
 								preimage: payment_preimage,
