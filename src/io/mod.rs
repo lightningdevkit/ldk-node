@@ -80,6 +80,11 @@ pub(crate) const BDK_WALLET_INDEXER_PRIMARY_NAMESPACE: &str = "bdk_wallet";
 pub(crate) const BDK_WALLET_INDEXER_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const BDK_WALLET_INDEXER_KEY: &str = "indexer";
 
+/// The derivation indices of the wallet's address pool will be persisted under this key.
+pub(crate) const BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE: &str = "bdk_wallet";
+pub(crate) const BDK_WALLET_ADDRESS_POOL_SECONDARY_NAMESPACE: &str = "";
+pub(crate) const BDK_WALLET_ADDRESS_POOL_KEY: &str = "address_pool";
+
 /// [`StaticInvoice`]s will be persisted under this key.
 ///
 /// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice

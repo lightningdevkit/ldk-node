@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -81,10 +81,39 @@ pub(crate) mod ser;
 
 const DUST_LIMIT_SATS: u64 = 546;
 
+/// The number of external addresses kept revealed, persisted, and ready for handout via
+/// [`Wallet::pop_pooled_address`].
+///
+/// Each channel open consumes two pooled addresses (one for the destination script and one for
+/// the upfront shutdown script), and the pool is refilled after every handout, so this bounds
+/// how many channels can be opened while wallet persistence is unavailable rather than steady
+/// state throughput. Pooled addresses are revealed-but-unused, so this value also widens
+/// incremental chain syncs accordingly and must stay below the default full-scan stop gap
+/// ([`DEFAULT_FULL_SCAN_STOP_GAP`]) lest a from-seed restore's full scan stop inside the pool's
+/// unused tail.
+///
+/// [`DEFAULT_FULL_SCAN_STOP_GAP`]: crate::config::DEFAULT_FULL_SCAN_STOP_GAP
+pub(crate) const ADDRESS_POOL_TARGET_SIZE: usize = 16;
+
+/// A pool of pre-revealed external addresses whose derivation indices are already persisted,
+/// allowing LDK's synchronous [`SignerProvider`] callbacks to obtain fresh addresses without
+/// waiting on wallet persistence.
+struct AddressPool {
+	/// Addresses ready for handout: their reveal is durably persisted, so every chain sync path
+	/// watches their scripts.
+	available: VecDeque<(u32, bitcoin::Address)>,
+	/// Addresses revealed in-memory whose persistence has not succeeded yet. They are published
+	/// to `available` by the next successful [`Wallet::refill_address_pool`] run.
+	unpublished: Vec<(u32, bitcoin::Address)>,
+}
+
 pub(crate) struct Wallet {
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
 	persister: tokio::sync::Mutex<KVStoreWalletPersister>,
+	address_pool: Mutex<AddressPool>,
+	// Serializes refill runs so concurrent pops never over-reveal.
+	address_pool_refill_lock: tokio::sync::Mutex<()>,
 	broadcaster: Arc<Broadcaster>,
 	fee_estimator: Arc<OnchainFeeEstimator>,
 	chain_source: Arc<ChainSource>,
@@ -105,9 +134,14 @@ impl Wallet {
 	) -> Self {
 		let inner = Mutex::new(wallet);
 		let persister = tokio::sync::Mutex::new(wallet_persister);
+		let address_pool =
+			Mutex::new(AddressPool { available: VecDeque::new(), unpublished: Vec::new() });
+		let address_pool_refill_lock = tokio::sync::Mutex::new(());
 		Self {
 			inner,
 			persister,
+			address_pool,
+			address_pool_refill_lock,
 			broadcaster,
 			fee_estimator,
 			chain_source,
@@ -518,34 +552,132 @@ impl Wallet {
 		Ok(address_info.address)
 	}
 
-	/// Returns a new address, persisting the revealed derivation index in the background rather
-	/// than waiting on it.
+	/// Loads the persisted address pool and tops it up to [`ADDRESS_POOL_TARGET_SIZE`].
 	///
-	/// This exists for sync callbacks (e.g., [`SignerProvider`]) that LDK invokes on runtime
-	/// worker threads while holding channel locks. Blocking such a callback on persistence can
-	/// deadlock the runtime: other tasks blocking synchronously on the same channel locks capture
-	/// the remaining workers, leaving none to drive the persistence future the callback waits on.
-	///
-	/// If the node crashes before the background flush lands, the revealed index is lost and the
-	/// address may be handed out again after restart. BDK's keychain lookahead still detects any
-	/// funds it receives.
-	pub(crate) fn get_new_address_deferring_persist(self: &Arc<Self>) -> bitcoin::Address {
-		let address_info =
-			self.inner.lock().expect("lock").reveal_next_address(KeychainKind::External);
+	/// Must be called once before the node starts handing out pooled addresses; reloading the
+	/// persisted indices is what keeps restarts from burning fresh derivation indices on every
+	/// run.
+	pub(crate) async fn initialize_address_pool(&self) -> Result<(), Error> {
+		let persisted_indices = {
+			let locked_persister = self.persister.lock().await;
+			locked_persister.read_address_pool().await.map_err(|e| {
+				log_error!(self.logger, "Failed to read address pool: {}", e);
+				Error::PersistenceFailed
+			})?
+		};
+		{
+			let locked_wallet = self.inner.lock().expect("lock");
+			let last_revealed = locked_wallet.derivation_index(KeychainKind::External);
+			let mut locked_pool = self.address_pool.lock().expect("lock");
+			for index in persisted_indices {
+				// Only trust indices the persisted wallet actually revealed: anything beyond
+				// `last_revealed` would hand out a script no chain sync path watches.
+				if last_revealed.map_or(false, |last| index <= last) {
+					let address = locked_wallet.peek_address(KeychainKind::External, index).address;
+					locked_pool.available.push_back((index, address));
+				} else {
+					log_error!(
+						self.logger,
+						"Dropping persisted address pool index {} beyond the wallet's last revealed index",
+						index
+					);
+				}
+			}
+		}
+		self.refill_address_pool().await
+	}
 
-		// Leave the change set staged: whichever flow next takes the persister lock and calls
-		// `take_staged` (possibly the task spawned here) persists the reveal, preserving the
-		// ordering that serializing those two steps under the persister lock establishes.
+	/// Returns an address whose reveal is already durably persisted, or `None` if the pool is
+	/// exhausted.
+	///
+	/// This is safe to call from sync callbacks (e.g., [`SignerProvider`]) that LDK invokes on
+	/// runtime worker threads while holding channel locks: it never waits on persistence, only
+	/// popping from the pre-persisted pool and scheduling a background refill. Blocking such a
+	/// callback on persistence can deadlock the runtime, as other tasks blocking synchronously on
+	/// the same channel locks may capture the remaining workers, leaving none to drive the
+	/// persistence future the callback would wait on.
+	///
+	/// Failing closed on an empty pool (rather than revealing an unpersisted address) ensures we
+	/// never hand out a script that would go unwatched if the node crashed before its reveal
+	/// landed: incremental chain syncs only query scripts the persisted wallet has revealed.
+	///
+	/// The handout itself is not persisted: if the node restarts before the refill scheduled here
+	/// rewrites the pool record, the popped address may be handed out again after the restart.
+	/// Its reveal is durable either way, so the script always stays watched — the cost is bounded
+	/// address reuse, not fund visibility.
+	pub(crate) fn pop_pooled_address(self: &Arc<Self>) -> Option<bitcoin::Address> {
+		let popped = self.address_pool.lock().expect("lock").available.pop_front();
+
 		let wallet = Arc::clone(self);
 		self.runtime.spawn_background_task(async move {
-			let mut locked_persister = wallet.persister.lock().await;
-			let change_set = wallet.inner.lock().expect("lock").take_staged().unwrap_or_default();
-			if let Err(e) = locked_persister.persist_changeset(change_set).await {
-				log_error!(wallet.logger, "Failed to persist wallet: {}", e);
+			if let Err(e) = wallet.refill_address_pool().await {
+				log_error!(wallet.logger, "Failed to refill the address pool: {}", e);
 			}
 		});
 
-		address_info.address
+		popped.map(|(_, address)| address)
+	}
+
+	/// Tops the address pool up to [`ADDRESS_POOL_TARGET_SIZE`], publishing newly revealed
+	/// addresses only after their reveal has been durably persisted.
+	pub(crate) async fn refill_address_pool(&self) -> Result<(), Error> {
+		let _refill_guard = self.address_pool_refill_lock.lock().await;
+
+		{
+			let locked_pool = self.address_pool.lock().expect("lock");
+			if locked_pool.unpublished.is_empty()
+				&& locked_pool.available.len() >= ADDRESS_POOL_TARGET_SIZE
+			{
+				return Ok(());
+			}
+		}
+
+		let mut locked_persister = self.persister.lock().await;
+		let (change_set, indices) = {
+			let mut locked_wallet = self.inner.lock().expect("lock");
+			let mut locked_pool = self.address_pool.lock().expect("lock");
+			let needed = ADDRESS_POOL_TARGET_SIZE
+				.saturating_sub(locked_pool.available.len() + locked_pool.unpublished.len());
+			for _ in 0..needed {
+				let address_info = locked_wallet.reveal_next_address(KeychainKind::External);
+				locked_pool.unpublished.push((address_info.index, address_info.address));
+			}
+			let indices: Vec<u32> = locked_pool
+				.available
+				.iter()
+				.chain(locked_pool.unpublished.iter())
+				.map(|(index, _)| *index)
+				.collect();
+			(locked_wallet.take_staged().unwrap_or_default(), indices)
+		};
+
+		// Persist the pool record before the reveals. A crash between the two writes then leaves
+		// record entries the persisted wallet doesn't cover, which reloading drops and the next
+		// refill re-derives to the same indices — rather than durably revealed indices missing
+		// from the record, which no path would ever pool or hand out again (burning them).
+		// Writing the record first also drops popped indices from it as early as possible,
+		// narrowing the restart window in which a handed-out address is handed out again.
+		let record_res = locked_persister.persist_address_pool(indices).await;
+		// Attempt the change-set persist even if the record write failed: the reveals were
+		// already taken from the wallet, so they must reach the persister's pending change set
+		// (either persisted now or retained for retry) to not be lost.
+		let change_set_res = locked_persister.persist_changeset(change_set).await;
+		record_res.map_err(|e| {
+			log_error!(self.logger, "Failed to persist address pool: {}", e);
+			Error::PersistenceFailed
+		})?;
+		// On failure the reveals stay in `unpublished` (never handed out) and the persister
+		// retains the change set, so the next refill run retries both.
+		change_set_res.map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})?;
+
+		// Both writes are durable, so the addresses may be handed out.
+		let mut locked_pool = self.address_pool.lock().expect("lock");
+		let unpublished = core::mem::take(&mut locked_pool.unpublished);
+		locked_pool.available.extend(unpublished);
+		Ok(())
 	}
 
 	pub(crate) async fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
@@ -2122,14 +2254,18 @@ impl SignerProvider for WalletKeysManager {
 	fn get_destination_script(&self, _channel_keys_id: [u8; 32]) -> Result<ScriptBuf, ()> {
 		// LDK may invoke this callback on a runtime worker thread while holding channel locks.
 		// It must not block on the runtime, or the runtime can deadlock.
-		let address = self.wallet.get_new_address_deferring_persist();
+		let address = self.wallet.pop_pooled_address().ok_or_else(|| {
+			log_error!(self.logger, "Failed to retrieve a destination script: address pool empty");
+		})?;
 		Ok(address.script_pubkey())
 	}
 
 	fn get_shutdown_scriptpubkey(&self) -> Result<ShutdownScript, ()> {
 		// LDK may invoke this callback on a runtime worker thread while holding channel locks.
 		// It must not block on the runtime, or the runtime can deadlock.
-		let address = self.wallet.get_new_address_deferring_persist();
+		let address = self.wallet.pop_pooled_address().ok_or_else(|| {
+			log_error!(self.logger, "Failed to retrieve a shutdown script: address pool empty");
+		})?;
 
 		match address.witness_program() {
 			Some(program) => ShutdownScript::new_witness_program(&program).map_err(|e| {
@@ -2183,4 +2319,431 @@ fn ldk_to_bdk_satisfaction_weight(ldk_satisfaction_weight: u64) -> Weight {
 		ldk_satisfaction_weight
 			.saturating_sub(EMPTY_SCRIPT_SIG_WEIGHT + EMPTY_WITNESS_COUNT_WEIGHT),
 	)
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::atomic::{AtomicBool, Ordering};
+
+	use bdk_wallet::Wallet as BdkWallet;
+	use bitcoin::Network;
+	use lightning::io;
+	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+
+	use super::*;
+	use crate::config::EsploraSyncConfig;
+	use crate::io::test_utils::InMemoryStore;
+	use crate::io::{
+		BDK_WALLET_ADDRESS_POOL_KEY, BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
+		BDK_WALLET_ADDRESS_POOL_SECONDARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+		PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+		PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+		PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	};
+	use crate::types::{DynStore, DynStoreWrapper};
+	use crate::{NodeMetrics, PersistedNodeMetrics};
+
+	const EXTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/0/*)";
+	const INTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/1/*)";
+
+	/// An in-memory store whose writes can be made to fail on demand.
+	#[derive(Clone)]
+	struct FailSwitchStore {
+		inner: Arc<InMemoryStore>,
+		fail_writes: Arc<AtomicBool>,
+	}
+
+	impl FailSwitchStore {
+		fn new() -> Self {
+			Self {
+				inner: Arc::new(InMemoryStore::new()),
+				fail_writes: Arc::new(AtomicBool::new(false)),
+			}
+		}
+	}
+
+	impl KVStore for FailSwitchStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			let inner = Arc::clone(&self.inner);
+			let fail_writes = Arc::clone(&self.fail_writes);
+			let primary_namespace = primary_namespace.to_string();
+			let secondary_namespace = secondary_namespace.to_string();
+			let key = key.to_string();
+			async move {
+				if fail_writes.load(Ordering::Acquire) {
+					return Err(io::Error::new(io::ErrorKind::Other, "writes disabled"));
+				}
+				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
+			}
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for FailSwitchStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+			PaginatedKVStore::list_paginated(
+				&*self.inner,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+		}
+	}
+
+	/// Constructs a `Wallet` around the given store, either creating a fresh BDK wallet or
+	/// loading the one the store already holds.
+	async fn new_test_wallet(store: Arc<DynStore>, load_existing: bool) -> Arc<Wallet> {
+		let logger = Arc::new(Logger::new_log_facade());
+		let mut config = Config::default();
+		config.network = Network::Regtest;
+		let config = Arc::new(config);
+
+		let mut wallet_persister =
+			KVStoreWalletPersister::new(Arc::clone(&store), Arc::clone(&logger));
+		let bdk_wallet = if load_existing {
+			BdkWallet::load()
+				.descriptor(KeychainKind::External, Some(EXTERNAL_DESCRIPTOR))
+				.descriptor(KeychainKind::Internal, Some(INTERNAL_DESCRIPTOR))
+				.extract_keys()
+				.check_network(Network::Regtest)
+				.load_wallet_async(&mut wallet_persister)
+				.await
+				.unwrap()
+				.unwrap()
+		} else {
+			BdkWallet::create(EXTERNAL_DESCRIPTOR, INTERNAL_DESCRIPTOR)
+				.network(Network::Regtest)
+				.create_wallet_async(&mut wallet_persister)
+				.await
+				.unwrap()
+		};
+
+		let fee_estimator = Arc::new(OnchainFeeEstimator::new());
+		let broadcaster = Arc::new(Broadcaster::new(Arc::clone(&logger)));
+		let node_metrics = Arc::new(PersistedNodeMetrics::new(NodeMetrics::default()));
+		let (chain_source, _) = ChainSource::new_esplora(
+			"http://localhost:1".to_string(),
+			HashMap::new(),
+			EsploraSyncConfig::default(),
+			Arc::clone(&fee_estimator),
+			Arc::clone(&broadcaster),
+			Arc::clone(&store),
+			Arc::clone(&config),
+			Arc::clone(&logger),
+			node_metrics,
+		)
+		.unwrap();
+		let payment_store = Arc::new(PaymentStore::new(
+			Vec::new(),
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&store),
+			Arc::clone(&logger),
+		));
+		let pending_payment_store = Arc::new(PendingPaymentStore::new(
+			Vec::new(),
+			PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&store),
+			Arc::clone(&logger),
+		));
+		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
+
+		Arc::new(Wallet::new(
+			bdk_wallet,
+			wallet_persister,
+			broadcaster,
+			fee_estimator,
+			Arc::new(chain_source),
+			payment_store,
+			runtime,
+			config,
+			logger,
+			pending_payment_store,
+		))
+	}
+
+	fn pooled_indices(wallet: &Wallet) -> Vec<u32> {
+		wallet.address_pool.lock().unwrap().available.iter().map(|(index, _)| *index).collect()
+	}
+
+	#[tokio::test]
+	async fn refill_publishes_addresses_only_after_their_reveal_is_persisted() {
+		let fail_store = FailSwitchStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		wallet.initialize_address_pool().await.unwrap();
+		assert_eq!(pooled_indices(&wallet).len(), ADDRESS_POOL_TARGET_SIZE);
+
+		// Simulate a handout, then make wallet writes fail: the refill must not publish the
+		// address it revealed, as a crash would leave its script unwatched by incremental syncs.
+		wallet.address_pool.lock().unwrap().available.pop_front().unwrap();
+		fail_store.fail_writes.store(true, Ordering::Release);
+		assert!(wallet.refill_address_pool().await.is_err());
+		let unpersisted_index = ADDRESS_POOL_TARGET_SIZE as u32;
+		let indices = pooled_indices(&wallet);
+		assert_eq!(indices.len(), ADDRESS_POOL_TARGET_SIZE - 1);
+		assert!(!indices.contains(&unpersisted_index));
+
+		// Once persistence recovers, the next refill publishes the retained reveal without
+		// burning another derivation index.
+		fail_store.fail_writes.store(false, Ordering::Release);
+		wallet.refill_address_pool().await.unwrap();
+		let indices = pooled_indices(&wallet);
+		assert_eq!(indices.len(), ADDRESS_POOL_TARGET_SIZE);
+		assert!(indices.contains(&unpersisted_index));
+		let last_revealed = wallet.inner.lock().unwrap().derivation_index(KeychainKind::External);
+		assert_eq!(last_revealed, Some(unpersisted_index));
+	}
+
+	#[tokio::test]
+	async fn pool_reloads_across_restarts_without_burning_indices() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+
+		let (popped_address, indices_before) = {
+			let wallet = new_test_wallet(Arc::clone(&store), false).await;
+			wallet.initialize_address_pool().await.unwrap();
+			// Simulate a handout and a completed refill before the restart.
+			let (_, popped_address) =
+				wallet.address_pool.lock().unwrap().available.pop_front().unwrap();
+			wallet.refill_address_pool().await.unwrap();
+			(popped_address, pooled_indices(&wallet))
+		};
+
+		let wallet = new_test_wallet(Arc::clone(&store), true).await;
+		wallet.initialize_address_pool().await.unwrap();
+
+		// The pool is rebuilt from the persisted record: the restart neither reveals fresh
+		// indices (widening what incremental syncs must watch) nor re-hands-out the address
+		// popped before the restart.
+		assert_eq!(pooled_indices(&wallet), indices_before);
+		let last_revealed = wallet.inner.lock().unwrap().derivation_index(KeychainKind::External);
+		assert_eq!(last_revealed, Some(ADDRESS_POOL_TARGET_SIZE as u32));
+		let pool = wallet.address_pool.lock().unwrap();
+		assert!(!pool.available.iter().any(|(_, address)| *address == popped_address));
+	}
+
+	#[tokio::test]
+	async fn initialize_drops_pool_indices_the_wallet_never_revealed() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		{
+			let wallet = new_test_wallet(Arc::clone(&store), false).await;
+			wallet.initialize_address_pool().await.unwrap();
+		}
+
+		// Corrupt the persisted record with an index the wallet never revealed.
+		let logger = Arc::new(Logger::new_log_facade());
+		let mut persister = KVStoreWalletPersister::new(Arc::clone(&store), logger);
+		persister.persist_address_pool(vec![5, 100]).await.unwrap();
+
+		let wallet = new_test_wallet(Arc::clone(&store), true).await;
+		wallet.initialize_address_pool().await.unwrap();
+
+		// Index 5 was revealed before the restart and is kept; the never-revealed index 100
+		// must be dropped, as no sync path would watch its script. The initial refill then
+		// tops the pool back up with fresh reveals.
+		let indices = pooled_indices(&wallet);
+		assert_eq!(indices.len(), ADDRESS_POOL_TARGET_SIZE);
+		assert!(indices.contains(&5));
+		assert!(!indices.contains(&100));
+	}
+
+	#[tokio::test]
+	async fn signer_provider_callbacks_fail_closed_when_pool_is_empty() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let logger = Arc::new(Logger::new_log_facade());
+		let keys_manager = WalletKeysManager::new(&[7u8; 32], 42, 42, Arc::clone(&wallet), logger);
+
+		// Before the pool is initialized it is empty: the sync callbacks must fail closed
+		// rather than hand out an address whose reveal was never persisted.
+		assert!(keys_manager.get_destination_script([0u8; 32]).is_err());
+		assert!(keys_manager.get_shutdown_scriptpubkey().is_err());
+
+		wallet.initialize_address_pool().await.unwrap();
+		assert!(keys_manager.get_destination_script([0u8; 32]).is_ok());
+		assert!(keys_manager.get_shutdown_scriptpubkey().is_ok());
+	}
+
+	/// An in-memory store that snapshots its full contents after every completed write, letting
+	/// tests reload the wallet from any crash point.
+	#[derive(Clone)]
+	struct SnapshotStore {
+		data: Arc<Mutex<HashMap<(String, String, String), Vec<u8>>>>,
+		snapshots: Arc<Mutex<Vec<HashMap<(String, String, String), Vec<u8>>>>>,
+	}
+
+	impl SnapshotStore {
+		fn new() -> Self {
+			Self {
+				data: Arc::new(Mutex::new(HashMap::new())),
+				snapshots: Arc::new(Mutex::new(Vec::new())),
+			}
+		}
+
+		fn from_contents(data: HashMap<(String, String, String), Vec<u8>>) -> Self {
+			Self { data: Arc::new(Mutex::new(data)), snapshots: Arc::new(Mutex::new(Vec::new())) }
+		}
+	}
+
+	impl KVStore for SnapshotStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			let res = self
+				.data
+				.lock()
+				.unwrap()
+				.get(&(
+					primary_namespace.to_string(),
+					secondary_namespace.to_string(),
+					key.to_string(),
+				))
+				.cloned()
+				.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "not found"));
+			async move { res }
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			let mut data = self.data.lock().unwrap();
+			data.insert(
+				(primary_namespace.to_string(), secondary_namespace.to_string(), key.to_string()),
+				buf,
+			);
+			self.snapshots.lock().unwrap().push(data.clone());
+			async move { Ok(()) }
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, _lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			let mut data = self.data.lock().unwrap();
+			data.remove(&(
+				primary_namespace.to_string(),
+				secondary_namespace.to_string(),
+				key.to_string(),
+			));
+			self.snapshots.lock().unwrap().push(data.clone());
+			async move { Ok(()) }
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			let keys = self
+				.data
+				.lock()
+				.unwrap()
+				.keys()
+				.filter(|(primary, secondary, _)| {
+					primary == primary_namespace && secondary == secondary_namespace
+				})
+				.map(|(_, _, key)| key.clone())
+				.collect::<Vec<_>>();
+			async move { Ok(keys) }
+		}
+	}
+
+	impl PaginatedKVStore for SnapshotStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			_page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+			let keys = self
+				.data
+				.lock()
+				.unwrap()
+				.keys()
+				.filter(|(primary, secondary, _)| {
+					primary == primary_namespace && secondary == secondary_namespace
+				})
+				.map(|(_, _, key)| key.clone())
+				.collect::<Vec<_>>();
+			async move { Ok(PaginatedListResponse { keys, next_page_token: None }) }
+		}
+	}
+
+	#[tokio::test]
+	async fn pool_survives_a_crash_at_any_point_during_refill() {
+		let snapshot_store = SnapshotStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(snapshot_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		// Only replay crash points from wallet creation onwards; earlier snapshots hold a
+		// half-created wallet, which is the builder's concern rather than the pool's.
+		let baseline = snapshot_store.snapshots.lock().unwrap().len();
+
+		wallet.initialize_address_pool().await.unwrap();
+		// Simulate a handout plus the refill it schedules.
+		wallet.address_pool.lock().unwrap().available.pop_front().unwrap();
+		wallet.refill_address_pool().await.unwrap();
+		let final_derivation =
+			wallet.inner.lock().unwrap().derivation_index(KeychainKind::External).unwrap();
+
+		// Reload the wallet from every intermediate store state. No crash point may leave the
+		// pool unfillable or burn indices: a reload revealing past `final_derivation` means some
+		// reveal was durable while absent from the pool record, stranding its index as
+		// revealed-but-unused forever.
+		let snapshots = snapshot_store.snapshots.lock().unwrap().clone();
+		assert!(snapshots.len() > baseline);
+		for snapshot in snapshots.into_iter().skip(baseline) {
+			let store: Arc<DynStore> =
+				Arc::new(DynStoreWrapper(SnapshotStore::from_contents(snapshot)));
+			let wallet = new_test_wallet(Arc::clone(&store), true).await;
+			wallet.initialize_address_pool().await.unwrap();
+			assert_eq!(pooled_indices(&wallet).len(), ADDRESS_POOL_TARGET_SIZE);
+			let derivation =
+				wallet.inner.lock().unwrap().derivation_index(KeychainKind::External).unwrap();
+			assert!(derivation <= final_derivation);
+		}
+	}
+
+	#[tokio::test]
+	async fn initialize_survives_an_undecodable_pool_record() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		{
+			let wallet = new_test_wallet(Arc::clone(&store), false).await;
+			wallet.initialize_address_pool().await.unwrap();
+		}
+
+		// Corrupt the record itself: the pool is a reconstructible cache, so an undecodable
+		// record must not prevent the node from starting.
+		KVStore::write(
+			&*store,
+			BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
+			BDK_WALLET_ADDRESS_POOL_SECONDARY_NAMESPACE,
+			BDK_WALLET_ADDRESS_POOL_KEY,
+			vec![0x00, 0xff],
+		)
+		.await
+		.unwrap();
+
+		let wallet = new_test_wallet(Arc::clone(&store), true).await;
+		wallet.initialize_address_pool().await.unwrap();
+		assert_eq!(pooled_indices(&wallet).len(), ADDRESS_POOL_TARGET_SIZE);
+	}
 }

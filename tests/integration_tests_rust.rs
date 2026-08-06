@@ -298,7 +298,8 @@ impl PaginatedKVStore for WalletPersistGatedStore {
 // shutdown script waits on wallet persistence, a contended wallet store wedges the event handler
 // while it holds those locks, and other runtime tasks blocking on the same locks can capture the
 // remaining workers, deadlocking the runtime. Gate node B's BDK wallet writes and assert the
-// channel open still completes, with the revealed address persisted once the store recovers.
+// channel open still completes (served from the pre-persisted address pool), with the pool
+// refill's persistence landing once the store recovers.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_open_completes_while_wallet_persistence_is_stalled() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
@@ -351,8 +352,8 @@ async fn channel_open_completes_while_wallet_persistence_is_stalled() {
 	// waiting for the `ChannelPending` events otherwise.
 	let funding_txo = open_channel_no_wait(&node_a, &node_b, 500_000, None, false).await;
 
-	// Reopen the gate and verify the deferred persist of the revealed shutdown-script address
-	// eventually lands.
+	// Reopen the gate and verify the pool refill triggered by the handouts eventually persists
+	// its newly revealed addresses.
 	store.gate_engaged.store(false, Ordering::Release);
 	// The watchdog thread may have force-released the gate already on a slow run.
 	let _ = release_gate_sender.send(());
@@ -363,9 +364,69 @@ async fn channel_open_completes_while_wallet_persistence_is_stalled() {
 	};
 	tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), persisted)
 		.await
-		.expect("timed out waiting for the deferred wallet persist");
+		.expect("timed out waiting for the address-pool refill to persist");
 
 	// The channel and both nodes remain fully functional.
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+}
+
+// The address pool's derivation indices are persisted alongside the wallet: a restart reloads
+// the pooled addresses instead of revealing fresh ones, so restarts don't burn derivation
+// indices (each of which incremental chain syncs would have to watch forever). Rebuild node B
+// from the same store, assert the rebuild performs no wallet writes, and verify a channel open
+// is served from the reloaded pool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn address_pool_is_reloaded_on_restart() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let config_a = random_config();
+	let node_a = setup_node(&chain_source, config_a);
+
+	// Trust node A with no reserve so unfunded node B accepts the channel; its wallet then sees
+	// no activity besides the address pool itself.
+	let mut config_b = random_config();
+	config_b.node_config.anchor_channels_config.trusted_peers_no_reserve.push(node_a.node_id());
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+	let store = WalletPersistGatedStore::new();
+
+	setup_builder!(builder_b, config_b.node_config);
+	builder_b.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	node_b.start().unwrap();
+	node_b.stop().unwrap();
+	drop(node_b);
+
+	// Rebuilding from the same store must reload the persisted pool rather than revealing (and
+	// persisting) fresh addresses.
+	let wallet_writes_before = store.wallet_writes_completed.load(Ordering::Acquire);
+	setup_builder!(builder_b, config_b.node_config);
+	builder_b.set_chain_source_esplora(esplora_url, Some(sync_config));
+	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	assert_eq!(store.wallet_writes_completed.load(Ordering::Acquire), wallet_writes_before);
+	node_b.start().unwrap();
+
+	// The shutdown and destination scripts for the channel open are handed out of the reloaded
+	// pool; an empty pool would fail the open.
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	let funding_txo = open_channel_no_wait(&node_a, &node_b, 500_000, None, false).await;
+
 	wait_for_tx(&electrsd.client, funding_txo.txid).await;
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 	node_a.sync_wallets().unwrap();

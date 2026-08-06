@@ -11,14 +11,37 @@ use std::sync::Arc;
 
 use bdk_chain::Merge;
 use bdk_wallet::{AsyncWalletPersister, ChangeSet};
+use lightning::impl_writeable_tlv_based;
+use lightning::util::persist::KVStore;
+use lightning::util::ser::{Readable, Writeable};
 
 use crate::io::utils::{
 	read_bdk_wallet_change_set, write_bdk_wallet_change_descriptor, write_bdk_wallet_descriptor,
 	write_bdk_wallet_indexer, write_bdk_wallet_local_chain, write_bdk_wallet_network,
 	write_bdk_wallet_tx_graph,
 };
+use crate::io::{
+	BDK_WALLET_ADDRESS_POOL_KEY, BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
+	BDK_WALLET_ADDRESS_POOL_SECONDARY_NAMESPACE,
+};
 use crate::logger::{log_error, LdkLogger, Logger};
 use crate::types::DynStore;
+
+/// The persisted derivation indices of the wallet's address pool.
+///
+/// The record is advisory and reconstructible: it is written before the reveals it references
+/// are necessarily persisted, so it may briefly lead the persisted [`ChangeSet::indexer`].
+/// Readers must validate each index against the wallet's revealed range before handing out any
+/// of the addresses; dropped entries are re-derived to the same indices by the next refill.
+///
+/// [`ChangeSet::indexer`]: bdk_wallet::ChangeSet::indexer
+struct AddressPoolRecord {
+	indices: Vec<u32>,
+}
+
+impl_writeable_tlv_based!(AddressPoolRecord, {
+	(0, indices, required_vec),
+});
 
 pub(crate) struct KVStoreWalletPersister {
 	latest_change_set: Option<ChangeSet>,
@@ -186,6 +209,55 @@ impl KVStoreWalletPersister {
 		.await?;
 		let _ = std::mem::take(&mut self.pending_change_set);
 		Ok(())
+	}
+
+	/// Reads the persisted address-pool derivation indices, or an empty list if none were
+	/// persisted yet.
+	pub(super) async fn read_address_pool(&self) -> Result<Vec<u32>, std::io::Error> {
+		let reader = match KVStore::read(
+			&*self.kv_store,
+			BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
+			BDK_WALLET_ADDRESS_POOL_SECONDARY_NAMESPACE,
+			BDK_WALLET_ADDRESS_POOL_KEY,
+		)
+		.await
+		{
+			Ok(reader) => reader,
+			Err(e) if e.kind() == lightning::io::ErrorKind::NotFound => return Ok(Vec::new()),
+			Err(e) => return Err(e.into()),
+		};
+		let record = match AddressPoolRecord::read(&mut &*reader) {
+			Ok(record) => record,
+			Err(e) => {
+				// The record is a reconstructible cache: a decode failure (corruption, or a
+				// future version's incompatible encoding) at worst costs the pool's indices, so
+				// degrade to an empty pool rather than failing the node's startup.
+				log_error!(self.logger, "Dropping undecodable address pool: {}", e);
+				return Ok(Vec::new());
+			},
+		};
+		Ok(record.indices)
+	}
+
+	/// Persists the address-pool derivation indices.
+	///
+	/// See [`AddressPoolRecord`] for what readers may assume about the persisted indices.
+	pub(super) async fn persist_address_pool(
+		&mut self, indices: Vec<u32>,
+	) -> Result<(), std::io::Error> {
+		let record = AddressPoolRecord { indices };
+		KVStore::write(
+			&*self.kv_store,
+			BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
+			BDK_WALLET_ADDRESS_POOL_SECONDARY_NAMESPACE,
+			BDK_WALLET_ADDRESS_POOL_KEY,
+			record.encode(),
+		)
+		.await
+		.map_err(|e| {
+			log_error!(self.logger, "Failed to persist address pool: {}", e);
+			e.into()
+		})
 	}
 }
 
