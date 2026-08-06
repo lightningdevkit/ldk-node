@@ -50,9 +50,11 @@ use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
 	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
 	TorConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
-	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT,
+	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT, PAYMENT_CACHE_CAPACITY,
+	PAYMENT_CACHE_WARMUP_COUNT,
 };
 use crate::connection::ConnectionManager;
+use crate::data_store::{KeepAllEntries, KeepLeastRecentlyUsed};
 use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
@@ -60,8 +62,8 @@ use crate::gossip::GossipSource;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
 	open_or_migrate_fs_store, read_all_objects, read_event_queue,
-	read_external_pathfinding_scores_from_cache, read_network_graph, read_node_metrics,
-	read_output_sweeper, read_peer_info, read_scorer,
+	read_external_pathfinding_scores_from_cache, read_n_objects, read_network_graph,
+	read_node_metrics, read_output_sweeper, read_peer_info, read_scorer,
 };
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
@@ -1442,10 +1444,11 @@ fn build_with_store_internal(
 	let (payment_store_res, node_metris_res, pending_payment_store_res) =
 		runtime.block_on(async move {
 			tokio::join!(
-				read_all_objects(
+				read_n_objects(
 					&*kv_store_ref,
 					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+					PAYMENT_CACHE_WARMUP_COUNT,
 					Arc::clone(&logger_ref),
 				),
 				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
@@ -1473,7 +1476,11 @@ fn build_with_store_internal(
 
 	let payment_store = match payment_store_res {
 		Ok(payments) => Arc::new(PaymentStore::new(
-			payments,
+			// The read hands us the newest payments first, while the cache treats the objects it
+			// is seeded with as increasingly recently used. Reverse them, so that the newest
+			// payment is the last one to be evicted rather than the first.
+			payments.into_iter().rev().collect(),
+			KeepLeastRecentlyUsed::new(PAYMENT_CACHE_CAPACITY),
 			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
 			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&kv_store),
@@ -1728,8 +1735,12 @@ fn build_with_store_internal(
 	};
 
 	let pending_payment_store = match pending_payment_store_res {
+		// NOTE: This store must keep all its entries in memory: the wallet scans it in full on
+		// every chain tip change and to resolve replaced transactions. It stays bounded anyway,
+		// as entries are removed once a payment is no longer pending.
 		Ok(pending_payments) => Arc::new(PendingPaymentStore::new(
 			pending_payments,
+			KeepAllEntries,
 			PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
 			PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&kv_store),

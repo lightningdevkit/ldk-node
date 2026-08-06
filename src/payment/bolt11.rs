@@ -276,7 +276,7 @@ impl Bolt11Payment {
 
 		let payment_hash = invoice.payment_hash();
 		let payment_id = PaymentId(invoice.payment_hash().0);
-		if let Some(payment) = self.payment_store.get(&payment_id) {
+		if let Some(payment) = self.runtime.block_on(self.payment_store.get(&payment_id))? {
 			if payment.status == PaymentStatus::Pending
 				|| payment.status == PaymentStatus::Succeeded
 			{
@@ -506,7 +506,7 @@ impl Bolt11Payment {
 			return Err(Error::InvalidPaymentPreimage);
 		}
 
-		if let Some(details) = self.payment_store.get(&payment_id) {
+		if let Some(details) = self.runtime.block_on(self.payment_store.get(&payment_id))? {
 			// For payments requested via `receive*_via_jit_channel_for_hash()`
 			// `skimmed_fee_msat` held by LSP must be taken into account.
 			let skimmed_fee_msat = match details.kind {

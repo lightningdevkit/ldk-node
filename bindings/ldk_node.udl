@@ -147,11 +147,13 @@ interface Node {
 	void update_channel_config([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, ChannelConfig channel_config);
 	[Throws=NodeError]
 	void sync_wallets();
+	[Throws=NodeError]
 	PaymentDetails? payment([ByRef]PaymentId payment_id);
 	[Throws=NodeError]
 	void remove_payment([ByRef]PaymentId payment_id);
 	BalanceDetails list_balances();
-	sequence<PaymentDetails> list_payments();
+	[Throws=NodeError]
+	PaymentDetailsPage list_payments(PageToken? page_token);
 	sequence<PeerDetails> list_peers();
 	sequence<ChannelDetails> list_channels();
 	NetworkGraph network_graph();
@@ -235,6 +237,7 @@ enum NodeError {
 	"InvalidDateTime",
 	"InvalidFeeRate",
 	"InvalidScriptPubKey",
+	"InvalidPageToken",
 	"DuplicatePayment",
 	"UnsupportedCurrency",
 	"InsufficientFunds",
@@ -276,6 +279,10 @@ enum PaymentFailureReason {
 };
 
 typedef dictionary PaymentDetails;
+
+typedef dictionary PaymentDetailsPage;
+
+typedef interface PageToken;
 
 [Remote]
 dictionary RouteParametersConfig {

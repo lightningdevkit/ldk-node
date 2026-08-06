@@ -28,7 +28,7 @@ use common::{
 	open_channel_with_all, premine_and_distribute_funds, premine_blocks, prepare_rbf,
 	random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_builder, setup_node,
 	setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_tx, InMemoryStore,
-	TestChainSource, TestConfig, TestStoreType, TestSyncStore,
+	NodePaymentExt, TestChainSource, TestConfig, TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
@@ -58,7 +58,7 @@ use serde_json::json;
 async fn wait_for_classified_funding_payment(node: &Node, funding_txid: Txid) {
 	let poll = async {
 		loop {
-			let classified = node.list_payments().into_iter().any(|p| {
+			let classified = node.list_all_payments().into_iter().any(|p| {
 				matches!(
 					p.kind,
 					PaymentKind::Onchain { txid, tx_type: Some(_), .. } if txid == funding_txid
@@ -590,16 +590,15 @@ async fn split_underpaid_bolt11_payment() {
 	expect_payment_successful_event!(node_b, Some(payment_id_b), None);
 
 	// The receiver records the full invoice amount; each payer records only its own half.
-	let receiver_payments =
-		node_c.list_payments_with_filter(|p| p.id == receiver_payment_id.unwrap());
+	let receiver_payments = node_c.list_payments_matching(|p| p.id == receiver_payment_id.unwrap());
 	assert_eq!(receiver_payments.len(), 1);
 	assert_eq!(receiver_payments.first().unwrap().amount_msat, Some(amount_msat));
 
-	let node_a_payments = node_a.list_payments_with_filter(|p| p.id == payment_id_a);
+	let node_a_payments = node_a.list_payments_matching(|p| p.id == payment_id_a);
 	assert_eq!(node_a_payments.len(), 1);
 	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(half_amount_msat));
 
-	let node_b_payments = node_b.list_payments_with_filter(|p| p.id == payment_id_b);
+	let node_b_payments = node_b.list_payments_matching(|p| p.id == payment_id_b);
 	assert_eq!(node_b_payments.len(), 1);
 	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(half_amount_msat));
 }
@@ -723,8 +722,8 @@ async fn onchain_send_receive() {
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 	assert_eq!(node_b.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
 
-	let node_a_payments = node_a.list_payments();
-	let node_b_payments = node_b.list_payments();
+	let node_a_payments = node_a.list_all_payments();
+	let node_b_payments = node_b.list_all_payments();
 	for payments in [&node_a_payments, &node_b_payments] {
 		assert_eq!(payments.len(), 1)
 	}
@@ -752,10 +751,10 @@ async fn onchain_send_receive() {
 	expect_channel_ready_event!(node_b, node_a.node_id());
 
 	let node_a_payments =
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
 	assert_eq!(node_a_payments.len(), 1);
 	let node_b_payments =
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_b.list_payments_matching(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
 	assert_eq!(node_b_payments.len(), 2);
 
 	let onchain_fee_buffer_sat = 1000;
@@ -791,7 +790,7 @@ async fn onchain_send_receive() {
 	node_b.sync_wallets().unwrap();
 
 	let payment_id = PaymentId(txid.to_byte_array());
-	let payment_a = node_a.payment(&payment_id).unwrap();
+	let payment_a = node_a.payment(&payment_id).unwrap().unwrap();
 	assert_eq!(payment_a.status, PaymentStatus::Pending);
 	match payment_a.kind {
 		PaymentKind::Onchain { status, tx_type, .. } => {
@@ -801,7 +800,7 @@ async fn onchain_send_receive() {
 		_ => panic!("Unexpected payment kind"),
 	}
 	assert!(payment_a.fee_paid_msat > Some(0));
-	let payment_b = node_b.payment(&payment_id).unwrap();
+	let payment_b = node_b.payment(&payment_id).unwrap().unwrap();
 	assert_eq!(payment_b.status, PaymentStatus::Pending);
 	match payment_b.kind {
 		PaymentKind::Onchain { status, tx_type, .. } => {
@@ -827,13 +826,13 @@ async fn onchain_send_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	let node_a_payments =
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
 	assert_eq!(node_a_payments.len(), 2);
 	let node_b_payments =
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_b.list_payments_matching(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
 	assert_eq!(node_b_payments.len(), 3);
 
-	let payment_a = node_a.payment(&payment_id).unwrap();
+	let payment_a = node_a.payment(&payment_id).unwrap().unwrap();
 	match payment_a.kind {
 		PaymentKind::Onchain { txid: _txid, status, tx_type } => {
 			assert_eq!(_txid, txid);
@@ -843,7 +842,7 @@ async fn onchain_send_receive() {
 		_ => panic!("Unexpected payment kind"),
 	}
 
-	let payment_b = node_b.payment(&payment_id).unwrap();
+	let payment_b = node_b.payment(&payment_id).unwrap().unwrap();
 	match payment_b.kind {
 		PaymentKind::Onchain { txid: _txid, status, tx_type } => {
 			assert_eq!(_txid, txid);
@@ -870,10 +869,10 @@ async fn onchain_send_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	let node_a_payments =
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
 	assert_eq!(node_a_payments.len(), 3);
 	let node_b_payments =
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_b.list_payments_matching(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
 	assert_eq!(node_b_payments.len(), 4);
 
 	let addr_b = node_b.onchain_payment().new_address().unwrap();
@@ -894,10 +893,10 @@ async fn onchain_send_receive() {
 	assert!(node_b.list_balances().spendable_onchain_balance_sats < expected_node_b_balance_upper);
 
 	let node_a_payments =
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
 	assert_eq!(node_a_payments.len(), 4);
 	let node_b_payments =
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
+		node_b.list_payments_matching(|p| matches!(p.kind, PaymentKind::Onchain { .. }));
 	assert_eq!(node_b_payments.len(), 5);
 }
 
@@ -932,7 +931,7 @@ async fn reorged_onchain_payment_returns_to_unconfirmed() {
 
 	let payment_id = PaymentId(txid.to_byte_array());
 	for node in [&node_a, &node_b] {
-		let payment = node.payment(&payment_id).unwrap();
+		let payment = node.payment(&payment_id).unwrap().unwrap();
 		assert_eq!(payment.status, PaymentStatus::Pending);
 		match payment.kind {
 			PaymentKind::Onchain { status, .. } => {
@@ -958,7 +957,7 @@ async fn reorged_onchain_payment_returns_to_unconfirmed() {
 	node_b.sync_wallets().unwrap();
 
 	for node in [&node_a, &node_b] {
-		let payment = node.payment(&payment_id).unwrap();
+		let payment = node.payment(&payment_id).unwrap().unwrap();
 		assert_eq!(payment.status, PaymentStatus::Pending);
 		match payment.kind {
 			PaymentKind::Onchain { status, .. } => {
@@ -1777,7 +1776,7 @@ async fn splice_channel() {
 	// them to the channel balance since there may not be a change output.
 	let expected_splice_in_lightning_balance_sat = 4_000_002;
 
-	let payments = node_b.list_payments();
+	let payments = node_b.list_all_payments();
 	let payment =
 		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
 	assert_eq!(payment.fee_paid_msat, Some(expected_splice_in_fee_sat * 1_000));
@@ -1829,7 +1828,7 @@ async fn splice_channel() {
 
 	let expected_splice_out_fee_sat = 183;
 
-	let payments = node_a.list_payments();
+	let payments = node_a.list_all_payments();
 	let payment =
 		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
 	assert_eq!(payment.fee_paid_msat, Some(expected_splice_out_fee_sat * 1_000));
@@ -1943,7 +1942,8 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// the RBF replaces it, so it can be force-confirmed (instead of the RBF) further below.
 	let original_candidate: Option<(Option<u64>, String)> = if confirm_original {
 		let payment_id = PaymentId(original_txo.txid.to_byte_array());
-		let fee = node_b.payment(&payment_id).expect("splice payment exists").fee_paid_msat;
+		let fee =
+			node_b.payment(&payment_id).unwrap().expect("splice payment exists").fee_paid_msat;
 		let raw_tx: String = bitcoind
 			.client
 			.call("getrawtransaction", &[json!(original_txo.txid.to_string())])
@@ -1981,7 +1981,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// the replacement.
 	let rbf_candidate_fee = {
 		let payment_id = PaymentId(original_txo.txid.to_byte_array());
-		let payment = node_b.payment(&payment_id).expect("splice payment exists");
+		let payment = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
 		match payment.kind {
 			PaymentKind::Onchain {
 				txid,
@@ -1996,7 +1996,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 		}
 		assert_eq!(payment.status, PaymentStatus::Pending);
 		// Only one Onchain Pending payment for this splice attempt (not one per candidate).
-		let splice_payments = node_b.list_payments_with_filter(|p| {
+		let splice_payments = node_b.list_payments_matching(|p| {
 			p.direction == PaymentDirection::Outbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. })
 				&& p.status == PaymentStatus::Pending
@@ -2056,7 +2056,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// winning RBF candidate, and `fee_paid_msat` carries this node's `FundingContribution` fee.
 	{
 		let payment_id = PaymentId(original_txo.txid.to_byte_array());
-		let payment = node_b.payment(&payment_id).expect("splice payment graduated");
+		let payment = node_b.payment(&payment_id).unwrap().expect("splice payment graduated");
 		assert_eq!(payment.status, PaymentStatus::Succeeded);
 		match payment.kind {
 			PaymentKind::Onchain { txid, status: ConfirmationStatus::Confirmed { .. }, .. } => {
@@ -2117,7 +2117,7 @@ async fn funding_payment_graduates_without_channel_ready() {
 	// confirmations, asserted before draining any LDK event — so graduation is not driven by the
 	// Lightning `ChannelReady` signal.
 	let payment_id = PaymentId(funding_txo.txid.to_byte_array());
-	let payment = node_a.payment(&payment_id).expect("funding payment exists");
+	let payment = node_a.payment(&payment_id).unwrap().expect("funding payment exists");
 	assert_eq!(payment.status, PaymentStatus::Succeeded);
 	match payment.kind {
 		PaymentKind::Onchain {
@@ -2180,7 +2180,7 @@ async fn splice_payment_reorged_to_unconfirmed() {
 	node_b.sync_wallets().unwrap();
 
 	let payment_id = PaymentId(splice_txo.txid.to_byte_array());
-	let payment = node_b.payment(&payment_id).expect("splice payment exists");
+	let payment = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
 	assert_eq!(payment.status, PaymentStatus::Pending);
 	assert!(matches!(
 		payment.kind,
@@ -2203,7 +2203,7 @@ async fn splice_payment_reorged_to_unconfirmed() {
 
 	// The funding payment returns to `Unconfirmed` and stays `Pending`, exercising the
 	// `TxUnconfirmed` arm for a funding payment.
-	let payment = node_b.payment(&payment_id).expect("splice payment still exists");
+	let payment = node_b.payment(&payment_id).unwrap().expect("splice payment still exists");
 	assert_eq!(payment.status, PaymentStatus::Pending);
 	assert!(matches!(
 		payment.kind,
@@ -2321,7 +2321,7 @@ async fn simple_bolt12_send_receive() {
 		ref e => panic!("{} got unexpected event!: {:?}", "node_a", e),
 	}
 	let node_a_payments =
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
+		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
 	assert_eq!(node_a_payments.len(), 1);
 	match node_a_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer {
@@ -2348,7 +2348,7 @@ async fn simple_bolt12_send_receive() {
 
 	expect_payment_received_event!(node_b, expected_amount_msat);
 	let node_b_payments =
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
+		node_b.list_payments_matching(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
 	assert_eq!(node_b_payments.len(), 1);
 	match node_b_payments.first().unwrap().kind {
 		PaymentKind::Bolt12Offer { hash, preimage, secret, offer_id, .. } => {
@@ -2386,7 +2386,7 @@ async fn simple_bolt12_send_receive() {
 		.unwrap();
 
 	expect_payment_successful_event!(node_a, Some(payment_id), None);
-	let node_a_payments = node_a.list_payments_with_filter(|p| {
+	let node_a_payments = node_a.list_payments_matching(|p| {
 		matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == payment_id
 	});
 	assert_eq!(node_a_payments.len(), 1);
@@ -2416,7 +2416,7 @@ async fn simple_bolt12_send_receive() {
 
 	expect_payment_received_event!(node_b, expected_amount_msat);
 	let node_b_payment_id = PaymentId(payment_hash.0);
-	let node_b_payments = node_b.list_payments_with_filter(|p| {
+	let node_b_payments = node_b.list_payments_matching(|p| {
 		matches!(p.kind, PaymentKind::Bolt12Offer { .. }) && p.id == node_b_payment_id
 	});
 	assert_eq!(node_b_payments.len(), 1);
@@ -2451,7 +2451,7 @@ async fn simple_bolt12_send_receive() {
 	expect_payment_received_event!(node_a, overpaid_amount);
 
 	let node_b_payment_id = node_b
-		.list_payments_with_filter(|p| {
+		.list_payments_matching(|p| {
 			matches!(p.kind, PaymentKind::Bolt12Refund { .. })
 				&& p.amount_msat == Some(overpaid_amount)
 		})
@@ -2460,7 +2460,7 @@ async fn simple_bolt12_send_receive() {
 		.id;
 	expect_payment_successful_event!(node_b, Some(node_b_payment_id), None);
 
-	let node_b_payments = node_b.list_payments_with_filter(|p| {
+	let node_b_payments = node_b.list_payments_matching(|p| {
 		matches!(p.kind, PaymentKind::Bolt12Refund { .. }) && p.id == node_b_payment_id
 	});
 	assert_eq!(node_b_payments.len(), 1);
@@ -2486,7 +2486,7 @@ async fn simple_bolt12_send_receive() {
 	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(overpaid_amount));
 
 	let node_a_payment_id = PaymentId(invoice.payment_hash().0);
-	let node_a_payments = node_a.list_payments_with_filter(|p| {
+	let node_a_payments = node_a.list_payments_matching(|p| {
 		matches!(p.kind, PaymentKind::Bolt12Refund { .. }) && p.id == node_a_payment_id
 	});
 	assert_eq!(node_a_payments.len(), 1);
@@ -3016,7 +3016,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
 	let client_payment_id =
 		expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
-	let client_payment = client_node.payment(&client_payment_id).unwrap();
+	let client_payment = client_node.payment(&client_payment_id).unwrap().unwrap();
 	match client_payment.kind {
 		PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, Some(service_fee_msat));
@@ -3091,7 +3091,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
 	let client_payment_id =
 		expect_payment_received_event!(client_node, expected_received_amount_msat).unwrap();
-	let client_payment = client_node.payment(&client_payment_id).unwrap();
+	let client_payment = client_node.payment(&client_payment_id).unwrap().unwrap();
 	match client_payment.kind {
 		PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, Some(service_fee_msat));
@@ -3138,7 +3138,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	client_node.bolt11_payment().fail_for_hash(manual_payment_hash).unwrap();
 
 	expect_event!(payer_node, PaymentFailed);
-	assert_eq!(client_node.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
+	assert_eq!(client_node.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Failed);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -3197,7 +3197,7 @@ async fn spontaneous_send_with_custom_preimage() {
 	// check payment status and verify stored preimage
 	expect_payment_successful_event!(node_a, Some(payment_id), None);
 	let details: PaymentDetails =
-		node_a.list_payments_with_filter(|p| p.id == payment_id).first().unwrap().clone();
+		node_a.list_payments_matching(|p| p.id == payment_id).first().unwrap().clone();
 	assert_eq!(details.status, PaymentStatus::Succeeded);
 	if let PaymentKind::Spontaneous { preimage: Some(pi), .. } = details.kind {
 		assert_eq!(pi.0, custom_bytes);
@@ -3207,7 +3207,7 @@ async fn spontaneous_send_with_custom_preimage() {
 
 	// Verify receiver side (node_b)
 	expect_payment_received_event!(node_b, amount_msat);
-	let receiver_payments: Vec<PaymentDetails> = node_b.list_payments_with_filter(|p| {
+	let receiver_payments: Vec<PaymentDetails> = node_b.list_payments_matching(|p| {
 		p.direction == PaymentDirection::Inbound
 			&& matches!(p.kind, PaymentKind::Spontaneous { .. })
 	});
@@ -3604,12 +3604,15 @@ async fn payment_persistence_after_restart() {
 			}
 
 			// Verify payment succeeded
-			assert_eq!(node_a.payment(&payment_id).unwrap().status, PaymentStatus::Succeeded);
+			assert_eq!(
+				node_a.payment(&payment_id).unwrap().unwrap().status,
+				PaymentStatus::Succeeded
+			);
 		}
 		println!("All {} payments completed successfully", num_payments);
 
 		// Verify node_a has 200 outbound Bolt11 payments before shutdown
-		let outbound_payments_before = node_a.list_payments_with_filter(|p| {
+		let outbound_payments_before = node_a.list_payments_matching(|p| {
 			p.direction == PaymentDirection::Outbound
 				&& matches!(p.kind, PaymentKind::Bolt11 { .. })
 		});
@@ -3626,7 +3629,7 @@ async fn payment_persistence_after_restart() {
 	let restarted_node_a = setup_node(&chain_source, config_a);
 
 	// Assert all 200 payments are still in the store
-	let outbound_payments_after = restarted_node_a.list_payments_with_filter(|p| {
+	let outbound_payments_after = restarted_node_a.list_payments_matching(|p| {
 		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
 	});
 	assert_eq!(
@@ -3869,7 +3872,7 @@ async fn onchain_fee_bump_rbf() {
 	node_b.sync_wallets().unwrap();
 
 	let payment_id = PaymentId(txid.to_byte_array());
-	let original_payment = node_b.payment(&payment_id).unwrap();
+	let original_payment = node_b.payment(&payment_id).unwrap().unwrap();
 	let original_fee = original_payment.fee_paid_msat.unwrap();
 
 	// Non-existent payment id
@@ -3898,7 +3901,7 @@ async fn onchain_fee_bump_rbf() {
 	node_b.sync_wallets().unwrap();
 
 	// Verify fee increased and txid updated for node_b
-	let new_payment = node_b.payment(&payment_id).unwrap();
+	let new_payment = node_b.payment(&payment_id).unwrap().unwrap();
 	assert!(
 		new_payment.fee_paid_msat > Some(original_fee),
 		"Fee should increase after RBF bump. Original: {}, New: {}",
@@ -3922,7 +3925,7 @@ async fn onchain_fee_bump_rbf() {
 	node_b.sync_wallets().unwrap();
 
 	// Verify second bump payment exists and txid updated for node_b
-	let second_payment = node_b.payment(&payment_id).unwrap();
+	let second_payment = node_b.payment(&payment_id).unwrap().unwrap();
 	assert!(
 		second_payment.fee_paid_msat > new_payment.fee_paid_msat,
 		"Second bump should have higher fee than first bump"
@@ -3948,7 +3951,7 @@ async fn onchain_fee_bump_rbf() {
 	);
 
 	// Verify final payment is confirmed
-	let final_payment = node_b.payment(&payment_id).unwrap();
+	let final_payment = node_b.payment(&payment_id).unwrap().unwrap();
 	assert_eq!(final_payment.status, PaymentStatus::Succeeded);
 	match final_payment.kind {
 		PaymentKind::Onchain { status, .. } => {
@@ -3958,7 +3961,7 @@ async fn onchain_fee_bump_rbf() {
 	}
 
 	// Verify node A received the funds correctly
-	let node_a_received_payment = node_a.list_payments_with_filter(|p| {
+	let node_a_received_payment = node_a.list_payments_matching(|p| {
 		p.id == payment_id && matches!(p.kind, PaymentKind::Onchain { .. })
 	});
 

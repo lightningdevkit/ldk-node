@@ -25,6 +25,39 @@ use lightning_types::string::UntrustedString;
 use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate};
 use crate::hex_utils;
 
+/// An opaque token used to continue a paginated listing.
+///
+/// See [`Node::list_payments`] for how to use it.
+///
+/// [`Node::list_payments`]: crate::Node::list_payments
+#[cfg(not(feature = "uniffi"))]
+pub type PageToken = lightning::util::persist::PageToken;
+/// An opaque token used to continue a paginated listing.
+///
+/// See [`Node::list_payments`] for how to use it.
+///
+/// [`Node::list_payments`]: crate::Node::list_payments
+#[cfg(feature = "uniffi")]
+pub type PageToken = std::sync::Arc<crate::ffi::PageToken>;
+
+/// A page of payments, as returned by [`Node::list_payments`].
+///
+/// [`Node::list_payments`]: crate::Node::list_payments
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PaymentDetailsPage {
+	/// The payments in this page, ordered from most recently created to least recently created.
+	///
+	/// Note this may hold fewer payments than the storage backend's page size even when further
+	/// pages remain, so iterate until `next_page_token` is `None` rather than until a short page.
+	pub payments: Vec<PaymentDetails>,
+	/// The token to pass to the next [`Node::list_payments`] call, or `None` if this was the last
+	/// page.
+	///
+	/// [`Node::list_payments`]: crate::Node::list_payments
+	pub next_page_token: Option<PageToken>,
+}
+
 /// Represents a payment.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
@@ -151,6 +184,10 @@ impl Readable for PaymentDetails {
 impl StorableObjectId for PaymentId {
 	fn encode_to_hex_str(&self) -> String {
 		hex_utils::to_string(&self.0)
+	}
+
+	fn decode_from_hex_str(s: &str) -> Option<Self> {
+		hex_utils::to_vec(s)?.try_into().ok().map(PaymentId)
 	}
 }
 impl StorableObject for PaymentDetails {
@@ -1084,5 +1121,142 @@ mod tests {
 		let reencoded = decoded.encode();
 		assert_eq!(reencoded[0], 2);
 		assert_eq!(decoded, PaymentKind::read(&mut &*reencoded).unwrap());
+	}
+}
+
+#[cfg(test)]
+mod bounded_cache_tests {
+	use std::num::NonZeroUsize;
+	use std::sync::Arc;
+
+	use lightning::util::test_utils::TestLogger;
+
+	use super::*;
+	use crate::config::PAYMENT_CACHE_CAPACITY;
+	use crate::data_store::{DataStore, DataStoreUpdateResult, KeepLeastRecentlyUsed};
+	use crate::io::test_utils::InMemoryStore;
+	use crate::io::{
+		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	};
+	use crate::types::{DynStore, DynStoreWrapper};
+
+	type BoundedPaymentStore = DataStore<PaymentDetails, Arc<TestLogger>, KeepLeastRecentlyUsed>;
+
+	fn new_bounded_payment_store(capacity: usize) -> BoundedPaymentStore {
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		DataStore::new(
+			Vec::new(),
+			KeepLeastRecentlyUsed::new(NonZeroUsize::new(capacity).unwrap()),
+			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			kv_store,
+			Arc::new(TestLogger::new()),
+		)
+	}
+
+	fn bolt11_payment(seed: u8) -> PaymentDetails {
+		PaymentDetails::new(
+			PaymentId([seed; 32]),
+			PaymentKind::Bolt11 {
+				hash: PaymentHash([seed; 32]),
+				preimage: Some(PaymentPreimage([seed.wrapping_add(1); 32])),
+				secret: Some(PaymentSecret([seed.wrapping_add(2); 32])),
+				counterparty_skimmed_fee_msat: Some(seed as u64 * 7),
+			},
+			Some(seed as u64 * 1_000),
+			Some(seed as u64 * 3),
+			PaymentDirection::Outbound,
+			PaymentStatus::Succeeded,
+		)
+	}
+
+	#[tokio::test]
+	async fn evicted_payments_survive_a_round_trip_through_the_store() {
+		// A bounded store hands back objects it deserialized rather than ones it kept, so every
+		// field a payment carries has to survive being written out and read back.
+		let data_store = new_bounded_payment_store(2);
+
+		let payments: Vec<PaymentDetails> = (1..=10u8).map(bolt11_payment).collect();
+		for payment in &payments {
+			data_store.insert(payment.clone()).await.unwrap();
+		}
+		assert_eq!(2, data_store.cached_len());
+
+		for payment in &payments {
+			assert_eq!(Some(payment.clone()), data_store.get(&payment.id).await.unwrap());
+		}
+	}
+
+	#[tokio::test]
+	async fn updating_an_evicted_payment_preserves_the_fields_it_omits() {
+		// This is the failure mode a bounded cache invites: the wallet builds a partial
+		// `PaymentDetails` from a transaction and merges it in, and a payment that happens to have
+		// been evicted must not lose the fields only the merge target knows about.
+		let data_store = new_bounded_payment_store(1);
+
+		let mut stored = bolt11_payment(1);
+		stored.fee_paid_msat = Some(4_242);
+		data_store.insert(stored.clone()).await.unwrap();
+
+		// Push it out of the cache.
+		data_store.insert(bolt11_payment(2)).await.unwrap();
+
+		let mut update = PaymentDetailsUpdate::new(stored.id);
+		update.status = Some(PaymentStatus::Failed);
+		assert_eq!(Ok(DataStoreUpdateResult::Updated), data_store.update(update).await);
+
+		let updated = data_store.get(&stored.id).await.unwrap().unwrap();
+		assert_eq!(PaymentStatus::Failed, updated.status);
+		assert_eq!(Some(4_242), updated.fee_paid_msat);
+		assert_eq!(stored.kind, updated.kind);
+		assert_eq!(stored.amount_msat, updated.amount_msat);
+	}
+
+	#[tokio::test]
+	async fn listing_covers_payments_the_cache_cannot_hold() {
+		let data_store = new_bounded_payment_store(3);
+
+		let payments: Vec<PaymentDetails> = (1..=60u8).map(bolt11_payment).collect();
+		for payment in &payments {
+			data_store.insert(payment.clone()).await.unwrap();
+		}
+		assert_eq!(3, data_store.cached_len());
+
+		let mut listed = Vec::new();
+		let mut page_token = None;
+		loop {
+			let page = data_store.list_page(page_token).await.unwrap();
+			listed.extend(page.objects);
+			match page.next_page_token {
+				Some(token) => page_token = Some(token),
+				None => break,
+			}
+		}
+
+		let mut expected = payments;
+		expected.reverse();
+		assert_eq!(expected, listed);
+		// Listing the whole history must not have displaced the cache.
+		assert_eq!(3, data_store.cached_len());
+	}
+
+	#[tokio::test]
+	async fn the_cache_stays_within_its_capacity() {
+		let capacity = 16;
+		let data_store = new_bounded_payment_store(capacity);
+
+		for seed in 1..=200u8 {
+			data_store.insert(bolt11_payment(seed)).await.unwrap();
+			assert!(data_store.cached_len() <= capacity);
+		}
+		assert_eq!(capacity, data_store.cached_len());
+	}
+
+	#[test]
+	fn payment_cache_capacity_is_sane() {
+		// Small enough to bound memory at well under a megabyte, large enough to cover the recent
+		// payments a node actually works with.
+		assert!(PAYMENT_CACHE_CAPACITY.get() >= 100);
+		assert!(PAYMENT_CACHE_CAPACITY.get() <= 10_000);
 	}
 }
