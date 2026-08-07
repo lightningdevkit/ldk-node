@@ -538,18 +538,47 @@ impl Wallet {
 		Ok(tx)
 	}
 
+	/// Returns a fresh address, served from the address pool so that all external handouts
+	/// consume the oldest revealed index first.
+	///
+	/// Allocating strictly in reveal order keeps the window of revealed-but-unused scripts
+	/// compact: as soon as a handed-out address is used on-chain, everything before it no longer
+	/// counts towards a from-seed restore's full-scan stop gap. Minting a fresh index here
+	/// instead would strand the pooled indices as an ever-growing unused tail in front of every
+	/// address a restore must discover.
+	///
+	/// Unlike [`Wallet::pop_pooled_address`], this may wait on persistence, so the handout is
+	/// made durable before the address is returned: the awaited refill rewrites the pool record
+	/// (no longer containing the popped index) before topping the pool back up, so a restart
+	/// never hands the returned address out again. On failure the address instead returns to
+	/// the pool unhanded-out, with a compensating record write covering the case where the
+	/// failed refill had already rewritten the record.
 	pub(crate) async fn get_new_address(&self) -> Result<bitcoin::Address, Error> {
-		let mut locked_persister = self.persister.lock().await;
-		let (address_info, change_set) = {
-			let mut locked_wallet = self.inner.lock().expect("lock");
-			let address_info = locked_wallet.reveal_next_address(KeychainKind::External);
-			(address_info, locked_wallet.take_staged().unwrap_or_default())
+		let (index, address) = loop {
+			if let Some(entry) = self.address_pool.lock().expect("lock").available.pop_front() {
+				break entry;
+			}
+			// Another caller may pop what this refill publishes before the re-check, so loop
+			// rather than assuming a successful refill leaves the pool non-empty.
+			self.refill_address_pool().await?;
 		};
-		locked_persister.persist_changeset(change_set).await.map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
-		Ok(address_info.address)
+
+		// Force the record rewrite: a failed handout's push-back can leave the pool over its
+		// target size, and an early-returning refill would then leave the just-popped index
+		// durably recorded, handing the address out again after a restart.
+		match self.refill_address_pool_inner(true).await {
+			Ok(()) => Ok(address),
+			Err(e) => {
+				// The address was never handed out, so return it for the next caller rather
+				// than leaving its index revealed but unreachable.
+				self.address_pool.lock().expect("lock").available.push_front((index, address));
+				// The refill may have failed after rewriting the record, which then durably
+				// excludes the pushed-back index; rewrite it from the restored pool so a crash
+				// before the next successful refill doesn't strand the index outside the pool.
+				self.rewrite_pool_record().await;
+				Err(e)
+			},
+		}
 	}
 
 	/// Loads the persisted address pool and tops it up to [`ADDRESS_POOL_TARGET_SIZE`].
@@ -621,9 +650,16 @@ impl Wallet {
 	/// Tops the address pool up to [`ADDRESS_POOL_TARGET_SIZE`], publishing newly revealed
 	/// addresses only after their reveal has been durably persisted.
 	pub(crate) async fn refill_address_pool(&self) -> Result<(), Error> {
+		self.refill_address_pool_inner(false).await
+	}
+
+	/// [`Wallet::refill_address_pool`], where `force_record_rewrite` makes the pool-record
+	/// rewrite unconditional: a pool at or over its target size otherwise skips it, which after
+	/// a pop would leave the popped index in the record.
+	async fn refill_address_pool_inner(&self, force_record_rewrite: bool) -> Result<(), Error> {
 		let _refill_guard = self.address_pool_refill_lock.lock().await;
 
-		{
+		if !force_record_rewrite {
 			let locked_pool = self.address_pool.lock().expect("lock");
 			if locked_pool.unpublished.is_empty()
 				&& locked_pool.available.len() >= ADDRESS_POOL_TARGET_SIZE
@@ -678,6 +714,25 @@ impl Wallet {
 		let unpublished = core::mem::take(&mut locked_pool.unpublished);
 		locked_pool.available.extend(unpublished);
 		Ok(())
+	}
+
+	/// Best-effort rewrite of the pool record from the pool's current contents, used to
+	/// re-include a pushed-back index whose handout's record write succeeded before the handout
+	/// failed. Failures are only logged: the pool still covers the index in memory and the next
+	/// successful refill rewrites the record anyway, so only a crash before then strands the
+	/// index outside the pool.
+	async fn rewrite_pool_record(&self) {
+		let mut locked_persister = self.persister.lock().await;
+		let indices: Vec<u32> = {
+			let locked_pool = self.address_pool.lock().expect("lock");
+			locked_pool
+				.available
+				.iter()
+				.chain(locked_pool.unpublished.iter())
+				.map(|(index, _)| *index)
+				.collect()
+		};
+		let _ = locked_persister.persist_address_pool(indices).await;
 	}
 
 	pub(crate) async fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
@@ -2720,6 +2775,196 @@ mod tests {
 				wallet.inner.lock().unwrap().derivation_index(KeychainKind::External).unwrap();
 			assert!(derivation <= final_derivation);
 		}
+	}
+
+	#[tokio::test]
+	async fn get_new_address_pops_the_oldest_pooled_address_and_persists_the_dequeue() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		wallet.initialize_address_pool().await.unwrap();
+
+		let (front_index, front_address) =
+			wallet.address_pool.lock().unwrap().available.front().cloned().unwrap();
+		assert_eq!(front_index, 0);
+
+		// The handout comes from the pool front (the oldest revealed index) rather than minting
+		// a fresh index past the pool's unused tail, keeping the window of revealed-but-unused
+		// scripts compact for a from-seed restore's full scan.
+		let address = wallet.get_new_address().await.unwrap();
+		assert_eq!(address, front_address);
+		let indices = pooled_indices(&wallet);
+		assert_eq!(indices.len(), ADDRESS_POOL_TARGET_SIZE);
+		assert!(!indices.contains(&front_index));
+
+		// The dequeue must be durable before the address is returned: a wallet reloaded from
+		// the store may not pool (and later re-hand-out) the returned address.
+		let reloaded = new_test_wallet(Arc::clone(&store), true).await;
+		reloaded.initialize_address_pool().await.unwrap();
+		let reloaded_indices = pooled_indices(&reloaded);
+		assert!(!reloaded_indices.contains(&front_index));
+		assert_eq!(reloaded_indices, pooled_indices(&wallet));
+	}
+
+	#[tokio::test]
+	async fn get_new_address_fails_closed_and_returns_the_address_to_the_pool() {
+		let fail_store = FailSwitchStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		wallet.initialize_address_pool().await.unwrap();
+
+		let (front_index, front_address) =
+			wallet.address_pool.lock().unwrap().available.front().cloned().unwrap();
+
+		// While persistence is unavailable no address is handed out, and the popped address
+		// returns to the pool front: its index is neither skipped nor left unreachable.
+		fail_store.fail_writes.store(true, Ordering::Release);
+		assert!(wallet.get_new_address().await.is_err());
+		let (index, address) =
+			wallet.address_pool.lock().unwrap().available.front().cloned().unwrap();
+		assert_eq!(index, front_index);
+		assert_eq!(address, front_address);
+		assert_eq!(pooled_indices(&wallet).len(), ADDRESS_POOL_TARGET_SIZE);
+
+		// Once persistence recovers, the very address the failed call popped is handed out.
+		fail_store.fail_writes.store(false, Ordering::Release);
+		assert_eq!(wallet.get_new_address().await.unwrap(), front_address);
+	}
+
+	#[tokio::test]
+	async fn get_new_address_refills_an_empty_pool_before_handing_out() {
+		let fail_store = FailSwitchStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		// With the pool empty and persistence down, the call must fail closed rather than hand
+		// out an address whose reveal isn't durable.
+		fail_store.fail_writes.store(true, Ordering::Release);
+		assert!(wallet.get_new_address().await.is_err());
+
+		// With persistence available it fills the pool inline and serves from it.
+		fail_store.fail_writes.store(false, Ordering::Release);
+		let address = wallet.get_new_address().await.unwrap();
+		let expected = wallet.inner.lock().unwrap().peek_address(KeychainKind::External, 0).address;
+		assert_eq!(address, expected);
+		assert_eq!(pooled_indices(&wallet).len(), ADDRESS_POOL_TARGET_SIZE);
+	}
+
+	#[tokio::test]
+	async fn get_new_address_never_reuses_across_restarts_after_an_overfull_pool() {
+		let fail_store = FailSwitchStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		wallet.initialize_address_pool().await.unwrap();
+
+		// A failed handout returns the popped address to the pool while the refill retains its
+		// unpublished reveal; the next successful refill then records and publishes all
+		// seventeen indices, filling the pool past its target size.
+		fail_store.fail_writes.store(true, Ordering::Release);
+		assert!(wallet.get_new_address().await.is_err());
+		fail_store.fail_writes.store(false, Ordering::Release);
+		wallet.refill_address_pool().await.unwrap();
+		assert!(pooled_indices(&wallet).len() > ADDRESS_POOL_TARGET_SIZE);
+
+		// Handing out from the overfull pool must still durably exclude the returned address
+		// from the pool record before returning: a wallet reloaded from the store may never
+		// hand it out again.
+		let address = wallet.get_new_address().await.unwrap();
+
+		let reloaded = new_test_wallet(Arc::clone(&store), true).await;
+		reloaded.initialize_address_pool().await.unwrap();
+		let reloaded_pool = reloaded.address_pool.lock().unwrap();
+		assert!(!reloaded_pool.available.iter().any(|(_, pooled)| *pooled == address));
+	}
+
+	/// An in-memory store that can fail all writes except the address-pool record's.
+	#[derive(Clone)]
+	struct RecordOnlyStore {
+		inner: Arc<InMemoryStore>,
+		fail_non_record_writes: Arc<AtomicBool>,
+	}
+
+	impl RecordOnlyStore {
+		fn new() -> Self {
+			Self {
+				inner: Arc::new(InMemoryStore::new()),
+				fail_non_record_writes: Arc::new(AtomicBool::new(false)),
+			}
+		}
+	}
+
+	impl KVStore for RecordOnlyStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			let inner = Arc::clone(&self.inner);
+			let fail_non_record_writes = Arc::clone(&self.fail_non_record_writes);
+			let primary_namespace = primary_namespace.to_string();
+			let secondary_namespace = secondary_namespace.to_string();
+			let key = key.to_string();
+			async move {
+				if fail_non_record_writes.load(Ordering::Acquire)
+					&& key != BDK_WALLET_ADDRESS_POOL_KEY
+				{
+					return Err(io::Error::new(io::ErrorKind::Other, "writes disabled"));
+				}
+				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
+			}
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for RecordOnlyStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+			PaginatedKVStore::list_paginated(
+				&*self.inner,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+		}
+	}
+
+	#[tokio::test]
+	async fn failed_get_new_address_leaves_the_pool_record_covering_the_pool() {
+		let record_store = RecordOnlyStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(record_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		wallet.initialize_address_pool().await.unwrap();
+		let (front_index, _) =
+			wallet.address_pool.lock().unwrap().available.front().cloned().unwrap();
+
+		// Fail everything but the pool record: the handout's record write succeeds (durably
+		// excluding the popped index) while the reveal flush fails, so the call fails and the
+		// address goes back into the pool. Its index must not be stranded by that partial
+		// failure: a crash right here reloads the pool from the record, and a durably revealed
+		// index missing from it would never be pooled or handed out again.
+		record_store.fail_non_record_writes.store(true, Ordering::Release);
+		assert!(wallet.get_new_address().await.is_err());
+		record_store.fail_non_record_writes.store(false, Ordering::Release);
+
+		let reloaded = new_test_wallet(Arc::clone(&store), true).await;
+		reloaded.initialize_address_pool().await.unwrap();
+		assert!(pooled_indices(&reloaded).contains(&front_index));
 	}
 
 	#[tokio::test]

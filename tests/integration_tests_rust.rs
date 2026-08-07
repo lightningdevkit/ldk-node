@@ -1364,6 +1364,12 @@ async fn onchain_wallet_force_full_scan_rediscovers_esplora_funds() {
 	let address_source_config = random_config();
 	let node_entropy = address_source_config.node_entropy;
 	let address_source_node = setup_node(&chain_source, address_source_config);
+	// Skip past the address pool every node with this seed reveals (and thus watches) on its
+	// first start: the funded addresses must lie beyond it to be genuinely unknown to the stale
+	// node's incremental sync.
+	for _ in 0..16 {
+		address_source_node.onchain_payment().new_address().unwrap();
+	}
 	let addr_1 = address_source_node.onchain_payment().new_address().unwrap();
 	let addr_2 = address_source_node.onchain_payment().new_address().unwrap();
 	address_source_node.stop().unwrap();
