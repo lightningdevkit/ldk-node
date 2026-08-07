@@ -199,7 +199,22 @@ impl KVStoreWalletPersister {
 	pub(super) async fn persist_changeset(
 		&mut self, change_set: ChangeSet,
 	) -> Result<(), std::io::Error> {
+		self.stage(change_set);
+		self.persist_staged().await
+	}
+
+	/// Merges the given change set into the pending one without persisting it, to be flushed by
+	/// [`Self::persist_staged`] or any later persist call.
+	///
+	/// Staging is synchronous, letting callers that run as abortable tasks hand a change set
+	/// over without an intervening await point: once staged, an abort leaves it pending for the
+	/// next persist rather than dropping it.
+	pub(super) fn stage(&mut self, change_set: ChangeSet) {
 		self.pending_change_set.merge(change_set);
+	}
+
+	/// Persists the pending change set, retaining it for retry on failure.
+	pub(super) async fn persist_staged(&mut self) -> Result<(), std::io::Error> {
 		Self::persist_inner(
 			&mut self.latest_change_set,
 			&self.kv_store,
