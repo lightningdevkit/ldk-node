@@ -27,8 +27,8 @@ use lightning_transaction_sync::ElectrumSyncClient;
 
 use super::WalletSyncStatus;
 use crate::config::{
-	clamp_full_scan_stop_gap, Config, ElectrumSyncConfig, MAX_FULL_SCAN_STOP_GAP,
-	MIN_FULL_SCAN_STOP_GAP,
+	clamp_full_scan_stop_gap, Config, ElectrumSyncConfig, ADDRESS_POOL_SIZE,
+	MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
 };
 use crate::error::Error;
 use crate::fee_estimator::{
@@ -598,7 +598,10 @@ impl ElectrumRuntimeClient {
 				bounded
 			);
 		}
-		bounded as usize
+		// Extend the gap by the address pool size: the pool keeps that many addresses standing
+		// revealed-but-unused, which a scan restoring the wallet from seed alone would otherwise
+		// count against the configured gap.
+		(bounded as usize).saturating_add(ADDRESS_POOL_SIZE as usize)
 	}
 
 	async fn get_incremental_sync_wallet_update(

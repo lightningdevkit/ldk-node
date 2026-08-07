@@ -1754,6 +1754,13 @@ fn build_with_store_internal(
 		Arc::clone(&pending_payment_store),
 	));
 
+	// Fill the address pool up front so LDK's sync `SignerProvider` callbacks can hand out
+	// pre-persisted addresses without waiting on wallet persistence.
+	runtime.block_on(wallet.initialize_address_pool()).map_err(|e| {
+		log_error!(logger, "Failed to initialize the wallet's address pool: {}", e);
+		BuildError::WalletSetupFailed
+	})?;
+
 	tx_broadcaster.set_wallet(Arc::downgrade(&wallet));
 
 	// Initialize the KeysManager

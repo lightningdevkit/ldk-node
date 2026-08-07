@@ -79,6 +79,20 @@ pub const MIN_FULL_SCAN_STOP_GAP: u32 = 1;
 /// Values above 1000 are clamped to 1000 when a full scan runs.
 pub const MAX_FULL_SCAN_STOP_GAP: u32 = 1000;
 
+/// The number of addresses the node keeps revealed and persisted ahead of use, from which it
+/// serves fresh-address requests and channel destination and shutdown scripts.
+///
+/// Pooled addresses are revealed-but-unused wallet scripts, and a wallet restored from seed
+/// alone has no record of them. On-chain wallet full scans therefore extend the configured stop
+/// gap (e.g. [`EsploraSyncConfig::full_scan_stop_gap`]) by this amount, so that the pool's
+/// unused tail can never exhaust the gap on its own.
+///
+/// After a restore from seed, the pool refills from the keychain's first indices before the
+/// initial full scan runs, so it can serve addresses a previous installation of the wallet
+/// already handed out — possibly even used ones. The cost is address reuse, not fund
+/// visibility: the reveals keep the scripts watched and the scan discovers any prior use.
+pub const ADDRESS_POOL_SIZE: u32 = 16;
+
 // The number of concurrent requests made against the API provider.
 pub(crate) const BDK_CLIENT_CONCURRENCY: usize = 4;
 
@@ -550,6 +564,10 @@ pub struct EsploraSyncConfig {
 	/// ([`MAX_FULL_SCAN_STOP_GAP`]), inclusive. Values outside this range will be clamped to the
 	/// nearest bound and a warning will be logged when the full scan runs.
 	///
+	/// The scan extends this value by [`ADDRESS_POOL_SIZE`] to account for the addresses the
+	/// node keeps revealed-but-unused ahead of use, which would otherwise count against the gap
+	/// when restoring a wallet from seed.
+	///
 	/// **Note:** Large values can cause many Esplora requests, hit server rate limits,
 	/// take a long time to complete, or cause syncs to fail with
 	/// [`SyncTimeoutsConfig::onchain_wallet_sync_timeout_secs`].
@@ -600,6 +618,10 @@ pub struct ElectrumSyncConfig {
 	/// **Allowed values:** 1 ([`MIN_FULL_SCAN_STOP_GAP`]) to 1000
 	/// ([`MAX_FULL_SCAN_STOP_GAP`]), inclusive. Values outside this range will be clamped to the
 	/// nearest bound and a warning will be logged when the full scan runs.
+	///
+	/// The scan extends this value by [`ADDRESS_POOL_SIZE`] to account for the addresses the
+	/// node keeps revealed-but-unused ahead of use, which would otherwise count against the gap
+	/// when restoring a wallet from seed.
 	///
 	/// **Note:** Large values can cause many Electrum requests, hit server rate limits,
 	/// take a long time to complete, or cause syncs to fail with
