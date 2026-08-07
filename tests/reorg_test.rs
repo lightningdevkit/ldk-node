@@ -2,16 +2,73 @@ mod common;
 use std::collections::HashMap;
 
 use bitcoin::Amount;
+use electrsd::corepc_node::mtype::ChainTipsStatus;
 use ldk_node::payment::{PaymentDirection, PaymentKind};
 use ldk_node::{Event, LightningBalance, PendingSweepBalance};
 use proptest::prelude::prop;
 use proptest::proptest;
+use serde_json::json;
 
 use crate::common::{
 	expect_event, exponential_backoff_poll, generate_blocks_and_wait, invalidate_blocks,
 	open_channel, premine_and_distribute_funds, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_node, wait_for_outpoint_spend, wait_for_tx,
+	setup_bitcoind_and_electrsd, setup_node, wait_for_outpoint_spend, wait_for_tx, TestChainSource,
 };
+
+#[test]
+fn bitcoind_rest_follows_valid_reorg() {
+	let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+	rt.block_on(async {
+		let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+		let node = setup_node(&TestChainSource::BitcoindRestSync(&bitcoind), random_config());
+		let (bitcoind, electrs) = (&bitcoind.client, &electrsd.client);
+
+		generate_blocks_and_wait(bitcoind, electrs, 3).await;
+		node.sync_wallets().unwrap();
+		let original_tip = node.status().current_best_block;
+		let fork_block_hash = bitcoind
+			.get_block_hash((original_tip.height - 1) as u64)
+			.expect("failed to get fork block hash")
+			.block_hash()
+			.expect("fork block hash should be present");
+
+		invalidate_blocks(bitcoind, 2);
+		generate_blocks_and_wait(bitcoind, electrs, 3).await;
+		let replacement_tip_hash =
+			bitcoind.best_block_hash().expect("failed to get replacement tip");
+		let replacement_tip_height =
+			bitcoind.get_blockchain_info().expect("failed to get replacement tip height").blocks
+				as u32;
+
+		let _: serde_json::Value = bitcoind
+			.call("reconsiderblock", &[json!(fork_block_hash)])
+			.expect("failed to reconsider original branch");
+		let chain_tips = bitcoind
+			.get_chain_tips()
+			.expect("failed to get chain tips")
+			.into_model()
+			.expect("failed to parse chain tips")
+			.0;
+		assert!(chain_tips.iter().any(|tip| {
+			tip.hash == original_tip.block_hash && tip.status == ChainTipsStatus::ValidFork
+		}));
+		assert!(chain_tips.iter().any(|tip| {
+			tip.hash == replacement_tip_hash && tip.status == ChainTipsStatus::Active
+		}));
+
+		node.sync_wallets()
+			.expect("REST-backed node did not follow Bitcoin Core's replacement chain");
+		let synced_tip = node.status().current_best_block;
+		assert_eq!(
+			synced_tip.block_hash, replacement_tip_hash,
+			"REST-backed node did not follow Bitcoin Core's replacement chain"
+		);
+		assert_eq!(
+			synced_tip.height, replacement_tip_height,
+			"REST-backed node did not follow Bitcoin Core's replacement chain"
+		);
+	})
+}
 
 async fn wait_for_pending_sweep_balance<F>(
 	node: &ldk_node::Node, mut matches_balance: F,
