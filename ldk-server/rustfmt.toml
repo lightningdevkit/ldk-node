@@ -1,0 +1,19 @@
+use_small_heuristics = "Max"
+fn_params_layout = "Compressed"
+hard_tabs = true
+use_field_init_shorthand = true
+max_width = 100
+match_block_trailing_comma = true
+format_code_in_doc_comments = true
+comment_width = 100
+format_macro_matchers = true
+group_imports = "StdExternalCrate"
+reorder_imports = true
+imports_granularity = "Module"
+normalize_comments = true
+normalize_doc_attributes = true
+style_edition = "2021"
+# TBD: do we want comment and string wrapping?
+#wrap_comments = true
+#format_strings = true
+#overflow_delimited_expr = true
