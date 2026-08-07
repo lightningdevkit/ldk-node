@@ -21,8 +21,8 @@ use tokio::sync::oneshot;
 
 use crate::connection::ConnectionManager;
 use crate::liquidity::{
-	select_lsps_for_protocol, LspConfig, LspNode, LIQUIDITY_REQUEST_TIMEOUT_SECS,
-	LSPS_DISCOVERY_WAIT_TIMEOUT_SECS,
+	select_lsps_for_protocol, LspConfig, LspNode, PendingRequest, PendingRequestGuard,
+	LIQUIDITY_REQUEST_TIMEOUT_SECS, LSPS_DISCOVERY_WAIT_TIMEOUT_SECS,
 };
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
@@ -35,11 +35,11 @@ where
 {
 	pub(crate) lsp_nodes: Arc<RwLock<Vec<LspNode>>>,
 	pub(crate) pending_opening_params_requests:
-		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS1OpeningParamsResponse>>>,
+		Mutex<HashMap<LSPSRequestId, PendingRequest<LSPS1OpeningParamsResponse>>>,
 	pub(crate) pending_create_order_requests:
-		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS1OrderStatus>>>,
+		Mutex<HashMap<LSPSRequestId, PendingRequest<LSPS1OrderStatus>>>,
 	pub(crate) pending_check_order_status_requests:
-		Mutex<HashMap<LSPSRequestId, oneshot::Sender<LSPS1OrderStatus>>>,
+		Mutex<HashMap<LSPSRequestId, PendingRequest<LSPS1OrderStatus>>>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
 	pub(crate) liquidity_manager: Arc<LiquidityManager>,
 	pub(crate) logger: L,
@@ -61,12 +61,17 @@ where
 		})?;
 
 		let (request_sender, request_receiver) = oneshot::channel();
-		{
+		let _pending_request = {
 			let mut pending_opening_params_requests_lock =
 				self.pending_opening_params_requests.lock().expect("lock");
 			let request_id = client_handler.request_supported_options(lsps1_node.node_id);
-			pending_opening_params_requests_lock.insert(request_id, request_sender);
-		}
+			PendingRequestGuard::insert(
+				&self.pending_opening_params_requests,
+				&mut pending_opening_params_requests_lock,
+				request_id,
+				request_sender,
+			)
+		};
 
 		tokio::time::timeout(Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS), request_receiver)
 			.await
@@ -146,7 +151,7 @@ where
 
 		let (request_sender, request_receiver) = oneshot::channel();
 		let request_id;
-		{
+		let _pending_request = {
 			let mut pending_create_order_requests_lock =
 				self.pending_create_order_requests.lock().expect("lock");
 			request_id = client_handler.create_order(
@@ -154,8 +159,13 @@ where
 				order_params.clone(),
 				Some(refund_address),
 			);
-			pending_create_order_requests_lock.insert(request_id.clone(), request_sender);
-		}
+			PendingRequestGuard::insert(
+				&self.pending_create_order_requests,
+				&mut pending_create_order_requests_lock,
+				request_id.clone(),
+				request_sender,
+			)
+		};
 
 		let response = tokio::time::timeout(
 			Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS),
@@ -191,12 +201,17 @@ where
 		})?;
 
 		let (request_sender, request_receiver) = oneshot::channel();
-		{
+		let _pending_request = {
 			let mut pending_check_order_status_requests_lock =
 				self.pending_check_order_status_requests.lock().expect("lock");
 			let request_id = client_handler.check_order_status(&lsp_node_id, order_id);
-			pending_check_order_status_requests_lock.insert(request_id, request_sender);
-		}
+			PendingRequestGuard::insert(
+				&self.pending_check_order_status_requests,
+				&mut pending_check_order_status_requests_lock,
+				request_id,
+				request_sender,
+			)
+		};
 
 		let response = tokio::time::timeout(
 			Duration::from_secs(LIQUIDITY_REQUEST_TIMEOUT_SECS),
@@ -229,7 +244,7 @@ where
 					.iter()
 					.any(|n| n.node_id == counterparty_node_id)
 				{
-					if let Some(sender) = self
+					if let Some(request) = self
 						.pending_opening_params_requests
 						.lock()
 						.expect("lock")
@@ -237,7 +252,7 @@ where
 					{
 						let response = LSPS1OpeningParamsResponse { supported_options };
 
-						match sender.send(response) {
+						match request.sender.send(response) {
 							Ok(()) => (),
 							Err(_) => {
 								log_error!(
@@ -279,7 +294,7 @@ where
 					.iter()
 					.any(|n| n.node_id == counterparty_node_id)
 				{
-					if let Some(sender) =
+					if let Some(request) =
 						self.pending_create_order_requests.lock().expect("lock").remove(&request_id)
 					{
 						let response = LSPS1OrderStatus {
@@ -290,7 +305,7 @@ where
 							counterparty_node_id,
 						};
 
-						match sender.send(response) {
+						match request.sender.send(response) {
 							Ok(()) => (),
 							Err(_) => {
 								log_error!(
@@ -329,7 +344,7 @@ where
 					.iter()
 					.any(|n| n.node_id == counterparty_node_id)
 				{
-					if let Some(sender) = self
+					if let Some(request) = self
 						.pending_check_order_status_requests
 						.lock()
 						.expect("lock")
@@ -343,7 +358,7 @@ where
 							counterparty_node_id,
 						};
 
-						match sender.send(response) {
+						match request.sender.send(response) {
 							Ok(()) => (),
 							Err(_) => {
 								log_error!(

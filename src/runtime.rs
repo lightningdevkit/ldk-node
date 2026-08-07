@@ -13,6 +13,8 @@ use std::time::Duration;
 
 use lightning::util::native_async::FutureSpawner;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::config::{
 	BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECS, LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS,
@@ -28,13 +30,18 @@ pub(crate) struct Runtime {
 }
 
 struct CancellableBackgroundTasks {
-	tasks: JoinSet<()>,
+	tasks: TaskTracker,
+	cancellation_token: CancellationToken,
 	accepting_tasks: bool,
 }
 
 impl CancellableBackgroundTasks {
 	fn new() -> Self {
-		Self { tasks: JoinSet::new(), accepting_tasks: true }
+		Self {
+			tasks: TaskTracker::new(),
+			cancellation_token: CancellationToken::new(),
+			accepting_tasks: true,
+		}
 	}
 }
 
@@ -109,8 +116,7 @@ impl Runtime {
 	where
 		F: Future<Output = ()> + Send + 'static,
 	{
-		let mut cancellable_background_tasks =
-			self.cancellable_background_tasks.lock().expect("lock");
+		let cancellable_background_tasks = self.cancellable_background_tasks.lock().expect("lock");
 		if !cancellable_background_tasks.accepting_tasks {
 			log_trace!(
 				self.logger,
@@ -122,11 +128,32 @@ impl Runtime {
 		// Since it seems to make a difference to `tokio` (see
 		// https://docs.rs/tokio/latest/tokio/time/fn.timeout.html#panics) we make sure the futures
 		// are always put in an `async` / `.await` closure.
-		cancellable_background_tasks.tasks.spawn_on(async { future.await }, runtime_handle);
+		let cancellation_token = cancellable_background_tasks.cancellation_token.clone();
+		// Detach the handle while the tracker continues tracking the task.
+		let _ = cancellable_background_tasks.tasks.spawn_on(
+			async move {
+				tokio::select! {
+					biased;
+					_ = cancellation_token.cancelled() => {},
+					_ = future => {},
+				}
+			},
+			runtime_handle,
+		);
 	}
 
 	pub fn allow_cancellable_background_task_spawns(&self) {
-		self.cancellable_background_tasks.lock().expect("lock").accepting_tasks = true;
+		let mut cancellable_background_tasks =
+			self.cancellable_background_tasks.lock().expect("lock");
+		if cancellable_background_tasks.cancellation_token.is_cancelled() {
+			debug_assert!(
+				cancellable_background_tasks.tasks.is_empty(),
+				"Expected all cancellable background tasks to be stopped"
+			);
+			cancellable_background_tasks.cancellation_token = CancellationToken::new();
+		}
+		cancellable_background_tasks.tasks.reopen();
+		cancellable_background_tasks.accepting_tasks = true;
 	}
 
 	pub fn spawn_background_processor_task<F>(&self, future: F)
@@ -164,15 +191,15 @@ impl Runtime {
 	}
 
 	pub fn abort_cancellable_background_tasks(&self) {
-		let mut tasks = {
+		let tasks = {
 			let mut cancellable_background_tasks =
 				self.cancellable_background_tasks.lock().expect("lock");
 			cancellable_background_tasks.accepting_tasks = false;
-			core::mem::take(&mut cancellable_background_tasks.tasks)
+			cancellable_background_tasks.tasks.close();
+			cancellable_background_tasks.cancellation_token.cancel();
+			cancellable_background_tasks.tasks.clone()
 		};
-		debug_assert!(tasks.len() > 0, "Expected some cancellable background_tasks");
-		tasks.abort_all();
-		self.block_on(async { while let Some(_) = tasks.join_next().await {} })
+		self.block_on(tasks.wait())
 	}
 
 	pub fn wait_on_background_tasks(&self) {
@@ -381,19 +408,68 @@ impl FutureSpawner for RuntimeSpawner {
 
 #[cfg(test)]
 mod tests {
-	use tokio::sync::oneshot;
+	use tokio::sync::{mpsc, oneshot};
 
 	use super::*;
+
+	struct DropNotifier(Option<oneshot::Sender<()>>);
+
+	impl Drop for DropNotifier {
+		fn drop(&mut self) {
+			if let Some(sender) = self.0.take() {
+				let _ = sender.send(());
+			}
+		}
+	}
 
 	fn test_runtime() -> Runtime {
 		Runtime::new(Arc::new(Logger::new_log_facade())).unwrap()
 	}
 
 	#[test]
+	fn completed_cancellable_tasks_are_released_before_shutdown() {
+		const TASK_COUNT: usize = 64;
+
+		let runtime = test_runtime();
+		let (completion_sender, mut completion_receiver) = mpsc::channel(TASK_COUNT);
+		for _ in 0..TASK_COUNT {
+			let completion_sender = completion_sender.clone();
+			runtime.spawn_cancellable_background_task(async move {
+				completion_sender.send(()).await.expect("completion receiver should be open");
+			});
+		}
+		drop(completion_sender);
+
+		let completed_tasks_are_released = runtime.block_on(async {
+			for _ in 0..TASK_COUNT {
+				completion_receiver.recv().await.expect("cancellable task should complete");
+			}
+
+			tokio::time::timeout(Duration::from_secs(1), async {
+				loop {
+					if runtime.cancellable_background_tasks.lock().expect("lock").tasks.is_empty() {
+						break;
+					}
+					tokio::task::yield_now().await;
+				}
+			})
+			.await
+			.is_ok()
+		});
+
+		assert!(
+			completed_tasks_are_released,
+			"completed cancellable tasks should be released before shutdown"
+		);
+	}
+
+	#[test]
 	fn late_cancellable_spawns_are_not_polled_after_abort() {
 		let runtime = test_runtime();
 		let (started_sender, started_receiver) = oneshot::channel();
+		let (dropped_sender, dropped_receiver) = oneshot::channel();
 		runtime.spawn_cancellable_background_task(async move {
+			let _drop_notifier = DropNotifier(Some(dropped_sender));
 			let _ = started_sender.send(());
 			std::future::pending::<()>().await;
 		});
@@ -402,6 +478,9 @@ mod tests {
 		});
 
 		runtime.abort_cancellable_background_tasks();
+		runtime.block_on(async {
+			dropped_receiver.await.expect("aborted task should be dropped before abort returns");
+		});
 
 		let (late_spawn_sender, late_spawn_receiver) = oneshot::channel();
 		runtime.spawn_cancellable_background_task(async move {
