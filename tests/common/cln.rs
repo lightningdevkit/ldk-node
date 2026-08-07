@@ -181,12 +181,81 @@ impl ExternalNode for TestClnNode {
 		Ok(invoice.bolt11)
 	}
 
+	async fn create_offer(
+		&self, amount_msat: u64, description: &str,
+	) -> Result<String, TestFailure> {
+		let desc = description.to_string();
+		let label = format!(
+			"{}-{}",
+			desc,
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.unwrap_or_default()
+				.as_nanos()
+		);
+
+		let params = serde_json::json!({
+			"amount": format!("{}msat", amount_msat),
+			"description": desc,
+			"label": label,
+			"single_use": true,
+		});
+
+		let response: serde_json::Value = self
+			.rpc(move |c| c.call("offer", &params))
+			.await
+			.map_err(|e| self.make_error(format!("offer RPC call failed: {}", e)))?;
+
+		let offer_str = response["bolt12"]
+			.as_str()
+			.ok_or_else(|| {
+				self.make_error("Failed to parse 'bolt12' from CLN response".to_string())
+			})?
+			.to_string();
+
+		Ok(offer_str)
+	}
+
 	async fn pay_invoice(&self, invoice: &str) -> Result<String, TestFailure> {
 		let inv = invoice.to_string();
 		let result = self
 			.rpc(move |c| c.pay(&inv, PayOptions::default()))
 			.await
 			.map_err(|e| self.make_error(format!("pay: {}", e)))?;
+		Ok(result.payment_preimage)
+	}
+
+	async fn pay_offer(
+		&self, offer_str: &str, amount_msat: Option<u64>,
+	) -> Result<String, TestFailure> {
+		let offer = offer_str.to_string();
+
+		let mut fetch_params = serde_json::json!({
+			"offer": offer,
+			"quantity": 1,
+		});
+
+		if let Some(msat) = amount_msat {
+			fetch_params["amount_msat"] = serde_json::json!(format!("{}msat", msat));
+		}
+
+		let fetch_response: serde_json::Value =
+			self.rpc(move |c| c.call("fetchinvoice", fetch_params)).await.map_err(|e| {
+				self.make_error(format!("fetchinvoice RPC call failed for BOLT12: {}", e))
+			})?;
+
+		let inv = fetch_response["invoice"]
+			.as_str()
+			.ok_or_else(|| {
+				self.make_error("Failed to parse 'invoice' from fetchinvoice response".to_string())
+			})?
+			.to_string();
+
+		let result = self
+			.rpc(move |c| c.pay(&inv, PayOptions::default()))
+			.await
+			.map_err(|e| self.make_error(format!("pay: {}", e)))?;
+
 		Ok(result.payment_preimage)
 	}
 

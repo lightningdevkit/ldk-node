@@ -151,7 +151,7 @@ pub(crate) async fn run_interop_scenario<N, E, F>(
 }
 
 /// Open a channel, send a BOLT11 payment in each direction, then cooperatively close.
-pub(crate) async fn basic_channel_cycle_scenario<E: ElectrumApi>(
+pub(crate) async fn basic_channel_cycle_bolt11_scenario<E: ElectrumApi>(
 	node: &Node, peer: &(impl ExternalNode + ?Sized), bitcoind: &BitcoindClient, electrs: &E,
 ) {
 	let (user_ch, ext_ch) = channel::open_channel_to_external(
@@ -164,8 +164,28 @@ pub(crate) async fn basic_channel_cycle_scenario<E: ElectrumApi>(
 	)
 	.await;
 
-	payment::send_bolt11_to_peer(node, peer, 10_000_000, "basic-send").await;
+	payment::send_bolt11_to_peer(node, peer, 10_000_000, "basic-send-bolt11").await;
 	payment::receive_bolt11_payment(node, peer, 10_000_000).await;
+
+	channel::cooperative_close(node, peer, bitcoind, electrs, &user_ch, &ext_ch, Side::Ldk).await;
+}
+
+/// Open a channel, send a BOLT12 payment in each direction, then cooperatively close.
+pub(crate) async fn basic_channel_cycle_bolt12_scenario<E: ElectrumApi>(
+	node: &Node, peer: &(impl ExternalNode + ?Sized), bitcoind: &BitcoindClient, electrs: &E,
+) {
+	let (user_ch, ext_ch) = channel::open_channel_to_external(
+		node,
+		peer,
+		bitcoind,
+		electrs,
+		1_000_000,
+		Some(500_000_000),
+	)
+	.await;
+
+	payment::send_bolt12_to_peer(node, peer, 10_000_000, "basic-send-bolt12").await;
+	payment::receive_bolt12_payment(node, peer, 10_000_000).await;
 
 	channel::cooperative_close(node, peer, bitcoind, electrs, &user_ch, &ext_ch, Side::Ldk).await;
 }
@@ -188,8 +208,8 @@ pub(crate) async fn keysend_scenario<E: ElectrumApi>(
 	channel::cooperative_close(node, peer, bitcoind, electrs, &user_ch, &ext_ch, Side::Ldk).await;
 }
 
-/// Open a channel, send a payment, then force-close from the LDK side.
-pub(crate) async fn force_close_after_payment_scenario<E: ElectrumApi>(
+/// Open a channel, send a BOLT11 payment, then force-close from the LDK side.
+pub(crate) async fn force_close_after_payment_bolt11_scenario<E: ElectrumApi>(
 	node: &Node, peer: &(impl ExternalNode + ?Sized), bitcoind: &BitcoindClient, electrs: &E,
 ) {
 	let (user_ch, ext_ch) = channel::open_channel_to_external(
@@ -201,7 +221,25 @@ pub(crate) async fn force_close_after_payment_scenario<E: ElectrumApi>(
 		Some(500_000_000),
 	)
 	.await;
-	payment::send_bolt11_to_peer(node, peer, 5_000_000, "force-close").await;
+	payment::send_bolt11_to_peer(node, peer, 5_000_000, "force-close-bolt11").await;
+	wait_for_htlcs_settled(peer, &ext_ch).await;
+	channel::force_close(node, peer, bitcoind, electrs, &user_ch, &ext_ch, Side::Ldk).await;
+}
+
+/// Open a channel, send a BOLT12 payment, then force-close from the LDK side.
+pub(crate) async fn force_close_after_payment_bolt12_scenario<E: ElectrumApi>(
+	node: &Node, peer: &(impl ExternalNode + ?Sized), bitcoind: &BitcoindClient, electrs: &E,
+) {
+	let (user_ch, ext_ch) = channel::open_channel_to_external(
+		node,
+		peer,
+		bitcoind,
+		electrs,
+		1_000_000,
+		Some(500_000_000),
+	)
+	.await;
+	payment::send_bolt12_to_peer(node, peer, 5_000_000, "force-close-bolt12").await;
 	wait_for_htlcs_settled(peer, &ext_ch).await;
 	channel::force_close(node, peer, bitcoind, electrs, &user_ch, &ext_ch, Side::Ldk).await;
 }
@@ -225,8 +263,8 @@ pub(crate) async fn disconnect_during_payment_scenario<E: ElectrumApi>(
 	channel::cooperative_close(node, peer, bitcoind, electrs, &user_ch, &ext_ch, Side::Ldk).await;
 }
 
-/// Open a channel, splice-in additional funds, send a post-splice payment, then close.
-pub(crate) async fn splice_in_scenario<E: ElectrumApi>(
+/// Open a channel, splice-in additional funds, send a post-splice BOLT11 payment, then close.
+pub(crate) async fn splice_in_bolt11_scenario<E: ElectrumApi>(
 	node: &Node, peer: &(impl ExternalNode + ?Sized), bitcoind: &BitcoindClient, electrs: &E,
 ) {
 	let (user_ch, ext_ch) = channel::open_channel_to_external(
@@ -245,7 +283,32 @@ pub(crate) async fn splice_in_scenario<E: ElectrumApi>(
 	sync_wallets_with_retry(node).await;
 	expect_channel_ready_event!(node, ext_node_id);
 
-	payment::send_bolt11_to_peer(node, peer, 5_000_000, "post-splice").await;
+	payment::send_bolt11_to_peer(node, peer, 5_000_000, "post-splice-bolt11").await;
+
+	channel::cooperative_close(node, peer, bitcoind, electrs, &user_ch, &ext_ch, Side::Ldk).await;
+}
+
+/// Open a channel, splice-in additional funds, send a post-splice BOLT12 payment, then close.
+pub(crate) async fn splice_in_bolt12_scenario<E: ElectrumApi>(
+	node: &Node, peer: &(impl ExternalNode + ?Sized), bitcoind: &BitcoindClient, electrs: &E,
+) {
+	let (user_ch, ext_ch) = channel::open_channel_to_external(
+		node,
+		peer,
+		bitcoind,
+		electrs,
+		1_000_000,
+		Some(500_000_000),
+	)
+	.await;
+	let ext_node_id = peer.get_node_id().await.unwrap();
+	node.splice_in(&user_ch, ext_node_id, 500_000).unwrap();
+	expect_splice_pending_event!(node, ext_node_id);
+	generate_blocks_and_wait(bitcoind, electrs, 6).await;
+	sync_wallets_with_retry(node).await;
+	expect_channel_ready_event!(node, ext_node_id);
+
+	payment::send_bolt12_to_peer(node, peer, 5_000_000, "post-splice-bolt12").await;
 
 	channel::cooperative_close(node, peer, bitcoind, electrs, &user_ch, &ext_ch, Side::Ldk).await;
 }

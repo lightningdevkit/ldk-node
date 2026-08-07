@@ -12,8 +12,10 @@ mod common;
 use base64::prelude::{Engine as _, BASE64_STANDARD};
 use common::eclair::TestEclairNode;
 use common::scenarios::{
-	basic_channel_cycle_scenario, disconnect_during_payment_scenario,
-	force_close_after_payment_scenario, keysend_scenario, run_interop_scenario, splice_in_scenario,
+	basic_channel_cycle_bolt11_scenario, basic_channel_cycle_bolt12_scenario,
+	disconnect_during_payment_scenario, force_close_after_payment_bolt11_scenario,
+	force_close_after_payment_bolt12_scenario, keysend_scenario, run_interop_scenario,
+	splice_in_bolt11_scenario, splice_in_bolt12_scenario,
 };
 use electrsd::corepc_client::client_sync::Auth;
 use electrsd::corepc_node::Client as BitcoindClient;
@@ -48,8 +50,14 @@ async fn setup_clients() -> (BitcoindClient, ElectrumClient, TestEclairNode) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn test_basic_channel_cycle() {
-	run_interop_scenario(setup_clients(), basic_channel_cycle_scenario).await;
+async fn test_basic_channel_cycle_bolt11() {
+	run_interop_scenario(setup_clients(), basic_channel_cycle_bolt11_scenario).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "BOLT12 support for Eclair is not implemented yet"]
+async fn test_basic_channel_cycle_bolt12() {
+	run_interop_scenario(setup_clients(), basic_channel_cycle_bolt12_scenario).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -58,8 +66,14 @@ async fn test_keysend() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-async fn test_force_close_after_payment() {
-	run_interop_scenario(setup_clients(), force_close_after_payment_scenario).await;
+async fn test_force_close_after_payment_bolt11() {
+	run_interop_scenario(setup_clients(), force_close_after_payment_bolt11_scenario).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "BOLT12 support for Eclair is not implemented yet"]
+async fn test_force_close_after_payment_bolt12() {
+	run_interop_scenario(setup_clients(), force_close_after_payment_bolt12_scenario).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -69,6 +83,12 @@ async fn test_disconnect_during_payment() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "Eclair advertises splicing via custom bit 154 instead of BOLT bit 62/63; disjoint from LDK until Eclair migrates"]
-async fn test_splice_in() {
-	run_interop_scenario(setup_clients(), splice_in_scenario).await;
+async fn test_splice_in_bolt11() {
+	run_interop_scenario(setup_clients(), splice_in_bolt11_scenario).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[ignore = "BOLT12 support for Eclair is not implemented yet"]
+async fn test_splice_in_bolt12() {
+	run_interop_scenario(setup_clients(), splice_in_bolt12_scenario).await;
 }
