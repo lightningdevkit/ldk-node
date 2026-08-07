@@ -105,11 +105,12 @@ impl LSPS2LeaseState {
 	}
 
 	pub(crate) fn fixed_amount(
-		&self, amount_msat: u64, max_fee_msat: Option<u64>,
+		&self, amount_msat: u64, max_fee_msat: Option<u64>, available_lsps: &[PublicKey],
 	) -> Option<(PaymentLease, u64)> {
 		let (id, fee_msat) = self
 			.leases
 			.iter()
+			.filter(|(id, _)| available_lsps.contains(&id.lsp_node_id))
 			.filter(|(_, lease)| lease.payment_size_msat == Some(amount_msat))
 			.filter(|(_, lease)| is_lease_usable(lease))
 			.filter_map(|(id, lease)| {
@@ -126,11 +127,12 @@ impl LSPS2LeaseState {
 	}
 
 	pub(crate) fn variable_amount(
-		&self, max_total_fee_msat: Option<u64>,
+		&self, max_total_fee_msat: Option<u64>, available_lsps: &[PublicKey],
 	) -> Option<(PaymentLease, u64)> {
 		let (id, proportional_fee) = self
 			.leases
 			.iter()
+			.filter(|(id, _)| available_lsps.contains(&id.lsp_node_id))
 			.filter(|(_, lease)| lease.payment_size_msat.is_none())
 			.filter(|(_, lease)| is_lease_usable(lease))
 			.filter(|(_, lease)| {
@@ -215,11 +217,23 @@ mod tests {
 		let cheap = lease(3, 45, 50, Some(1_000), valid_until);
 		let mut state = LSPS2LeaseState::from_leases(vec![expensive.clone(), cheap.clone()]);
 
-		let (selected, _) = state.fixed_amount(1_000, None).unwrap();
+		let available_lsps = [expensive.id.lsp_node_id, cheap.id.lsp_node_id];
+		let (selected, _) = state.fixed_amount(1_000, None, &available_lsps).unwrap();
 		assert_eq!(selected.id, cheap.id);
 		state.remove(&selected.id);
-		let (remaining, _) = state.fixed_amount(1_000, None).unwrap();
+		let (remaining, _) = state.fixed_amount(1_000, None, &available_lsps).unwrap();
 		assert_eq!(remaining.id, expensive.id);
+	}
+
+	#[test]
+	fn ignores_leases_from_unavailable_lsps() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let unavailable = lease(2, 46, 1, Some(1_000), valid_until);
+		let available = lease(3, 47, 2, Some(1_000), valid_until);
+		let state = LSPS2LeaseState::from_leases(vec![unavailable, available.clone()]);
+
+		let (selected, _) = state.fixed_amount(1_000, None, &[available.id.lsp_node_id]).unwrap();
+		assert_eq!(selected.id, available.id, "lease selection ignored the set of available LSPs");
 	}
 
 	#[test]
@@ -228,7 +242,8 @@ mod tests {
 		let variable = lease(2, 46, 50, None, valid_until);
 		let state = LSPS2LeaseState::from_leases(vec![variable.clone()]);
 
-		assert!(state.variable_amount(Some(49)).is_none());
-		assert_eq!(state.variable_amount(Some(50)).unwrap().0.id, variable.id);
+		let available_lsps = [variable.id.lsp_node_id];
+		assert!(state.variable_amount(Some(49), &available_lsps).is_none());
+		assert_eq!(state.variable_amount(Some(50), &available_lsps).unwrap().0.id, variable.id);
 	}
 }

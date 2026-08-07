@@ -451,43 +451,42 @@ where
 	async fn take_cached_fixed_lease(
 		&self, amount_msat: u64,
 	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
-		loop {
-			let Some((lease, fee_msat)) = self
-				.lease_state
-				.lock()
-				.expect("lock")
-				.fixed_amount(amount_msat, self.config.lsps2_max_total_lsp_fee_limit_msat)
-			else {
-				return Ok(None);
-			};
-			let lease = self.consume_selected_lease(lease).await?;
-			if let Some(lsp) =
-				select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
-			{
-				return Ok(Some((lease, fee_msat, lsp)));
-			}
-		}
+		let lsps2_nodes = self.get_lsps2_nodes().await?;
+		let available_lsps = lsps2_nodes.iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
+		let Some((lease, fee_msat)) = self.lease_state.lock().expect("lock").fixed_amount(
+			amount_msat,
+			self.config.lsps2_max_total_lsp_fee_limit_msat,
+			&available_lsps,
+		) else {
+			return Ok(None);
+		};
+		let lsp = lsps2_nodes
+			.into_iter()
+			.find(|lsp| lsp.node_id == lease.id.lsp_node_id)
+			.expect("lease was selected from available LSPs");
+		let lease = self.consume_selected_lease(lease).await?;
+		Ok(Some((lease, fee_msat, lsp)))
 	}
 
 	async fn take_cached_variable_lease(
 		&self,
 	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
-		loop {
-			let Some((lease, proportional_fee)) = self
-				.lease_state
-				.lock()
-				.expect("lock")
-				.variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat)
-			else {
-				return Ok(None);
-			};
-			let lease = self.consume_selected_lease(lease).await?;
-			if let Some(lsp) =
-				select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
-			{
-				return Ok(Some((lease, proportional_fee, lsp)));
-			}
-		}
+		let lsps2_nodes = self.get_lsps2_nodes().await?;
+		let available_lsps = lsps2_nodes.iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
+		let Some((lease, proportional_fee)) = self
+			.lease_state
+			.lock()
+			.expect("lock")
+			.variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat, &available_lsps)
+		else {
+			return Ok(None);
+		};
+		let lsp = lsps2_nodes
+			.into_iter()
+			.find(|lsp| lsp.node_id == lease.id.lsp_node_id)
+			.expect("lease was selected from available LSPs");
+		let lease = self.consume_selected_lease(lease).await?;
+		Ok(Some((lease, proportional_fee, lsp)))
 	}
 
 	fn lsps2_create_jit_invoice(
