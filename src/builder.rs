@@ -1494,12 +1494,21 @@ fn build_with_store_internal(
 
 	// Initialize the ChannelManager
 	let channel_manager = {
-		if let Ok(res) = KVStoreSync::read(
+		let channel_manager_bytes = match KVStoreSync::read(
 			&*kv_store,
 			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 			CHANNEL_MANAGER_PERSISTENCE_KEY,
 		) {
+			Ok(res) => Some(res),
+			Err(e) if e.kind() == lightning::io::ErrorKind::NotFound => None,
+			Err(e) => {
+				log_error!(logger, "Failed to read channel manager from store: {}", e);
+				return Err(BuildError::ReadFailed);
+			},
+		};
+
+		if let Some(res) = channel_manager_bytes {
 			let mut reader = Cursor::new(res);
 			let channel_monitor_references =
 				channel_monitors.iter().map(|(_, chanmon)| chanmon).collect();
@@ -1926,7 +1935,101 @@ pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 
 #[cfg(test)]
 mod tests {
-	use super::{sanitize_alias, BuildError, NodeAlias};
+	use std::future::Future;
+	use std::pin::Pin;
+	use std::sync::Arc;
+
+	use lightning::io;
+	use lightning::util::persist::{
+		KVStore, KVStoreSync, CHANNEL_MANAGER_PERSISTENCE_KEY,
+		CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+	};
+
+	use super::{sanitize_alias, BuildError, NodeAlias, NodeBuilder};
+	use crate::io::test_utils::InMemoryStore;
+	use crate::types::DynStore;
+
+	struct ChannelManagerReadFailingStore(InMemoryStore);
+
+	impl ChannelManagerReadFailingStore {
+		fn fails_read(primary_namespace: &str, secondary_namespace: &str, key: &str) -> bool {
+			primary_namespace == CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE
+				&& secondary_namespace == CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE
+				&& key == CHANNEL_MANAGER_PERSISTENCE_KEY
+		}
+	}
+
+	impl KVStoreSync for ChannelManagerReadFailingStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> io::Result<Vec<u8>> {
+			if Self::fails_read(primary_namespace, secondary_namespace, key) {
+				return Err(io::Error::new(io::ErrorKind::Other, "channel manager read failed"));
+			}
+			KVStoreSync::read(&self.0, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> io::Result<()> {
+			KVStoreSync::write(&self.0, primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> io::Result<()> {
+			KVStoreSync::remove(&self.0, primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> io::Result<Vec<String>> {
+			KVStoreSync::list(&self.0, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl KVStore for ChannelManagerReadFailingStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send>> {
+			let res = KVStoreSync::read(self, primary_namespace, secondary_namespace, key);
+			Box::pin(async move { res })
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
+			let res = KVStoreSync::write(self, primary_namespace, secondary_namespace, key, buf);
+			Box::pin(async move { res })
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
+			let res = KVStoreSync::remove(self, primary_namespace, secondary_namespace, key, lazy);
+			Box::pin(async move { res })
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + 'static + Send>> {
+			let res = KVStoreSync::list(self, primary_namespace, secondary_namespace);
+			Box::pin(async move { res })
+		}
+	}
+
+	#[test]
+	fn channel_manager_read_failure_fails_build() {
+		let mut builder = NodeBuilder::new();
+		builder.set_entropy_seed_bytes([42; 64]);
+		builder.set_log_facade_logger();
+		let store: Arc<DynStore> = Arc::new(ChannelManagerReadFailingStore(InMemoryStore::new()));
+
+		let result = builder.build_with_store(store);
+
+		assert!(matches!(result, Err(BuildError::ReadFailed)));
+	}
 
 	#[test]
 	fn sanitize_empty_node_alias() {
