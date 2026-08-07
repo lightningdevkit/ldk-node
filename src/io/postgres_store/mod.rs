@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use lightning::io;
 use lightning::util::persist::{
@@ -19,11 +20,16 @@ use lightning_types::string::PrintableString;
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
 use tokio_postgres::config::SslMode;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::{Config, Error as PgError};
 
 use self::pool::{make_config_connection, ClientConnection, PgTlsConnector, SmallPool};
+use crate::io::node_lease::{
+	lease_lost_error, NodeLease, NODE_LEASE_DURATION, NODE_LEASE_RELEASE_TIMEOUT,
+	NODE_LEASE_RENEWAL_INTERVAL, NODE_LEASE_RETRY_INTERVAL,
+};
 use crate::io::utils::check_namespace_key_validity;
-use crate::logger::{log_debug, log_info, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::StoreRuntime;
 
 mod migrations;
@@ -43,6 +49,11 @@ const PAGE_SIZE: usize = 50;
 
 // Keep this small while still allowing progress if one runtime worker blocks on sync store access.
 const INTERNAL_RUNTIME_WORKERS: usize = 2;
+
+const NODE_LEASE_TABLE_SUFFIX: &str = "_node_lease";
+const POSTGRES_IDENTIFIER_MAX_BYTES: usize = 63;
+const MAX_KV_TABLE_NAME_BYTES: usize =
+	POSTGRES_IDENTIFIER_MAX_BYTES - NODE_LEASE_TABLE_SUFFIX.len();
 
 fn sql_identifier(identifier: &str) -> io::Result<String> {
 	if identifier.is_empty() || identifier.contains('\0') {
@@ -70,6 +81,21 @@ fn sql_table_identifier(table_name: &str) -> io::Result<String> {
 	Ok(quoted_parts?.join("."))
 }
 
+fn sql_node_lease_table_identifier(table_name: &str) -> io::Result<String> {
+	sql_table_identifier(table_name)?;
+	let table_part = table_name.rsplit_once('.').map_or(table_name, |(_, table)| table);
+	if table_part.len() > MAX_KV_TABLE_NAME_BYTES {
+		return Err(io::Error::new(
+			io::ErrorKind::InvalidInput,
+			format!(
+				"PostgreSQL KV table name exceeds the maximum of {MAX_KV_TABLE_NAME_BYTES} bytes: {table_name}"
+			),
+		));
+	}
+
+	sql_table_identifier(&format!("{table_name}{NODE_LEASE_TABLE_SUFFIX}"))
+}
+
 /// Runs a tokio-postgres query and, if the connection dropped mid-flight, reconnects and retries
 /// once. `$store` is the [`PostgresStoreInner`], `$locked` the held client slot guard,
 /// `$err_map` an `Fn(PgError) -> io::Error` (called at most once), and `$query` an expression
@@ -95,6 +121,7 @@ macro_rules! query_with_retry {
 /// A [`KVStore`] implementation that writes to and reads from a [PostgreSQL] database.
 ///
 /// Maintains an internal runtime for the underlying tokio-postgres connection drivers.
+/// Each instance exclusively leases its configured KV table and fences every mutation.
 ///
 /// [PostgreSQL]: https://www.postgresql.org
 pub struct PostgresStore {
@@ -106,6 +133,8 @@ pub struct PostgresStore {
 
 	// A store-internal runtime that drives PostgreSQL I/O independently from the node runtime.
 	internal_runtime: Option<Arc<StoreRuntime>>,
+
+	lease_renewal_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 // tokio::sync::Mutex (used for the DB client) contains UnsafeCell which opts out of
@@ -128,11 +157,18 @@ impl PostgresStore {
 	/// the default `postgres` database to create it.
 	///
 	/// The given `kv_table_name` will be used or default to [`DEFAULT_KV_TABLE_NAME`].
+	/// A companion lease table is created by appending `_node_lease` to this name.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
 	/// certificates (it does not replace them). If `certificate_pem` is `None`, connections
 	/// will be unencrypted.
+	///
+	/// Construction acquires an exclusive lease for the selected KV table. Returns an error with
+	/// [`io::ErrorKind::WouldBlock`] while another store owns the lease.
+	/// Use [`crate::Builder::build_with_postgres_store`] when building a node so ldk-node can install
+	/// its lease-loss handler before returning it. Passing this store to
+	/// [`crate::Builder::build_with_store`] directly does not support failover.
 	pub async fn new(
 		connection_string: String, db_name: Option<String>, kv_table_name: Option<String>,
 		certificate_pem: Option<String>,
@@ -155,14 +191,67 @@ impl PostgresStore {
 		)?);
 		let tls = Self::build_tls_connector(certificate_pem)?;
 		let task = internal_runtime.spawn(async move {
-			PostgresStoreInner::new(connection_string, db_name, kv_table_name, tls, logger).await
+			let (inner, renewal_started_at) =
+				PostgresStoreInner::new(connection_string, db_name, kv_table_name, tls, logger)
+					.await?;
+			Ok::<_, io::Error>((inner, renewal_started_at))
 		});
-		let inner = task.await.map_err(|e| {
+		let (inner, renewal_started_at) = task.await.map_err(|e| {
 			io::Error::new(io::ErrorKind::Other, format!("PostgreSQL runtime task failed: {}", e))
 		})??;
 		let inner = Arc::new(inner);
-		let next_write_version = AtomicU64::new(1);
-		Ok(Self { inner, next_write_version, internal_runtime: Some(internal_runtime) })
+		inner.node_lease.record_renewal_started_at(renewal_started_at);
+		inner.node_lease.ensure_operation_active()?;
+
+		let inner_ref = Arc::clone(&inner);
+		let lease_ref = Arc::clone(&inner.node_lease);
+		let lease_renewal_task = internal_runtime.spawn(async move {
+			let mut next_delay =
+				NODE_LEASE_RENEWAL_INTERVAL.saturating_sub(renewal_started_at.elapsed());
+			loop {
+				let renewal_attempt = async {
+					tokio::time::sleep(next_delay).await;
+					let started_at = Instant::now();
+					(started_at, inner_ref.renew_node_lease().await)
+				};
+				let (renewal_started_at, renewal_result) = tokio::select! {
+					biased;
+					_ = lease_ref.wait_for_renewal_deadline() => {
+						lease_ref.mark_lost();
+						return;
+					},
+					result = renewal_attempt => result,
+				};
+				match renewal_result {
+					Ok(true) => {
+						lease_ref.record_renewal_started_at(renewal_started_at);
+						next_delay = NODE_LEASE_RENEWAL_INTERVAL
+							.saturating_sub(renewal_started_at.elapsed());
+					},
+					Ok(false) => {
+						lease_ref.mark_lost();
+						return;
+					},
+					Err(e) => {
+						if let Some(logger) = inner_ref.logger.as_ref() {
+							log_error!(logger, "Failed to renew PostgreSQL node lease: {e}");
+						}
+						if lease_ref.renewal_deadline_elapsed() {
+							lease_ref.mark_lost();
+							return;
+						}
+						next_delay = NODE_LEASE_RETRY_INTERVAL;
+					},
+				}
+			}
+		});
+
+		Ok(Self {
+			inner,
+			next_write_version: AtomicU64::new(1),
+			internal_runtime: Some(internal_runtime),
+			lease_renewal_task: Some(lease_renewal_task),
+		})
 	}
 
 	fn build_tls_connector(certificate_pem: Option<String>) -> io::Result<PgTlsConnector> {
@@ -209,10 +298,41 @@ impl PostgresStore {
 	fn internal_runtime(&self) -> Arc<StoreRuntime> {
 		Arc::clone(self.internal_runtime.as_ref().expect("PostgreSQL runtime must be available"))
 	}
+
+	pub(crate) fn node_lease(&self) -> Arc<NodeLease> {
+		Arc::clone(&self.inner.node_lease)
+	}
 }
 
 impl Drop for PostgresStore {
 	fn drop(&mut self) {
+		if let Some(internal_runtime) = self.internal_runtime.as_ref() {
+			let renewal_task = self.lease_renewal_task.take();
+			if let Some(task) = renewal_task.as_ref() {
+				task.abort();
+			}
+
+			let runtime_handle = internal_runtime.handle().clone();
+			let inner = Arc::clone(&self.inner);
+			let _ = std::thread::spawn(move || {
+				runtime_handle.block_on(async move {
+					if let Some(task) = renewal_task {
+						let _ = task.await;
+					}
+
+					// Never run clean-release I/O after the terminal loss path has begun.
+					if !inner.node_lease.is_lost() {
+						let _ = tokio::time::timeout(
+							NODE_LEASE_RELEASE_TIMEOUT,
+							inner.release_node_lease(),
+						)
+						.await;
+					}
+				});
+			})
+			.join();
+		}
+
 		if let Some(internal_runtime) = self.internal_runtime.take() {
 			if let Ok(internal_runtime) = Arc::try_unwrap(internal_runtime) {
 				internal_runtime.shutdown_background();
@@ -375,6 +495,8 @@ struct PostgresStoreInner {
 	pool: SmallPool,
 	config: Config,
 	kv_table_name_sql: String,
+	node_lease_table_name_sql: String,
+	node_lease: Arc<NodeLease>,
 	tls: PgTlsConnector,
 	write_version_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<u64>>>>,
 	logger: Option<Arc<Logger>>,
@@ -384,9 +506,11 @@ impl PostgresStoreInner {
 	async fn new(
 		connection_string: String, db_name: Option<String>, kv_table_name: Option<String>,
 		tls: PgTlsConnector, logger: Option<Arc<Logger>>,
-	) -> io::Result<Self> {
+	) -> io::Result<(Self, Instant)> {
 		let kv_table_name = kv_table_name.unwrap_or(DEFAULT_KV_TABLE_NAME.to_string());
 		let kv_table_name_sql = sql_table_identifier(&kv_table_name)?;
+		let node_lease_table_name_sql = sql_node_lease_table_identifier(&kv_table_name)?;
+		let node_lease = NodeLease::new()?;
 
 		let mut config: Config = connection_string.parse().map_err(|e: PgError| {
 			let msg = format!("Failed to parse PostgreSQL connection string: {e}");
@@ -425,7 +549,50 @@ impl PostgresStoreInner {
 
 		Self::create_database_if_not_exists(&config, &tls, logger.as_deref()).await?;
 
-		let client = make_config_connection(&config, &tls).await?;
+		let mut client = make_config_connection(&config, &tls).await?;
+
+		let sql = format!(
+			"CREATE TABLE IF NOT EXISTS {node_lease_table_name_sql} (
+			id SMALLINT PRIMARY KEY CHECK (id = 1),
+			owner_id BYTEA NOT NULL,
+			expires_at TIMESTAMPTZ NOT NULL
+			)"
+		);
+		client.execute(&sql, &[]).await.map_err(|e| {
+			io::Error::new(io::ErrorKind::Other, format!("Failed to create node lease table: {e}"))
+		})?;
+
+		let pool = SmallPool::new(&config, &tls).await?;
+		// Keep the lease row locked until all transactional schema changes are committed.
+		let transaction = client.transaction().await.map_err(|e| {
+			io::Error::new(
+				io::ErrorKind::Other,
+				format!("Failed to start PostgreSQL schema setup transaction: {e}"),
+			)
+		})?;
+		let lease_duration_secs = NODE_LEASE_DURATION.as_secs() as i64;
+		let acquire_sql = format!(
+			"INSERT INTO {node_lease_table_name_sql} (id, owner_id, expires_at)
+			VALUES (1, $1, clock_timestamp() + ($2::bigint * interval '1 second'))
+			ON CONFLICT (id) DO UPDATE SET
+			owner_id = EXCLUDED.owner_id,
+			expires_at = EXCLUDED.expires_at
+			WHERE {node_lease_table_name_sql}.expires_at <= clock_timestamp()
+			OR {node_lease_table_name_sql}.owner_id = EXCLUDED.owner_id
+			RETURNING id"
+		);
+		let row = transaction
+			.query_opt(&acquire_sql, &[&node_lease.owner_id().as_slice(), &lease_duration_secs])
+			.await
+			.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("Failed to acquire node lease: {e}"))
+			})?;
+		if row.is_none() {
+			return Err(io::Error::new(
+				io::ErrorKind::WouldBlock,
+				"PostgreSQL node lease is unavailable",
+			));
+		}
 
 		// Create the KV data table if it doesn't exist. `sort_order` uses BIGSERIAL so
 		// the database assigns a fresh, monotonically increasing value on each INSERT and
@@ -441,13 +608,13 @@ impl PostgresStoreInner {
 			PRIMARY KEY (primary_namespace, secondary_namespace, key)
 			)"
 		);
-		client.execute(sql.as_str(), &[]).await.map_err(|e| {
+		transaction.execute(sql.as_str(), &[]).await.map_err(|e| {
 			let msg = format!("Failed to create table {kv_table_name}: {e}");
 			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
 		// Read the schema version from the table comment (analogous to SQLite's PRAGMA user_version).
-		let row = client
+		let row = transaction
 			.query_one("SELECT obj_description(to_regclass($1), 'pg_class')", &[&kv_table_name_sql])
 			.await
 			.map_err(|e| {
@@ -478,13 +645,18 @@ impl PostgresStoreInner {
 		if version_res == 0 {
 			// New table, set our SCHEMA_VERSION.
 			let sql = format!("COMMENT ON TABLE {kv_table_name_sql} IS '{SCHEMA_VERSION}'");
-			client.execute(sql.as_str(), &[]).await.map_err(|e| {
+			transaction.execute(sql.as_str(), &[]).await.map_err(|e| {
 				let msg = format!("Failed to set schema version: {e}");
 				io::Error::new(io::ErrorKind::Other, msg)
 			})?;
 		} else if version_res < SCHEMA_VERSION {
-			migrations::migrate_schema(&client, &kv_table_name_sql, version_res, SCHEMA_VERSION)
-				.await?;
+			migrations::migrate_schema(
+				&transaction,
+				&kv_table_name_sql,
+				version_res,
+				SCHEMA_VERSION,
+			)
+			.await?;
 		} else if version_res > SCHEMA_VERSION {
 			let msg = format!(
 				"Failed to open database: incompatible schema version {version_res}. Expected: {SCHEMA_VERSION}"
@@ -497,17 +669,56 @@ impl PostgresStoreInner {
 		let sql = format!(
 			"CREATE INDEX IF NOT EXISTS {index_name_sql} ON {kv_table_name_sql} (primary_namespace, secondary_namespace, sort_order DESC, key ASC)"
 		);
-		client.execute(sql.as_str(), &[]).await.map_err(|e| {
+		transaction.execute(sql.as_str(), &[]).await.map_err(|e| {
 			let msg = format!("Failed to create index on table {kv_table_name}: {e}");
 			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
-		// Drop the setup client; the pool builds its own POOL_SIZE fresh connections.
+		let renewal_started_at = Instant::now();
+		let renew_sql = format!(
+			"UPDATE {node_lease_table_name_sql}
+			SET expires_at = clock_timestamp() + ($2::bigint * interval '1 second')
+			WHERE id = 1 AND owner_id = $1"
+		);
+		let updated = transaction
+			.execute(&renew_sql, &[&node_lease.owner_id().as_slice(), &lease_duration_secs])
+			.await
+			.map_err(|e| {
+				io::Error::new(
+					io::ErrorKind::Other,
+					format!("Failed to renew node lease after schema setup: {e}"),
+				)
+			})?;
+		if updated != 1 {
+			return Err(io::Error::new(
+				io::ErrorKind::Other,
+				"Failed to renew node lease after schema setup",
+			));
+		}
+		transaction.commit().await.map_err(|e| {
+			io::Error::new(
+				io::ErrorKind::Other,
+				format!("Failed to commit PostgreSQL schema setup transaction: {e}"),
+			)
+		})?;
+
+		// Drop the setup client; the pool has its own connections.
 		drop(client);
-		let pool = SmallPool::new(&config, &tls).await?;
 
 		let write_version_locks = Mutex::new(HashMap::new());
-		Ok(Self { pool, config, kv_table_name_sql, tls, write_version_locks, logger })
+		Ok((
+			Self {
+				pool,
+				config,
+				kv_table_name_sql,
+				node_lease_table_name_sql,
+				node_lease,
+				tls,
+				write_version_locks,
+				logger,
+			},
+			renewal_started_at,
+		))
 	}
 
 	async fn create_database_if_not_exists(
@@ -592,6 +803,113 @@ impl PostgresStoreInner {
 		self.pool.get(&self.config, &self.tls, self.logger.as_deref()).await
 	}
 
+	async fn renew_node_lease(&self) -> io::Result<bool> {
+		if self.node_lease.is_lost() {
+			return Ok(false);
+		}
+
+		let lease_duration_secs = NODE_LEASE_DURATION.as_secs() as i64;
+		let lease_table = &self.node_lease_table_name_sql;
+		let sql = format!(
+			"UPDATE {lease_table}
+			SET expires_at = clock_timestamp() + ($2::bigint * interval '1 second')
+			WHERE id = 1 AND owner_id = $1 AND expires_at > clock_timestamp()"
+		);
+		let locked = self.locked_client().await?;
+		let updated = locked
+			.execute(&sql, &[&self.node_lease.owner_id().as_slice(), &lease_duration_secs])
+			.await
+			.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("Failed to renew node lease: {e}"))
+			})?;
+		Ok(updated == 1)
+	}
+
+	async fn release_node_lease(&self) -> io::Result<()> {
+		let lease_table = &self.node_lease_table_name_sql;
+		let sql = format!("DELETE FROM {lease_table} WHERE id = 1 AND owner_id = $1");
+		let locked = self.locked_client().await?;
+		locked.execute(&sql, &[&self.node_lease.owner_id().as_slice()]).await.map_err(|e| {
+			io::Error::new(io::ErrorKind::Other, format!("Failed to release node lease: {e}"))
+		})?;
+		Ok(())
+	}
+
+	async fn renew_node_lease_in_transaction(
+		&self, transaction: &tokio_postgres::Transaction<'_>,
+	) -> io::Result<()> {
+		self.node_lease.ensure_operation_active()?;
+
+		// The local check only fails early. This update is authoritative and holds the row lock
+		// through the caller's KV mutation and commit.
+		let lease_duration_secs = NODE_LEASE_DURATION.as_secs() as i64;
+		let lease_table = &self.node_lease_table_name_sql;
+		let update_sql = format!(
+			"UPDATE {lease_table}
+			SET expires_at = clock_timestamp() + ($2::bigint * interval '1 second')
+			WHERE id = 1 AND owner_id = $1 AND expires_at > clock_timestamp()"
+		);
+		let updated = transaction
+			.execute(&update_sql, &[&self.node_lease.owner_id().as_slice(), &lease_duration_secs])
+			.await
+			.map_err(|e| {
+				self.node_lease.map_operation_error(io::Error::new(
+					io::ErrorKind::Other,
+					format!("Failed to check and renew node lease: {e}"),
+				))
+			})?;
+		if updated != 1 {
+			self.node_lease.mark_lost();
+			return Err(lease_lost_error());
+		}
+		Ok(())
+	}
+
+	async fn execute_fenced_mutation<F: FnOnce(PgError) -> io::Error>(
+		&self, sql: &str, params: &[&(dyn ToSql + Sync)], err_map: F,
+	) -> io::Result<()> {
+		let node_lease = &self.node_lease;
+		let mut locked =
+			self.locked_client().await.map_err(|e| node_lease.map_operation_error(e))?;
+		let transaction_result = locked.transaction().await;
+		let reconnect = transaction_result.as_ref().is_err_and(PgError::is_closed);
+		let transaction_result = if reconnect {
+			if let (Some(logger), Err(e)) = (self.logger.as_ref(), &transaction_result) {
+				log_debug!(logger, "Reconnecting to PostgreSQL after error: {e}");
+			}
+			drop(transaction_result);
+			*locked = make_config_connection(&self.config, &self.tls)
+				.await
+				.map_err(|e| node_lease.map_operation_error(e))?;
+			locked.transaction().await
+		} else {
+			transaction_result
+		};
+		let transaction = transaction_result.map_err(|e| {
+			node_lease.map_operation_error(io::Error::new(
+				io::ErrorKind::Other,
+				format!("Failed to start fenced mutation transaction: {e}"),
+			))
+		})?;
+		let renewal_started_at = Instant::now();
+		self.renew_node_lease_in_transaction(&transaction).await?;
+		transaction
+			.execute(sql, params)
+			.await
+			.map_err(|e| node_lease.map_operation_error(err_map(e)))?;
+		transaction.commit().await.map_err(|e| {
+			node_lease.map_operation_error(io::Error::new(
+				io::ErrorKind::Other,
+				format!("Failed to commit fenced mutation transaction: {e}"),
+			))
+		})?;
+		if node_lease.is_lost() {
+			return Err(lease_lost_error());
+		}
+		node_lease.record_renewal_started_at(renewal_started_at);
+		Ok(())
+	}
+
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
 		let mut outer_lock = self.write_version_locks.lock().unwrap();
 		Arc::clone(&outer_lock.entry(locking_key).or_default())
@@ -668,17 +986,12 @@ impl PostgresStoreInner {
 				io::Error::new(io::ErrorKind::Other, msg)
 			};
 
-			let mut locked = self.locked_client().await?;
-			query_with_retry!(
-				self,
-				locked,
+			self.execute_fenced_mutation(
+				sql.as_str(),
+				&[&primary_namespace, &secondary_namespace, &key, &buf],
 				err_map,
-				locked.execute(
-					sql.as_str(),
-					&[&primary_namespace, &secondary_namespace, &key, &buf],
-				)
 			)
-			.map(|_| ())
+			.await
 		})
 		.await
 	}
@@ -706,14 +1019,12 @@ impl PostgresStoreInner {
 				io::Error::new(io::ErrorKind::Other, msg)
 			};
 
-			let mut locked = self.locked_client().await?;
-			query_with_retry!(
-				self,
-				locked,
+			self.execute_fenced_mutation(
+				sql.as_str(),
+				&[&primary_namespace, &secondary_namespace, &key],
 				err_map,
-				locked.execute(sql.as_str(), &[&primary_namespace, &secondary_namespace, &key])
 			)
-			.map(|_| ())
+			.await
 		})
 		.await
 	}
@@ -925,6 +1236,13 @@ mod tests {
 		assert!(sql_identifier("").is_err());
 		assert!(sql_table_identifier("too.many.parts").is_err());
 		assert!(sql_table_identifier("schema.").is_err());
+		assert_eq!(sql_node_lease_table_identifier("tenant-1").unwrap(), "\"tenant-1_node_lease\"");
+		assert_eq!(
+			sql_node_lease_table_identifier("tenant.select").unwrap(),
+			"\"tenant\".\"select_node_lease\""
+		);
+		assert!(sql_node_lease_table_identifier(&"a".repeat(MAX_KV_TABLE_NAME_BYTES)).is_ok());
+		assert!(sql_node_lease_table_identifier(&"a".repeat(MAX_KV_TABLE_NAME_BYTES + 1)).is_err());
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -941,6 +1259,87 @@ mod tests {
 		do_test_store(&store_0, &store_1);
 		cleanup_store(&store_0).await;
 		cleanup_store(&store_1).await;
+	}
+
+	#[tokio::test]
+	async fn node_lease_contends_fences_and_releases() {
+		let leader = create_test_store("test_pg_lease_shared").await;
+		let leader_lease = leader.node_lease();
+		let leader_lease_table = leader.inner.node_lease_table_name_sql.clone();
+		let leader_index_name = "idx_test_pg_lease_shared_paginated";
+		{
+			let client = leader.inner.pool.connections[0].lock().await;
+			client
+				.execute(
+					&format!("DROP INDEX IF EXISTS {}", sql_identifier(leader_index_name).unwrap()),
+					&[],
+				)
+				.await
+				.unwrap();
+		}
+		let contention_error = match PostgresStore::new(
+			test_connection_string(),
+			None,
+			Some("test_pg_lease_shared".to_string()),
+			None,
+		)
+		.await
+		{
+			Ok(_) => panic!("a second store acquired the same node lease"),
+			Err(e) => e,
+		};
+		assert_eq!(contention_error.kind(), io::ErrorKind::WouldBlock);
+		{
+			let client = leader.inner.pool.connections[0].lock().await;
+			let row = client
+				.query_one("SELECT to_regclass($1)::text", &[&leader_index_name])
+				.await
+				.unwrap();
+			assert_eq!(row.get::<_, Option<String>>(0), None);
+		}
+
+		let independent = create_test_store("test_pg_lease_independent").await;
+		let independent_lease_table = independent.inner.node_lease_table_name_sql.clone();
+
+		KVStore::write(&leader, "ns", "", "leader", vec![1]).await.unwrap();
+		KVStore::write(&independent, "ns", "", "independent", vec![1]).await.unwrap();
+
+		{
+			let client = leader.inner.pool.connections[0].lock().await;
+			client
+				.execute(
+					&format!(
+						"UPDATE {leader_lease_table} SET expires_at = clock_timestamp() - interval '1 second' WHERE id = 1"
+					),
+					&[],
+				)
+				.await
+				.unwrap();
+		}
+
+		let fallback = create_test_store("test_pg_lease_shared").await;
+		let loss_notification = Arc::clone(&leader_lease).wait_for_loss();
+		let write_error = KVStore::write(&leader, "ns", "", "stale", vec![2]).await.unwrap_err();
+		assert_eq!(write_error.kind(), io::ErrorKind::PermissionDenied);
+		loss_notification.await;
+		assert!(leader_lease.is_lost());
+
+		let remove_error = KVStore::remove(&leader, "ns", "", "leader", false).await.unwrap_err();
+		assert_eq!(remove_error.kind(), io::ErrorKind::PermissionDenied);
+		KVStore::write(&fallback, "ns", "", "fallback", vec![3]).await.unwrap();
+
+		cleanup_store(&leader).await;
+		drop(fallback);
+		let replacement = create_test_store("test_pg_lease_shared").await;
+		cleanup_store(&replacement).await;
+		drop(replacement);
+		cleanup_store(&independent).await;
+		drop(independent);
+
+		let client = leader.inner.pool.connections[0].lock().await;
+		let _ = client.execute(&format!("DROP TABLE IF EXISTS {leader_lease_table}"), &[]).await;
+		let _ =
+			client.execute(&format!("DROP TABLE IF EXISTS {independent_lease_table}"), &[]).await;
 	}
 
 	#[tokio::test(flavor = "multi_thread")]

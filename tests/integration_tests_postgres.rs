@@ -17,7 +17,9 @@ use rand::RngCore;
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn channel_full_cycle_with_postgres_store() {
 	drop_table("channel_cycle_a").await;
+	drop_table("channel_cycle_a_node_lease").await;
 	drop_table("channel_cycle_b").await;
+	drop_table("channel_cycle_b_node_lease").await;
 
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
 	println!("== Node A ==");
@@ -64,12 +66,15 @@ async fn channel_full_cycle_with_postgres_store() {
 	.await;
 
 	drop_table("channel_cycle_a").await;
+	drop_table("channel_cycle_a_node_lease").await;
 	drop_table("channel_cycle_b").await;
+	drop_table("channel_cycle_b_node_lease").await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn postgres_node_restart() {
 	drop_table("restart_test").await;
+	drop_table("restart_test_node_lease").await;
 
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
@@ -140,4 +145,5 @@ async fn postgres_node_restart() {
 	node.stop().unwrap();
 
 	drop_table("restart_test").await;
+	drop_table("restart_test_node_lease").await;
 }
