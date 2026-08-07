@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::ops::Deref;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Duration;
 
 use bitcoin::secp256k1::{PublicKey, Secp256k1};
@@ -33,6 +33,7 @@ use crate::liquidity::{
 use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::payment::store::LSPS2Parameters;
 use crate::payment::PaymentMetadata;
+use crate::runtime::Runtime;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
@@ -107,6 +108,8 @@ where
 	pub(crate) keys_manager: Arc<KeysManager>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
 	pub(crate) liquidity_manager: Arc<LiquidityManager>,
+	// Refill tasks are runtime-owned; keeping this weak avoids extending the runtime's lifetime.
+	pub(crate) runtime: Weak<Runtime>,
 	pub(crate) config: Arc<Config>,
 	pub(crate) logger: L,
 }
@@ -431,9 +434,10 @@ where
 	fn schedule_fixed_lease_refill(
 		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
 	) {
+		let Some(runtime) = self.runtime.upgrade() else { return };
 		let client = Arc::clone(self);
 		let connection_manager = Arc::clone(connection_manager);
-		tokio::spawn(async move {
+		runtime.spawn_cancellable_background_task(async move {
 			if let Err(error) = client.cache_fixed_lease(amount_msat, &connection_manager).await {
 				log_warn!(client.logger, "Failed refilling LSPS2 payment lease: {}", error);
 			}
@@ -443,9 +447,10 @@ where
 	fn schedule_variable_lease_refill(
 		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
 	) {
+		let Some(runtime) = self.runtime.upgrade() else { return };
 		let client = Arc::clone(self);
 		let connection_manager = Arc::clone(connection_manager);
-		tokio::spawn(async move {
+		runtime.spawn_cancellable_background_task(async move {
 			if let Err(error) = client.cache_variable_lease(&connection_manager).await {
 				log_warn!(client.logger, "Failed refilling LSPS2 payment lease: {}", error);
 			}
