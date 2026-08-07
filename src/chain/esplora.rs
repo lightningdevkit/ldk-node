@@ -20,7 +20,7 @@ use lightning_transaction_sync::EsploraSyncClient;
 
 use super::WalletSyncStatus;
 use crate::config::{
-	clamp_full_scan_stop_gap, Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY,
+	clamp_full_scan_stop_gap, Config, EsploraSyncConfig, ADDRESS_POOL_SIZE, BDK_CLIENT_CONCURRENCY,
 	MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
 };
 use crate::fee_estimator::{
@@ -256,7 +256,10 @@ impl EsploraChainSource {
 				bounded
 			);
 		}
-		bounded as usize
+		// Extend the gap by the address pool size: the pool keeps that many addresses standing
+		// revealed-but-unused, which a scan restoring the wallet from seed alone would otherwise
+		// count against the configured gap.
+		(bounded as usize).saturating_add(ADDRESS_POOL_SIZE as usize)
 	}
 
 	pub(super) async fn sync_lightning_wallet(

@@ -32,7 +32,9 @@ use common::{
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
-use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig, DEFAULT_FULL_SCAN_STOP_GAP};
+use ldk_node::config::{
+	AsyncPaymentsRole, EsploraSyncConfig, ADDRESS_POOL_SIZE, DEFAULT_FULL_SCAN_STOP_GAP,
+};
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
@@ -1367,7 +1369,7 @@ async fn onchain_wallet_force_full_scan_rediscovers_esplora_funds() {
 	// Skip past the address pool every node with this seed reveals (and thus watches) on its
 	// first start: the funded addresses must lie beyond it to be genuinely unknown to the stale
 	// node's incremental sync.
-	for _ in 0..16 {
+	for _ in 0..ADDRESS_POOL_SIZE {
 		address_source_node.onchain_payment().new_address().unwrap();
 	}
 	let addr_1 = address_source_node.onchain_payment().new_address().unwrap();
@@ -1446,12 +1448,16 @@ async fn do_onchain_wallet_full_scan_stop_gap_recovers_far_funds(
 	chain_source: TestChainSource<'_>, bitcoind: &BitcoinD, electrsd: &ElectrsD,
 ) {
 	let configured_stop_gap = DEFAULT_FULL_SCAN_STOP_GAP + 5;
+	// Full scans extend the stop gap by the address pool size, so the funded address must lie
+	// that much further out to stay beyond the default gap's (extended) reach, while remaining
+	// within the configured gap's.
+	let handout_count = DEFAULT_FULL_SCAN_STOP_GAP + ADDRESS_POOL_SIZE + 5;
 
 	let address_source_config = random_config();
 	let node_entropy = address_source_config.node_entropy;
 	let address_source_node = setup_node(&chain_source, address_source_config);
 	let mut far_address = None;
-	for _ in 0..configured_stop_gap {
+	for _ in 0..handout_count {
 		far_address = Some(address_source_node.onchain_payment().new_address().unwrap());
 	}
 	address_source_node.stop().unwrap();

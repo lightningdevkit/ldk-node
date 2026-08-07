@@ -53,7 +53,7 @@ use lightning::util::wallet_utils::{
 use lightning_invoice::RawBolt11Invoice;
 use persist::KVStoreWalletPersister;
 
-use crate::config::Config;
+use crate::config::{Config, ADDRESS_POOL_SIZE};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::store::ConfirmationStatus;
@@ -82,18 +82,20 @@ pub(crate) mod ser;
 const DUST_LIMIT_SATS: u64 = 546;
 
 /// The number of external addresses kept revealed, persisted, and ready for handout via
-/// [`Wallet::pop_pooled_address`].
+/// [`Wallet::pop_pooled_address`] and [`Wallet::get_new_address`].
 ///
 /// Each channel open consumes two pooled addresses (one for the destination script and one for
 /// the upfront shutdown script), and the pool is refilled after every handout, so this bounds
 /// how many channels can be opened while wallet persistence is unavailable rather than steady
-/// state throughput. Pooled addresses are revealed-but-unused, so this value also widens
-/// incremental chain syncs accordingly and must stay below the default full-scan stop gap
-/// ([`DEFAULT_FULL_SCAN_STOP_GAP`]) lest a from-seed restore's full scan stop inside the pool's
-/// unused tail.
+/// state throughput.
 ///
-/// [`DEFAULT_FULL_SCAN_STOP_GAP`]: crate::config::DEFAULT_FULL_SCAN_STOP_GAP
-pub(crate) const ADDRESS_POOL_TARGET_SIZE: usize = 16;
+/// Pooled addresses are revealed-but-unused, widening what incremental chain syncs must watch,
+/// and a wallet restored from seed alone knows nothing of them: on-chain wallet full scans
+/// extend their configured stop gap by this amount so the pool's unused tail can never exhaust
+/// the gap on its own. Handed-out scripts that have yet to appear on-chain (e.g. the shutdown
+/// scripts of open channels) still count against the configured gap, as they did before the
+/// pool existed.
+pub(crate) const ADDRESS_POOL_TARGET_SIZE: usize = ADDRESS_POOL_SIZE as usize;
 
 /// A pool of pre-revealed external addresses whose derivation indices are already persisted,
 /// allowing LDK's synchronous [`SignerProvider`] callbacks to obtain fresh addresses without
