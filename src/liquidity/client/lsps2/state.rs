@@ -670,13 +670,14 @@ mod tests {
 		let valid_until = now_secs() + MIN_CACHED_LEASE_REMAINING_SECS + 60;
 		let fixed = lease(2, 49, 100, Some(1_000), valid_until);
 		let variable = lease(3, 50, 50, None, valid_until);
+		let available_lsps = [fixed.id.lsp_node_id, variable.id.lsp_node_id];
 		let mut state = LSPS2LeaseState::from_leases(vec![fixed.clone(), variable.clone()]);
 
-		let (selected_fixed, _) = state.fixed_amount(1_000, None, 1).unwrap();
+		let (selected_fixed, _) = state.fixed_amount(1_000, None, 1, &available_lsps).unwrap();
 		assert_eq!(selected_fixed.id, fixed.id);
-		assert!(state.fixed_amount(1_000, None, 1).is_none());
+		assert!(state.fixed_amount(1_000, None, 1, &available_lsps).is_none());
 
-		let (selected_variable, _) = state.variable_amount(None, None, 1).unwrap();
+		let (selected_variable, _) = state.variable_amount(None, None, 1, &available_lsps).unwrap();
 		assert_eq!(selected_variable.id, variable.id);
 	}
 
