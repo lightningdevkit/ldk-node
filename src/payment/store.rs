@@ -564,6 +564,9 @@ pub enum PaymentKind {
 	///
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	/// [`Refund`]: lightning::offers::refund::Refund
+	// TODO: Start setting `payer_note` and `quantity` for inbound refund payments again once
+	// LDK v0.4 exposes refund context via `PaymentClaimable`.
+	// See https://github.com/lightningdevkit/ldk-node/issues/1023.
 	Bolt12Refund {
 		/// The payment hash, i.e., the hash of the `preimage`.
 		hash: Option<PaymentHash>,
@@ -573,9 +576,13 @@ pub enum PaymentKind {
 		secret: Option<PaymentSecret>,
 		/// The payer note for the refund payment.
 		///
+		/// Currently only set for outbound refund payments.
+		///
 		/// This will always be `None` for payments serialized with version `v0.3.0`.
 		payer_note: Option<UntrustedString>,
 		/// The quantity of an item that the refund is for.
+		///
+		/// Currently only set for outbound refund payments.
 		///
 		/// This will always be `None` for payments serialized with version `v0.3.0`.
 		quantity: Option<u64>,
