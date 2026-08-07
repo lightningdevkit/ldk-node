@@ -32,7 +32,7 @@ use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, Description};
 use crate::config::HRN_RESOLUTION_TIMEOUT_SECS;
 use crate::error::Error;
 use crate::ffi::maybe_wrap;
-use crate::logger::{log_error, LdkLogger, Logger};
+use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
 use crate::types::HRNResolver;
 use crate::Config;
@@ -155,6 +155,87 @@ impl UnifiedPayment {
 			Err(e) => {
 				log_error!(self.logger, "Failed to create invoice {}", e);
 				None
+			},
+		};
+
+		let extras = Extras { bolt11_invoice, bolt12_offer };
+
+		let mut uri = Uri::with_extras(onchain_address, extras);
+		uri.amount = Some(Amount::from_sat(amount_sats));
+		uri.message = Some(description.into());
+
+		Ok(format_uri(uri))
+	}
+
+	/// Generates a unified BIP21 URI identical in structure to [`receive`], but uses a
+	/// JIT (Just-In-Time) BOLT 11 invoice via the configured LSP liquidity source for
+	/// the purpose of providing inbound liquidity on the fly.
+	///
+	/// This method is designed to be called when the node has insufficient inbound capacity
+	/// to receive the payment over standard Lightning routes. **Note that this method does not
+	/// automatically detect your current inbound capacity;** the determination of whether
+	/// inbound capacity is lacking, and the decision to invoke this JIT flow, is left entirely
+	/// to the discretion of the developer.
+	///
+	/// Like [`receive`], the resulting URI provides an on-chain fallback address and a BOLT 12
+	/// offer. However, the attached BOLT 11 invoice is provisioned through an External Liquidity
+	/// Provider (LSP) to dynamically open a JIT channel when the payer routes the payment. If no
+	/// LSP is configured or the JIT generation fails, it falls back to standard local invoice
+	/// generation.
+	///
+	/// # Parameters
+	/// - `amount_sats`: The amount to be received, specified in satoshis.
+	/// - `description`: A description or note associated with the payment.
+	///   This message is visible to the payer and can provide context or details about the payment.
+	/// - `expiry_sec`: The expiration time for the payment, specified in seconds.
+	/// - `max_total_lsp_fee_limit_msat`: An optional fee cap in millisatoshis defining the maximum
+	///   fee you are willing to allow the LSP to charge for opening the JIT liquidity channel.
+	///
+	/// # Warning
+	/// Because this method may require synchronous network negotiation with an external LSP,
+	/// it can block the calling thread. Mobile applications should ensure this is invoked
+	/// from a background thread to prevent UI freezing.
+	pub fn receive_via_jit_channel(
+		&self, amount_sats: u64, description: &str, expiry_sec: u32,
+		max_total_lsp_fee_limit_msat: Option<u64>,
+	) -> Result<String, Error> {
+		let onchain_address = self.onchain_payment.new_address()?;
+		let amount_msats = amount_sats * 1_000;
+
+		let bolt12_offer =
+			match self.bolt12_payment.receive_inner(amount_msats, description, None, None) {
+				Ok(offer) => Some(maybe_wrap(offer)),
+				Err(e) => {
+					log_error!(self.logger, "Failed to create offer: {}", e);
+					None
+				},
+			};
+
+		let invoice_description = Bolt11InvoiceDescription::Direct(
+			Description::new(description.to_string()).map_err(|_| Error::InvoiceCreationFailed)?,
+		);
+
+		let bolt11_invoice = match self.bolt11_invoice.receive_via_jit_channel(
+			amount_msats,
+			&invoice_description,
+			expiry_sec,
+			max_total_lsp_fee_limit_msat,
+		) {
+			Ok(invoice) => Some(invoice),
+			Err(Error::LiquiditySourceUnavailable) => {
+				log_info!(
+					self.logger,
+					"No LSP configured. Falling back to local invoice generation."
+				);
+				self.bolt11_invoice.receive(amount_msats, &invoice_description, expiry_sec).ok()
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"LSP JIT invoice creation failed: {:?}. Falling back to local invoice.",
+					e
+				);
+				self.bolt11_invoice.receive(amount_msats, &invoice_description, expiry_sec).ok()
 			},
 		};
 
