@@ -799,21 +799,30 @@ pub(crate) async fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 	.await;
 }
 
-pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: OutPoint) {
+pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(
+	electrs: &E, outpoint: OutPoint,
+) -> Transaction {
 	let tx = electrs.transaction_get(&outpoint.txid).unwrap();
 	let txout_script = tx.output.get(outpoint.vout as usize).unwrap().clone().script_pubkey;
 
-	// Script history already contains the funding transaction itself, so wait until the exact
-	// funding outpoint leaves the unspent set instead of treating any history as a spend.
+	// Script history already contains the funding transaction itself and may contain unrelated
+	// transactions for reused scripts, so only return a transaction spending the exact outpoint.
 	exponential_backoff_poll(|| {
 		electrs.ping().unwrap();
 
-		let is_spent = !electrs.script_list_unspent(&txout_script).unwrap().iter().any(|output| {
-			output.tx_hash == outpoint.txid && output.tx_pos == outpoint.vout as usize
-		});
-		is_spent.then_some(())
+		electrs.script_get_history(&txout_script).unwrap().into_iter().find_map(|entry| {
+			if entry.tx_hash == outpoint.txid {
+				return None;
+			}
+			let transaction = electrs.transaction_get(&entry.tx_hash).ok()?;
+			transaction
+				.input
+				.iter()
+				.any(|input| input.previous_output == outpoint)
+				.then_some(transaction)
+		})
 	})
-	.await;
+	.await
 }
 
 /// Polls the channel from `source_node` to `counterparty_node` until it reports `is_usable`

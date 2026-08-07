@@ -150,6 +150,7 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_
 /// | `announcement_addresses`               | None                                 |
 /// | `node_alias`                           | None                                 |
 /// | `trusted_peers_0conf`                  | []                                   |
+/// | `enable_v2_channel_close`              | false                                |
 /// | `probing_liquidity_limit_multiplier`   | 3                                    |
 /// | `anchor_channels_config`               | AnchorChannelsConfig::default()      |
 /// | `route_parameters`                     | None                                 |
@@ -189,6 +190,10 @@ pub struct Config {
 	/// funding transaction ends up never being confirmed on-chain. Zero-confirmation channels
 	/// should therefore only be accepted from trusted peers.
 	pub trusted_peers_0conf: Vec<PublicKey>,
+	/// Whether to enable the `option_simple_close` protocol for cooperative channel closures.
+	///
+	/// The protocol will only be used when supported by the channel counterparty.
+	pub enable_v2_channel_close: bool,
 	/// The liquidity factor by which we filter the outgoing channels used for sending probes.
 	///
 	/// Channels with available liquidity less than the required amount times this value won't be
@@ -229,6 +234,7 @@ impl Default for Config {
 			listening_addresses: None,
 			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
+			enable_v2_channel_close: false,
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
 			anchor_channels_config: AnchorChannelsConfig::default(),
 			tor_config: None,
@@ -435,6 +441,7 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	user_config.channel_handshake_config.negotiate_anchor_zero_fee_commitments =
 		config.anchor_channels_config.enable_zero_fee_commitments;
 	user_config.reject_inbound_splices = false;
+	user_config.enable_v2_channel_close = config.enable_v2_channel_close;
 
 	if may_announce_channel(config).is_err() {
 		user_config.accept_forwards_to_priv_channels = false;
@@ -783,9 +790,9 @@ mod tests {
 	use std::str::FromStr;
 
 	use super::{
-		clamp_full_scan_stop_gap, may_announce_channel, AnnounceError, Config, ElectrumSyncConfig,
-		EsploraSyncConfig, NodeAlias, SocketAddress, DEFAULT_FULL_SCAN_STOP_GAP,
-		MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
+		clamp_full_scan_stop_gap, default_user_config, may_announce_channel, AnnounceError, Config,
+		ElectrumSyncConfig, EsploraSyncConfig, NodeAlias, SocketAddress,
+		DEFAULT_FULL_SCAN_STOP_GAP, MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
 	};
 
 	#[test]
@@ -850,5 +857,17 @@ mod tests {
 		assert_eq!(clamp_full_scan_stop_gap(MAX_FULL_SCAN_STOP_GAP), MAX_FULL_SCAN_STOP_GAP);
 		assert_eq!(clamp_full_scan_stop_gap(0), MIN_FULL_SCAN_STOP_GAP);
 		assert_eq!(clamp_full_scan_stop_gap(MAX_FULL_SCAN_STOP_GAP + 1), MAX_FULL_SCAN_STOP_GAP);
+	}
+
+	#[test]
+	fn v2_channel_close_config() {
+		let default_config = Config::default();
+		assert!(!default_user_config(&default_config).enable_v2_channel_close);
+
+		let enabled_config = Config { enable_v2_channel_close: true, ..Config::default() };
+		assert!(
+			default_user_config(&enabled_config).enable_v2_channel_close,
+			"v2 channel close opt-in must be forwarded to LDK"
+		);
 	}
 }
