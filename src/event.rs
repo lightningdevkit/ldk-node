@@ -748,6 +748,7 @@ where
 					.await;
 				match funding_transaction {
 					Ok(final_tx) => {
+						let final_tx_for_cancel = final_tx.clone();
 						let needs_manual_broadcast = self
 							.liquidity_source
 							.lsps2_service()
@@ -778,27 +779,39 @@ where
 
 						match result {
 							Ok(()) => {},
-							Err(APIError::APIMisuseError { err }) => {
-								log_error!(
-									self.logger,
-									"Encountered APIMisuseError, this should never happen: {}",
-									err
-								);
-								debug_assert!(false, "APIMisuseError: {}", err);
-							},
-							Err(APIError::ChannelUnavailable { err }) => {
-								log_error!(
-									self.logger,
-									"Failed to process funding transaction as channel went away before we could fund it: {}",
-									err
-								)
-							},
 							Err(err) => {
-								log_error!(
-									self.logger,
-									"Failed to process funding transaction: {:?}",
-									err
-								)
+								if let Err(e) = self.wallet.cancel_tx(final_tx_for_cancel).await {
+									log_error!(
+										self.logger,
+										"Failed to release funding inputs: {}",
+										e
+									);
+									return Err(ReplayEvent());
+								}
+								match err {
+									APIError::APIMisuseError { err } => {
+										log_error!(
+											self.logger,
+											"Encountered APIMisuseError, this should never happen: {}",
+											err
+										);
+										debug_assert!(false, "APIMisuseError: {}", err);
+									},
+									APIError::ChannelUnavailable { err } => {
+										log_error!(
+											self.logger,
+											"Failed to process funding transaction as channel went away before we could fund it: {}",
+											err
+										)
+									},
+									err => {
+										log_error!(
+											self.logger,
+											"Failed to process funding transaction: {:?}",
+											err
+										)
+									},
+								}
 							},
 						}
 					},
@@ -1941,27 +1954,33 @@ where
 				}
 			},
 			LdkEvent::DiscardFunding { channel_id, funding_info } => {
-				if let FundingInfo::Contribution { inputs: _, outputs } = funding_info {
+				let tx = match funding_info {
+					FundingInfo::Tx { transaction } => Some(transaction),
+					FundingInfo::Contribution { inputs: _, outputs } => {
+						Some(bitcoin::Transaction {
+							version: bitcoin::transaction::Version::TWO,
+							lock_time: bitcoin::absolute::LockTime::ZERO,
+							input: vec![],
+							output: outputs
+								.into_iter()
+								.map(|script_pubkey| bitcoin::TxOut {
+									value: bitcoin::Amount::ZERO,
+									script_pubkey,
+								})
+								.collect(),
+						})
+					},
+					FundingInfo::OutPoint { .. } => None,
+				};
+
+				if let Some(tx) = tx {
 					log_info!(
 						self.logger,
-						"Reclaiming unused addresses from channel {} funding",
+						"Reclaiming unused wallet state from channel {} funding",
 						channel_id,
 					);
-
-					let tx = bitcoin::Transaction {
-						version: bitcoin::transaction::Version::TWO,
-						lock_time: bitcoin::absolute::LockTime::ZERO,
-						input: vec![],
-						output: outputs
-							.into_iter()
-							.map(|script_pubkey| bitcoin::TxOut {
-								value: bitcoin::Amount::ZERO,
-								script_pubkey,
-							})
-							.collect(),
-					};
 					if let Err(e) = self.wallet.cancel_tx(tx).await {
-						log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
+						log_error!(self.logger, "Failed reclaiming unused wallet state: {}", e);
 						return Err(ReplayEvent());
 					}
 				}

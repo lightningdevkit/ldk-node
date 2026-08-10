@@ -73,6 +73,13 @@ pub(crate) const BDK_WALLET_TX_GRAPH_PRIMARY_NAMESPACE: &str = "bdk_wallet";
 pub(crate) const BDK_WALLET_TX_GRAPH_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const BDK_WALLET_TX_GRAPH_KEY: &str = "tx_graph";
 
+/// The BDK wallet's [`ChangeSet::locked_outpoints`] will be persisted under this key.
+///
+/// [`ChangeSet::locked_outpoints`]: bdk_wallet::ChangeSet::locked_outpoints
+pub(crate) const BDK_WALLET_LOCKED_OUTPOINTS_PRIMARY_NAMESPACE: &str = "bdk_wallet";
+pub(crate) const BDK_WALLET_LOCKED_OUTPOINTS_SECONDARY_NAMESPACE: &str = "";
+pub(crate) const BDK_WALLET_LOCKED_OUTPOINTS_KEY: &str = "locked_outpoints";
+
 /// The BDK wallet's [`ChangeSet::indexer`] will be persisted under this key.
 ///
 /// [`ChangeSet::indexer`]: bdk_wallet::ChangeSet::indexer
