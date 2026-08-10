@@ -8,7 +8,7 @@ concurrency:
 
 jobs:
   build:
-    timeout-minutes: 60
+    timeout-minutes: 120
     strategy:
       matrix:
         platform: [
@@ -93,7 +93,7 @@ jobs:
 
   linting:
     name: Linting
-    timeout-minutes: 60
+    timeout-minutes: 120
     runs-on: self-hosted
     steps:
       - name: Checkout source code
@@ -110,7 +110,7 @@ jobs:
 
   doc:
     name: Documentation
-    timeout-minutes: 60
+    timeout-minutes: 120
     runs-on: self-hosted
     env:
       RUSTDOCFLAGS: -Dwarnings
