@@ -133,15 +133,30 @@ where
 		self.queue_receiver.lock().await
 	}
 
-	/// Classifies a queued package into payment records and returns the package ready for the
-	/// chain client. Returns `Err` if any classification fails; callers must not broadcast the
-	/// package in that case, since a crash would leave the transaction on-chain without a record.
+	/// Prepares a queued package in the wallet, classifies it into payment records, and returns the
+	/// package ready for the chain client. Returns `Err` if preparation or classification fails;
+	/// callers must not broadcast the package in that case.
 	pub(crate) async fn classify_package(
 		&self, package: BroadcastPackage,
 	) -> Result<BroadcastPackage, Error> {
 		let wallet_opt = self.wallet.lock().expect("lock").as_ref().and_then(Weak::upgrade);
 		if let Some(wallet) = wallet_opt {
 			for (tx, tx_type) in package.transactions() {
+				let should_broadcast = match tx_type {
+					Some(LdkTransactionType::Funding { .. }) => {
+						wallet.prepare_funding_broadcast(tx).await?
+					},
+					None => wallet.prepare_unclassified_broadcast(tx).await?,
+					_ => true,
+				};
+				if !should_broadcast {
+					log_error!(
+						self.logger,
+						"Skipping broadcast of {} because an input is no longer available",
+						tx.compute_txid(),
+					);
+					return Err(Error::WalletOperationFailed);
+				}
 				if let Some(tx_type) = tx_type {
 					wallet.classify_broadcast(tx, tx_type).await?;
 				}

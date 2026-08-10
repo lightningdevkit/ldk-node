@@ -17,8 +17,8 @@ use lightning::util::ser::{Readable, Writeable};
 
 use crate::io::utils::{
 	read_bdk_wallet_change_set, write_bdk_wallet_change_descriptor, write_bdk_wallet_descriptor,
-	write_bdk_wallet_indexer, write_bdk_wallet_local_chain, write_bdk_wallet_network,
-	write_bdk_wallet_tx_graph,
+	write_bdk_wallet_indexer, write_bdk_wallet_local_chain, write_bdk_wallet_locked_outpoints,
+	write_bdk_wallet_network, write_bdk_wallet_tx_graph,
 };
 use crate::io::{
 	BDK_WALLET_ADDRESS_POOL_KEY, BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
@@ -183,6 +183,19 @@ impl KVStoreWalletPersister {
 				.await?;
 		}
 
+		// Persist transaction graph changes before releasing locks so that an interrupted write
+		// remains conservative: an input may stay locked, but can never become available before its
+		// spending transaction is durable.
+		if !change_set.locked_outpoints.is_empty() {
+			latest_change_set.locked_outpoints.merge(change_set.locked_outpoints.clone());
+			write_bdk_wallet_locked_outpoints(
+				&latest_change_set.locked_outpoints,
+				&*kv_store,
+				Arc::clone(&logger),
+			)
+			.await?;
+		}
+
 		if !change_set.local_chain.is_empty() {
 			latest_change_set.local_chain.merge(change_set.local_chain.clone());
 			write_bdk_wallet_local_chain(
@@ -312,7 +325,8 @@ mod tests {
 	use std::time::Duration;
 
 	use bdk_wallet::{AsyncWalletPersister, ChangeSet, Wallet as BdkWallet};
-	use bitcoin::Network;
+	use bitcoin::hashes::Hash;
+	use bitcoin::{Network, OutPoint, Txid};
 	use lightning::io;
 	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 
@@ -429,5 +443,34 @@ mod tests {
 		let mut reloaded_persister = KVStoreWalletPersister::new(store, logger);
 		let reloaded = AsyncWalletPersister::initialize(&mut reloaded_persister).await.unwrap();
 		assert_eq!(reloaded.network, Some(Network::Regtest));
+	}
+
+	#[tokio::test]
+	async fn persists_locked_outpoints() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(Logger::new_log_facade());
+		let mut persister = KVStoreWalletPersister::new(Arc::clone(&store), Arc::clone(&logger));
+		AsyncWalletPersister::initialize(&mut persister).await.unwrap();
+
+		let mut wallet = BdkWallet::create(EXTERNAL_DESCRIPTOR, INTERNAL_DESCRIPTOR)
+			.network(Network::Regtest)
+			.create_wallet_no_persist()
+			.unwrap();
+		persister.persist_changeset(wallet.take_staged().unwrap()).await.unwrap();
+
+		let outpoint = OutPoint::new(Txid::all_zeros(), 42);
+		wallet.lock_outpoint(outpoint);
+		persister.persist_changeset(wallet.take_staged().unwrap()).await.unwrap();
+
+		let mut reloaded_persister =
+			KVStoreWalletPersister::new(Arc::clone(&store), Arc::clone(&logger));
+		let reloaded = AsyncWalletPersister::initialize(&mut reloaded_persister).await.unwrap();
+		assert_eq!(reloaded.locked_outpoints.outpoints.get(&outpoint), Some(&true));
+
+		wallet.unlock_outpoint(outpoint);
+		persister.persist_changeset(wallet.take_staged().unwrap()).await.unwrap();
+		let mut reloaded_persister = KVStoreWalletPersister::new(store, logger);
+		let reloaded = AsyncWalletPersister::initialize(&mut reloaded_persister).await.unwrap();
+		assert_eq!(reloaded.locked_outpoints.outpoints.get(&outpoint), Some(&false));
 	}
 }
