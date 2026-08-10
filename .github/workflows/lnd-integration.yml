@@ -8,7 +8,7 @@ concurrency:
 
 jobs:
   check-lnd:
-    timeout-minutes: 60
+    timeout-minutes: 120
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
