@@ -9,7 +9,8 @@
 
 use std::fmt;
 
-use bip39::{rand::rngs::OsRng, Language, Mnemonic};
+use bip39::rand::rngs::OsRng;
+use bip39::{Language, Mnemonic};
 
 use crate::config::WALLET_KEYS_SEED_LEN;
 use crate::io;
