@@ -1225,8 +1225,7 @@ where
 					);
 					log_info!(
 						self.logger,
-						"Successfully sent payment of {}msat{} from \
-						payment hash {:?} with preimage {:?}",
+						"Successfully sent payment of {}msat{} with payment hash {}",
 						amount_msat,
 						if let Some(fee) = fee_paid_msat {
 							format!(" (fee {} msat)", fee)
@@ -1234,7 +1233,6 @@ where
 							"".to_string()
 						},
 						hex_utils::to_string(&payment_hash.0),
-						hex_utils::to_string(&payment_preimage.0)
 					);
 				});
 				let event = Event::PaymentSuccessful {
