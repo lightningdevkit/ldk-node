@@ -10,7 +10,7 @@ mod common;
 use std::collections::HashSet;
 use std::future::Future;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
@@ -32,7 +32,9 @@ use common::{
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
-use ldk_node::config::{AsyncPaymentsRole, EsploraSyncConfig, DEFAULT_FULL_SCAN_STOP_GAP};
+use ldk_node::config::{
+	AsyncPaymentsRole, EsploraSyncConfig, ADDRESS_POOL_SIZE, DEFAULT_FULL_SCAN_STOP_GAP,
+};
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
@@ -214,6 +216,225 @@ fn wallet_store_contention_does_not_stall_runtime() {
 		.recv_timeout(Duration::from_secs(3))
 		.expect("wallet contention stalled the single-thread runtime");
 	result.unwrap_or_else(|e| panic!("wallet contention test failed: {e}"));
+}
+
+#[derive(Clone)]
+struct WalletPersistGatedStore {
+	inner: Arc<InMemoryStore>,
+	wallet_write_gate: Arc<tokio::sync::RwLock<()>>,
+	gate_engaged: Arc<AtomicBool>,
+	wallet_writes_completed: Arc<AtomicUsize>,
+}
+
+impl WalletPersistGatedStore {
+	fn new() -> Self {
+		Self {
+			inner: Arc::new(InMemoryStore::new()),
+			wallet_write_gate: Arc::new(tokio::sync::RwLock::new(())),
+			gate_engaged: Arc::new(AtomicBool::new(false)),
+			wallet_writes_completed: Arc::new(AtomicUsize::new(0)),
+		}
+	}
+}
+
+impl KVStore for WalletPersistGatedStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, lightning::io::Error>> + 'static + Send {
+		KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		let wallet_write_gate = Arc::clone(&self.wallet_write_gate);
+		let gate_engaged = Arc::clone(&self.gate_engaged);
+		let wallet_writes_completed = Arc::clone(&self.wallet_writes_completed);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			let is_wallet_write = primary_namespace == "bdk_wallet";
+			if is_wallet_write && gate_engaged.load(Ordering::Acquire) {
+				let _guard = wallet_write_gate.read().await;
+			}
+			let res =
+				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await;
+			if is_wallet_write && res.is_ok() {
+				wallet_writes_completed.fetch_add(1, Ordering::AcqRel);
+			}
+			res
+		}
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send {
+		KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+	}
+}
+
+impl PaginatedKVStore for WalletPersistGatedStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, lightning::io::Error>> + 'static + Send
+	{
+		PaginatedKVStore::list_paginated(
+			&*self.inner,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		)
+	}
+}
+
+// LDK invokes the sync `SignerProvider::get_shutdown_scriptpubkey` callback on a runtime worker
+// thread while holding channel locks when a node accepts (or opens) a channel. If deriving the
+// shutdown script waits on wallet persistence, a contended wallet store wedges the event handler
+// while it holds those locks, and other runtime tasks blocking on the same locks can capture the
+// remaining workers, deadlocking the runtime. Gate node B's BDK wallet writes and assert the
+// channel open still completes (served from the pre-persisted address pool), with the pool
+// refill's persistence landing once the store recovers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn channel_open_completes_while_wallet_persistence_is_stalled() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let config_a = random_config();
+	let node_a = setup_node(&chain_source, config_a);
+
+	let config_b = random_config();
+	setup_builder!(builder_b, config_b.node_config);
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+	builder_b.set_chain_source_esplora(esplora_url, Some(sync_config));
+	let store = WalletPersistGatedStore::new();
+	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	node_b.start().unwrap();
+
+	// Fund both nodes so node B passes the anchor reserve check on the accept path.
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Stall writes of node B's BDK wallet data before the channel open reaches the accept path.
+	// The gate guard lives on a plain thread with a deadline: if the gated write wedges the
+	// runtime (the bug under test captures all workers, so even timers stop firing), the gate
+	// force-reopens after the event timeouts below have expired, letting them fail the test
+	// cleanly instead of hanging it.
+	let (release_gate_sender, release_gate_receiver) = mpsc::sync_channel::<()>(1);
+	let (gate_held_sender, gate_held_receiver) = mpsc::sync_channel::<()>(1);
+	let gate = Arc::clone(&store.wallet_write_gate);
+	std::thread::spawn(move || {
+		let _guard = gate.blocking_write();
+		let _ = gate_held_sender.send(());
+		let _ = release_gate_receiver.recv_timeout(Duration::from_secs(90));
+	});
+	gate_held_receiver.recv().unwrap();
+	store.gate_engaged.store(true, Ordering::Release);
+	let wallet_writes_before = store.wallet_writes_completed.load(Ordering::Acquire);
+
+	// Accepting the channel must not wait on wallet persistence: `open_channel_no_wait` times out
+	// waiting for the `ChannelPending` events otherwise.
+	let funding_txo = open_channel_no_wait(&node_a, &node_b, 500_000, None, false).await;
+
+	// Reopen the gate and verify the pool refill triggered by the handouts eventually persists
+	// its newly revealed addresses.
+	store.gate_engaged.store(false, Ordering::Release);
+	// The watchdog thread may have force-released the gate already on a slow run.
+	let _ = release_gate_sender.send(());
+	let persisted = async {
+		while store.wallet_writes_completed.load(Ordering::Acquire) <= wallet_writes_before {
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	};
+	tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), persisted)
+		.await
+		.expect("timed out waiting for the address-pool refill to persist");
+
+	// The channel and both nodes remain fully functional.
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+}
+
+// The address pool's derivation indices are persisted alongside the wallet: a restart reloads
+// the pooled addresses instead of revealing fresh ones, so restarts don't burn derivation
+// indices (each of which incremental chain syncs would have to watch forever). Rebuild node B
+// from the same store, assert the rebuild performs no wallet writes, and verify a channel open
+// is served from the reloaded pool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn address_pool_is_reloaded_on_restart() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let config_a = random_config();
+	let node_a = setup_node(&chain_source, config_a);
+
+	// Trust node A with no reserve so unfunded node B accepts the channel; its wallet then sees
+	// no activity besides the address pool itself.
+	let mut config_b = random_config();
+	config_b.node_config.anchor_channels_config.trusted_peers_no_reserve.push(node_a.node_id());
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+	let store = WalletPersistGatedStore::new();
+
+	setup_builder!(builder_b, config_b.node_config);
+	builder_b.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	node_b.start().unwrap();
+	node_b.stop().unwrap();
+	drop(node_b);
+
+	// Rebuilding from the same store must reload the persisted pool rather than revealing (and
+	// persisting) fresh addresses.
+	let wallet_writes_before = store.wallet_writes_completed.load(Ordering::Acquire);
+	setup_builder!(builder_b, config_b.node_config);
+	builder_b.set_chain_source_esplora(esplora_url, Some(sync_config));
+	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	assert_eq!(store.wallet_writes_completed.load(Ordering::Acquire), wallet_writes_before);
+	node_b.start().unwrap();
+
+	// The shutdown and destination scripts for the channel open are handed out of the reloaded
+	// pool; an empty pool would fail the open.
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	let funding_txo = open_channel_no_wait(&node_a, &node_b, 500_000, None, false).await;
+
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -1200,6 +1421,12 @@ async fn onchain_wallet_force_full_scan_rediscovers_esplora_funds() {
 	let address_source_config = random_config();
 	let node_entropy = address_source_config.node_entropy;
 	let address_source_node = setup_node(&chain_source, address_source_config);
+	// Skip past the address pool every node with this seed reveals (and thus watches) on its
+	// first start: the funded addresses must lie beyond it to be genuinely unknown to the stale
+	// node's incremental sync.
+	for _ in 0..ADDRESS_POOL_SIZE {
+		address_source_node.onchain_payment().new_address().unwrap();
+	}
 	let addr_1 = address_source_node.onchain_payment().new_address().unwrap();
 	let addr_2 = address_source_node.onchain_payment().new_address().unwrap();
 	address_source_node.stop().unwrap();
@@ -1276,12 +1503,16 @@ async fn do_onchain_wallet_full_scan_stop_gap_recovers_far_funds(
 	chain_source: TestChainSource<'_>, bitcoind: &BitcoinD, electrsd: &ElectrsD,
 ) {
 	let configured_stop_gap = DEFAULT_FULL_SCAN_STOP_GAP + 5;
+	// Handouts consume the pool oldest revealed index first, so the last of N handouts sits at
+	// index N - 1, behind N - 1 revealed-but-unused scripts. Choose N so the funded address lies
+	// beyond the default stop gap's reach but within the configured gap's.
+	let handout_count = DEFAULT_FULL_SCAN_STOP_GAP + 3;
 
 	let address_source_config = random_config();
 	let node_entropy = address_source_config.node_entropy;
 	let address_source_node = setup_node(&chain_source, address_source_config);
 	let mut far_address = None;
-	for _ in 0..configured_stop_gap {
+	for _ in 0..handout_count {
 		far_address = Some(address_source_node.onchain_payment().new_address().unwrap());
 	}
 	address_source_node.stop().unwrap();

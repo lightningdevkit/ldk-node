@@ -86,7 +86,7 @@ use crate::types::{
 	GossipSync, Graph, HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
 	PeerManager, PendingPaymentStore,
 };
-use crate::wallet::persist::KVStoreWalletPersister;
+use crate::wallet::persist::{read_address_pool, KVStoreWalletPersister};
 use crate::wallet::Wallet;
 use crate::{Node, NodeMetrics, PersistedNodeMetrics};
 
@@ -1455,8 +1455,8 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res) =
-		runtime.block_on(async move {
+	let (payment_store_res, node_metris_res, pending_payment_store_res, address_pool_res) = runtime
+		.block_on(async move {
 			tokio::join!(
 				read_all_objects(
 					&*kv_store_ref,
@@ -1470,7 +1470,8 @@ fn build_with_store_internal(
 					PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 					PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 					Arc::clone(&logger_ref),
-				)
+				),
+				read_address_pool(&*kv_store_ref, &*logger_ref)
 			)
 		});
 
@@ -1757,9 +1758,18 @@ fn build_with_store_internal(
 		},
 	};
 
+	let persisted_pool_indices = match address_pool_res {
+		Ok(indices) => indices,
+		Err(e) => {
+			log_error!(logger, "Failed to read address pool data from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
 		wallet_persister,
+		persisted_pool_indices,
 		Arc::clone(&tx_broadcaster),
 		Arc::clone(&fee_estimator),
 		Arc::clone(&chain_source),
@@ -1769,6 +1779,13 @@ fn build_with_store_internal(
 		Arc::clone(&logger),
 		Arc::clone(&pending_payment_store),
 	));
+
+	// Fill the address pool up front so LDK's sync `SignerProvider` callbacks can hand out
+	// pre-persisted addresses without waiting on wallet persistence.
+	runtime.block_on(wallet.refill_address_pool()).map_err(|e| {
+		log_error!(logger, "Failed to fill the wallet's address pool: {}", e);
+		BuildError::WalletSetupFailed
+	})?;
 
 	tx_broadcaster.set_wallet(Arc::downgrade(&wallet));
 

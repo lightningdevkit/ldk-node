@@ -79,6 +79,22 @@ pub const MIN_FULL_SCAN_STOP_GAP: u32 = 1;
 /// Values above 1000 are clamped to 1000 when a full scan runs.
 pub const MAX_FULL_SCAN_STOP_GAP: u32 = 1000;
 
+/// The number of addresses the node keeps revealed and persisted ahead of use, from which it
+/// serves fresh-address requests and channel destination and shutdown scripts.
+///
+/// Pooled addresses are revealed-but-unused wallet scripts. Addresses are handed out oldest
+/// first, which keeps the pool beyond the handed-out addresses, where it cannot hide funds
+/// from a full scan's stop gap (e.g. [`EsploraSyncConfig::full_scan_stop_gap`]). A handout
+/// that fails while a concurrent one proceeds can briefly leave a pooled address below a
+/// handed-out one; such inversions are bounded by the pool size and consumed by the next
+/// handouts.
+///
+/// After a restore from seed, the pool refills from the keychain's first indices before the
+/// initial full scan runs, so it can serve addresses a previous installation of the wallet
+/// already handed out — possibly even used ones. The cost is address reuse, not fund
+/// visibility: the reveals keep the scripts watched and the scan discovers any prior use.
+pub const ADDRESS_POOL_SIZE: u32 = 16;
+
 // The number of concurrent requests made against the API provider.
 pub(crate) const BDK_CLIENT_CONCURRENCY: usize = 4;
 
