@@ -9,7 +9,7 @@ authors = [
   { name="Elias Rohrer", email="dev@tnull.de" },
 ]
 description = "A ready-to-go Lightning node library built using LDK and BDK."
-readme = "../../README.md"
+dynamic = ["readme"]
 requires-python = ">=3.8"
 classifiers = [
     "Topic :: Software Development :: Libraries",
@@ -29,5 +29,7 @@ dev = ["requests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ldk_node"]
+
+[tool.hatch.metadata.hooks.custom]
 
 [tool.hatch.build.hooks.custom]
