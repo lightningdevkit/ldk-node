@@ -203,7 +203,7 @@ async fn migrate_node_across_all_backends() {
 		Bolt11InvoiceDescription::Direct(Description::new("ln send".to_string()).unwrap());
 	let invoice = node_b.bolt11_payment().receive(10_000, &description.into(), 3600).unwrap();
 	let ln_send_id = node.bolt11_payment().send(&invoice, None).unwrap();
-	expect_payment_successful_event!(node, Some(ln_send_id), None);
+	expect_payment_successful_event!(node, ln_send_id, None);
 	expect_payment_received_event!(node_b, 10_000);
 
 	// Lightning receive: node B -> node.
@@ -211,7 +211,7 @@ async fn migrate_node_across_all_backends() {
 		Bolt11InvoiceDescription::Direct(Description::new("ln receive".to_string()).unwrap());
 	let invoice = node.bolt11_payment().receive(5_000, &description.into(), 3600).unwrap();
 	let ln_receive_id = node_b.bolt11_payment().send(&invoice, None).unwrap();
-	expect_payment_successful_event!(node_b, Some(ln_receive_id), None);
+	expect_payment_successful_event!(node_b, ln_receive_id, None);
 	expect_payment_received_event!(node, 5_000);
 
 	// On-chain send: node -> a foreign address.

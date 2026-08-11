@@ -441,28 +441,6 @@ impl Bolt12Payment {
 			Error::InvoiceRequestCreationFailed
 		})?;
 
-		let payment_hash = invoice.payment_hash();
-		let payment_id = PaymentId(payment_hash.0);
-
-		let kind = PaymentKind::Bolt12Refund {
-			hash: Some(payment_hash),
-			preimage: None,
-			secret: None,
-			payer_note: refund.payer_note().map(|note| UntrustedString(note.0.to_string())),
-			quantity: refund.quantity(),
-		};
-
-		let payment = PaymentDetails::new(
-			payment_id,
-			kind,
-			Some(refund.amount_msats()),
-			None,
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-
-		self.runtime.block_on(self.payment_store.insert(payment))?;
-
 		Ok(maybe_wrap(invoice))
 	}
 
