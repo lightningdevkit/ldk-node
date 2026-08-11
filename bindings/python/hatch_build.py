@@ -1,4 +1,5 @@
 import os
+import sysconfig
 
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from hatchling.metadata.plugin.interface import MetadataHookInterface
@@ -20,7 +21,8 @@ class CustomMetadataHook(MetadataHookInterface):
 
 class CustomBuildHook(BuildHookInterface):
     def initialize(self, version, build_data):
+        platform_tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
         build_data["pure_python"] = False
-        build_data["infer_tag"] = True
+        build_data["tag"] = f"py3-none-{platform_tag}"
         if self.target_name == "sdist":
             build_data["force_include"][readme_path(self.root)] = "README.md"

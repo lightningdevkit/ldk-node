@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling==1.32.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -10,13 +10,20 @@ authors = [
 ]
 description = "A ready-to-go Lightning node library built using LDK and BDK."
 dynamic = ["readme"]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 classifiers = [
     "Topic :: Software Development :: Libraries",
     "Topic :: Security :: Cryptography",
     "License :: OSI Approved :: MIT License",
     "License :: OSI Approved :: Apache Software License",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
 [project.urls]
@@ -29,7 +36,37 @@ dev = ["requests"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ldk_node"]
+exclude = ["src/ldk_node/test_ldk_node.py"]
 
 [tool.hatch.metadata.hooks.custom]
 
 [tool.hatch.build.hooks.custom]
+
+[tool.cibuildwheel]
+archs = ["native"]
+build = "cp3{10,11,12,13,14}-{manylinux,macosx}_*"
+build-frontend = "uv"
+test-command = 'python -c "import ldk_node; ldk_node.default_config()"'
+
+[tool.cibuildwheel.linux]
+before-all = [
+  "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.95.0",
+  '. "$HOME/.cargo/env"',
+  "cd {package}/../.. && ./scripts/uniffi_bindgen_generate_python.sh",
+]
+environment-pass = ["CARGO_TARGET_DIR", "SOURCE_DATE_EPOCH"]
+manylinux-x86_64-image = "manylinux_2_28"
+manylinux-aarch64-image = "manylinux_2_28"
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
+before-all = "rustup target add x86_64-apple-darwin aarch64-apple-darwin --toolchain 1.95.0"
+before-build = "cd {package}/../.. && RUSTUP_TOOLCHAIN=1.95.0 ./scripts/uniffi_bindgen_generate_python.sh"
+
+[[tool.cibuildwheel.overrides]]
+select = "*-macosx_x86_64"
+environment = { MACOSX_DEPLOYMENT_TARGET = "10.12" }
+
+[[tool.cibuildwheel.overrides]]
+select = "*-macosx_arm64"
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }

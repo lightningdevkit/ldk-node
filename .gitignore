@@ -27,3 +27,15 @@ swift.swiftdoc
 /bindings/kotlin/ldk-node-android/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.kt
 /bindings/kotlin/ldk-node-jvm/lib/src/main/kotlin/org/lightningdevkit/ldknode/ldk_node.kt
 /bindings/kotlin/ldk-node-jvm/lib/src/main/resources/
+
+# Ignore generated Python bindings and build output
+/bindings/python/.venv/
+/bindings/python/.venv-*/
+/bindings/python/dist/
+/bindings/python/uv.lock
+/bindings/python/wheelhouse/
+/bindings/python/src/ldk_node/ldk_node.py
+/bindings/python/src/ldk_node/libldk_node.so
+/bindings/python/src/ldk_node/libldk_node.dylib
+/bindings/python/__pycache__/
+/bindings/python/src/ldk_node/__pycache__/

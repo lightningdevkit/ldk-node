@@ -12,6 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      CARGO_TARGET_DIR: /tmp/cargo-target-ldk-node-python-ci
       LDK_NODE_PYTHON_DIR: bindings/python
 
     steps:
@@ -20,6 +21,11 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.12.3"
+
+      - name: Install supported Python versions
+        run: uv python install 3.10 3.14
 
       - name: Generate Python bindings
         run: ./scripts/uniffi_bindgen_generate_python.sh
@@ -35,4 +41,8 @@ jobs:
           ESPLORA_ENDPOINT: "http://127.0.0.1:3002"
         run: |
           cd $LDK_NODE_PYTHON_DIR
-          uv run --group dev python -m unittest discover -s src/ldk_node
+          for python_version in 3.10 3.14; do
+            UV_PROJECT_ENVIRONMENT=".venv-$python_version" \
+              uv run --python "$python_version" --group dev \
+              python -m unittest discover -s src/ldk_node
+          done
