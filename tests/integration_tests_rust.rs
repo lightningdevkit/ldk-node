@@ -38,8 +38,8 @@ use ldk_node::config::{
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
-	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
-	TransactionType, UnifiedPaymentResult,
+	ConfirmationStatus, PayerProofOptions, PaymentDetails, PaymentDirection, PaymentKind,
+	PaymentStatus, TransactionType, UnifiedPaymentResult,
 };
 use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType};
 use lightning::ln::channelmanager::PaymentId;
@@ -2631,6 +2631,27 @@ async fn simple_bolt12_send_receive() {
 		},
 	}
 	assert_eq!(node_a_payments.first().unwrap().amount_msat, Some(expected_amount_msat));
+
+	// As we persist the paid invoice alongside the payment, the payer is able to build a payer
+	// proof for it after the fact.
+	let expected_proof_note = "Paid in full".to_string();
+	let payer_proof_options = PayerProofOptions {
+		note: Some(expected_proof_note.clone()),
+		include_offer_description: true,
+		include_invoice_amount: true,
+		..Default::default()
+	};
+	let payer_proof =
+		node_a.bolt12_payment().create_payer_proof(&payment_id, Some(payer_proof_options)).unwrap();
+	let expected_hash = match node_a_payments.first().unwrap().kind {
+		PaymentKind::Bolt12Offer { hash, .. } => hash.unwrap(),
+		_ => panic!("Unexpected payment kind"),
+	};
+	assert_eq!(payer_proof.payment_hash(), expected_hash);
+	assert_eq!(payer_proof.invoice_amount_msats(), Some(expected_amount_msat));
+	assert_eq!(payer_proof.proof_note().map(|n| n.to_string()), Some(expected_proof_note));
+	assert!(payer_proof.offer_description().is_some());
+	assert!(payer_proof.offer_issuer().is_none());
 
 	expect_payment_received_event!(node_b, expected_amount_msat);
 	let node_b_payments =

@@ -32,6 +32,11 @@
   `ChannelTypeFeatures`.
 - `Config::anchor_channels_config` is no longer optional, hence anchor channels can no longer be
   disabled. We still negotiate legacy channels if the peer does not support anchor channels.
+- The paid BOLT 12 invoice is now persisted on `PaymentKind::Bolt12Offer` and
+  `PaymentKind::Bolt12Refund`, and `Bolt12Payment::create_payer_proof` allows building a BOLT 12
+  payer proof for a previously succeeded outbound BOLT 12 payment. `PayerProofOptions` controls
+  which optional invoice fields are selectively disclosed. Payments that completed via a static
+  invoice, i.e., async payments, do not support payer proofs. (#845)
 
 ## Bug Fixes and Improvements
 - Building a fresh node against a Bitcoin Core RPC or REST chain source that fails to return the
