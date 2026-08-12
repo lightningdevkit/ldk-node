@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
 use std::default::Default;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
 use std::{fmt, fs};
@@ -218,8 +218,6 @@ pub enum BuildError {
 	ReadFailed,
 	/// The deserialized channel data would be dangerous to use, typically because
 	/// channel monitors are stale compared to the channel manager.
-	///
-	/// Use [`NodeBuilder::set_accept_stale_channel_monitors`] to recover.
 	DangerousValue,
 	/// We failed to write data to the [`KVStore`].
 	///
@@ -260,11 +258,9 @@ impl fmt::Display for BuildError {
 			},
 			Self::RuntimeSetupFailed => write!(f, "Failed to setup a runtime."),
 			Self::ReadFailed => write!(f, "Failed to read from store."),
-			Self::DangerousValue => write!(
-				f,
-				"Deserialized channel data is dangerous to use (stale channel monitors). \
-				 Use set_accept_stale_channel_monitors(true) to recover."
-			),
+			Self::DangerousValue => {
+				write!(f, "Deserialized channel data is dangerous to use (stale channel monitors).")
+			},
 			Self::WriteFailed => write!(f, "Failed to write to store."),
 			Self::StoragePathAccessFailed => write!(f, "Failed to access the given storage path."),
 			Self::KVStoreSetupFailed => write!(f, "Failed to setup KVStore."),
@@ -305,7 +301,6 @@ pub struct NodeBuilder {
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	channel_data_migration: Option<ChannelDataMigration>,
-	accept_stale_channel_monitors: bool,
 }
 
 impl NodeBuilder {
@@ -336,7 +331,6 @@ impl NodeBuilder {
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
 			channel_data_migration,
-			accept_stale_channel_monitors: false,
 		}
 	}
 
@@ -386,19 +380,6 @@ impl NodeBuilder {
 	/// **Note:** The serialized data must be compatible with the current LDK version.
 	pub fn set_channel_data_migration(&mut self, migration: ChannelDataMigration) -> &mut Self {
 		self.channel_data_migration = Some(migration);
-		self
-	}
-
-	/// Accept stale channel monitors on startup instead of failing with `DangerousValue`.
-	///
-	/// When enabled, stale monitors have their `update_id` force-synced to match the
-	/// `ChannelManager`. The monitor's commitment state remains stale until the next real
-	/// channel update (e.g. a fee update round-trip after reconnecting to the peer).
-	///
-	/// Use this for recovery after monitor data was overwritten by a migration or backup restore.
-	/// Chain sync should be delayed until monitors are healed via a commitment round-trip.
-	pub fn set_accept_stale_channel_monitors(&mut self, accept: bool) -> &mut Self {
-		self.accept_stale_channel_monitors = accept;
 		self
 	}
 
@@ -866,7 +847,6 @@ impl NodeBuilder {
 			logger,
 			Arc::new(vss_store),
 			self.channel_data_migration.as_ref(),
-			self.accept_stale_channel_monitors,
 		)
 	}
 
@@ -902,7 +882,6 @@ impl NodeBuilder {
 			logger,
 			kv_store,
 			self.channel_data_migration.as_ref(),
-			self.accept_stale_channel_monitors,
 		)
 	}
 }
@@ -970,13 +949,6 @@ impl ArcedNodeBuilder {
 	/// See [`NodeBuilder::set_channel_data_migration`] for details.
 	pub fn set_channel_data_migration(&self, migration: ChannelDataMigration) {
 		self.inner.write().unwrap().set_channel_data_migration(migration);
-	}
-
-	/// Accept stale channel monitors on startup instead of failing.
-	///
-	/// See [`NodeBuilder::set_accept_stale_channel_monitors`] for details.
-	pub fn set_accept_stale_channel_monitors(&self, accept: bool) {
-		self.inner.write().unwrap().set_accept_stale_channel_monitors(accept);
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
@@ -1755,7 +1727,7 @@ fn build_with_store_internal(
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>, seed_bytes: [u8; 64], runtime: Arc<Runtime>,
 	logger: Arc<Logger>, kv_store: Arc<DynStore>,
-	channel_data_migration: Option<&ChannelDataMigration>, accept_stale_channel_monitors: bool,
+	channel_data_migration: Option<&ChannelDataMigration>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
 
@@ -2249,7 +2221,7 @@ fn build_with_store_internal(
 			let mut reader = Cursor::new(res);
 			let channel_monitor_references =
 				channel_monitors.iter().map(|(_, chanmon)| chanmon).collect();
-			let mut read_args = ChannelManagerReadArgs::new(
+			let read_args = ChannelManagerReadArgs::new(
 				Arc::clone(&keys_manager),
 				Arc::clone(&keys_manager),
 				Arc::clone(&keys_manager),
@@ -2262,15 +2234,13 @@ fn build_with_store_internal(
 				user_config,
 				channel_monitor_references,
 			);
-			read_args.accept_stale_channel_monitors = accept_stale_channel_monitors;
 			let (_hash, channel_manager) =
 				<(BlockHash, ChannelManager)>::read(&mut reader, read_args).map_err(|e| {
 					if matches!(e, lightning::ln::msgs::DecodeError::DangerousValue) {
 						log_error!(
 							logger,
 							"Channel manager deserialization returned DangerousValue \
-							 (stale channel monitors). \
-							 Use set_accept_stale_channel_monitors(true) to recover: {}",
+							 (stale channel monitors): {}",
 							e
 						);
 						BuildError::DangerousValue
@@ -2643,7 +2613,6 @@ fn build_with_store_internal(
 		async_payments_role,
 		runtime_sync_intervals: Arc::new(RwLock::new(RuntimeSyncIntervals::default())),
 		local_rgs_timestamp,
-		accept_stale_channel_monitors: AtomicBool::new(accept_stale_channel_monitors),
 	})
 }
 

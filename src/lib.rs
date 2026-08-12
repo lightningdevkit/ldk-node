@@ -107,7 +107,7 @@ use std::collections::{HashMap, HashSet};
 use std::default::Default;
 use std::net::ToSocketAddrs;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -144,13 +144,11 @@ use lightning::events::bump_transaction::{Input, Wallet as LdkWallet};
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::chan_utils::{make_funding_redeemscript, FUNDING_TRANSACTION_WITNESS_WEIGHT};
 use lightning::ln::channel_state::{ChannelDetails as LdkChannelDetails, ChannelShutdownState};
-use lightning::ln::channelmanager::{PaymentId, RecipientOnionFields, Retry};
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::funding::SpliceContribution;
 use lightning::ln::msgs::SocketAddress;
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeAlias;
-use lightning::routing::router::{PaymentParameters, RouteParameters};
-use lightning::sign::EntropySource;
 use lightning::util::persist::KVStoreSync;
 use lightning_background_processor::process_events_async;
 use liquidity::{LSPS1Liquidity, LiquiditySource};
@@ -223,7 +221,6 @@ pub struct Node {
 	runtime_sync_intervals: Arc<RwLock<RuntimeSyncIntervals>>,
 	/// Shared RGS timestamp used by LocalGraphStore to persist the timestamp alongside the graph.
 	local_rgs_timestamp: Arc<AtomicU32>,
-	accept_stale_channel_monitors: AtomicBool,
 }
 
 #[derive(Default)]
@@ -330,13 +327,7 @@ impl Node {
 		// Set event queue for onchain event emission
 		self.chain_source.set_event_queue(Arc::clone(&self.event_queue));
 
-		// When recovering stale monitors, defer chain sync until after the background
-		// processor and peer connections have had time to heal the monitors via a
-		// commitment round-trip (triggered by fee update after timer_tick).
-		let defer_chain_sync = self.accept_stale_channel_monitors.load(Ordering::Relaxed);
-		if !defer_chain_sync {
-			self.spawn_chain_sync_task();
-		}
+		self.spawn_chain_sync_task();
 
 		if self.gossip_source.is_rgs() {
 			let gossip_source = Arc::clone(&self.gossip_source);
@@ -737,246 +728,6 @@ impl Node {
 					}
 				}
 			});
-		}
-
-		if defer_chain_sync {
-			// Mark node as running and release the lock BEFORE the healing block,
-			// so stop() can be called to abort startup if needed.
-			*is_running_lock = true;
-			drop(is_running_lock);
-
-			// Stale monitor recovery: the background processor and peer connections are now
-			// running. We need to trigger a commitment round-trip on each channel to heal
-			// the stale monitors before processing any on-chain events.
-			log_info!(
-				self.logger,
-				"Stale monitor recovery: triggering commitment round-trips to heal monitors \
-				 before starting chain sync..."
-			);
-
-			// Trigger timer_tick to queue any fee updates (works for funder channels).
-			self.channel_manager.timer_tick_occurred();
-
-			let channel_manager = Arc::clone(&self.channel_manager);
-			let chain_monitor = Arc::clone(&self.chain_monitor);
-			let keys_manager = Arc::clone(&self.keys_manager);
-			let chain_source = Arc::clone(&self.chain_source);
-			let sync_sweeper = Arc::clone(&self.output_sweeper);
-			let heal_logger = Arc::clone(&self.logger);
-			let mut stop_healing = self.stop_sender.subscribe();
-			self.runtime.block_on(async move {
-				// Record initial monitor update_ids to detect when they advance.
-				let initial_update_ids: Vec<_> = channel_manager
-					.list_channels()
-					.iter()
-					.filter(|c| c.is_channel_ready)
-					.filter_map(|c| {
-						chain_monitor.get_monitor(c.channel_id).ok().map(|m| {
-							(c.channel_id, c.counterparty.node_id, m.get_latest_update_id())
-						})
-					})
-					.collect();
-
-				if initial_update_ids.is_empty() {
-					log_info!(heal_logger, "Stale monitor recovery: no active channels to heal.");
-					return;
-				}
-
-				log_info!(
-					heal_logger,
-					"Stale monitor recovery: tracking {} channel(s) for healing.",
-					initial_update_ids.len()
-				);
-
-				// Give peers time to connect and complete channel_reestablish.
-				tokio::select! {
-					_ = stop_healing.changed() => {
-						log_info!(heal_logger, "Stale monitor recovery: cancelled by shutdown.");
-						return;
-					}
-					_ = tokio::time::sleep(Duration::from_secs(5)) => {}
-				}
-
-				// Sync chain tip before sending healing payments. This updates the
-				// ChannelManager's best block height so the keysend HTLC gets a current
-				// CLTV expiry. Without this, users offline >24h would get an already-expired
-				// HTLC that triggers a force-close when chain sync later catches up.
-				log_info!(heal_logger, "Stale monitor recovery: syncing chain tip...");
-				let chain_synced = match chain_source
-					.sync_lightning_wallet(
-						Arc::clone(&channel_manager),
-						Arc::clone(&chain_monitor),
-						Arc::clone(&sync_sweeper),
-					)
-					.await
-				{
-					Ok(()) => {
-						log_info!(heal_logger, "Stale monitor recovery: chain tip synced.");
-						true
-					},
-					Err(e) => {
-						log_error!(
-							heal_logger,
-							"Stale monitor recovery: chain sync failed: {}. \
-							 Skipping healing payments to avoid stale CLTV.",
-							e
-						);
-						false
-					},
-				};
-
-				// Send 1-sat keysend payments to trigger commitment round-trips.
-				// We use real payments (not probes) because LDK rejects single-hop probes.
-				// The HTLC add/fail cycle triggers commitment_signed exchanges that heal
-				// the monitor. Cost: 1 sat per counterparty if keysend succeeds.
-				// Only send if chain sync succeeded — stale CLTV would force-close.
-				let send_heal_payment = |node_id: bitcoin::secp256k1::PublicKey| {
-					let payment_id = PaymentId(keys_manager.get_secure_random_bytes());
-					let mut route_params = RouteParameters::from_payment_params_and_value(
-						PaymentParameters::from_node_id(node_id, 144),
-						1_000, // 1 sat
-					);
-					// Force direct route only — prevent routing through a different channel
-					// which would heal the wrong monitor.
-					route_params.max_total_routing_fee_msat = Some(0);
-					channel_manager.send_spontaneous_payment(
-						None,
-						RecipientOnionFields::spontaneous_empty(),
-						payment_id,
-						route_params,
-						Retry::Attempts(0),
-					)
-				};
-
-				if chain_synced {
-					// Send one healing payment per unhealed channel. Note: for multiple
-					// channels with the same peer, the router may pick the same channel for
-					// both payments. The retry loop gives multiple chances for the router to
-					// select different channels as scores and capacity shift between attempts.
-					for (_, counterparty_node_id, _) in &initial_update_ids {
-						match send_heal_payment(*counterparty_node_id) {
-							Ok(_) => {
-								log_info!(
-									heal_logger,
-									"Stale monitor recovery: sent healing payment to {}",
-									counterparty_node_id
-								);
-							},
-							Err(e) => {
-								log_error!(
-								heal_logger,
-								"Stale monitor recovery: failed to send healing payment to {}: {:?}",
-								counterparty_node_id,
-								e
-							);
-							},
-						}
-					}
-				} // chain_synced
-
-				// Poll monitor update_ids until all have advanced (healed) or timeout.
-				// Retry payments every 10s for channels that haven't healed yet (peer
-				// may have connected late).
-				let poll_interval = Duration::from_secs(1);
-				let retry_interval = Duration::from_secs(10);
-				let max_wait = Duration::from_secs(60);
-				let start = tokio::time::Instant::now();
-				let mut last_retry_time = tokio::time::Instant::now();
-
-				loop {
-					if start.elapsed() >= max_wait {
-						let unhealed_count = initial_update_ids
-							.iter()
-							.filter(|(ch_id, _, initial_id)| {
-								chain_monitor
-									.get_monitor(*ch_id)
-									.ok()
-									.map(|m| m.get_latest_update_id() <= *initial_id)
-									.unwrap_or(false)
-							})
-							.count();
-
-						if unhealed_count == 0 {
-							log_info!(heal_logger, "Stale monitor recovery: all monitors healed.");
-						} else {
-							log_error!(
-								heal_logger,
-								"Stale monitor recovery: timeout reached with {} unhealed channel(s). \
-								 Proceeding with chain sync anyway.",
-								unhealed_count
-							);
-						}
-						break;
-					}
-
-					let all_healed = initial_update_ids.iter().all(|(ch_id, _, initial_id)| {
-						chain_monitor
-							.get_monitor(*ch_id)
-							.ok()
-							.map(|m| m.get_latest_update_id() > *initial_id)
-							.unwrap_or(true) // Channel gone = consider healed
-					});
-
-					if all_healed {
-						log_info!(
-							heal_logger,
-							"Stale monitor recovery: all monitors healed in {:.1}s.",
-							start.elapsed().as_secs_f64()
-						);
-						break;
-					}
-
-					// Retry healing payments for each unhealed channel (only if chain synced).
-					if chain_synced && last_retry_time.elapsed() >= retry_interval {
-						last_retry_time = tokio::time::Instant::now();
-						for (ch_id, counterparty_node_id, initial_id) in &initial_update_ids {
-							let healed = chain_monitor
-								.get_monitor(*ch_id)
-								.ok()
-								.map(|m| m.get_latest_update_id() > *initial_id)
-								.unwrap_or(true);
-							if healed {
-								continue;
-							}
-
-							if send_heal_payment(*counterparty_node_id).is_ok() {
-								log_info!(
-									heal_logger,
-									"Stale monitor recovery: retried healing payment for channel {}",
-									ch_id
-								);
-							}
-						}
-					}
-
-					tokio::select! {
-						_ = stop_healing.changed() => {
-							log_info!(heal_logger, "Stale monitor recovery: cancelled by shutdown.");
-							break;
-						}
-						_ = tokio::time::sleep(poll_interval) => {}
-					}
-				}
-			});
-
-			// Clear the flag so subsequent start()/stop()/start() cycles don't re-trigger.
-			self.accept_stale_channel_monitors.store(false, Ordering::Relaxed);
-
-			// Subscribe while holding the is_running read lock to prevent a TOCTOU
-			// race where stop() completes between our check and the subscribe — which
-			// would orphan the chain sync task (it would miss the stop signal).
-			{
-				let is_running = self.is_running.read().unwrap();
-				if *is_running {
-					let stop_receiver = self.stop_sender.subscribe();
-					drop(is_running);
-					self.spawn_chain_sync_task_with_receiver(stop_receiver);
-					log_info!(self.logger, "Startup complete.");
-				} else {
-					log_info!(self.logger, "Node was stopped during stale monitor recovery.");
-				}
-			}
-			return Ok(());
 		}
 
 		log_info!(self.logger, "Startup complete.");

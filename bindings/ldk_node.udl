@@ -155,7 +155,6 @@ interface Builder {
 	void set_entropy_seed_bytes(sequence<u8> seed_bytes);
 	void set_entropy_bip39_mnemonic(Mnemonic mnemonic, string? passphrase);
 	void set_channel_data_migration(ChannelDataMigration migration);
-	void set_accept_stale_channel_monitors(boolean accept);
 	void set_chain_source_esplora(string server_url, EsploraSyncConfig? config);
 	void set_chain_source_electrum(string server_url, ElectrumSyncConfig? config);
 	void set_chain_source_bitcoind_rpc(string rpc_host, u16 rpc_port, string rpc_user, string rpc_password);

@@ -1,3 +1,11 @@
+# Unreleased (Synonym Fork)
+
+## Security
+
+- Removed `set_accept_stale_channel_monitors` and the patched Synonym `rust-lightning` branch.
+  Stale channel-monitor mismatches now fail closed with `BuildError::DangerousValue`.
+  Lightning crates are pinned to upstream `rust-lightning` v0.2.2 (`0695da99`) by immutable `rev`.
+
 # 0.7.0-rc.62 (Synonym Fork)
 
 ## Bug Fixes

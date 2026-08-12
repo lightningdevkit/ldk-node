@@ -125,19 +125,18 @@ name = "payments"
 harness = false
 
 [patch.crates-io]
-lightning = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
-lightning-types = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
-lightning-invoice = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
-lightning-net-tokio = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
-lightning-persister = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
-lightning-background-processor = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
-lightning-rapid-gossip-sync = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
-lightning-block-sync = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
-lightning-transaction-sync = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
-lightning-liquidity = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
-lightning-macros = { git = "https://github.com/synonymdev/rust-lightning", branch = "0.2.2-accept-stale-monitors" }
+lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
+lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
+lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
+lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
+lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
+lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
+lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
+lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
+lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
+lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
+lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "0695da995fbe2810e11fd8824dd43eece994d111" }
 
-#[patch.crates-io]
 #lightning = { path = "../rust-lightning/lightning" }
 #lightning-types = { path = "../rust-lightning/lightning-types" }
 #lightning-invoice = { path = "../rust-lightning/lightning-invoice" }
