@@ -173,3 +173,37 @@ impl LogWriter for MultiNodeLogger {
 		print!("{}", log);
 	}
 }
+
+/// Collects every log message a node emits, for tests that assert a specific line was logged.
+pub(crate) struct CollectingLogWriter {
+	logs: Mutex<Vec<String>>,
+}
+
+impl CollectingLogWriter {
+	pub(crate) fn new() -> Self {
+		Self { logs: Mutex::new(Vec::new()) }
+	}
+
+	pub(crate) fn contains(&self, text: &str) -> bool {
+		self.logs.lock().unwrap().iter().any(|message| message.contains(text))
+	}
+
+	/// Waits up to ten seconds for a logged message containing `text`, returning whether one
+	/// arrived. Polling beats a fixed sleep: it returns as soon as the line lands and only pays
+	/// the full timeout when the line never comes.
+	pub(crate) async fn wait_for(&self, text: &str) -> bool {
+		for _ in 0..100 {
+			if self.contains(text) {
+				return true;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+		}
+		false
+	}
+}
+
+impl LogWriter for CollectingLogWriter {
+	fn log(&self, record: LogRecord) {
+		self.logs.lock().unwrap().push(record.args.to_string());
+	}
+}
