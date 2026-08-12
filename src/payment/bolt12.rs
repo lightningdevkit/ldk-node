@@ -18,10 +18,14 @@ use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId};
 use lightning::ln::outbound_payment::Retry;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
 use lightning::offers::parse::Bolt12SemanticError;
+use lightning::offers::payer_proof::PaidBolt12Invoice as LdkPaidBolt12Invoice;
+#[cfg(not(feature = "uniffi"))]
+use lightning::offers::payer_proof::PayerProof as LdkPayerProof;
 use lightning::routing::router::RouteParametersConfig;
-use lightning::sign::EntropySource;
+use lightning::sign::{EntropySource, NodeSigner};
 #[cfg(feature = "uniffi")]
 use lightning::util::ser::{Readable, Writeable};
+use lightning_types::payment::PaymentPreimage;
 use lightning_types::string::UntrustedString;
 
 use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
@@ -51,6 +55,36 @@ type Refund = Arc<crate::ffi::Refund>;
 type HumanReadableName = lightning::onion_message::dns_resolution::HumanReadableName;
 #[cfg(feature = "uniffi")]
 type HumanReadableName = Arc<crate::ffi::HumanReadableName>;
+
+#[cfg(not(feature = "uniffi"))]
+type PayerProof = LdkPayerProof;
+#[cfg(feature = "uniffi")]
+type PayerProof = Arc<crate::ffi::PayerProof>;
+
+/// Options controlling which optional fields are disclosed in a [BOLT 12] payer proof.
+///
+/// A payer proof always commits to the payer id, the payment hash, and the issuer signing
+/// pubkey, and additionally discloses the invoice features whenever the invoice carries any.
+/// Everything else is disclosed only if requested here, allowing to reveal just as much of the
+/// invoice as the verifier needs to see.
+///
+/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PayerProofOptions {
+	/// An optional note to attach to the payer proof itself.
+	pub note: Option<String>,
+	/// Whether to disclose the offer description.
+	pub include_offer_description: bool,
+	/// Whether to disclose the offer issuer.
+	pub include_offer_issuer: bool,
+	/// Whether to disclose the invoice amount.
+	pub include_invoice_amount: bool,
+	/// Whether to disclose the invoice creation timestamp.
+	pub include_invoice_created_at: bool,
+	/// Additional TLV types to disclose, for fields not covered by the flags above.
+	pub extra_tlv_types: Vec<u64>,
+}
 
 /// A payment handler allowing to create and pay [BOLT 12] offers and refunds.
 ///
@@ -387,6 +421,87 @@ impl Bolt12Payment {
 			None,
 		)?;
 		Ok(payment_id)
+	}
+
+	/// Creates a [BOLT 12] payer proof for a payment this node made.
+	///
+	/// A payer proof lets the payer demonstrate to a third party that they paid a particular
+	/// [BOLT 12] invoice, disclosing only the invoice fields they choose to reveal via
+	/// [`PayerProofOptions`].
+	///
+	/// All inputs are taken straight from [`Event::PaymentSuccessful`]: pass its `payment_id` and
+	/// `payment_preimage`, plus the [`Bolt12Invoice`] out of its `bolt12_invoice` field. Nothing
+	/// is read from or written to the payment store, so it's up to you to hold on to the invoice
+	/// if you want to build a proof later on.
+	///
+	/// Note that payments settled via a static invoice, i.e., async payments, can't be proven this
+	/// way, which is why this takes a [`Bolt12Invoice`] rather than the event's
+	/// [`PaidBolt12Invoice`]: those payments simply won't yield one.
+	///
+	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
+	/// [`Event::PaymentSuccessful`]: crate::Event::PaymentSuccessful
+	/// [`Bolt12Invoice`]: lightning::offers::invoice::Bolt12Invoice
+	/// [`PaidBolt12Invoice`]: lightning::offers::payer_proof::PaidBolt12Invoice
+	pub fn create_payer_proof(
+		&self, payment_id: PaymentId, payment_preimage: PaymentPreimage, invoice: &Bolt12Invoice,
+		options: Option<PayerProofOptions>,
+	) -> Result<PayerProof, Error> {
+		let invoice = maybe_deref(invoice);
+		let paid_invoice = LdkPaidBolt12Invoice::Bolt12Invoice(invoice.clone());
+
+		let options = options.unwrap_or_default();
+		let expanded_key = self.keys_manager.get_expanded_key();
+		let secp_ctx = bitcoin::secp256k1::Secp256k1::new();
+
+		let mut builder = paid_invoice
+			.prove_payer_derived(payment_preimage, &expanded_key, payment_id, &secp_ctx)
+			.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to initialize payer proof builder for {}: {:?}",
+					payment_id,
+					e
+				);
+				Error::PayerProofCreationFailed
+			})?;
+
+		for tlv_type in options.extra_tlv_types {
+			builder = builder.include_type(tlv_type).map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to include TLV {} in payer proof for {}: {:?}",
+					tlv_type,
+					payment_id,
+					e
+				);
+				Error::PayerProofCreationFailed
+			})?;
+		}
+
+		if options.include_offer_description {
+			builder = builder.include_offer_description();
+		}
+		if options.include_offer_issuer {
+			builder = builder.include_offer_issuer();
+		}
+		if options.include_invoice_amount {
+			builder = builder.include_invoice_amount();
+		}
+		if options.include_invoice_created_at {
+			builder = builder.include_invoice_created_at();
+		}
+		if let Some(note) = options.note {
+			builder = builder.with_proof_note(note);
+		}
+
+		let proof = builder.build_and_sign().map_err(|e| {
+			log_error!(self.logger, "Failed to build payer proof for {}: {:?}", payment_id, e);
+			Error::PayerProofCreationFailed
+		})?;
+
+		log_info!(self.logger, "Created payer proof for payment {}", payment_id);
+
+		Ok(maybe_wrap(proof))
 	}
 
 	/// Returns a payable offer that can be used to request and receive a payment of the amount
