@@ -38,8 +38,8 @@ use ldk_node::config::{
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
-	ConfirmationStatus, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
-	TransactionType, UnifiedPaymentResult,
+	ConfirmationStatus, PayerProofOptions, PaymentDetails, PaymentDirection, PaymentKind,
+	PaymentStatus, TransactionType, UnifiedPaymentResult,
 };
 use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType};
 use lightning::ln::channelmanager::PaymentId;
@@ -2592,18 +2592,47 @@ async fn simple_bolt12_send_receive() {
 		.unwrap();
 
 	let event = node_a.next_event_async().await;
-	match event {
-		ref e @ Event::PaymentSuccessful { payment_id: ref evt_id, ref bolt12_invoice, .. } => {
+	let (invoice, payment_preimage) = match event {
+		ref e @ Event::PaymentSuccessful {
+			payment_id: ref evt_id,
+			ref bolt12_invoice,
+			ref payment_preimage,
+			..
+		} => {
 			println!("{} got event {:?}", node_a.node_id(), e);
 			assert_eq!(*evt_id, payment_id);
 			assert!(
 				bolt12_invoice.is_some(),
 				"bolt12_invoice should be present for BOLT12 payments"
 			);
+			let invoice = bolt12_invoice.as_ref().unwrap().bolt12_invoice().unwrap().clone();
+			let captured = (invoice, payment_preimage.unwrap());
 			node_a.event_handled().unwrap();
+			captured
 		},
 		ref e => panic!("{} got unexpected event!: {:?}", "node_a", e),
-	}
+	};
+
+	// The payer proof is built purely from what the event handed us -- nothing is read back out
+	// of the payment store.
+	let expected_proof_note = "Paid in full".to_string();
+	let options = PayerProofOptions {
+		note: Some(expected_proof_note.clone()),
+		include_offer_description: true,
+		include_invoice_amount: true,
+		..Default::default()
+	};
+	let payer_proof = node_a
+		.bolt12_payment()
+		.create_payer_proof(payment_id, payment_preimage, &invoice, Some(options))
+		.unwrap();
+	assert_eq!(payer_proof.payment_preimage(), payment_preimage);
+	assert_eq!(payer_proof.invoice_amount_msats(), Some(expected_amount_msat));
+	assert_eq!(payer_proof.proof_note().map(|n| n.to_string()), Some(expected_proof_note));
+	assert!(payer_proof.offer_description().is_some());
+	// Fields we didn't ask to disclose stay absent.
+	assert!(payer_proof.offer_issuer().is_none());
+	assert!(payer_proof.invoice_created_at().is_none());
 	let node_a_payments =
 		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt12Offer { .. }));
 	assert_eq!(node_a_payments.len(), 1);

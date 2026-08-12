@@ -57,6 +57,8 @@ pub enum Error {
 	WalletOperationFailed,
 	/// A wallet operation timed out.
 	WalletOperationTimeout,
+	/// Creating a payer proof failed.
+	PayerProofCreationFailed,
 	/// A signing operation for transaction failed.
 	OnchainTxSigningFailed,
 	/// A transaction sync operation failed.
@@ -139,6 +141,8 @@ pub enum Error {
 	InvalidLnurl,
 	/// The configured chain source is not supported.
 	ChainSourceNotSupported,
+	/// The provided payer proof is invalid.
+	InvalidPayerProof,
 }
 
 impl fmt::Display for Error {
@@ -170,6 +174,7 @@ impl fmt::Display for Error {
 			},
 			Self::WalletOperationFailed => write!(f, "Failed to conduct wallet operation."),
 			Self::WalletOperationTimeout => write!(f, "A wallet operation timed out."),
+			Self::PayerProofCreationFailed => write!(f, "Failed to create payer proof."),
 			Self::OnchainTxSigningFailed => write!(f, "Failed to sign given transaction."),
 			Self::TxSyncFailed => write!(f, "Failed to sync transactions."),
 			Self::TxSyncTimeout => write!(f, "Syncing transactions timed out."),
@@ -227,6 +232,7 @@ impl fmt::Display for Error {
 			Self::ChainSourceNotSupported => {
 				write!(f, "The configured chain source is not supported.")
 			},
+			Self::InvalidPayerProof => write!(f, "The provided payer proof is invalid."),
 		}
 	}
 }

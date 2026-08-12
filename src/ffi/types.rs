@@ -23,7 +23,6 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 pub use bitcoin::{Address, BlockHash, Network, OutPoint, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
-use lightning::events::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
 use lightning::ln::channel_state::{ChannelShutdownState, CounterpartyForwardingInfo};
 use lightning::ln::channelmanager::PaymentId;
@@ -32,6 +31,9 @@ pub use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
 pub use lightning::offers::offer::OfferId;
 use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
+use lightning::offers::payer_proof::{
+	PaidBolt12Invoice as LdkPaidBolt12Invoice, PayerProof as LdkPayerProof,
+};
 use lightning::offers::refund::Refund as LdkRefund;
 use lightning::offers::static_invoice::StaticInvoice as LdkStaticInvoice;
 use lightning::onion_message::dns_resolution::HumanReadableName as LdkHumanReadableName;
@@ -840,6 +842,17 @@ pub enum PaidBolt12Invoice {
 	Static(Arc<StaticInvoice>),
 }
 
+impl PaidBolt12Invoice {
+	/// Returns the [`Bolt12Invoice`] if the payment was for a standard BOLT 12 invoice, and
+	/// `None` for a static invoice, i.e., an async payment, which can't be proven.
+	pub fn bolt12_invoice(&self) -> Option<Arc<Bolt12Invoice>> {
+		match self {
+			PaidBolt12Invoice::Bolt12(invoice) => Some(Arc::clone(invoice)),
+			PaidBolt12Invoice::Static(_) => None,
+		}
+	}
+}
+
 impl From<LdkPaidBolt12Invoice> for PaidBolt12Invoice {
 	fn from(ldk: LdkPaidBolt12Invoice) -> Self {
 		match ldk {
@@ -878,6 +891,135 @@ impl Readable for PaidBolt12Invoice {
 	fn read<R: lightning::io::Read>(r: &mut R) -> Result<Self, DecodeError> {
 		let ldk_type = LdkPaidBolt12Invoice::read(r)?;
 		Ok(ldk_type.into())
+	}
+}
+
+/// A cryptographic proof that a BOLT12 invoice was paid by this node.
+///
+/// Hand the encoded form, via [`Self::bytes`] or [`Self::as_string`], to whoever needs to verify
+/// it. The remaining accessors expose the fields that were selectively disclosed when the proof
+/// was created.
+#[derive(Debug, Clone, uniffi::Object)]
+#[uniffi::export(Debug, Display)]
+pub struct PayerProof {
+	pub(crate) inner: LdkPayerProof,
+}
+
+#[uniffi::export]
+impl PayerProof {
+	#[uniffi::constructor]
+	pub fn from_bytes(proof_bytes: Vec<u8>) -> Result<Self, Error> {
+		let inner = LdkPayerProof::try_from(proof_bytes).map_err(|_| Error::InvalidPayerProof)?;
+		Ok(Self { inner })
+	}
+
+	/// Parses a payer proof from its bech32-encoded string form, as returned by
+	/// [`Self::as_string`].
+	#[uniffi::constructor]
+	pub fn from_str(proof_str: &str) -> Result<Self, Error> {
+		proof_str.parse()
+	}
+
+	/// The payment preimage proving the payment completed.
+	pub fn payment_preimage(&self) -> PaymentPreimage {
+		self.inner.payment_preimage()
+	}
+
+	/// The payment hash committed to by the invoice and proven by the preimage.
+	pub fn payment_hash(&self) -> PaymentHash {
+		self.inner.payment_hash()
+	}
+
+	/// The public key of the payer that authorized the payment.
+	pub fn payer_signing_pubkey(&self) -> PublicKey {
+		self.inner.payer_signing_pubkey()
+	}
+
+	/// The issuer signing public key committed to by the invoice.
+	pub fn issuer_signing_pubkey(&self) -> PublicKey {
+		self.inner.issuer_signing_pubkey()
+	}
+
+	/// The invoice signature bytes.
+	pub fn invoice_signature(&self) -> Vec<u8> {
+		self.inner.invoice_signature().as_ref().to_vec()
+	}
+
+	/// The proof signature bytes.
+	pub fn proof_signature(&self) -> Vec<u8> {
+		self.inner.proof_signature().as_ref().to_vec()
+	}
+
+	/// The offer description, if it was disclosed in the proof.
+	pub fn offer_description(&self) -> Option<String> {
+		self.inner.offer_description().map(|value| value.to_string())
+	}
+
+	/// The offer issuer, if it was disclosed in the proof.
+	pub fn offer_issuer(&self) -> Option<String> {
+		self.inner.offer_issuer().map(|value| value.to_string())
+	}
+
+	/// The invoice amount in millisatoshis, if it was disclosed in the proof.
+	pub fn invoice_amount_msats(&self) -> Option<u64> {
+		self.inner.invoice_amount_msats()
+	}
+
+	/// The invoice creation time, in seconds since the UNIX epoch, if it was disclosed in the
+	/// proof.
+	pub fn invoice_created_at(&self) -> Option<u64> {
+		self.inner.invoice_created_at().map(|value| value.as_secs())
+	}
+
+	/// The optional note attached to the proof.
+	pub fn proof_note(&self) -> Option<String> {
+		self.inner.proof_note().map(|value| value.to_string())
+	}
+
+	/// The Merkle root committed to by the proof.
+	pub fn merkle_root(&self) -> Vec<u8> {
+		self.inner.merkle_root().to_byte_array().to_vec()
+	}
+
+	/// The raw TLV bytes of the proof.
+	pub fn bytes(&self) -> Vec<u8> {
+		self.inner.bytes().to_vec()
+	}
+
+	/// The bech32-encoded string form of the proof.
+	pub fn as_string(&self) -> String {
+		self.inner.to_string()
+	}
+}
+
+impl From<LdkPayerProof> for PayerProof {
+	fn from(inner: LdkPayerProof) -> Self {
+		Self { inner }
+	}
+}
+
+impl std::str::FromStr for PayerProof {
+	type Err = Error;
+
+	fn from_str(proof_str: &str) -> Result<Self, Self::Err> {
+		proof_str
+			.parse::<LdkPayerProof>()
+			.map(|proof| PayerProof { inner: proof })
+			.map_err(|_| Error::InvalidPayerProof)
+	}
+}
+
+impl Deref for PayerProof {
+	type Target = LdkPayerProof;
+
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl std::fmt::Display for PayerProof {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.inner)
 	}
 }
 
