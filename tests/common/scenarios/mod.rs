@@ -23,7 +23,7 @@ use electrsd::electrum_client::ElectrumApi;
 use ldk_node::{Event, Node};
 
 use super::external_node::ExternalNode;
-use super::{generate_blocks_and_wait, premine_and_distribute_funds};
+use super::{generate_blocks_and_wait, premine_and_distribute_funds, wait_for_tx};
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum Side {
@@ -240,7 +240,8 @@ pub(crate) async fn splice_in_scenario<E: ElectrumApi>(
 	.await;
 	let ext_node_id = peer.get_node_id().await.unwrap();
 	node.splice_in(&user_ch, ext_node_id, 500_000).unwrap();
-	expect_splice_negotiated_event!(node, ext_node_id);
+	let splice_txo = expect_splice_negotiated_event!(node, ext_node_id);
+	wait_for_tx(electrs, splice_txo.txid).await;
 	generate_blocks_and_wait(bitcoind, electrs, 6).await;
 	sync_wallets_with_retry(node).await;
 	expect_channel_ready_event!(node, ext_node_id);
