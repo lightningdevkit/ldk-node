@@ -1967,7 +1967,16 @@ fn build_with_store_internal(
 
 	// Initialize the ChannelManager
 	let channel_manager = {
-		if let Ok(reader) = channel_manager_bytes_res {
+		let channel_manager_bytes = match channel_manager_bytes_res {
+			Ok(reader) => Some(reader),
+			Err(e) if e.kind() == lightning::io::ErrorKind::NotFound => None,
+			Err(e) => {
+				log_error!(logger, "Failed to read channel manager from store: {}", e);
+				return Err(BuildError::ReadFailed);
+			},
+		};
+
+		if let Some(reader) = channel_manager_bytes {
 			let channel_monitor_references =
 				channel_monitors.iter().map(|(_, chanmon)| chanmon).collect();
 			let read_args = ChannelManagerReadArgs::new(
@@ -2459,7 +2468,90 @@ pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 
 #[cfg(test)]
 mod tests {
-	use super::{sanitize_alias, BuildError, NodeAlias};
+	use std::future::Future;
+	use std::sync::Arc;
+
+	use lightning::io;
+	use lightning::util::persist::{
+		KVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+		CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+	};
+
+	use super::{sanitize_alias, BuildError, NodeAlias, NodeBuilder};
+	use crate::entropy::NodeEntropy;
+	use crate::io::test_utils::InMemoryStore;
+	use crate::logger::Logger;
+
+	struct ChannelManagerReadFailingStore(InMemoryStore);
+
+	impl KVStore for ChannelManagerReadFailingStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			let fail_read = primary_namespace == CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE
+				&& secondary_namespace == CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE
+				&& key == CHANNEL_MANAGER_PERSISTENCE_KEY;
+			let read = KVStore::read(&self.0, primary_namespace, secondary_namespace, key);
+			async move {
+				if fail_read {
+					Err(io::Error::new(io::ErrorKind::Other, "channel manager read failed"))
+				} else {
+					read.await
+				}
+			}
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::write(&self.0, primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::remove(&self.0, primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			KVStore::list(&self.0, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for ChannelManagerReadFailingStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+			PaginatedKVStore::list_paginated(
+				&self.0,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+		}
+	}
+
+	#[test]
+	fn channel_manager_read_failure_fails_build() {
+		let builder = NodeBuilder::new();
+		let logger = Arc::new(Logger::new_log_facade());
+		#[cfg(not(feature = "uniffi"))]
+		let node_entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let node_entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+
+		let result = builder.build_with_store_and_logger(
+			node_entropy,
+			ChannelManagerReadFailingStore(InMemoryStore::new()),
+			logger,
+		);
+
+		assert!(matches!(result, Err(BuildError::ReadFailed)));
+	}
 
 	#[test]
 	fn sanitize_empty_node_alias() {
