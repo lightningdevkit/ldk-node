@@ -222,6 +222,66 @@ where
 	})
 }
 
+/// Runs reads from a single namespace with bounded concurrency, passing each result to
+/// `handle_read` as it completes.
+///
+/// `reads` pairs caller-owned context with each key so callers can preserve ordering or other
+/// metadata without coupling it to the scheduling machinery. Any join or handler error aborts
+/// the remaining reads.
+pub(crate) async fn process_kv_store_reads<C, I, H, J, E>(
+	kv_store: &DynStore, primary_namespace: &str, secondary_namespace: &str, reads: I,
+	mut handle_read: H, mut handle_join_error: J,
+) -> Result<(), E>
+where
+	C: Send + 'static,
+	I: IntoIterator<Item = (C, String)>,
+	H: FnMut(C, String, Result<Vec<u8>, lightning::io::Error>) -> Result<(), E>,
+	J: FnMut(tokio::task::JoinError) -> E,
+{
+	const BATCH_SIZE: usize = 50;
+
+	type ReadResult<C> = (C, String, Result<Vec<u8>, lightning::io::Error>);
+	let spawn_read = |set: &mut tokio::task::JoinSet<ReadResult<C>>, context: C, key: String| {
+		let read_fut = KVStore::read(kv_store, primary_namespace, secondary_namespace, &key);
+		set.spawn(async move { (context, key, read_fut.await) });
+	};
+
+	let mut reads = reads.into_iter();
+	let mut set = tokio::task::JoinSet::new();
+
+	// Fill JoinSet with tasks if possible
+	while set.len() < BATCH_SIZE {
+		let Some((context, key)) = reads.next() else { break };
+		spawn_read(&mut set, context, key);
+		debug_assert!(set.len() <= BATCH_SIZE);
+	}
+
+	while let Some(join_res) = set.join_next().await {
+		let (context, key, read_res) = match join_res {
+			Ok(read_res) => read_res,
+			Err(e) => {
+				set.abort_all();
+				return Err(handle_join_error(e));
+			},
+		};
+
+		// Refill set for every finished future, if we still have something to do.
+		if let Some((next_context, next_key)) = reads.next() {
+			spawn_read(&mut set, next_context, next_key);
+			debug_assert!(set.len() <= BATCH_SIZE);
+		}
+
+		if let Err(e) = handle_read(context, key, read_res) {
+			set.abort_all();
+			return Err(e);
+		}
+	}
+
+	debug_assert!(set.is_empty());
+	debug_assert!(reads.next().is_none());
+	Ok(())
+}
+
 /// Read all objects of type `T` from the given namespace, spawning reads in parallel.
 pub(crate) async fn read_all_objects<T, L>(
 	kv_store: &DynStore, primary_namespace: &str, secondary_namespace: &str, logger: L,
@@ -234,55 +294,35 @@ where
 	let type_name = std::any::type_name::<T>();
 	let mut res = Vec::new();
 
-	let mut stored_keys = KVStore::list(&*kv_store, primary_namespace, secondary_namespace).await?;
-
-	const BATCH_SIZE: usize = 50;
-
-	let mut set = tokio::task::JoinSet::new();
-
-	// Fill JoinSet with tasks if possible
-	while set.len() < BATCH_SIZE && !stored_keys.is_empty() {
-		if let Some(next_key) = stored_keys.pop() {
-			let fut = KVStore::read(kv_store, primary_namespace, secondary_namespace, &next_key);
-			set.spawn(fut);
-			debug_assert!(set.len() <= BATCH_SIZE);
-		}
-	}
-
-	while let Some(read_res) = set.join_next().await {
-		// Exit early if we get an IO error.
-		let reader = read_res
-			.map_err(|e| {
+	let stored_keys = KVStore::list(&*kv_store, primary_namespace, secondary_namespace).await?;
+	// Preserve the prior `Vec::pop` order.
+	let reads = stored_keys.into_iter().rev().map(|key| ((), key));
+	process_kv_store_reads(
+		kv_store,
+		primary_namespace,
+		secondary_namespace,
+		reads,
+		|(), _key, read_res| -> Result<(), std::io::Error> {
+			let reader = read_res.map_err(|e| {
 				log_error!(logger, "Failed to read {}: {}", type_name, e);
-				set.abort_all();
-				e
-			})?
-			.map_err(|e| {
-				log_error!(logger, "Failed to read {}: {}", type_name, e);
-				set.abort_all();
-				e
+				std::io::Error::from(e)
 			})?;
-
-		// Refill set for every finished future, if we still have something to do.
-		if let Some(next_key) = stored_keys.pop() {
-			let fut = KVStore::read(kv_store, primary_namespace, secondary_namespace, &next_key);
-			set.spawn(fut);
-			debug_assert!(set.len() <= BATCH_SIZE);
-		}
-
-		// Handle result.
-		let object = T::read(&mut &*reader).map_err(|e| {
-			log_error!(logger, "Failed to deserialize {}: {}", type_name, e);
-			std::io::Error::new(
-				std::io::ErrorKind::InvalidData,
-				format!("Failed to deserialize {}", type_name),
-			)
-		})?;
-		res.push(object);
-	}
-
-	debug_assert!(set.is_empty());
-	debug_assert!(stored_keys.is_empty());
+			let object = T::read(&mut &*reader).map_err(|e| {
+				log_error!(logger, "Failed to deserialize {}: {}", type_name, e);
+				std::io::Error::new(
+					std::io::ErrorKind::InvalidData,
+					format!("Failed to deserialize {}", type_name),
+				)
+			})?;
+			res.push(object);
+			Ok(())
+		},
+		|e| {
+			log_error!(logger, "Failed to read {}: {}", type_name, e);
+			e.into()
+		},
+	)
+	.await?;
 
 	Ok(res)
 }
