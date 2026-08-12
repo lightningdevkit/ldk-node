@@ -185,15 +185,25 @@ impl CollectingLogWriter {
 	}
 
 	pub(crate) fn contains(&self, text: &str) -> bool {
-		self.logs.lock().unwrap().iter().any(|message| message.contains(text))
+		self.count(text) > 0
+	}
+
+	pub(crate) fn count(&self, text: &str) -> usize {
+		self.logs.lock().unwrap().iter().filter(|message| message.contains(text)).count()
 	}
 
 	/// Waits up to ten seconds for a logged message containing `text`, returning whether one
 	/// arrived. Polling beats a fixed sleep: it returns as soon as the line lands and only pays
 	/// the full timeout when the line never comes.
 	pub(crate) async fn wait_for(&self, text: &str) -> bool {
+		self.wait_for_count(text, 1).await
+	}
+
+	/// Waits up to ten seconds for `occurrences` logged messages containing `text`, returning
+	/// whether they arrived.
+	pub(crate) async fn wait_for_count(&self, text: &str, occurrences: usize) -> bool {
 		for _ in 0..100 {
-			if self.contains(text) {
+			if self.count(text) >= occurrences {
 				return true;
 			}
 			tokio::time::sleep(std::time::Duration::from_millis(100)).await;

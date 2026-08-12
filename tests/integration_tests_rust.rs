@@ -2232,6 +2232,106 @@ async fn zero_conf_splice_out_funding_rebroadcast_canary() {
 	);
 }
 
+/// Canary for the upstream behavior the funding-over-interactive-funding guard in
+/// `funding_reclassification_update` works around: LDK re-broadcasts a promoted-but-unconfirmed
+/// 0conf splice through its generic funding path — re-typed as a plain funding transaction with
+/// wallet-view figures and no contribution metadata — on every monitor-update completion until it
+/// confirms. On the contributing side those re-offers target the interactive-funding record,
+/// which must come through unchanged. The re-typing is tracked upstream at
+/// <https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4878>.
+///
+/// If this test fails, upstream likely stopped re-offering the transaction that way (or now
+/// preserves its interactive-funding classification): re-evaluate whether the guard still sees
+/// traffic.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn zero_conf_splice_in_funding_rebroadcast_canary() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	// The guard leaves no trace in the stores, so observe the re-offers through Node A's logs.
+	// `setup_two_nodes` wires file loggers, so build the pair manually with a collector, Node B
+	// trusting Node A for 0conf.
+	let logger_a = Arc::new(CollectingLogWriter::new());
+	let mut config_a = random_config();
+	config_a.log_writer = TestLogWriter::Custom(logger_a.clone());
+	let node_a = setup_node(&chain_source, config_a);
+
+	let mut config_b = random_config();
+	config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
+	let node_b = setup_node(&chain_source, config_b);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 2_000_000, false, &electrsd).await;
+
+	// 0conf: the channel is ready without any confirmations.
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Confirm the original funding so the splice below is the only unconfirmed funding and Node
+	// A's change from the open is spendable for the splice contribution.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 1_000_000).unwrap();
+	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	wait_for_classified_funding_payment(&node_a, txo.txid).await;
+
+	// The 0conf splice locks without confirmations, re-signaled as `ChannelReady`.
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let splice_payments = |node: &Node| {
+		node.list_payments_with_filter(
+			|p| matches!(p.kind, PaymentKind::Onchain { txid, .. } if txid == txo.txid),
+		)
+	};
+	let payments = splice_payments(&node_a);
+	assert_eq!(payments.len(), 1);
+	let recorded_amount_msat = payments[0].amount_msat;
+	let recorded_fee_paid_msat = payments[0].fee_paid_msat;
+
+	// Locking the splice completed monitor updates that re-offered the unconfirmed funding
+	// transaction; a payment drives further monitor updates and thus further re-broadcasts.
+	let amount_msat = 1_000_000;
+	let payment_id =
+		node_a.spontaneous_payment().send(amount_msat, node_b.node_id(), None).unwrap();
+	expect_payment_successful_event!(node_a, payment_id, None);
+	expect_payment_received_event!(node_b, amount_msat);
+
+	// Canary: generic re-offers of the splice reached classification while its record held the
+	// interactive-funding classification. Waiting for the second occurrence also makes the
+	// record assertions below deterministic — the broadcast loop classifies sequentially, so by
+	// the second arrival the first re-offer's store write has completed.
+	let rebroadcast = format!("funding-typed rebroadcast {}", txo.txid);
+	assert!(
+		logger_a.wait_for_count(&rebroadcast, 2).await,
+		"Node A saw no generic-funding re-broadcast targeting the interactive-funding record; if \
+		 upstream stopped re-offering it, re-evaluate the guard in funding_reclassification_update"
+	);
+
+	// The re-offers must not have disturbed the record's classification or figures.
+	let payments = splice_payments(&node_a);
+	assert_eq!(payments.len(), 1);
+	let payment = &payments[0];
+	assert_eq!(payment.amount_msat, recorded_amount_msat);
+	assert_eq!(payment.fee_paid_msat, recorded_fee_paid_msat);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain { tx_type: Some(TransactionType::InteractiveFunding { .. }), .. }
+	));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn rbf_splice_channel() {
 	run_rbf_splice_channel_test(false).await;
