@@ -43,6 +43,7 @@ use ldk_node::payment::{
 };
 use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType};
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
@@ -628,6 +629,105 @@ async fn channel_open_fails_when_funds_insufficient() {
 			None,
 			None,
 		)
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn watchtower_commitment_and_justice_apis() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 500_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 200_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let channel_id = node_a.list_channels().first().unwrap().channel_id;
+
+	// The initial counterparty commitment transaction is available for monitors created with
+	// LDK 0.0.117+.
+	assert!(node_a.initial_counterparty_commitment_tx(channel_id).unwrap().is_some());
+	assert!(node_b.initial_counterparty_commitment_tx(channel_id).unwrap().is_some());
+
+	// An unknown channel ID yields `ChannelMonitorNotFound`.
+	let unknown_channel_id = ChannelId::from_bytes([42u8; 32]);
+	assert_eq!(
+		Err(NodeError::ChannelMonitorNotFound),
+		node_a.initial_counterparty_commitment_tx(unknown_channel_id)
+	);
+	assert!(node_a.channel_monitor_updates(unknown_channel_id).unwrap().is_empty());
+
+	// Send a payment to generate channel monitor updates.
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("watchtower")).unwrap());
+	let invoice =
+		node_b.bolt11_payment().receive(10_000_000, &invoice_description.into(), 3600).unwrap();
+	let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
+	expect_payment_received_event!(&node_b, 10_000_000);
+	expect_payment_successful_event!(node_a, Some(payment_id), None);
+
+	// The persisted monitor updates are readable and ordered by update ID. Monitor updates are
+	// persisted asynchronously, so we retry a few times to avoid racing the persister.
+	let updates = {
+		let mut updates = Vec::new();
+		for _ in 0..10 {
+			updates = node_a.channel_monitor_updates(channel_id).unwrap();
+			if !updates.is_empty() {
+				break;
+			}
+			tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+		}
+		updates
+	};
+	assert!(!updates.is_empty());
+	let update_ids: Vec<u64> = updates.iter().map(|u| u.update_id).collect();
+	let mut sorted_update_ids = update_ids.clone();
+	sorted_update_ids.sort_unstable();
+	assert_eq!(update_ids, sorted_update_ids);
+
+	// We can build counterparty commitment transactions from the persisted updates.
+	let commitment_tx_count: usize = updates
+		.iter()
+		.map(|u| {
+			node_a.counterparty_commitment_txs_from_update(channel_id, u.clone()).unwrap().len()
+		})
+		.sum();
+	assert!(commitment_tx_count > 0);
+
+	assert_eq!(
+		Err(NodeError::ChannelMonitorNotFound),
+		node_a.counterparty_commitment_txs_from_update(
+			unknown_channel_id,
+			updates.first().unwrap().clone()
+		)
+	);
+
+	// Signing a justice transaction fails if the monitor has not received the revocation
+	// secret for the given commitment number.
+	let justice_tx = bitcoin::Transaction {
+		version: bitcoin::transaction::Version::TWO,
+		lock_time: bitcoin::absolute::LockTime::ZERO,
+		input: vec![bitcoin::TxIn::default()],
+		output: vec![],
+	};
+	assert_eq!(
+		Err(NodeError::OnchainTxSigningFailed),
+		node_a.sign_to_local_justice_tx(channel_id, justice_tx, 0, 1000, u64::MAX)
 	);
 }
 
