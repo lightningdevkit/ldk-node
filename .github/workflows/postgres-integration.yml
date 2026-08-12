@@ -9,7 +9,6 @@ concurrency:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
 
     services:
       postgres:
