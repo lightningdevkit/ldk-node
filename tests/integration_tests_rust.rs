@@ -2043,6 +2043,7 @@ async fn splice_channel() {
 	// Node B contributed to this splice, so wait for its funding broadcast to be classified before
 	// syncing — otherwise a sync racing the broadcaster's queue records a generic on-chain payment.
 	wait_for_classified_funding_payment(&node_b, txo.txid).await;
+	wait_for_tx(&electrsd.client, txo.txid).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
@@ -2102,6 +2103,7 @@ async fn splice_channel() {
 	// Node A contributed to this splice, so wait for its funding broadcast to be classified before
 	// syncing — otherwise a sync racing the broadcaster's queue records a generic on-chain payment.
 	wait_for_classified_funding_payment(&node_a, txo.txid).await;
+	wait_for_tx(&electrsd.client, txo.txid).await;
 
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
 
