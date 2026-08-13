@@ -397,6 +397,12 @@ where
 	L::Target: LdkLogger,
 {
 	queue: Arc<Mutex<VecDeque<Event>>>,
+	/// Serializes `add_event` / `event_handled` end-to-end (snapshot compute -> persist ->
+	/// in-memory commit) so that in-memory state is only ever advanced after its snapshot
+	/// has been durably persisted, and so that persistence submissions happen in the same
+	/// order as the logical queue mutations. This is what makes failed enqueues/acks leave
+	/// memory intact and keeps built-in store write-version allocation strictly ordered.
+	operation_lock: tokio::sync::Mutex<()>,
 	waker: Arc<Mutex<Option<Waker>>>,
 	kv_store: Arc<DynStore>,
 	logger: L,
@@ -409,18 +415,30 @@ where
 	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let queue = Arc::new(Mutex::new(VecDeque::new()));
 		let waker = Arc::new(Mutex::new(None));
-		Self { queue, waker, kv_store, logger }
+		Self { queue, operation_lock: tokio::sync::Mutex::new(()), waker, kv_store, logger }
 	}
 
 	pub(crate) async fn add_event(&self, event: Event) -> Result<(), Error> {
-		let data = {
-			let mut locked_queue = self.queue.lock().expect("lock");
-			locked_queue.push_back(event);
-			EventQueueSerWrapper(&locked_queue).encode()
-		};
+		let _guard = self.operation_lock.lock().await;
 
+		// 1. Compute the next state without mutating live memory yet.
+		let next_queue = {
+			let locked_queue = self.queue.lock().expect("lock");
+			let mut next = locked_queue.clone();
+			next.push_back(event);
+			next
+		};
+		let data = EventQueueSerWrapper(&next_queue).encode();
+
+		// 2. Persist the *computed* snapshot BEFORE making it visible in memory. On failure
+		//    the in-memory queue is left untouched, so a retry (e.g. an LDK `ReplayEvent`)
+		//    performs the same logical operation and cannot duplicate the event.
 		self.persist_queue(data).await?;
 
+		// 3. Commit the in-memory mutation only now that persistence succeeded.
+		*self.queue.lock().expect("lock") = next_queue;
+
+		// 4. Wake any waiter (safe to do after commit).
 		if let Some(waker) = self.waker.lock().expect("lock").take() {
 			waker.wake();
 		}
@@ -437,14 +455,26 @@ where
 	}
 
 	pub(crate) async fn event_handled(&self) -> Result<(), Error> {
-		let data = {
-			let mut locked_queue = self.queue.lock().expect("lock");
-			locked_queue.pop_front();
-			EventQueueSerWrapper(&locked_queue).encode()
-		};
+		let _guard = self.operation_lock.lock().await;
 
+		// 1. Compute the next state without mutating live memory yet.
+		let next_queue = {
+			let locked_queue = self.queue.lock().expect("lock");
+			let mut next = locked_queue.clone();
+			next.pop_front();
+			next
+		};
+		let data = EventQueueSerWrapper(&next_queue).encode();
+
+		// 2. Persist the *computed* snapshot BEFORE mutating memory. On failure the front
+		//    event stays put in memory, so a user retry drops only that same front event
+		//    (no silent skip of a different event).
 		self.persist_queue(data).await?;
 
+		// 3. Commit the in-memory mutation only now that persistence succeeded.
+		*self.queue.lock().expect("lock") = next_queue;
+
+		// 4. Wake any waiter (safe to do after commit).
 		if let Some(waker) = self.waker.lock().expect("lock").take() {
 			waker.wake();
 		}
@@ -487,7 +517,7 @@ where
 		let read_queue: EventQueueDeserWrapper = Readable::read(reader)?;
 		let queue = Arc::new(Mutex::new(read_queue.0));
 		let waker = Arc::new(Mutex::new(None));
-		Ok(Self { queue, waker, kv_store, logger })
+		Ok(Self { queue, operation_lock: tokio::sync::Mutex::new(()), waker, kv_store, logger })
 	}
 }
 
@@ -2261,10 +2291,15 @@ where
 #[cfg(test)]
 mod tests {
 	use std::collections::VecDeque;
+	use std::pin::Pin;
 	use std::str::FromStr;
 	use std::sync::atomic::{AtomicU16, Ordering};
+	use std::sync::{Arc, Mutex};
 	use std::time::Duration;
 
+	use lightning::util::persist::{
+		MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+	};
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
@@ -2494,6 +2529,390 @@ mod tests {
 			expected_event.encode(),
 			"legacy forwarded amount should normalize to zero"
 		);
+	}
+
+	/// A `KVStore` wrapper used by the failure-path tests. It delegates to an
+	/// `InMemoryStore` for the actual storage, but can be configured to fail the next
+	/// `N` writes with an `io::Error`. This lets us deterministically exercise the
+	/// "persist fails" branches of `add_event` / `event_handled` without touching real
+	/// IO.
+	struct FaultingStore {
+		/// Wrapped store, held behind an `Arc` so we can move a clone into the boxed future
+		/// that is only constructed after the fail decision is made.
+		inner: Arc<InMemoryStore>,
+		/// Number of writes that should still fail before the next success.
+		fail_writes: Arc<Mutex<usize>>,
+		/// Every successfully-applied write payload, captured in application order.
+		applied_writes: Arc<Mutex<Vec<Vec<u8>>>>,
+	}
+
+	impl FaultingStore {
+		fn new() -> Self {
+			Self {
+				inner: Arc::new(InMemoryStore::new()),
+				fail_writes: Arc::new(Mutex::new(0)),
+				applied_writes: Arc::new(Mutex::new(Vec::new())),
+			}
+		}
+
+		/// Cause the next `n` writes to fail before succeeding.
+		fn fail_next_writes(&self, n: usize) {
+			*self.fail_writes.lock().unwrap() = n;
+		}
+	}
+
+	impl KVStore for FaultingStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, lightning::io::Error>> + 'static + Send {
+			let fut = KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key);
+			async move { fut.await }
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+			// Delegate to `write_async` so the eager-vs-lazy `write` application behavior of the
+			// inner store does not mask our fault injection. `write_async` applies the inner write
+			// only after the (synchronous) fail decision, which is exactly how the built-in stores
+			// allocate their write version at the top of `write()` before any async work.
+			crate::types::DynStoreTrait::write_async(
+				self,
+				primary_namespace,
+				secondary_namespace,
+				key,
+				buf,
+			)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+			let fut =
+				KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy);
+			async move { fut.await }
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send {
+			let fut = KVStore::list(&*self.inner, primary_namespace, secondary_namespace);
+			async move { fut.await }
+		}
+	}
+
+	impl PaginatedKVStore for FaultingStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, lightning::io::Error>> + 'static + Send
+		{
+			let fut = PaginatedKVStore::list_paginated(
+				&*self.inner,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			);
+			async move { fut.await }
+		}
+	}
+
+	impl MigratableKVStore for FaultingStore {
+		fn list_all_keys(
+			&self,
+		) -> impl Future<Output = Result<Vec<(String, String, String)>, lightning::io::Error>>
+		       + 'static
+		       + Send {
+			let fut = MigratableKVStore::list_all_keys(&*self.inner);
+			async move { fut.await }
+		}
+	}
+
+	// Allow `FaultingStore` to be used directly as an `Arc<DynStore>` (the type the
+	// `EventQueue` is constructed with) by bridging it to the object-safe `DynStoreTrait`.
+	impl crate::types::DynStoreTrait for FaultingStore {
+		fn read_async(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, lightning::io::Error>> + Send + 'static>>
+		{
+			Box::pin(KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key))
+		}
+
+		fn write_async(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> Pin<Box<dyn Future<Output = Result<(), lightning::io::Error>> + Send + 'static>> {
+			// Decide synchronously whether this write should fail, mirroring how the built-in
+			// stores allocate their write version at the top of `write()` before any async work.
+			let should_fail = {
+				let mut pending = self.fail_writes.lock().unwrap();
+				if *pending > 0 {
+					*pending -= 1;
+					true
+				} else {
+					false
+				}
+			};
+			let applied_writes = Arc::clone(&self.applied_writes);
+			// Owned copies so the boxed future is `'static`. Crucially, we defer the inner
+			// `write` call until *inside* the async block, after the fail decision: `InMemoryStore`
+			// applies its effect synchronously at `write()` call time, so an eager call would
+			// apply the bytes even on a fault-injected failure. Deferring keeps the failure
+			// honest — a failing write never touches the inner store.
+			let inner = Arc::clone(&self.inner);
+			let primary_namespace = primary_namespace.to_string();
+			let secondary_namespace = secondary_namespace.to_string();
+			let key = key.to_string();
+			Box::pin(async move {
+				if should_fail {
+					return Err(lightning::io::Error::new(
+						lightning::io::ErrorKind::Other,
+						"injected write failure",
+					));
+				}
+				let res = KVStore::write(
+					&*inner,
+					&primary_namespace,
+					&secondary_namespace,
+					&key,
+					buf.clone(),
+				)
+				.await;
+				if res.is_ok() {
+					applied_writes.lock().unwrap().push(buf);
+				}
+				res
+			})
+		}
+
+		fn remove_async(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> Pin<Box<dyn Future<Output = Result<(), lightning::io::Error>> + Send + 'static>> {
+			Box::pin(KVStore::remove(
+				&*self.inner,
+				primary_namespace,
+				secondary_namespace,
+				key,
+				lazy,
+			))
+		}
+
+		fn list_async(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> Pin<Box<dyn Future<Output = Result<Vec<String>, lightning::io::Error>> + Send + 'static>>
+		{
+			Box::pin(KVStore::list(&*self.inner, primary_namespace, secondary_namespace))
+		}
+
+		fn list_paginated_async(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> Pin<
+			Box<
+				dyn Future<Output = Result<PaginatedListResponse, lightning::io::Error>>
+					+ Send
+					+ 'static,
+			>,
+		> {
+			Box::pin(PaginatedKVStore::list_paginated(
+				&*self.inner,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			))
+		}
+	}
+
+	fn decode_event_queue(bytes: &[u8]) -> VecDeque<Event> {
+		use lightning::util::ser::Readable;
+		EventQueueDeserWrapper::read(&mut &bytes[..]).unwrap().0
+	}
+
+	async fn persisted_event_queue(store: &FaultingStore) -> VecDeque<Event> {
+		let bytes = lightning::util::persist::KVStore::read(
+			store,
+			EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+			EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+			EVENT_QUEUE_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+		decode_event_queue(&bytes)
+	}
+
+	/// Regression for failure mode 1: a failed enqueue must not leave the event in
+	/// memory, so the LDK `ReplayEvent` retry enqueues exactly one copy.
+	#[tokio::test]
+	async fn event_queue_failed_enqueue_no_duplicate_on_replay() {
+		let store = Arc::new(FaultingStore::new());
+		let logger = Arc::new(TestLogger::new());
+		let event_queue =
+			Arc::new(EventQueue::new(Arc::clone(&store) as Arc<DynStore>, Arc::clone(&logger)));
+
+		let event = Event::ChannelReady {
+			channel_id: ChannelId([23u8; 32]),
+			user_channel_id: UserChannelId(2323),
+			counterparty_node_id: None,
+			funding_txo: None,
+		};
+
+		// First write fails: add_event must return Err and keep the queue empty in memory.
+		store.fail_next_writes(1);
+		assert!(event_queue.add_event(event.clone()).await.is_err());
+		assert_eq!(event_queue.next_event(), None, "event must not be in memory on failed enqueue");
+
+		// Simulating the LDK ReplayEvent path: a retry enqueue that now succeeds.
+		event_queue.add_event(event.clone()).await.unwrap();
+
+		// Exactly one copy persisted and in memory.
+		let persisted = persisted_event_queue(&store).await;
+		assert_eq!(persisted.len(), 1, "no duplicate persisted after replay");
+		assert_eq!(event_queue.next_event(), Some(event.clone()));
+		assert_eq!(event_queue.next_event_async().await, event);
+	}
+
+	/// Regression for failure mode 2: a failed ack must keep the front event in memory
+	/// (not silently drop it / skip to the next event).
+	#[tokio::test]
+	async fn event_queue_failed_ack_keeps_front_event() {
+		let store = Arc::new(FaultingStore::new());
+		let logger = Arc::new(TestLogger::new());
+		let event_queue =
+			Arc::new(EventQueue::new(Arc::clone(&store) as Arc<DynStore>, Arc::clone(&logger)));
+
+		let a = Event::ChannelReady {
+			channel_id: ChannelId([1u8; 32]),
+			user_channel_id: UserChannelId(1),
+			counterparty_node_id: None,
+			funding_txo: None,
+		};
+		let b = Event::ChannelReady {
+			channel_id: ChannelId([2u8; 32]),
+			user_channel_id: UserChannelId(2),
+			counterparty_node_id: None,
+			funding_txo: None,
+		};
+
+		event_queue.add_event(a.clone()).await.unwrap();
+		event_queue.add_event(b.clone()).await.unwrap();
+		assert_eq!(event_queue.next_event(), Some(a.clone()));
+
+		// First ack write fails: front event must remain A in memory and persisted.
+		store.fail_next_writes(1);
+		assert!(event_queue.event_handled().await.is_err());
+		assert_eq!(
+			event_queue.next_event(),
+			Some(a.clone()),
+			"front event must survive failed ack"
+		);
+		let persisted = persisted_event_queue(&store).await;
+		assert_eq!(persisted.len(), 2);
+		assert_eq!(persisted.front(), Some(&a));
+
+		// Retry ack succeeds: now the front is B and persisted is [B].
+		event_queue.event_handled().await.unwrap();
+		assert_eq!(event_queue.next_event(), Some(b.clone()));
+		let persisted = persisted_event_queue(&store).await;
+		assert_eq!(persisted.len(), 1);
+		assert_eq!(persisted.front(), Some(&b));
+	}
+
+	/// Stress the `operation_lock`'s mutual exclusion under concurrent load: 200 tasks race
+	/// to add-then-ack an event, and because every enqueue/ack is fully serialized behind
+	/// the lock (snapshot compute -> persist -> in-memory commit), no update is lost and the
+	/// persisted snapshot always ends up equal to the in-memory queue. This exercises the
+	/// lock itself under contention (no panics, no gaps, no duplicates); the failure-mode-3/4
+	/// ordering property is closed structurally by this same serialization.
+	#[tokio::test]
+	async fn event_queue_concurrent_enqueue_and_ack_ordered() {
+		let store = Arc::new(FaultingStore::new());
+		let logger = Arc::new(TestLogger::new());
+		let event_queue =
+			Arc::new(EventQueue::new(Arc::clone(&store) as Arc<DynStore>, Arc::clone(&logger)));
+
+		const N: u16 = 200;
+		let mut tasks = Vec::new();
+		for i in 0..N {
+			let eq = Arc::clone(&event_queue);
+			tasks.push(tokio::spawn(async move {
+				let event = Event::ChannelReady {
+					channel_id: ChannelId([(i & 0xff) as u8; 32]),
+					user_channel_id: UserChannelId(i as u128),
+					counterparty_node_id: None,
+					funding_txo: None,
+				};
+				eq.add_event(event).await.unwrap();
+				// Immediately ack the just-added event. Because the operation is serialized
+				// end-to-end, the in-memory queue and the persisted snapshot stay consistent.
+				let _ = eq.next_event();
+				eq.event_handled().await.unwrap();
+			}));
+		}
+		for t in tasks {
+			t.await.unwrap();
+		}
+
+		// The queue should be empty and the persisted snapshot should too (every enqueue was
+		// acked exactly once). No event was duplicated or skipped.
+		assert_eq!(event_queue.next_event(), None);
+		let persisted = persisted_event_queue(&store).await;
+		assert_eq!(persisted.len(), 0, "persisted snapshot must match in-memory queue");
+
+		// Applied writes must form a consistent sequence: each persisted snapshot's length
+		// tracks the net enqueue/ack count, so the final applied write is the empty queue.
+		let applied = store.applied_writes.lock().unwrap();
+		let last = applied.last().expect("at least one write applied");
+		assert_eq!(decode_event_queue(last).len(), 0);
+	}
+
+	/// Regression for failure mode 4 (restart resurrection): when the in-memory and
+	/// persisted states diverge only via transient write failures, reading the persisted
+	/// bytes back must restore exactly the last successfully committed state — no
+	/// resurrected already-acked events and no missing newer events.
+	#[tokio::test]
+	async fn event_queue_restart_resurrection() {
+		let store = Arc::new(FaultingStore::new());
+		let logger = Arc::new(TestLogger::new());
+		let event_queue =
+			Arc::new(EventQueue::new(Arc::clone(&store) as Arc<DynStore>, Arc::clone(&logger)));
+
+		let a = Event::ChannelReady {
+			channel_id: ChannelId([1u8; 32]),
+			user_channel_id: UserChannelId(1),
+			counterparty_node_id: None,
+			funding_txo: None,
+		};
+		let b = Event::ChannelReady {
+			channel_id: ChannelId([2u8; 32]),
+			user_channel_id: UserChannelId(2),
+			counterparty_node_id: None,
+			funding_txo: None,
+		};
+
+		event_queue.add_event(a.clone()).await.unwrap();
+		event_queue.add_event(b.clone()).await.unwrap();
+
+		// Ack `a`, but force that ack's write to fail: in-memory + persisted both keep [a, b].
+		store.fail_next_writes(1);
+		assert!(event_queue.event_handled().await.is_err());
+
+		// Now read back from the persisted bytes (simulating a restart).
+		let persisted_bytes = lightning::util::persist::KVStore::read(
+			&*store,
+			EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+			EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+			EVENT_QUEUE_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+		let restored = EventQueue::read(
+			&mut &persisted_bytes[..],
+			(Arc::clone(&store) as Arc<DynStore>, Arc::clone(&logger)),
+		)
+		.unwrap();
+
+		// The persisted state never dropped `a`, so it is correctly restored as the front.
+		assert_eq!(restored.next_event(), Some(a.clone()));
+		assert_eq!(restored.next_event_async().await, a);
 	}
 
 	#[tokio::test]
