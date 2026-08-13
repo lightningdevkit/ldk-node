@@ -1551,7 +1551,54 @@ impl Wallet {
 		let txid = tx.compute_txid();
 		let (amount_msat, fee_paid_msat, direction) = self.onchain_payment_fields(tx);
 
+		// A funding transaction that moves no wallet funds carries nothing to record — e.g. LDK
+		// re-broadcasts a promoted-but-unconfirmed 0conf splice through its generic funding path,
+		// including splices the interactive-funding classification deliberately declined (no
+		// local contribution, or a splice-out moving no wallet funds). Recording it here would
+		// mint a zero-amount payment that nothing ever confirms. Skip on the wallet-derived
+		// amount alone — the condition `classify_interactive_funding` declines on; anything
+		// declined there must be skipped here, or its re-broadcast resurrects the record. The fee
+		// is no participation signal: the wallet resolves a splice's shared input whenever the
+		// previous funding transaction touched it (e.g. it funded the original channel open).
+		//
+		// TODO(https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4878): The
+		// re-typed re-broadcasts are upstream behavior that should be fixed in `rust-lightning`:
+		// the re-offer ought to keep its `InteractiveFunding` classification, or not recur at
+		// all. `zero_conf_splice_out_funding_rebroadcast_canary` pins the current behavior by
+		// asserting the log line below; when it fails against a newer LDK, re-evaluate whether
+		// this skip still sees traffic.
+		if amount_msat == Some(0) {
+			log_trace!(
+				self.logger,
+				"Not recording channel-funding broadcast {} as a payment: no wallet-level activity",
+				txid,
+			);
+			return Ok(());
+		}
+
 		let payment_id = PaymentId(txid.to_byte_array());
+
+		// A promoted-but-unconfirmed 0conf splice comes back through this generic path re-typed
+		// and carrying wallet-view figures; `funding_reclassification_update` declines the
+		// downgrade, leaving no trace that a re-broadcast arrived. Log the arrival so tests can
+		// observe the traffic. The read cannot go stale: only the broadcast loop writes
+		// interactive-funding classifications, and it runs this classification too.
+		if let Some(current) = self.payment_store.get(&payment_id) {
+			if matches!(
+				current.kind,
+				PaymentKind::Onchain {
+					tx_type: Some(TransactionType::InteractiveFunding { .. }),
+					..
+				}
+			) {
+				log_trace!(
+					self.logger,
+					"Keeping interactive-funding classification over funding-typed rebroadcast {}",
+					txid,
+				);
+			}
+		}
+
 		let details = PaymentDetails::new(
 			payment_id,
 			PaymentKind::Onchain {
@@ -2585,6 +2632,28 @@ fn ldk_to_bdk_satisfaction_weight(ldk_satisfaction_weight: u64) -> Weight {
 fn funding_reclassification_update(
 	details: PaymentDetails, candidates: &[FundingTxCandidate], current: Option<&PaymentDetails>,
 ) -> PaymentDetailsUpdate {
+	// A funding-typed classification of a record already classified as interactive funding is a
+	// downgrade, not news: LDK re-broadcasts a promoted-but-unconfirmed splice through its
+	// generic funding path, where the figures are wallet-view rather than contribution-derived.
+	// Keep the record as classified; wallet-sync events own its confirmation state.
+	//
+	// TODO(https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4878): The
+	// re-typed re-broadcasts are upstream behavior that should be fixed in `rust-lightning`:
+	// the re-offer ought to keep its `InteractiveFunding` classification, or not recur at all.
+	// `zero_conf_splice_in_funding_rebroadcast_canary` pins the current behavior via the
+	// arrival log in `classify_funding`; when it fails against a newer LDK, re-evaluate
+	// whether this guard still sees traffic.
+	if let (
+		Some(PaymentKind::Onchain {
+			tx_type: Some(TransactionType::InteractiveFunding { .. }),
+			..
+		}),
+		PaymentKind::Onchain { tx_type: Some(TransactionType::Funding { .. }), .. },
+	) = (current.map(|payment| &payment.kind), &details.kind)
+	{
+		return PaymentDetailsUpdate::new(details.id);
+	}
+
 	let mut update = PaymentDetailsUpdate::funding_reclassification(details);
 	if let Some(PaymentKind::Onchain {
 		txid: confirmed_txid,
@@ -3689,6 +3758,35 @@ mod tests {
 		assert_eq!(update.txid, Some(active_txid));
 	}
 
+	/// A funding-typed (re)classification of a record already classified as interactive funding
+	/// carries nothing the record doesn't have — LDK re-broadcasts a promoted-but-unconfirmed
+	/// splice through its generic funding path with wallet-view figures — so the update must
+	/// move nothing.
+	#[test]
+	fn funding_reclassification_update_skips_funding_over_interactive_funding() {
+		let txid = Txid::from_byte_array([1u8; 32]);
+		let payment_id = PaymentId(txid.to_byte_array());
+		let current = interactive_funding_details(payment_id, txid, Some(1_000_000), Some(500));
+
+		let rebroadcast = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: Some(TransactionType::Funding { channels: vec![] }),
+			},
+			Some(10_000_000),
+			Some(0),
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		let update = funding_reclassification_update(rebroadcast, &[], Some(&current));
+		let mut updated = current.clone();
+		assert!(!updated.update(update), "the rebroadcast must not move the record");
+		assert_eq!(updated, current);
+	}
+
 	/// Graduation must decide from the live record and write only the status: a pending-store
 	/// snapshot taken before a concurrent classification landed must not roll the record's
 	/// figures back when the payment graduates to `Succeeded`.
@@ -3829,6 +3927,148 @@ mod tests {
 		assert_eq!(wallet.find_payment_by_txid(txid1), Some(payment_id));
 		assert_eq!(wallet.find_payment_by_txid(txid3), Some(payment_id));
 		assert_eq!(wallet.find_payment_by_txid(txid2), Some(payment_id));
+	}
+
+	/// A funding-typed broadcast that doesn't touch the on-chain wallet must not be recorded.
+	/// LDK re-broadcasts a promoted-but-unconfirmed 0conf splice through its generic funding
+	/// path, so a splice the interactive-funding classification deliberately declined — no local
+	/// contribution, or none of the moved funds are the wallet's — would otherwise come back as
+	/// a spurious zero-amount record that nothing ever confirms.
+	#[tokio::test]
+	async fn funding_broadcast_without_wallet_activity_is_not_recorded() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channels = vec![(counterparty_node_id, ChannelId([7u8; 32]))];
+		let tx_type = TransactionType::Funding { channels: vec![] };
+
+		// No inputs or outputs involve the wallet: nothing to record.
+		wallet.classify_funding(&dummy_tx(), &channels, tx_type.clone()).await.unwrap();
+		assert!(wallet.payment_store.list_filter(|_| true).is_empty());
+		assert!(wallet.pending_payment_store.list_filter(|_| true).is_empty());
+
+		// A computable fee is not wallet participation. The wallet can resolve a splice's shared
+		// input whenever the previous funding transaction touched it (e.g. it funded the original
+		// channel open), so it derives the splice's fee even when no wallet funds move.
+		let prev_funding_outpoint = OutPoint { txid: Txid::from_byte_array([8u8; 32]), vout: 0 };
+		wallet.inner.lock().unwrap().insert_txout(
+			prev_funding_outpoint,
+			TxOut { value: Amount::from_sat(100_000), script_pubkey: ScriptBuf::new() },
+		);
+		let splice_tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: vec![bitcoin::TxIn {
+				previous_output: prev_funding_outpoint,
+				..Default::default()
+			}],
+			output: vec![TxOut {
+				value: Amount::from_sat(99_000),
+				script_pubkey: ScriptBuf::new(),
+			}],
+		};
+		wallet.classify_funding(&splice_tx, &channels, tx_type.clone()).await.unwrap();
+		assert!(wallet.payment_store.list_filter(|_| true).is_empty());
+
+		// Control: a funding transaction the wallet participates in is still recorded.
+		let script_pubkey = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::External)
+			.address
+			.script_pubkey();
+		let funded_tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: Vec::new(),
+			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
+		};
+		wallet.classify_funding(&funded_tx, &channels, tx_type).await.unwrap();
+		let payments = wallet.payment_store.list_filter(|_| true);
+		assert_eq!(payments.len(), 1);
+		assert_eq!(payments[0].id, PaymentId(funded_tx.compute_txid().to_byte_array()));
+	}
+
+	/// LDK re-broadcasts a promoted-but-unconfirmed 0conf splice through its generic funding
+	/// path: same txid, but typed as a plain funding transaction with wallet-view figures and no
+	/// contribution metadata. The rebroadcast must not overwrite the contribution-derived
+	/// figures or the interactive-funding classification — neither while the record is
+	/// unconfirmed nor once it confirmed under that same txid, where updates naming the
+	/// confirmed txid may otherwise move figures.
+	#[tokio::test]
+	async fn funding_rebroadcast_keeps_interactive_funding_classification() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		// The rebroadcast passes the wallet-activity guard: a splice-in funds the new channel
+		// output partly from the wallet, so the wallet sees movement.
+		let script_pubkey = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::External)
+			.address
+			.script_pubkey();
+		let tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: Vec::new(),
+			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
+		};
+		let txid = tx.compute_txid();
+		let payment_id = PaymentId(txid.to_byte_array());
+
+		let candidates = vec![FundingTxCandidate {
+			txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let details = interactive_funding_details(payment_id, txid, Some(1_000_000), Some(500));
+		wallet.persist_funding_payment(details, candidates).await.unwrap();
+
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channels = vec![(counterparty_node_id, ChannelId([7u8; 32]))];
+		let tx_type = TransactionType::Funding { channels: vec![] };
+
+		let assert_unchanged = |confirmed: bool| {
+			let payments = wallet.payment_store.list_filter(|_| true);
+			assert_eq!(payments.len(), 1, "the rebroadcast must not mint a second record");
+			let payment = &payments[0];
+			assert_eq!(payment.id, payment_id);
+			assert_eq!(payment.amount_msat, Some(1_000_000));
+			assert_eq!(payment.fee_paid_msat, Some(500));
+			match &payment.kind {
+				PaymentKind::Onchain {
+					status,
+					tx_type: Some(TransactionType::InteractiveFunding { .. }),
+					..
+				} => assert_eq!(matches!(status, ConfirmationStatus::Confirmed { .. }), confirmed),
+				kind => panic!("unexpected kind {:?}", kind),
+			}
+		};
+
+		wallet.classify_funding(&tx, &channels, tx_type.clone()).await.unwrap();
+		assert_unchanged(false);
+
+		// Confirm the record, then replay the rebroadcast: a monitor-update completion can race
+		// wallet sync around confirmation.
+		let event = WalletEvent::TxConfirmed {
+			txid,
+			tx: Arc::new(tx.clone()),
+			block_time: confirmed_block_time(5),
+			old_block_time: None,
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.classify_funding(&tx, &channels, tx_type).await.unwrap();
+		assert_unchanged(true);
 	}
 
 	/// Barrier test, classification-first ordering: wallet sync's confirmation handling must
