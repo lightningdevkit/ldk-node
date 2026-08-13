@@ -6,6 +6,7 @@
 // accordance with one or both of these licenses.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
@@ -187,10 +188,18 @@ where
 	pub(crate) async fn mutate<F: FnOnce(Option<&SO>) -> Option<SO>>(
 		&self, id: &SO::Id, f: F,
 	) -> Result<Option<SO>, Error> {
+		self.mutate_with(id, |current| async move { Ok(f(current.as_ref())) }).await
+	}
+
+	async fn mutate_with<F, Fut>(&self, id: &SO::Id, f: F) -> Result<Option<SO>, Error>
+	where
+		F: FnOnce(Option<SO>) -> Fut,
+		Fut: Future<Output = Result<Option<SO>, Error>>,
+	{
 		let _guard = self.mutation_lock.lock().await;
 
 		let current = self.objects.lock().expect("lock").get(id).cloned();
-		let new_object = match f(current.as_ref()) {
+		let new_object = match f(current).await? {
 			Some(new_object) => new_object,
 			None => return Ok(None),
 		};
