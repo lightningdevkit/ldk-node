@@ -1371,24 +1371,26 @@ impl Wallet {
 				return Err(());
 			}
 
+			// Keep selected wallet inputs unavailable until LDK either broadcasts a transaction
+			// spending them or returns them through `DiscardFunding`.
+			for txin in unsigned_tx.input.iter().filter(|txin| {
+				must_spend.iter().all(|input| input.outpoint != txin.previous_output)
+			}) {
+				locked_wallet.lock_outpoint(txin.previous_output);
+			}
+
 			let change_output = unsigned_tx
 				.output
 				.into_iter()
 				.find(|txout| must_pay_to.iter().all(|output| output != txout));
-			let change_set = if change_output.is_some() {
-				Some(locked_wallet.take_staged().unwrap_or_default())
-			} else {
-				None
-			};
+			let change_set = locked_wallet.take_staged().unwrap_or_default();
 
 			(CoinSelection { confirmed_utxos, change_output }, change_set)
 		};
 
-		if let Some(change_set) = change_set {
-			locked_persister.persist_changeset(change_set).await.map_err(|e| {
-				log_error!(self.logger, "Failed to persist wallet: {}", e);
-			})?;
-		}
+		locked_persister.persist_changeset(change_set).await.map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+		})?;
 
 		Ok(coin_selection)
 	}
@@ -2849,7 +2851,7 @@ mod tests {
 	use std::sync::atomic::{AtomicBool, Ordering};
 	use std::time::Duration;
 
-	use bdk_chain::{BlockId, ConfirmationBlockTime};
+	use bdk_chain::{BlockId, CheckPoint, ConfirmationBlockTime, TxUpdate};
 	use bdk_wallet::Wallet as BdkWallet;
 	use bitcoin::hashes::Hash;
 	use bitcoin::{Network, TxIn};
@@ -3014,6 +3016,132 @@ mod tests {
 			logger,
 			pending_payment_store,
 		))
+	}
+
+	#[tokio::test]
+	async fn splice_coin_selection_locks_inputs_until_cancelled() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (funding_tx, block_id) = {
+			let mut locked_wallet = wallet.inner.lock().unwrap();
+			let outputs = (0..2)
+				.map(|_| TxOut {
+					value: Amount::from_sat(100_000),
+					script_pubkey: locked_wallet
+						.reveal_next_address(KeychainKind::External)
+						.address
+						.script_pubkey(),
+				})
+				.collect();
+			let funding_tx = Transaction {
+				version: bitcoin::transaction::Version::TWO,
+				lock_time: LockTime::ZERO,
+				input: Vec::new(),
+				output: outputs,
+			};
+			let block_id = BlockId {
+				height: locked_wallet.latest_checkpoint().height() + 1,
+				hash: bitcoin::BlockHash::from_byte_array([42; 32]),
+			};
+			(funding_tx, block_id)
+		};
+		let funding_txid = funding_tx.compute_txid();
+		let mut tx_update = TxUpdate::default();
+		tx_update.txs = vec![Arc::new(funding_tx)];
+		tx_update.anchors =
+			[(ConfirmationBlockTime { block_id, confirmation_time: 1 }, funding_txid)].into();
+		let chain = CheckPoint::from_block_ids([
+			wallet.inner.lock().unwrap().latest_checkpoint().block_id(),
+			block_id,
+		])
+		.unwrap();
+		wallet
+			.apply_update(Update { tx_update, chain: Some(chain), ..Default::default() })
+			.await
+			.unwrap();
+
+		let payment = TxOut {
+			value: Amount::from_sat(50_000),
+			script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_slice(&[1; 20]).unwrap()),
+		};
+		let fee_rate = FeeRate::from_sat_per_kwu(250);
+		let selection =
+			Wallet::select_confirmed_utxos(&wallet, Vec::new(), &[payment.clone()], fee_rate)
+				.await
+				.unwrap();
+		let selected_outpoints = selection
+			.confirmed_utxos
+			.iter()
+			.cloned()
+			.map(ConfirmedUtxo::into_utxo)
+			.map(|utxo| utxo.outpoint)
+			.collect::<Vec<_>>();
+		assert!(!selected_outpoints.is_empty());
+		assert!(
+			selected_outpoints.iter().all(|outpoint| wallet
+				.inner
+				.lock()
+				.unwrap()
+				.is_outpoint_locked(*outpoint)),
+			"splice coin selection must lock selected wallet inputs",
+		);
+		drop(wallet);
+
+		let reloaded = new_test_wallet(Arc::clone(&store), true).await;
+		assert!(
+			selected_outpoints.iter().all(|outpoint| reloaded
+				.inner
+				.lock()
+				.unwrap()
+				.is_outpoint_locked(*outpoint)),
+			"splice input locks must survive a wallet reload",
+		);
+		let second_selection =
+			Wallet::select_confirmed_utxos(&reloaded, Vec::new(), &[payment.clone()], fee_rate)
+				.await
+				.unwrap();
+		let second_outpoints = second_selection
+			.confirmed_utxos
+			.into_iter()
+			.map(ConfirmedUtxo::into_utxo)
+			.map(|utxo| utxo.outpoint)
+			.collect::<Vec<_>>();
+		assert!(
+			selected_outpoints.iter().all(|outpoint| !second_outpoints.contains(outpoint)),
+			"subsequent splice coin selection must not reuse locked inputs",
+		);
+
+		let cancelled_tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: selected_outpoints
+				.iter()
+				.map(|outpoint| TxIn { previous_output: *outpoint, ..TxIn::default() })
+				.collect(),
+			output: selection.change_output.into_iter().collect(),
+		};
+		reloaded.cancel_tx(cancelled_tx).await.unwrap();
+		drop(reloaded);
+		let reloaded = new_test_wallet(store, true).await;
+		assert!(
+			selected_outpoints.iter().all(|outpoint| !reloaded
+				.inner
+				.lock()
+				.unwrap()
+				.is_outpoint_locked(*outpoint)),
+			"discarded splice inputs must be unlocked persistently",
+		);
+		let replacement_selection =
+			Wallet::select_confirmed_utxos(&reloaded, Vec::new(), &[payment], fee_rate)
+				.await
+				.unwrap();
+		let replacement_outpoints = replacement_selection
+			.confirmed_utxos
+			.into_iter()
+			.map(ConfirmedUtxo::into_utxo)
+			.map(|utxo| utxo.outpoint)
+			.collect::<Vec<_>>();
+		assert_eq!(replacement_outpoints, selected_outpoints);
 	}
 
 	fn pooled_indices(wallet: &Wallet) -> Vec<u32> {

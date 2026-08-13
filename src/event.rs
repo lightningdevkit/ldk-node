@@ -538,6 +538,28 @@ impl Future for EventFuture {
 	}
 }
 
+fn discarded_funding_transaction(funding_info: FundingInfo) -> Option<bitcoin::Transaction> {
+	match funding_info {
+		FundingInfo::Tx { transaction } => Some(transaction),
+		FundingInfo::Contribution { inputs, outputs } => Some(bitcoin::Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: bitcoin::absolute::LockTime::ZERO,
+			input: inputs
+				.into_iter()
+				.map(|previous_output| bitcoin::TxIn {
+					previous_output,
+					..bitcoin::TxIn::default()
+				})
+				.collect(),
+			output: outputs
+				.into_iter()
+				.map(|script_pubkey| bitcoin::TxOut { value: bitcoin::Amount::ZERO, script_pubkey })
+				.collect(),
+		}),
+		FundingInfo::OutPoint { .. } => None,
+	}
+}
+
 pub(crate) struct EventHandler<L: Deref + Clone + Sync + Send + 'static>
 where
 	L::Target: LdkLogger,
@@ -1954,26 +1976,7 @@ where
 				}
 			},
 			LdkEvent::DiscardFunding { channel_id, funding_info } => {
-				let tx = match funding_info {
-					FundingInfo::Tx { transaction } => Some(transaction),
-					FundingInfo::Contribution { inputs: _, outputs } => {
-						Some(bitcoin::Transaction {
-							version: bitcoin::transaction::Version::TWO,
-							lock_time: bitcoin::absolute::LockTime::ZERO,
-							input: vec![],
-							output: outputs
-								.into_iter()
-								.map(|script_pubkey| bitcoin::TxOut {
-									value: bitcoin::Amount::ZERO,
-									script_pubkey,
-								})
-								.collect(),
-						})
-					},
-					FundingInfo::OutPoint { .. } => None,
-				};
-
-				if let Some(tx) = tx {
+				if let Some(tx) = discarded_funding_transaction(funding_info) {
 					log_info!(
 						self.logger,
 						"Reclaiming unused wallet state from channel {} funding",
@@ -2249,12 +2252,35 @@ mod tests {
 	use std::sync::atomic::{AtomicU16, Ordering};
 	use std::time::Duration;
 
+	use bitcoin::hashes::Hash;
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
 	use crate::io::test_utils::InMemoryStore;
 	use crate::payment::store::LSPS2Parameters;
 	use crate::types::DynStoreWrapper;
+
+	#[test]
+	fn discarded_contribution_preserves_inputs_and_outputs() {
+		let inputs = vec![
+			OutPoint::new(bitcoin::Txid::from_byte_array([1; 32]), 2),
+			OutPoint::new(bitcoin::Txid::from_byte_array([3; 32]), 4),
+		];
+		let outputs =
+			vec![bitcoin::ScriptBuf::from_bytes(vec![5]), bitcoin::ScriptBuf::from_bytes(vec![6])];
+
+		let tx = discarded_funding_transaction(FundingInfo::Contribution {
+			inputs: inputs.clone(),
+			outputs: outputs.clone(),
+		})
+		.unwrap();
+
+		assert_eq!(tx.input.iter().map(|txin| txin.previous_output).collect::<Vec<_>>(), inputs,);
+		assert_eq!(
+			tx.output.iter().map(|txout| txout.script_pubkey.clone()).collect::<Vec<_>>(),
+			outputs,
+		);
+	}
 
 	#[test]
 	fn lsps2_payment_metadata_decodes_total_fee_limit() {
