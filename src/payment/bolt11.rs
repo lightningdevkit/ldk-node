@@ -623,9 +623,9 @@ impl Bolt11Payment {
 	/// Returns a payable invoice that can use a just-in-time (JIT) channel to receive a payment of
 	/// the amount given when additional inbound liquidity is needed.
 	///
-	/// The configured [LSPS2]-compliant LSP may open a channel when the invoice is paid. The payment
-	/// may instead arrive over pre-existing channels when they provide sufficient inbound liquidity,
-	/// in which case no new channel is opened.
+	/// The invoice only advertises the configured [LSPS2]-compliant LSP's intercept route. The payment
+	/// may instead use pre-existing channels if the payer independently knows a route to the
+	/// recipient, in which case no new channel is opened.
 	///
 	/// The configured LSPS2 fee limit is enforced before creating the invoice.
 	///
@@ -642,9 +642,9 @@ impl Bolt11Payment {
 	/// Returns a payable invoice that can use a just-in-time (JIT) channel to receive a payment of
 	/// the amount given when additional inbound liquidity is needed.
 	///
-	/// The configured [LSPS2]-compliant LSP may open a channel when the invoice is paid. The payment
-	/// may instead arrive over pre-existing channels when they provide sufficient inbound liquidity,
-	/// in which case no new channel is opened.
+	/// The invoice only advertises the configured [LSPS2]-compliant LSP's intercept route. The payment
+	/// may instead use pre-existing channels if the payer independently knows a route to the
+	/// recipient, in which case no new channel is opened.
 	///
 	/// The configured LSPS2 fee limit is enforced before creating the invoice.
 	///
@@ -686,9 +686,9 @@ impl Bolt11Payment {
 	/// amount payment, also known as a "zero-amount" invoice, when additional inbound liquidity is
 	/// needed.
 	///
-	/// The configured [LSPS2]-compliant LSP may open a channel when the invoice is paid. The payment
-	/// may instead arrive over pre-existing channels when they provide sufficient inbound liquidity,
-	/// in which case no new channel is opened.
+	/// The invoice only advertises the configured [LSPS2]-compliant LSP's intercept route. The payment
+	/// may instead use pre-existing channels if the payer independently knows a route to the
+	/// recipient, in which case no new channel is opened.
 	///
 	/// The configured LSPS2 fee limit is enforced when the payment arrives.
 	///
@@ -705,9 +705,9 @@ impl Bolt11Payment {
 	/// amount payment, also known as a "zero-amount" invoice, when additional inbound liquidity is
 	/// needed.
 	///
-	/// The configured [LSPS2]-compliant LSP may open a channel when the invoice is paid. The payment
-	/// may instead arrive over pre-existing channels when they provide sufficient inbound liquidity,
-	/// in which case no new channel is opened.
+	/// The invoice only advertises the configured [LSPS2]-compliant LSP's intercept route. The payment
+	/// may instead use pre-existing channels if the payer independently knows a route to the
+	/// recipient, in which case no new channel is opened.
 	///
 	/// The configured LSPS2 fee limit is enforced when the payment arrives.
 	///
