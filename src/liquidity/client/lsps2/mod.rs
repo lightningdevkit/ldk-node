@@ -202,11 +202,7 @@ where
 			.await?;
 		let lsps2_parameters = LSPS2Parameters {
 			max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
-			max_proportional_opening_fee_ppm_msat: self
-				.config
-				.lsps2_max_total_lsp_fee_limit_msat
-				.is_none()
-				.then_some(min_prop_fee_ppm_msat),
+			max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
 		};
 		let invoice = self.lsps2_create_jit_invoice(
 			buy_response,
