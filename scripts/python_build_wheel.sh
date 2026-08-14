@@ -123,6 +123,7 @@ fi
 
 CARGO_TARGET_DIR="$(mktemp -d /tmp/cargo-target-ldk-node-python-wheels.XXXXXX)"
 export CARGO_TARGET_DIR
+BUILD_SOURCE_DIR="$(mktemp -d /tmp/ldk-node-python-wheels-source.XXXXXX)"
 SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)"
 export SOURCE_DATE_EPOCH
 
@@ -132,16 +133,30 @@ cleanup() {
 			rm -rf -- "$CARGO_TARGET_DIR"
 			;;
 	esac
+	case "$BUILD_SOURCE_DIR" in
+		/tmp/ldk-node-python-wheels-source.*)
+			rm -rf -- "$BUILD_SOURCE_DIR"
+			;;
+	esac
 }
 trap cleanup EXIT
+
+git ls-files --cached --others --exclude-standard -z | while IFS= read -r -d '' source_path; do
+	if [[ -e "$source_path" || -L "$source_path" ]]; then
+		printf '%s\0' "$source_path"
+	fi
+done | tar --null --files-from=- -cf - | tar -xf - -C "$BUILD_SOURCE_DIR"
 
 echo "Building Python wheel from commit $(git rev-parse HEAD)"
 echo "Build host: $HOST_OS $HOST_ARCH"
 
-uv tool run --python 3.11 --from "cibuildwheel[uv]==$CIBUILDWHEEL_VERSION" cibuildwheel \
-	bindings/python \
-	--config-file bindings/python/pyproject.toml \
-	--output-dir "$OUTPUT_DIR"
+(
+	cd "$BUILD_SOURCE_DIR"
+	uv tool run --python 3.11 --from "cibuildwheel[uv]==$CIBUILDWHEEL_VERSION" cibuildwheel \
+		bindings/python \
+		--config-file bindings/python/pyproject.toml \
+		--output-dir "$OUTPUT_DIR"
+)
 
 built_wheels=("$OUTPUT_DIR"/*.whl)
 if [[ ${#built_wheels[@]} -ne $EXPECTED_WHEEL_COUNT ]]; then
