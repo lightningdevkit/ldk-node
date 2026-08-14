@@ -6,6 +6,7 @@
 // accordance with one or both of these licenses.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use bitcoin::block::Header;
@@ -50,6 +51,19 @@ impl InvoiceBuildError {
 			Self::Response(error) => error,
 		}
 	}
+}
+
+async fn commit_cache_target_on_success<T, E, C, Fut>(
+	result: Result<T, E>, commit: C,
+) -> Result<T, E>
+where
+	C: FnOnce() -> Fut,
+	Fut: Future<Output = ()>,
+{
+	if result.is_ok() {
+		commit().await;
+	}
+	result
 }
 
 struct JitInvoiceRequestDependencies {
@@ -323,14 +337,15 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 		let secp_ctx = Arc::clone(&self.secp_ctx);
 		let logger = Arc::clone(&self.logger);
 		dependencies.runtime.spawn_cancellable_background_task(async move {
-			let response =
-				lsps2_client.prepare_invoice_response(jit_request, connection_manager).await;
+			let response = Arc::clone(&lsps2_client)
+				.prepare_invoice_response(jit_request, connection_manager)
+				.await;
 			let (message, instructions) = match response {
 				Ok(JitInvoiceResponse { payment_metadata: jit_metadata, allow_mpp }) => {
 					debug_assert_eq!(allow_mpp, jit_request.allow_mpp());
 					let mut merged_metadata = payment_metadata.unwrap_or_default();
 					merged_metadata.extend(jit_metadata);
-					match build_invoice(
+					let invoice_result = build_invoice(
 						flow.as_ref(),
 						channel_manager.as_ref(),
 						keys_manager.as_ref(),
@@ -340,7 +355,13 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 						Some(merged_metadata),
 						allow_mpp,
 						payment_info.as_ref(),
-					) {
+					);
+					let invoice_result = commit_cache_target_on_success(invoice_result, || {
+						let lsps2_client = Arc::clone(&lsps2_client);
+						async move { lsps2_client.commit_invoice_cache_target(jit_request).await }
+					})
+					.await;
+					match invoice_result {
 						Ok((invoice, context)) => (
 							OffersMessage::Invoice(invoice),
 							responder.respond_with_reply_path(context),
@@ -406,6 +427,7 @@ impl Listen for NodeOffersMessageHandler {
 
 #[cfg(test)]
 mod tests {
+	use core::sync::atomic::{AtomicBool, Ordering};
 	use std::num::NonZeroU64;
 
 	use bitcoin::secp256k1::{PublicKey, SecretKey};
@@ -426,6 +448,33 @@ mod tests {
 
 	fn recipient_pubkey() -> PublicKey {
 		PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[43; 32]).unwrap())
+	}
+
+	#[tokio::test]
+	async fn failed_invoice_does_not_commit_cache_target() {
+		let committed = AtomicBool::new(false);
+		let result = commit_cache_target_on_success(Err::<(), _>(()), || async {
+			committed.store(true, Ordering::Release);
+		})
+		.await;
+
+		assert!(result.is_err());
+		assert!(
+			!committed.load(Ordering::Acquire),
+			"failed invoice construction committed a lease cache target"
+		);
+	}
+
+	#[tokio::test]
+	async fn successful_invoice_commits_cache_target() {
+		let committed = AtomicBool::new(false);
+		let result = commit_cache_target_on_success(Ok::<_, ()>(()), || async {
+			committed.store(true, Ordering::Release);
+		})
+		.await;
+
+		assert!(result.is_ok());
+		assert!(committed.load(Ordering::Acquire));
 	}
 
 	#[test]

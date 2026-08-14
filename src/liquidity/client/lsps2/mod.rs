@@ -143,17 +143,18 @@ where
 		self.cache_target_store.targets()
 	}
 
-	pub(crate) async fn prepare_invoice_response(
-		self: Arc<Self>, request: JitInvoiceRequest, connection_manager: Arc<ConnectionManager<L>>,
-	) -> Result<JitInvoiceResponse, Error> {
-		// Cache targets are only an optimization. Recording an older, evicted offer again makes it
-		// eligible for startup pre-caching, but a persistence failure must not make the current
+	pub(crate) async fn commit_invoice_cache_target(&self, request: JitInvoiceRequest) {
+		// Cache targets are only an optimization. A persistence failure must not make the current
 		// invoice request unusable.
 		let (target_id, absolute_expiry) = request.cache_target();
 		if let Err(error) = self.register_cache_target(target_id, absolute_expiry).await {
 			log_warn!(self.logger, "Failed recording LSPS2 lease cache target: {}", error);
 		}
+	}
 
+	pub(crate) async fn prepare_invoice_response(
+		self: Arc<Self>, request: JitInvoiceRequest, connection_manager: Arc<ConnectionManager<L>>,
+	) -> Result<JitInvoiceResponse, Error> {
 		let allow_mpp = request.allow_mpp();
 		let (lease, fee_parameters) = match request {
 			JitInvoiceRequest::Fixed { amount_msat, .. } => {
