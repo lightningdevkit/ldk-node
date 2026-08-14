@@ -147,12 +147,23 @@ where
 		self.cache_target_store.targets()
 	}
 
-	pub(crate) async fn commit_invoice_cache_target(&self, request: JitInvoiceRequest) {
+	pub(crate) async fn commit_invoice_cache_target(
+		self: &Arc<Self>, request: JitInvoiceRequest,
+		connection_manager: &Arc<ConnectionManager<L>>,
+	) {
 		// Cache targets are only an optimization. A persistence failure must not make the current
 		// invoice request unusable.
 		let (target_id, absolute_expiry) = request.cache_target();
 		if let Err(error) = self.register_cache_target(target_id, absolute_expiry).await {
 			log_warn!(self.logger, "Failed recording LSPS2 lease cache target: {}", error);
+		}
+		match request {
+			JitInvoiceRequest::Fixed { amount_msat, .. } => {
+				self.schedule_fixed_lease_refill(amount_msat, connection_manager);
+			},
+			JitInvoiceRequest::Variable { .. } => {
+				self.schedule_variable_lease_refill(connection_manager);
+			},
 		}
 	}
 
@@ -233,6 +244,7 @@ where
 			lsps2_parameters,
 			Some(&lsp.node_id),
 		)?;
+		self.schedule_fixed_lease_refill(amount_msat, &connection_manager);
 
 		if was_negotiated {
 			log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
@@ -259,6 +271,7 @@ where
 			lsps2_parameters,
 			Some(&lsp.node_id),
 		)?;
+		self.schedule_variable_lease_refill(&connection_manager);
 
 		if was_negotiated {
 			log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
@@ -272,7 +285,6 @@ where
 		if let Some((lease, total_fee_msat, lsp)) =
 			self.take_cached_fixed_lease(amount_msat).await?
 		{
-			self.schedule_fixed_lease_refill(amount_msat, connection_manager);
 			return Ok((lease, total_fee_msat, lsp, false));
 		}
 		let request_lock = self
@@ -284,14 +296,12 @@ where
 		if let Some((lease, total_fee_msat, lsp)) =
 			self.take_cached_fixed_lease(amount_msat).await?
 		{
-			self.schedule_fixed_lease_refill(amount_msat, connection_manager);
 			return Ok((lease, total_fee_msat, lsp, false));
 		}
 
 		let (negotiated_lease, min_total_fee_msat, cheapest_lsp) =
 			self.negotiate_fixed_lease(amount_msat, connection_manager).await?;
 		let lease = self.consume_lease(&negotiated_lease.id).await?;
-		self.schedule_fixed_lease_refill(amount_msat, connection_manager);
 		Ok((lease, min_total_fee_msat, cheapest_lsp, true))
 	}
 
@@ -360,7 +370,6 @@ where
 		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig, bool), Error> {
 		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
-			self.schedule_variable_lease_refill(connection_manager);
 			return Ok((lease, proportional_fee, lsp, false));
 		}
 		let request_lock = self
@@ -370,14 +379,12 @@ where
 			.request_lock(LeaseRequestKey::Variable);
 		let _request_guard = request_lock.lock().await;
 		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
-			self.schedule_variable_lease_refill(connection_manager);
 			return Ok((lease, proportional_fee, lsp, false));
 		}
 
 		let (negotiated_lease, min_prop_fee_ppm_msat, cheapest_lsp) =
 			self.negotiate_variable_lease(connection_manager).await?;
 		let lease = self.consume_lease(&negotiated_lease.id).await?;
-		self.schedule_variable_lease_refill(connection_manager);
 		Ok((lease, min_prop_fee_ppm_msat, cheapest_lsp, true))
 	}
 
