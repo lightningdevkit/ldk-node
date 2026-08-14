@@ -463,12 +463,13 @@ where
 			.expect("lock")
 			.request_lock(LeaseRequestKey::Fixed(amount_msat));
 		let _request_guard = request_lock.lock().await;
-		if self
-			.lease_state
-			.lock()
-			.expect("lock")
-			.has_fixed_amount(amount_msat, self.config.lsps2_max_total_lsp_fee_limit_msat)
-		{
+		let available_lsps =
+			self.get_lsps2_nodes().await?.into_iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
+		if self.lease_state.lock().expect("lock").has_fixed_amount(
+			amount_msat,
+			self.config.lsps2_max_total_lsp_fee_limit_msat,
+			&available_lsps,
+		) {
 			return Ok(());
 		}
 		self.negotiate_fixed_lease(amount_msat, connection_manager).await?;
@@ -484,11 +485,13 @@ where
 			.expect("lock")
 			.request_lock(LeaseRequestKey::Variable);
 		let _request_guard = request_lock.lock().await;
+		let available_lsps =
+			self.get_lsps2_nodes().await?.into_iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
 		if self
 			.lease_state
 			.lock()
 			.expect("lock")
-			.has_variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat)
+			.has_variable_amount(self.config.lsps2_max_total_lsp_fee_limit_msat, &available_lsps)
 		{
 			return Ok(());
 		}

@@ -409,9 +409,12 @@ impl LSPS2LeaseState {
 		self.leases.remove(&id).map(|lease| (lease, fee_msat))
 	}
 
-	pub(crate) fn has_fixed_amount(&self, amount_msat: u64, max_fee_msat: Option<u64>) -> bool {
+	pub(crate) fn has_fixed_amount(
+		&self, amount_msat: u64, max_fee_msat: Option<u64>, available_lsps: &[PublicKey],
+	) -> bool {
 		self.leases
 			.values()
+			.filter(|lease| available_lsps.contains(&lease.id.lsp_node_id))
 			.filter(|lease| lease.payment_size_msat == Some(amount_msat))
 			.filter(|lease| is_lease_usable(lease))
 			.filter_map(|lease| {
@@ -442,9 +445,12 @@ impl LSPS2LeaseState {
 		self.leases.remove(&id).map(|lease| (lease, proportional_fee))
 	}
 
-	pub(crate) fn has_variable_amount(&self, max_total_fee_msat: Option<u64>) -> bool {
+	pub(crate) fn has_variable_amount(
+		&self, max_total_fee_msat: Option<u64>, available_lsps: &[PublicKey],
+	) -> bool {
 		self.leases
 			.values()
+			.filter(|lease| available_lsps.contains(&lease.id.lsp_node_id))
 			.filter(|lease| lease.payment_size_msat.is_none())
 			.filter(|lease| is_lease_usable(lease))
 			.any(|lease| max_total_fee_msat.map_or(true, |max| lease.params.min_fee_msat <= max))
@@ -652,13 +658,40 @@ mod tests {
 		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
 		let fixed = lease(2, 46, 100, Some(1_000), valid_until);
 		let variable = lease(3, 47, 50, None, valid_until);
+		let available_lsps = [fixed.id.lsp_node_id, variable.id.lsp_node_id];
 		let state = LSPS2LeaseState::from_leases(vec![fixed, variable]);
 
-		assert!(state.has_fixed_amount(1_000, Some(100)));
-		assert!(!state.has_fixed_amount(1_000, Some(99)));
-		assert!(!state.has_fixed_amount(2_000, None));
-		assert!(state.has_variable_amount(Some(50)));
-		assert!(!state.has_variable_amount(Some(49)));
+		assert!(state.has_fixed_amount(1_000, Some(100), &available_lsps));
+		assert!(!state.has_fixed_amount(1_000, Some(99), &available_lsps));
+		assert!(!state.has_fixed_amount(2_000, None, &available_lsps));
+		assert!(state.has_variable_amount(Some(50), &available_lsps));
+		assert!(!state.has_variable_amount(Some(49), &available_lsps));
+	}
+
+	#[test]
+	fn unavailable_fixed_lease_does_not_suppress_refill() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let unavailable = lease(2, 48, 100, Some(1_000), valid_until);
+		let available_lsp = lease(3, 49, 100, Some(1_000), valid_until).id.lsp_node_id;
+		let state = LSPS2LeaseState::from_leases(vec![unavailable]);
+
+		assert!(
+			!state.has_fixed_amount(1_000, Some(100), &[available_lsp]),
+			"a lease from an unavailable LSP suppressed fixed-amount refill"
+		);
+	}
+
+	#[test]
+	fn unavailable_variable_lease_does_not_suppress_refill() {
+		let valid_until = now_secs() + MIN_LEASE_REMAINING_SECS + 60;
+		let unavailable = lease(2, 50, 50, None, valid_until);
+		let available_lsp = lease(3, 51, 50, None, valid_until).id.lsp_node_id;
+		let state = LSPS2LeaseState::from_leases(vec![unavailable]);
+
+		assert!(
+			!state.has_variable_amount(Some(50), &[available_lsp]),
+			"a lease from an unavailable LSP suppressed variable-amount refill"
+		);
 	}
 
 	fn cache_target(
