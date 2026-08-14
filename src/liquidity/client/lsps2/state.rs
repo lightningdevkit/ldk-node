@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::impl_writeable_tlv_based;
+use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 
@@ -17,6 +18,7 @@ use crate::data_store::{DataStore, StorableObject, StorableObjectId};
 use crate::hex_utils;
 
 pub(crate) const MIN_LEASE_REMAINING_SECS: u64 = 24 * 60 * 60;
+const BOLT12_FINAL_CLTV_EXPIRY_DELTA: u16 = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
 
 pub(crate) type PaymentLeaseStore<L> = DataStore<PaymentLease, L>;
 
@@ -145,7 +147,14 @@ impl LSPS2LeaseState {
 }
 
 pub(crate) fn is_lease_usable(lease: &PaymentLease) -> bool {
-	lease.valid_until.saturating_sub(now_secs()) >= MIN_LEASE_REMAINING_SECS
+	checked_cltv_expiry_delta(lease.cltv_expiry_delta).is_some()
+		&& lease.valid_until.saturating_sub(now_secs()) >= MIN_LEASE_REMAINING_SECS
+}
+
+pub(crate) fn checked_cltv_expiry_delta(cltv_expiry_delta: u32) -> Option<u16> {
+	u16::try_from(cltv_expiry_delta)
+		.ok()
+		.filter(|delta| *delta <= u16::MAX - BOLT12_FINAL_CLTV_EXPIRY_DELTA)
 }
 
 fn now_secs() -> u64 {
@@ -216,6 +225,30 @@ mod tests {
 		state.insert(lease);
 		state.prune();
 		assert!(state.take_valid(&id).is_none());
+	}
+
+	#[test]
+	fn rejects_unsupported_cltv_delta() {
+		let mut lease = lease(2, 53, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS + 60);
+		lease.cltv_expiry_delta = u16::MAX as u32 + 1;
+		let id = lease.id;
+		let mut state = LSPS2LeaseState::from_leases(vec![lease]);
+
+		assert!(
+			state.take_valid(&id).is_none(),
+			"lease with an unsupported CLTV delta remained usable"
+		);
+	}
+
+	#[test]
+	fn rejects_cltv_delta_without_bolt12_headroom() {
+		let mut lease = lease(2, 54, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS + 60);
+		lease.cltv_expiry_delta = u16::MAX as u32 - (MIN_FINAL_CLTV_EXPIRY_DELTA + 2) as u32 + 1;
+
+		assert!(
+			!is_lease_usable(&lease),
+			"lease CLTV delta cannot absorb the BOLT12 final CLTV delta"
+		);
 	}
 
 	#[test]
