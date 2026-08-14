@@ -188,11 +188,6 @@ impl StorableObject for PaymentDetails {
 					update_if_necessary!(*hash, hash_opt);
 				},
 				PaymentKind::Bolt12Refund { ref mut hash, .. } => {
-					debug_assert_eq!(
-						self.direction,
-						PaymentDirection::Outbound,
-						"We should only ever override payment hash for outbound BOLT 12 payments"
-					);
 					debug_assert!(
 						hash.is_none() || *hash == hash_opt,
 						"We should never change a payment hash after being initially set"
@@ -1447,6 +1442,64 @@ mod tests {
 			inserted.kind,
 			PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
 		));
+	}
+
+	#[test]
+	fn inbound_bolt12_offer_payments_can_be_failed() {
+		let payment_id = PaymentId([41; 32]);
+		let hash = PaymentHash([42; 32]);
+		let mut payment = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Bolt12Offer {
+				hash: Some(hash),
+				preimage: None,
+				secret: None,
+				counterparty_skimmed_fee_msat: None,
+				offer_id: OfferId([43; 32]),
+				payer_note: None,
+				quantity: None,
+			},
+			Some(100_000),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		payment.update(PaymentDetailsUpdate {
+			hash: Some(Some(hash)),
+			status: Some(PaymentStatus::Failed),
+			..PaymentDetailsUpdate::new(payment_id)
+		});
+
+		assert_eq!(payment.status, PaymentStatus::Failed);
+	}
+
+	#[test]
+	fn inbound_bolt12_refunds_can_be_failed() {
+		let payment_id = PaymentId([41; 32]);
+		let hash = PaymentHash([42; 32]);
+		let mut payment = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Bolt12Refund {
+				hash: Some(hash),
+				preimage: None,
+				secret: None,
+				payer_note: None,
+				quantity: None,
+			},
+			Some(100_000),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		payment.update(PaymentDetailsUpdate {
+			hash: Some(Some(hash)),
+			status: Some(PaymentStatus::Failed),
+			..PaymentDetailsUpdate::new(payment_id)
+		});
+
+		assert_eq!(payment.status, PaymentStatus::Failed);
 	}
 
 	#[test]
