@@ -37,7 +37,7 @@ use crate::io::{
 };
 use crate::liquidity::client::lsps1::LSPS1Client;
 use crate::liquidity::client::lsps2::state::{
-	is_lease_usable, now_secs, read_lease_cache_targets, LSPS2LeaseState, LeaseCacheTargetState,
+	is_lease_cacheable, now_secs, read_lease_cache_targets, LSPS2LeaseState, LeaseCacheTargetState,
 	LeaseCacheTargetStore, PaymentLeaseStore, PendingLeaseRequestState,
 };
 use crate::liquidity::client::lsps2::LSPS2Client;
@@ -279,11 +279,11 @@ where
 			Arc::clone(&self.kv_store),
 			self.logger.clone(),
 		));
-		for lease in leases.iter().filter(|lease| !is_lease_usable(lease)) {
+		for lease in leases.iter().filter(|lease| !is_lease_cacheable(lease)) {
 			lease_store.remove(&lease.id).await.map_err(|_| BuildError::WriteFailed)?;
 		}
 		let lease_state =
-			LSPS2LeaseState::from_leases(leases.into_iter().filter(is_lease_usable).collect());
+			LSPS2LeaseState::from_leases(leases.into_iter().filter(is_lease_cacheable).collect());
 		let (cache_target_state, removed_target_ids) = LeaseCacheTargetState::from_targets(
 			cache_targets,
 			LSPS2_LEASE_CACHE_TARGET_SIZE,
