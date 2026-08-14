@@ -2153,6 +2153,7 @@ fn build_with_store_internal(
 			Arc::clone(&scorer),
 			scoring_fee_params,
 		),
+		Arc::clone(&network_graph),
 		Arc::clone(&keys_manager),
 	));
 
@@ -2558,6 +2559,7 @@ fn build_with_store_internal(
 						Arc::clone(&scorer),
 						probing_fee_params,
 					),
+					Arc::clone(&network_graph),
 					Arc::clone(&keys_manager),
 				));
 				Arc::new(HighDegreeStrategy::new(
