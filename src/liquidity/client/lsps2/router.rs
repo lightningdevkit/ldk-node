@@ -17,12 +17,15 @@ use lightning::blinded_path::IntroductionNode;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelDetails;
 use lightning::ln::channelmanager::{PaymentId, MIN_FINAL_CLTV_EXPIRY_DELTA};
+use lightning::routing::gossip::NodeId;
 use lightning::routing::router::{InFlightHtlcs, Route, RouteParameters, Router};
 use lightning::sign::{EntropySource, ReceiveAuthKey};
 use lightning::types::features::BlindedHopFeatures;
 use lightning::types::payment::PaymentHash;
+use std::sync::Arc;
 
 use crate::payment::PaymentMetadata;
+use crate::types::Graph;
 
 /// Parameters needed to construct an LSPS2 blinded payment path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,13 +53,14 @@ impl_writeable_tlv_based!(LSPS2LeaseParameters, {
 /// A router wrapper that uses ordinary payment paths when available and LSPS2 JIT paths otherwise.
 pub struct LSPS2Router<R: Router, ES: EntropySource> {
 	inner_router: R,
+	network_graph: Arc<Graph>,
 	entropy_source: ES,
 }
 
 impl<R: Router, ES: EntropySource> LSPS2Router<R, ES> {
 	/// Constructs an LSPS2-aware wrapper around `inner_router`.
-	pub fn new(inner_router: R, entropy_source: ES) -> Self {
-		Self { inner_router, entropy_source }
+	pub fn new(inner_router: R, network_graph: Arc<Graph>, entropy_source: ES) -> Self {
+		Self { inner_router, network_graph, entropy_source }
 	}
 
 	fn payment_parameters(&self, payment_context: &PaymentContext) -> Vec<LSPS2LeaseParameters> {
@@ -103,15 +107,26 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 	) -> Result<Vec<BlindedPaymentPath>, ()> {
 		let parameters = self.payment_parameters(&tlvs.payment_context);
 		let allow_mpp = parameters.iter().all(|params| params.payment_size_msat.is_some());
+		let is_eligible_first_hop = |channel: &&ChannelDetails| {
+			self.network_graph
+				.read_only()
+				.node(&NodeId::from_pubkey(&channel.counterparty.node_id))
+				.is_some() && channel
+				.counterparty
+				.forwarding_info
+				.clone()
+				.is_some_and(|info| PaymentRelay::try_from(info).is_ok())
+		};
 		let direct_path_has_sufficient_liquidity = amount_msats.map_or(true, |amount_msats| {
 			if allow_mpp {
 				first_hops
 					.iter()
+					.filter(is_eligible_first_hop)
 					.map(|channel| channel.inbound_capacity_msat)
 					.fold(0u64, u64::saturating_add)
 					>= amount_msats
 			} else {
-				first_hops.iter().any(|channel| {
+				first_hops.iter().filter(is_eligible_first_hop).any(|channel| {
 					channel.inbound_capacity_msat >= amount_msats
 						&& channel.inbound_htlc_minimum_msat.unwrap_or(0) <= amount_msats
 						&& channel.inbound_htlc_maximum_msat.unwrap_or(u64::MAX) >= amount_msats
@@ -135,9 +150,9 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 		);
 		// The default router may fall back to a direct path for an announced recipient even when no
 		// channel-backed paths have enough inbound liquidity. Only accept that fallback when the
-		// locally known channels can receive the resolved amount: across channels when MPP is allowed,
-		// or on one channel, including its HTLC bounds, when MPP is disabled. Otherwise it would hide
-		// the need for a JIT path and leave an invoice that cannot be paid.
+		// locally known, blinded-path-eligible channels can receive the resolved amount: across channels
+		// when MPP is allowed, or on one channel, including its HTLC bounds, when MPP is disabled.
+		// Otherwise it would hide the need for a JIT path and leave an invoice that cannot be paid.
 		//
 		// Always prefer usable ordinary paths. Besides avoiding an unnecessary channel open, this
 		// prevents an MPP payer from splitting one payment across regular and JIT paths. The LSP only
@@ -222,15 +237,20 @@ mod tests {
 	use super::*;
 
 	use bitcoin::secp256k1::SecretKey;
+	use bitcoin::Network;
 	use core::sync::atomic::{AtomicUsize, Ordering};
 	use lightning::blinded_path::payment::{Bolt12OfferContext, PaymentConstraints};
-	use lightning::ln::channel_state::{ChannelCounterparty, ChannelShutdownState};
+	use lightning::ln::channel_state::{
+		ChannelCounterparty, ChannelShutdownState, CounterpartyForwardingInfo,
+	};
 	use lightning::ln::types::ChannelId;
 	use lightning::offers::invoice_request::InvoiceRequestFields;
 	use lightning::offers::offer::OfferId;
-	use lightning::types::features::InitFeatures;
+	use lightning::types::features::{ChannelFeatures, InitFeatures};
 	use lightning::types::payment::PaymentSecret;
 	use std::collections::BTreeMap;
+
+	use crate::logger::Logger;
 
 	#[derive(Clone)]
 	struct TestEntropy;
@@ -327,7 +347,11 @@ mod tests {
 				node_id: pubkey(13),
 				features: InitFeatures::empty(),
 				unspendable_punishment_reserve: 0,
-				forwarding_info: None,
+				forwarding_info: Some(CounterpartyForwardingInfo {
+					fee_base_msat: 0,
+					fee_proportional_millionths: 0,
+					cltv_expiry_delta: 18,
+				}),
 				outbound_htlc_minimum_msat: None,
 				outbound_htlc_maximum_msat: None,
 			},
@@ -364,6 +388,26 @@ mod tests {
 		}
 	}
 
+	fn empty_graph() -> Arc<Graph> {
+		Arc::new(Graph::new(Network::Regtest, Arc::new(Logger::new_log_facade())))
+	}
+
+	fn announced_graph(recipient: PublicKey, include_peer: bool) -> Arc<Graph> {
+		let graph = empty_graph();
+		let counterparty = if include_peer { pubkey(13) } else { pubkey(14) };
+		graph
+			.add_channel_from_partial_announcement(
+				42,
+				None,
+				0,
+				ChannelFeatures::empty(),
+				NodeId::from_pubkey(&recipient),
+				NodeId::from_pubkey(&counterparty),
+			)
+			.unwrap();
+		graph
+	}
+
 	fn payment_tlvs(metadata: BTreeMap<u64, Vec<u8>>) -> ReceiveTlvs {
 		ReceiveTlvs {
 			payment_secret: PaymentSecret([2; 32]),
@@ -398,7 +442,7 @@ mod tests {
 		};
 		let metadata = payment_metadata(parameters);
 		let inner_router = MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::None };
-		let router = LSPS2Router::new(inner_router, TestEntropy);
+		let router = LSPS2Router::new(inner_router, empty_graph(), TestEntropy);
 
 		let paths = router
 			.create_blinded_payment_paths(
@@ -433,7 +477,7 @@ mod tests {
 		};
 		let metadata = payment_metadata(parameters);
 		let inner_router = MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::None };
-		let router = LSPS2Router::new(inner_router, TestEntropy);
+		let router = LSPS2Router::new(inner_router, empty_graph(), TestEntropy);
 
 		assert!(router
 			.create_blinded_payment_paths(
@@ -458,7 +502,7 @@ mod tests {
 		};
 		let metadata = payment_metadata(parameters);
 		let inner_router = MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::None };
-		let router = LSPS2Router::new(inner_router, TestEntropy);
+		let router = LSPS2Router::new(inner_router, empty_graph(), TestEntropy);
 
 		let paths = router
 			.create_blinded_payment_paths(
@@ -488,7 +532,7 @@ mod tests {
 		let metadata = payment_metadata(parameters);
 		let inner_router =
 			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::ChannelBacked };
-		let router = LSPS2Router::new(inner_router, TestEntropy);
+		let router = LSPS2Router::new(inner_router, empty_graph(), TestEntropy);
 		let recipient = pubkey(10);
 
 		let paths = router
@@ -515,7 +559,7 @@ mod tests {
 		let recipient = pubkey(10);
 		let inner_router =
 			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
-		let router = LSPS2Router::new(inner_router, TestEntropy);
+		let router = LSPS2Router::new(inner_router, empty_graph(), TestEntropy);
 
 		assert!(
 			router
@@ -544,7 +588,7 @@ mod tests {
 		};
 		let inner_router =
 			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
-		let router = LSPS2Router::new(inner_router, TestEntropy);
+		let router = LSPS2Router::new(inner_router, announced_graph(recipient, true), TestEntropy);
 
 		let paths = router
 			.create_blinded_payment_paths(
@@ -561,6 +605,73 @@ mod tests {
 	}
 
 	#[test]
+	fn ignores_capacity_without_forwarding_info() {
+		let recipient = pubkey(10);
+		let lsp_node_id = pubkey(11);
+		let parameters = LSPS2LeaseParameters {
+			lsp_node_id,
+			intercept_scid: 42,
+			cltv_expiry_delta: 48,
+			payment_size_msat: Some(3_000),
+			valid_until: u64::MAX,
+		};
+		let mut missing_forwarding_info = first_hop(3_000, None, None);
+		missing_forwarding_info.counterparty.forwarding_info = None;
+		let inner_router =
+			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
+		let router = LSPS2Router::new(inner_router, announced_graph(recipient, true), TestEntropy);
+		let paths = router
+			.create_blinded_payment_paths(
+				recipient,
+				ReceiveAuthKey([3; 32]),
+				vec![missing_forwarding_info],
+				payment_tlvs(payment_metadata(parameters)),
+				Some(3_000),
+				&Secp256k1::new(),
+			)
+			.unwrap();
+
+		assert_eq!(
+			paths[0].introduction_node(),
+			&IntroductionNode::NodeId(lsp_node_id),
+			"capacity without forwarding parameters hid the JIT path"
+		);
+	}
+
+	#[test]
+	fn ignores_capacity_from_unannounced_peer() {
+		let recipient = pubkey(10);
+		let lsp_node_id = pubkey(11);
+		let parameters = LSPS2LeaseParameters {
+			lsp_node_id,
+			intercept_scid: 42,
+			cltv_expiry_delta: 48,
+			payment_size_msat: Some(3_000),
+			valid_until: u64::MAX,
+		};
+
+		let inner_router =
+			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
+		let router = LSPS2Router::new(inner_router, announced_graph(recipient, false), TestEntropy);
+		let paths = router
+			.create_blinded_payment_paths(
+				recipient,
+				ReceiveAuthKey([3; 32]),
+				vec![first_hop(3_000, None, None)],
+				payment_tlvs(payment_metadata(parameters)),
+				Some(3_000),
+				&Secp256k1::new(),
+			)
+			.unwrap();
+
+		assert_eq!(
+			paths[0].introduction_node(),
+			&IntroductionNode::NodeId(lsp_node_id),
+			"capacity through an unannounced peer hid the JIT path"
+		);
+	}
+
+	#[test]
 	fn requires_one_sufficient_non_mpp_channel() {
 		let recipient = pubkey(10);
 		let lsp_node_id = pubkey(11);
@@ -573,7 +684,7 @@ mod tests {
 		};
 		let inner_router =
 			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
-		let router = LSPS2Router::new(inner_router, TestEntropy);
+		let router = LSPS2Router::new(inner_router, announced_graph(recipient, true), TestEntropy);
 
 		let paths = router
 			.create_blinded_payment_paths(
@@ -602,7 +713,7 @@ mod tests {
 		};
 		let inner_router =
 			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
-		let router = LSPS2Router::new(inner_router, TestEntropy);
+		let router = LSPS2Router::new(inner_router, empty_graph(), TestEntropy);
 
 		let paths = router
 			.create_blinded_payment_paths(
