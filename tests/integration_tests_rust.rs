@@ -5100,6 +5100,11 @@ async fn do_lsps2_multi_lsp_picks_cheapest(
 		client.bolt11_payment().receive_via_jit_channel(100_000_000, &invoice_description, 1024);
 	if max_total_lsp_fee_limit_msat.is_some() {
 		assert!(matches!(jit_invoice_result, Err(NodeError::LiquidityFeeTooHigh)));
+		let offer = client.bolt12_payment().receive(100_000_000, "multi LSP", None, None).unwrap();
+		let payment_id = payer.bolt12_payment().send(&offer, None, None, None).unwrap();
+		expect_event!(payer, PaymentFailed);
+		assert_eq!(payer.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
+		assert!(client.list_channels().is_empty());
 		payer.stop().unwrap();
 		client.stop().unwrap();
 		cheap.stop().unwrap();
