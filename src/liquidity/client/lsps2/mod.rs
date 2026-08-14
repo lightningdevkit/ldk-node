@@ -394,6 +394,16 @@ where
 			log_error!(self.logger, "Failed to handle response from liquidity service: {:?}", e);
 			Error::LiquidityRequestFailed
 		})?;
+		let cltv_expiry_delta = state::checked_cltv_expiry_delta(buy_response.cltv_expiry_delta)
+			.ok_or_else(|| {
+				log_error!(
+					self.logger,
+					"LSP {} returned an unsupported CLTV expiry delta of {}",
+					lsps2_node.node_id,
+					buy_response.cltv_expiry_delta
+				);
+				Error::LiquidityRequestFailed
+			})?;
 
 		let valid_until = opening_fee_params
 			.valid_until
@@ -407,7 +417,7 @@ where
 				intercept_scid: buy_response.intercept_scid,
 			},
 			params: opening_fee_params,
-			cltv_expiry_delta: buy_response.cltv_expiry_delta,
+			cltv_expiry_delta: cltv_expiry_delta.into(),
 			payment_size_msat: amount_msat,
 			valid_until,
 		};
@@ -530,7 +540,8 @@ where
 			src_node_id: lsps2_node.node_id,
 			short_channel_id: buy_response.intercept_scid,
 			fees: RoutingFees { base_msat: 0, proportional_millionths: 0 },
-			cltv_expiry_delta: buy_response.cltv_expiry_delta as u16,
+			cltv_expiry_delta: state::checked_cltv_expiry_delta(buy_response.cltv_expiry_delta)
+				.expect("LSPS2 lease CLTV delta was validated before invoice creation"),
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]);

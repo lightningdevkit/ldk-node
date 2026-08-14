@@ -151,7 +151,12 @@ impl LSPS2LeaseState {
 }
 
 pub(crate) fn is_lease_usable(lease: &PaymentLease) -> bool {
-	lease.valid_until.saturating_sub(now_secs()) >= MIN_LEASE_REMAINING_SECS
+	checked_cltv_expiry_delta(lease.cltv_expiry_delta).is_some()
+		&& lease.valid_until.saturating_sub(now_secs()) >= MIN_LEASE_REMAINING_SECS
+}
+
+pub(crate) fn checked_cltv_expiry_delta(cltv_expiry_delta: u32) -> Option<u16> {
+	cltv_expiry_delta.try_into().ok()
 }
 
 fn now_secs() -> u64 {
@@ -222,6 +227,19 @@ mod tests {
 		state.insert(lease);
 		state.prune();
 		assert!(state.take_valid(&id).is_none());
+	}
+
+	#[test]
+	fn rejects_unsupported_cltv_delta() {
+		let mut lease = lease(2, 53, 1, Some(1_000), now_secs() + MIN_LEASE_REMAINING_SECS + 60);
+		lease.cltv_expiry_delta = u16::MAX as u32 + 1;
+		let id = lease.id;
+		let mut state = LSPS2LeaseState::from_leases(vec![lease]);
+
+		assert!(
+			state.take_valid(&id).is_none(),
+			"lease with an unsupported CLTV delta remained usable"
+		);
 	}
 
 	#[test]
