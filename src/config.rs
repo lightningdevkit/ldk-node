@@ -215,9 +215,9 @@ pub struct Config {
 	/// The maximum total fee in millisatoshis that an LSPS2 liquidity provider may charge for a
 	/// just-in-time channel.
 	///
-	/// This limit applies to all configured LSPS2 liquidity sources. If unset, fixed-amount
-	/// payments accept the fee negotiated for that payment, while variable-amount payments use the
-	/// negotiated proportional fee as their limit.
+	/// This limit applies to all configured LSPS2 liquidity sources in addition to the fee negotiated
+	/// for a payment. If unset, fixed-amount payments accept the fee negotiated for that payment,
+	/// while variable-amount payments use the negotiated proportional fee as their limit.
 	pub lsps2_max_total_lsp_fee_limit_msat: Option<u64>,
 	/// Configuration options pertaining to Anchor channels, i.e., channels for which the
 	/// `option_zero_fee_commitments` or `option_anchors_zero_fee_htlc_tx` channel type is

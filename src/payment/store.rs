@@ -541,7 +541,7 @@ pub enum PaymentKind {
 		preimage: Option<PaymentPreimage>,
 		/// The secret used by the payment.
 		secret: Option<PaymentSecret>,
-		/// The value, in thousands of a satoshi, that was deducted from this payment as an extra
+		/// The value, in thousandths of a satoshi, that was deducted from this payment as an extra
 		/// fee taken by our channel counterparty.
 		///
 		/// Will only ever be `Some` for inbound payments received via an [bLIP-52 / LSPS 2]

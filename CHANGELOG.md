@@ -19,6 +19,9 @@
   `Event::PaymentClaimable`.
 
 ## Feature and API updates
+- LSPS2 just-in-time receive fee limits are now configured globally through
+  `Config::lsps2_max_total_lsp_fee_limit_msat`. The corresponding per-call fee-limit arguments
+  have been removed from the BOLT 11 receive APIs.
 - The Bitcoin Core RPC and REST chain-source builder methods now accept an optional
   `wallet_rescan_from_height` argument. Passing a height lets fresh wallets rescan from a known
   birthday block instead of checkpointing at the current tip, which is useful when restoring a
