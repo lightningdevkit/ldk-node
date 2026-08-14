@@ -447,7 +447,7 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 		let logger = Arc::clone(&self.logger);
 		dependencies.runtime.spawn_cancellable_background_task(async move {
 			let response = Arc::clone(&lsps2_client)
-				.prepare_invoice_response(jit_request, connection_manager)
+				.prepare_invoice_response(jit_request, Arc::clone(&connection_manager))
 				.await;
 			let (message, reply_context) = match response {
 				Ok(JitInvoiceResponse { payment_metadata: jit_metadata, allow_mpp }) => {
@@ -467,7 +467,12 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 					);
 					let invoice_result = commit_cache_target_on_success(invoice_result, || {
 						let lsps2_client = Arc::clone(&lsps2_client);
-						async move { lsps2_client.commit_invoice_cache_target(jit_request).await }
+						let connection_manager = Arc::clone(&connection_manager);
+						async move {
+							lsps2_client
+								.commit_invoice_cache_target(jit_request, &connection_manager)
+								.await
+						}
 					})
 					.await;
 					match invoice_result {
