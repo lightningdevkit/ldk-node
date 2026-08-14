@@ -607,6 +607,9 @@ impl Bolt11Payment {
 	/// may instead use pre-existing channels if the payer independently knows a route to the
 	/// recipient, in which case no new channel is opened.
 	///
+	/// Invoice creation fails if no configured LSP advertises opening parameters that remain valid
+	/// for at least `expiry_secs`.
+	///
 	/// We choose the cheapest offer and return [`Error::LiquidityFeeTooHigh`] if its opening fee
 	/// exceeds `amount_msat` or the configured [`Config::lsps2_max_total_lsp_fee_limit_msat`].
 	///
@@ -629,6 +632,9 @@ impl Bolt11Payment {
 	/// The invoice only advertises the configured [LSPS2]-compliant LSP's intercept route. The payment
 	/// may instead use pre-existing channels if the payer independently knows a route to the
 	/// recipient, in which case no new channel is opened.
+	///
+	/// Invoice creation fails if no configured LSP advertises opening parameters that remain valid
+	/// for at least `expiry_secs`.
 	///
 	/// We choose the cheapest offer and return [`Error::LiquidityFeeTooHigh`] if its opening fee
 	/// exceeds `amount_msat` or the configured [`Config::lsps2_max_total_lsp_fee_limit_msat`].
@@ -678,6 +684,9 @@ impl Bolt11Payment {
 	/// may instead use pre-existing channels if the payer independently knows a route to the
 	/// recipient, in which case no new channel is opened.
 	///
+	/// Invoice creation fails if no configured LSP advertises opening parameters that remain valid
+	/// for at least `expiry_secs`.
+	///
 	/// The configured LSPS2 fee limit is enforced when the payment arrives.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
@@ -699,6 +708,9 @@ impl Bolt11Payment {
 	/// The invoice only advertises the configured [LSPS2]-compliant LSP's intercept route. The payment
 	/// may instead use pre-existing channels if the payer independently knows a route to the
 	/// recipient, in which case no new channel is opened.
+	///
+	/// Invoice creation fails if no configured LSP advertises opening parameters that remain valid
+	/// for at least `expiry_secs`.
 	///
 	/// The configured LSPS2 fee limit is enforced when the payment arrives.
 	///
