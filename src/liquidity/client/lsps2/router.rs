@@ -224,8 +224,11 @@ mod tests {
 	use bitcoin::secp256k1::SecretKey;
 	use core::sync::atomic::{AtomicUsize, Ordering};
 	use lightning::blinded_path::payment::{Bolt12OfferContext, PaymentConstraints};
+	use lightning::ln::channel_state::{ChannelCounterparty, ChannelShutdownState};
+	use lightning::ln::types::ChannelId;
 	use lightning::offers::invoice_request::InvoiceRequestFields;
 	use lightning::offers::offer::OfferId;
+	use lightning::types::features::InitFeatures;
 	use lightning::types::payment::PaymentSecret;
 	use std::collections::BTreeMap;
 
@@ -312,6 +315,53 @@ mod tests {
 
 	fn pubkey(byte: u8) -> PublicKey {
 		PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[byte; 32]).unwrap())
+	}
+
+	fn first_hop(
+		inbound_capacity_msat: u64, inbound_htlc_minimum_msat: Option<u64>,
+		inbound_htlc_maximum_msat: Option<u64>,
+	) -> ChannelDetails {
+		ChannelDetails {
+			channel_id: ChannelId::new_zero(),
+			counterparty: ChannelCounterparty {
+				node_id: pubkey(13),
+				features: InitFeatures::empty(),
+				unspendable_punishment_reserve: 0,
+				forwarding_info: None,
+				outbound_htlc_minimum_msat: None,
+				outbound_htlc_maximum_msat: None,
+			},
+			funding_txo: None,
+			channel_type: None,
+			short_channel_id: None,
+			outbound_scid_alias: None,
+			inbound_scid_alias: None,
+			channel_value_satoshis: 0,
+			unspendable_punishment_reserve: None,
+			user_channel_id: 0,
+			feerate_sat_per_1000_weight: None,
+			outbound_capacity_msat: 0,
+			next_outbound_htlc_limit_msat: 0,
+			next_outbound_htlc_minimum_msat: 0,
+			next_splice_out_maximum_sat: 0,
+			inbound_capacity_msat,
+			confirmations_required: None,
+			confirmations: None,
+			force_close_spend_delay: None,
+			is_outbound: false,
+			is_channel_ready: true,
+			channel_shutdown_state: Some(ChannelShutdownState::NotShuttingDown),
+			is_usable: true,
+			is_announced: false,
+			inbound_htlc_minimum_msat,
+			inbound_htlc_maximum_msat,
+			config: None,
+			pending_inbound_htlcs: Vec::new(),
+			pending_outbound_htlcs: Vec::new(),
+			funding_redeem_script: None,
+			current_dust_exposure_msat: None,
+			splice_details: None,
+		}
 	}
 
 	fn payment_tlvs(metadata: BTreeMap<u64, Vec<u8>>) -> ReceiveTlvs {
@@ -480,6 +530,63 @@ mod tests {
 				.is_err(),
 			"announced-recipient fallback hid missing inbound liquidity"
 		);
+	}
+
+	#[test]
+	fn accepts_sufficient_mpp_direct_recipient_fallback() {
+		let recipient = pubkey(10);
+		let parameters = LSPS2LeaseParameters {
+			lsp_node_id: pubkey(11),
+			intercept_scid: 42,
+			cltv_expiry_delta: 48,
+			payment_size_msat: Some(3_000),
+			valid_until: u64::MAX,
+		};
+		let inner_router =
+			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
+		let router = LSPS2Router::new(inner_router, TestEntropy);
+
+		let paths = router
+			.create_blinded_payment_paths(
+				recipient,
+				ReceiveAuthKey([3; 32]),
+				vec![first_hop(1_500, None, None), first_hop(1_500, None, None)],
+				payment_tlvs(payment_metadata(parameters)),
+				Some(3_000),
+				&Secp256k1::new(),
+			)
+			.unwrap();
+
+		assert_eq!(paths[0].introduction_node(), &IntroductionNode::NodeId(recipient));
+	}
+
+	#[test]
+	fn requires_one_sufficient_non_mpp_channel() {
+		let recipient = pubkey(10);
+		let lsp_node_id = pubkey(11);
+		let parameters = LSPS2LeaseParameters {
+			lsp_node_id,
+			intercept_scid: 42,
+			cltv_expiry_delta: 48,
+			payment_size_msat: None,
+			valid_until: u64::MAX,
+		};
+		let inner_router =
+			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
+		let router = LSPS2Router::new(inner_router, TestEntropy);
+
+		let paths = router
+			.create_blinded_payment_paths(
+				recipient,
+				ReceiveAuthKey([3; 32]),
+				vec![first_hop(2_000, None, None), first_hop(4_000, None, Some(2_500))],
+				payment_tlvs(payment_metadata(parameters)),
+				Some(3_000),
+				&Secp256k1::new(),
+			)
+			.unwrap();
+
+		assert_eq!(paths[0].introduction_node(), &IntroductionNode::NodeId(lsp_node_id));
 	}
 
 	#[test]
