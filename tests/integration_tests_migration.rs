@@ -88,10 +88,12 @@ macro_rules! with_opened_store {
 async fn build_migration_node(
 	instance: &BackendInstance, node_config: ldk_node::config::Config, node_entropy: NodeEntropy,
 	esplora_url: &str,
-) -> ldk_node::Node {
+) -> common::TestNode {
 	let mut builder = Builder::from_config(node_config);
 	builder.set_chain_source_esplora(esplora_url.to_string(), None);
-	with_opened_store!(instance, |store| builder.build_with_store(node_entropy, store).unwrap())
+	with_opened_store!(instance, |store| builder
+		.build_with_store(node_entropy.into(), store)
+		.unwrap())
 }
 
 fn open_fs_store(data_dir: &str) -> FilesystemStoreV2 {

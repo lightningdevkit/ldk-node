@@ -27,7 +27,7 @@ async fn channel_full_cycle_with_postgres_store() {
 	builder_a.set_chain_source_esplora(esplora_url.clone(), None);
 	let node_a = builder_a
 		.build_with_postgres_store(
-			config_a.node_entropy,
+			config_a.node_entropy.into(),
 			test_connection_string(),
 			None,
 			Some("channel_cycle_a".to_string()),
@@ -43,7 +43,7 @@ async fn channel_full_cycle_with_postgres_store() {
 	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
 	let node_b = builder_b
 		.build_with_postgres_store(
-			config_b.node_entropy,
+			config_b.node_entropy.into(),
 			test_connection_string(),
 			None,
 			Some("channel_cycle_b".to_string()),
@@ -79,6 +79,9 @@ async fn postgres_node_restart() {
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
 	let mut seed_bytes = [42u8; 64];
 	rand::rng().fill_bytes(&mut seed_bytes);
+	#[cfg(feature = "uniffi")]
+	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes.to_vec()).unwrap();
+	#[cfg(not(feature = "uniffi"))]
 	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
 
 	// Setup initial node and fund it.
@@ -89,7 +92,7 @@ async fn postgres_node_restart() {
 		builder.set_chain_source_esplora(esplora_url.clone(), None);
 		let node = builder
 			.build_with_postgres_store(
-				node_entropy,
+				node_entropy.into(),
 				connection_string.clone(),
 				None,
 				Some("restart_test".to_string()),
@@ -124,7 +127,7 @@ async fn postgres_node_restart() {
 
 	let node = builder
 		.build_with_postgres_store(
-			node_entropy,
+			node_entropy.into(),
 			connection_string.clone(),
 			None,
 			Some("restart_test".to_string()),
