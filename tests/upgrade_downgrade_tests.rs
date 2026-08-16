@@ -20,13 +20,6 @@ mod common;
 use std::str::FromStr;
 use std::time::Duration;
 
-use crate::common::{
-	expect_channel_pending_event, expect_channel_ready_event, expect_event,
-	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
-	generate_blocks_and_wait, generate_listening_addresses, premine_and_distribute_funds,
-	random_config, random_storage_path, setup_bitcoind_and_electrsd, setup_node, wait_for_tx,
-	TestChainSource,
-};
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
@@ -40,6 +33,14 @@ use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus};
 use ldk_node::{Builder, Event, Node};
 use ldk_node_070::lightning_types::payment::PaymentHash as OldPaymentHash;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
+
+use crate::common::{
+	expect_channel_pending_event, expect_channel_ready_event, expect_event,
+	expect_payment_claimable_event, expect_payment_received_event, expect_payment_successful_event,
+	generate_blocks_and_wait, generate_listening_addresses, premine_and_distribute_funds,
+	random_config, random_storage_path, setup_bitcoind_and_electrsd, setup_node, wait_for_tx,
+	TestChainSource,
+};
 
 const RECEIVER_SEED_BYTES: [u8; 64] = [43; 64];
 const CHANNEL_AMOUNT_SAT: u64 = 500_000;

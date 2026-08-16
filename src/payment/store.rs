@@ -1074,8 +1074,9 @@ mod tests {
 
 	#[test]
 	fn funding_reclassification_does_not_downgrade_an_advanced_record() {
-		use bitcoin::hashes::Hash;
 		use std::str::FromStr;
+
+		use bitcoin::hashes::Hash;
 
 		// A splice funding payment wallet sync has already advanced to Succeeded/Confirmed.
 		let txid = Txid::from_byte_array([7u8; 32]);
@@ -1162,8 +1163,9 @@ mod tests {
 
 	#[test]
 	fn funding_reclassification_keeps_confirmed_candidate_figures() {
-		use bitcoin::hashes::Hash;
 		use std::str::FromStr;
+
+		use bitcoin::hashes::Hash;
 
 		// A funding payment whose first candidate wallet sync has already seen confirm — e.g. the
 		// counterparty's broadcast of it was picked up before our own later candidate was
@@ -1247,8 +1249,9 @@ mod tests {
 
 	#[test]
 	fn funding_reclassification_merges_figures_for_the_confirmed_candidate() {
-		use bitcoin::hashes::Hash;
 		use std::str::FromStr;
+
+		use bitcoin::hashes::Hash;
 
 		// Wallet sync confirmed the transaction before classification ran, so the record carries
 		// the wallet's own view of amount/fee, which cannot represent our contribution to a shared
@@ -1315,10 +1318,11 @@ mod tests {
 
 	#[tokio::test]
 	async fn funding_classification_merge_preserves_advanced_record() {
-		use bitcoin::hashes::Hash;
-		use lightning::util::test_utils::TestLogger;
 		use std::str::FromStr;
 		use std::sync::Arc;
+
+		use bitcoin::hashes::Hash;
+		use lightning::util::test_utils::TestLogger;
 
 		use crate::data_store::DataStore;
 		use crate::io::test_utils::InMemoryStore;
