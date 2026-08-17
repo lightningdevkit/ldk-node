@@ -125,16 +125,30 @@ pub(crate) enum PendingPaymentDetails {
 	PendingSplice { id: PaymentId, intent: SpliceIntent },
 	/// A pending payment tracked toward confirmation, optionally still carrying a live splice
 	/// intent to resubmit until the splice locks.
+	///
+	/// Each field is written by a different subsystem: wallet sync records `conflicting_txids`
+	/// for any wallet transaction (splice fundings included), broadcast-time classification
+	/// records `candidates` for interactive funding, and splice initiation records
+	/// `splice_intent`. A splice uses all of them; the fields do not partition by payment type.
 	Tracked {
 		/// The full payment details.
 		details: PaymentDetails,
-		/// Transaction IDs that have replaced or conflict with this payment.
+		/// Transaction IDs wallet sync observed to have replaced or to conflict with this
+		/// payment, used to map later events about those txids back to this record. This is
+		/// BDK's view, distinct from `candidates`: it can hold conflicts that were never
+		/// negotiated candidates, while a candidate replaced between wallet syncs may never
+		/// appear here (it gets no `TxReplaced` event of its own).
 		conflicting_txids: Vec<Txid>,
 		/// For interactive funding (splices), this node's per-candidate funding figures across the
-		/// RBF history, keyed by each candidate's txid. Empty for non-funding payments.
+		/// RBF history, keyed by each candidate's txid and recorded as each round's broadcast is
+		/// classified. Empty for non-funding payments.
 		candidates: Vec<FundingTxCandidate>,
 		/// The splice intent to resubmit if LDK drops the splice before it locks, or `None` for a
-		/// non-splice payment or a splice that has locked.
+		/// non-splice payment or a splice that has locked. It lives here as well as on
+		/// [`PendingSplice`] because a fee bump is a fresh negotiation — one LDK likewise abandons
+		/// if the peer disconnects before signing — and it shares the broadcast splice's record.
+		///
+		/// [`PendingSplice`]: Self::PendingSplice
 		splice_intent: Option<SpliceIntent>,
 	},
 }
