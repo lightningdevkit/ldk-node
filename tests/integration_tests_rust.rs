@@ -3450,7 +3450,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let service_config = random_config();
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.enable_liquidity_provider(lsps2_service_config);
+	service_builder.enable_liquidity_provider(None, Some(lsps2_service_config));
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 
@@ -3778,7 +3778,7 @@ async fn lsps2_client_trusts_lsp() {
 	let service_config = random_config();
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.enable_liquidity_provider(lsps2_service_config);
+	service_builder.enable_liquidity_provider(None, Some(lsps2_service_config));
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 	let service_node_id = service_node.node_id();
@@ -3955,7 +3955,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let service_config = random_config();
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.enable_liquidity_provider(lsps2_service_config);
+	service_builder.enable_liquidity_provider(None, Some(lsps2_service_config));
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 
@@ -4861,7 +4861,7 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	let cheap_node_config = random_config();
 	setup_builder!(cheap_builder, cheap_node_config.node_config);
 	cheap_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	cheap_builder.enable_liquidity_provider(cheap_cfg);
+	cheap_builder.enable_liquidity_provider(None, Some(cheap_cfg));
 	let cheap = cheap_builder.build(cheap_node_config.node_entropy.into()).unwrap();
 	cheap.start().unwrap();
 	let cheap_id = cheap.node_id();
@@ -4884,7 +4884,7 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	let expensive_node_config = random_config();
 	setup_builder!(expensive_builder, expensive_node_config.node_config);
 	expensive_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	expensive_builder.enable_liquidity_provider(expensive_cfg);
+	expensive_builder.enable_liquidity_provider(None, Some(expensive_cfg));
 	let expensive = expensive_builder.build(expensive_node_config.node_entropy.into()).unwrap();
 	expensive.start().unwrap();
 	let expensive_id = expensive.node_id();
