@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bitcoin::hashes::{sha256, Hash, HashEngine};
 use lightning::util::persist::{
 	KVStore, PageToken, PaginatedKVStore, PaginatedListResponse, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
@@ -26,15 +27,19 @@ use crate::logger::{LdkLogger, Logger};
 use crate::types::{DynStore, DynStoreWrapper};
 
 const INDEX_DATABASE_ID_LEN: usize = 16;
+const INDEX_ENTRIES_PRIMARY_NAMESPACE: &str = "_tier_store_entries";
 const INDEX_METADATA_PRIMARY_NAMESPACE: &str = "_tier_store_metadata";
 const INDEX_DATABASE_ID_KEY: &str = "index_database_id";
+const INDEX_NAMESPACE_READY_KEY_PREFIX: &str = "ready_";
+const INDEX_ENTRY_VALUE: &[u8] = &[1];
 
 pub(crate) struct TierStoreIndex {
 	// Holding the store keeps its exclusive SQLite lock for the lifetime of the tier store.
-	_store: Arc<DynStore>,
+	store: Arc<DynStore>,
 }
 
 impl TierStoreIndex {
+	/// Opens the internal SQLite index and ensures that it has a persistent database identity.
 	async fn new(data_dir: PathBuf) -> io::Result<Self> {
 		let store = SqliteStore::new_exclusive(
 			data_dir,
@@ -43,9 +48,150 @@ impl TierStoreIndex {
 		)?;
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(store));
 		Self::read_or_create_database_id(store.as_ref()).await?;
-		Ok(Self { _store: store })
+		Ok(Self { store })
 	}
 
+	/// Constructs an index over the supplied store for tests that do not need SQLite persistence.
+	#[cfg(test)]
+	fn from_store(store: Arc<DynStore>) -> Self {
+		Self { store }
+	}
+
+	/// Derives the internal secondary namespace for a logical namespace pair.
+	///
+	/// Length-prefixing keeps distinct pairs from producing the same hash input. The original pair
+	/// is also stored as namespace metadata so that a hash collision can be detected.
+	fn namespace_id(primary_namespace: &str, secondary_namespace: &str) -> String {
+		let mut engine = sha256::Hash::engine();
+		engine.input(&(primary_namespace.len() as u64).to_be_bytes());
+		engine.input(primary_namespace.as_bytes());
+		engine.input(&(secondary_namespace.len() as u64).to_be_bytes());
+		engine.input(secondary_namespace.as_bytes());
+		sha256::Hash::from_engine(engine).to_string()
+	}
+
+	/// Derives the metadata key that records whether a logical namespace is index-backed.
+	fn namespace_ready_key(primary_namespace: &str, secondary_namespace: &str) -> String {
+		format!(
+			"{}{}",
+			INDEX_NAMESPACE_READY_KEY_PREFIX,
+			Self::namespace_id(primary_namespace, secondary_namespace)
+		)
+	}
+
+	/// Encodes the original logical namespace pair for collision detection.
+	fn namespace_metadata(primary_namespace: &str, secondary_namespace: &str) -> Vec<u8> {
+		// The fixed five-byte overhead is one format-version byte plus two big-endian u16
+		// namespace-length prefixes: 1 + 2 + 2 = 5.
+		let mut metadata =
+			Vec::with_capacity(5 + primary_namespace.len() + secondary_namespace.len());
+		metadata.push(1);
+		metadata.extend_from_slice(&(primary_namespace.len() as u16).to_be_bytes());
+		metadata.extend_from_slice(primary_namespace.as_bytes());
+		metadata.extend_from_slice(&(secondary_namespace.len() as u16).to_be_bytes());
+		metadata.extend_from_slice(secondary_namespace.as_bytes());
+		metadata
+	}
+
+	/// Returns whether the namespace's index is authoritative for listing.
+	///
+	/// Returns an error if the stored namespace metadata does not match the requested namespace,
+	/// which indicates either corrupt metadata or a namespace-ID collision.
+	async fn is_namespace_ready(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> io::Result<bool> {
+		match KVStore::read(
+			self.store.as_ref(),
+			INDEX_METADATA_PRIMARY_NAMESPACE,
+			"",
+			&Self::namespace_ready_key(primary_namespace, secondary_namespace),
+		)
+		.await
+		{
+			Ok(metadata)
+				if metadata == Self::namespace_metadata(primary_namespace, secondary_namespace) =>
+			{
+				Ok(true)
+			},
+			Ok(_) => Err(io::Error::new(
+				io::ErrorKind::InvalidData,
+				"Tier-store index namespace collision",
+			)),
+			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+			Err(e) => Err(e),
+		}
+	}
+
+	/// Marks the namespace's index as authoritative by persisting its original namespace pair.
+	async fn mark_namespace_ready(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> io::Result<()> {
+		KVStore::write(
+			self.store.as_ref(),
+			INDEX_METADATA_PRIMARY_NAMESPACE,
+			"",
+			&Self::namespace_ready_key(primary_namespace, secondary_namespace),
+			Self::namespace_metadata(primary_namespace, secondary_namespace),
+		)
+		.await
+	}
+
+	/// Adds a logical key to the namespace's ordered listing index.
+	///
+	/// Rewriting an existing key preserves its original index-store creation order.
+	async fn write_entry(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> io::Result<()> {
+		KVStore::write(
+			self.store.as_ref(),
+			INDEX_ENTRIES_PRIMARY_NAMESPACE,
+			&Self::namespace_id(primary_namespace, secondary_namespace),
+			key,
+			INDEX_ENTRY_VALUE.to_vec(),
+		)
+		.await
+	}
+
+	/// Removes a logical key from the namespace's listing index.
+	async fn remove_entry(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> io::Result<()> {
+		KVStore::remove(
+			self.store.as_ref(),
+			INDEX_ENTRIES_PRIMARY_NAMESPACE,
+			&Self::namespace_id(primary_namespace, secondary_namespace),
+			key,
+			lazy,
+		)
+		.await
+	}
+
+	/// Lists all logical keys recorded in the namespace's index.
+	async fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> io::Result<Vec<String>> {
+		KVStore::list(
+			self.store.as_ref(),
+			INDEX_ENTRIES_PRIMARY_NAMESPACE,
+			&Self::namespace_id(primary_namespace, secondary_namespace),
+		)
+		.await
+	}
+
+	/// Lists logical keys in the index store's creation order.
+	async fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> io::Result<PaginatedListResponse> {
+		PaginatedKVStore::list_paginated(
+			self.store.as_ref(),
+			INDEX_ENTRIES_PRIMARY_NAMESPACE,
+			&Self::namespace_id(primary_namespace, secondary_namespace),
+			page_token,
+		)
+		.await
+	}
+
+	/// Reads the index database identity, creating and persisting one when it is absent.
 	async fn read_or_create_database_id(
 		store: &DynStore,
 	) -> io::Result<[u8; INDEX_DATABASE_ID_LEN]> {
@@ -91,9 +237,9 @@ impl TierStoreIndex {
 ///
 /// Reads and lists do not consult the backup store during normal operation.
 /// Ephemeral data is read from and written to the ephemeral store when configured.
-/// Unpaginated listings expose the logical contents of the primary and ephemeral
-/// stores, while paginated listings expose only the primary store until cross-tier
-/// pagination semantics are defined.
+/// Namespaces are indexed locally so unpaginated and paginated listings expose the
+/// same logical contents in cross-tier creation order. Existing primary-store keys
+/// are imported into the index before a namespace is first modified or listed.
 ///
 /// Note that dual-store writes and removals are not atomic across the primary and
 /// backup stores. If one store succeeds and the other fails, the operation
@@ -259,6 +405,8 @@ struct TierStoreInner {
 	backup_store: Option<Arc<DynStore>>,
 	/// The local store used to index the logical contents across tiers.
 	index: Option<TierStoreIndex>,
+	/// Per-namespace locks for serializing first-use index initialization.
+	index_initialization_locks: Mutex<HashMap<String, Arc<TokioMutex<()>>>>,
 	/// Per-key locks for serializing primary+backup operations and skipping stale writes.
 	locks: Mutex<HashMap<String, Arc<TokioMutex<u64>>>>,
 	next_write_version: AtomicU64,
@@ -273,6 +421,7 @@ impl TierStoreInner {
 			ephemeral_store: None,
 			backup_store: None,
 			index: None,
+			index_initialization_locks: Mutex::new(HashMap::new()),
 			locks: Mutex::new(HashMap::new()),
 			next_write_version: AtomicU64::new(1),
 			logger,
@@ -298,6 +447,26 @@ impl TierStoreInner {
 		debug_assert!(strong_count >= 2, "Unexpected TierStore lock strong count");
 		if strong_count == 2 {
 			locks.remove(&locking_key);
+		}
+	}
+
+	/// Returns the lock that serializes initialization of the given logical namespace.
+	fn get_index_initialization_lock(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> Arc<TokioMutex<()>> {
+		let namespace_id = TierStoreIndex::namespace_id(primary_namespace, secondary_namespace);
+		let mut locks = self.index_initialization_locks.lock().expect("lock");
+		Arc::clone(locks.entry(namespace_id).or_insert_with(|| Arc::new(TokioMutex::new(()))))
+	}
+
+	/// Removes an initialization lock after its final active user releases it.
+	fn clean_index_initialization_locks(
+		&self, lock_ref: &Arc<TokioMutex<()>>, primary_namespace: &str, secondary_namespace: &str,
+	) {
+		let namespace_id = TierStoreIndex::namespace_id(primary_namespace, secondary_namespace);
+		let mut locks = self.index_initialization_locks.lock().expect("lock");
+		if Arc::strong_count(lock_ref) == 2 {
+			locks.remove(&namespace_id);
 		}
 	}
 
@@ -488,6 +657,7 @@ impl TierStoreInner {
 			Some(key.as_str()),
 			"write",
 		)?;
+		self.ensure_namespace_indexed(&primary_namespace, &secondary_namespace).await?;
 
 		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
 			if let Some(eph_store) = self.ephemeral_store.as_ref() {
@@ -501,7 +671,13 @@ impl TierStoreInner {
 							key.as_str(),
 							buf,
 						)
-						.await
+						.await?;
+						if let Some(index) = self.index.as_ref() {
+							index
+								.write_entry(&primary_namespace, &secondary_namespace, &key)
+								.await?;
+						}
+						Ok(())
 					})
 					.await;
 			}
@@ -514,7 +690,11 @@ impl TierStoreInner {
 				key.as_str(),
 				buf,
 			)
-			.await
+			.await?;
+			if let Some(index) = self.index.as_ref() {
+				index.write_entry(&primary_namespace, &secondary_namespace, &key).await?;
+			}
+			Ok(())
 		})
 		.await
 	}
@@ -529,6 +709,7 @@ impl TierStoreInner {
 			Some(key.as_str()),
 			"remove",
 		)?;
+		self.ensure_namespace_indexed(&primary_namespace, &secondary_namespace).await?;
 
 		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
 			if let Some(eph_store) = self.ephemeral_store.as_ref() {
@@ -542,7 +723,13 @@ impl TierStoreInner {
 							key.as_str(),
 							lazy,
 						)
-						.await
+						.await?;
+						if let Some(index) = self.index.as_ref() {
+							index
+								.remove_entry(&primary_namespace, &secondary_namespace, &key, lazy)
+								.await?;
+						}
+						Ok(())
 					})
 					.await;
 			}
@@ -555,7 +742,11 @@ impl TierStoreInner {
 				key.as_str(),
 				lazy,
 			)
-			.await
+			.await?;
+			if let Some(index) = self.index.as_ref() {
+				index.remove_entry(&primary_namespace, &secondary_namespace, &key, lazy).await?;
+			}
+			Ok(())
 		})
 		.await
 	}
@@ -570,7 +761,71 @@ impl TierStoreInner {
 			"list",
 		)?;
 
-		let mut keys = self.list_primary(&primary_namespace, &secondary_namespace).await?;
+		self.ensure_namespace_indexed(&primary_namespace, &secondary_namespace).await?;
+		if let Some(index) = self.index.as_ref() {
+			return index.list(&primary_namespace, &secondary_namespace).await;
+		}
+
+		self.list_value_stores(&primary_namespace, &secondary_namespace).await
+	}
+
+	/// Imports a namespace's existing primary-store keys and makes its index authoritative.
+	///
+	/// Primary pagination returns keys from newest to oldest, so the complete result is reversed
+	/// before insertion to preserve that order in the local index. The readiness marker is written
+	/// last so a failed import is safely retried before the index can be observed.
+	async fn ensure_namespace_indexed(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> io::Result<()> {
+		let Some(index) = self.index.as_ref() else {
+			return Ok(());
+		};
+		if index.is_namespace_ready(primary_namespace, secondary_namespace).await? {
+			return Ok(());
+		}
+
+		let lock_ref = self.get_index_initialization_lock(primary_namespace, secondary_namespace);
+		let result: io::Result<()> = async {
+			let _guard = lock_ref.lock().await;
+			if index.is_namespace_ready(primary_namespace, secondary_namespace).await? {
+				Ok(())
+			} else {
+				let mut keys = Vec::new();
+				let mut page_token = None;
+				loop {
+					let page = PaginatedKVStore::list_paginated(
+						self.primary_store.as_ref(),
+						primary_namespace,
+						secondary_namespace,
+						page_token,
+					)
+					.await?;
+					keys.extend(page.keys);
+					match page.next_page_token {
+						Some(next_page_token) => page_token = Some(next_page_token),
+						None => break,
+					}
+				}
+
+				for key in keys.into_iter().rev() {
+					index.write_entry(primary_namespace, secondary_namespace, &key).await?;
+				}
+				index.mark_namespace_ready(primary_namespace, secondary_namespace).await
+			}
+		}
+		.await;
+		self.clean_index_initialization_locks(&lock_ref, primary_namespace, secondary_namespace);
+		result
+	}
+
+	/// Lists the authoritative logical keys directly from the primary and ephemeral value stores.
+	///
+	/// Ephemeral-routed keys are taken only from the ephemeral store, excluding stale primary
+	/// copies. This path is used when no local index store is configured.
+	async fn list_value_stores(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> io::Result<Vec<String>> {
+		let mut keys = self.list_primary(primary_namespace, secondary_namespace).await?;
 
 		let Some(ephemeral_store) = self.ephemeral_store.as_ref() else {
 			return Ok(keys);
@@ -584,14 +839,13 @@ impl TierStoreInner {
 
 		// The ephemeral store is authoritative for keys routed there. Exclude stale
 		// primary copies, then add only routed keys from the ephemeral store.
-		keys.retain(|key| !is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, key));
+		keys.retain(|key| !is_ephemeral_cached_key(primary_namespace, secondary_namespace, key));
 
 		let ephemeral_keys =
-			KVStore::list(ephemeral_store.as_ref(), &primary_namespace, &secondary_namespace)
-				.await?;
+			KVStore::list(ephemeral_store.as_ref(), primary_namespace, secondary_namespace).await?;
 
 		for key in ephemeral_keys {
-			if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key)
+			if is_ephemeral_cached_key(primary_namespace, secondary_namespace, &key)
 				&& !keys.contains(&key)
 			{
 				keys.push(key);
@@ -612,9 +866,13 @@ impl TierStoreInner {
 			"list_paginated",
 		)?;
 
-		// TODO(@enigbe): Merge listings across tiers once `PaginatedKVStore` provides a
-		// shared ordering and cursor contract that permits a correct cross-store merge.
-		// Until then, listings intentionally expose only the primary tier.
+		self.ensure_namespace_indexed(&primary_namespace, &secondary_namespace).await?;
+		if let Some(index) = self.index.as_ref() {
+			return index
+				.list_paginated(&primary_namespace, &secondary_namespace, page_token)
+				.await;
+		}
+
 		PaginatedKVStore::list_paginated(
 			self.primary_store.as_ref(),
 			&primary_namespace,
@@ -721,6 +979,11 @@ mod tests {
 		TierStore::new(primary_store, logger)
 	}
 
+	fn set_test_index_store(tier: &mut TierStore) {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		tier.set_index_store(TierStoreIndex::from_store(store));
+	}
+
 	#[tokio::test]
 	async fn index_store_is_internal_persistent_sqlite_store() {
 		let base_dir = random_storage_path();
@@ -730,9 +993,9 @@ mod tests {
 		assert!(base_dir.join(SQLITE_TIER_INDEX_DB_FILE_NAME).exists());
 
 		let database_id =
-			TierStoreIndex::read_or_create_database_id(index._store.as_ref()).await.unwrap();
+			TierStoreIndex::read_or_create_database_id(index.store.as_ref()).await.unwrap();
 		let persisted_database_id =
-			TierStoreIndex::read_or_create_database_id(index._store.as_ref()).await.unwrap();
+			TierStoreIndex::read_or_create_database_id(index.store.as_ref()).await.unwrap();
 		assert_ne!(database_id, [0; INDEX_DATABASE_ID_LEN]);
 		assert_eq!(persisted_database_id, database_id);
 	}
@@ -748,6 +1011,124 @@ mod tests {
 			Err(e) => e,
 		};
 		assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+	}
+
+	#[tokio::test]
+	async fn indexed_listing_orders_keys_across_primary_and_ephemeral_stores() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let _cleanup = CleanupDir(base_dir);
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut tier = setup_tier_store(primary_store, logger);
+		set_test_index_store(&mut tier);
+		tier.set_ephemeral_store(ephemeral_store);
+
+		for key in ["primary-a", NETWORK_GRAPH_PERSISTENCE_KEY, "primary-b"] {
+			tier.write(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				key,
+				vec![1],
+			)
+			.await
+			.unwrap();
+		}
+
+		let page = PaginatedKVStore::list_paginated(
+			&tier,
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			None,
+		)
+		.await
+		.unwrap();
+		assert_eq!(
+			page.keys,
+			vec![
+				"primary-b".to_string(),
+				NETWORK_GRAPH_PERSISTENCE_KEY.to_string(),
+				"primary-a".to_string(),
+			]
+		);
+
+		let mut listed = KVStore::list(
+			&tier,
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+		)
+		.await
+		.unwrap();
+		listed.sort();
+		assert_eq!(
+			listed,
+			vec![
+				NETWORK_GRAPH_PERSISTENCE_KEY.to_string(),
+				"primary-a".to_string(),
+				"primary-b".to_string(),
+			]
+		);
+	}
+
+	#[tokio::test]
+	async fn indexed_listing_preserves_updates_and_reorders_recreated_keys() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let _cleanup = CleanupDir(base_dir);
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut tier = setup_tier_store(primary_store, logger);
+		set_test_index_store(&mut tier);
+
+		for key in ["a", "b"] {
+			tier.write("namespace", "", key, vec![1]).await.unwrap();
+		}
+		tier.write("namespace", "", "a", vec![2]).await.unwrap();
+
+		let page = PaginatedKVStore::list_paginated(&tier, "namespace", "", None).await.unwrap();
+		assert_eq!(page.keys, vec!["b".to_string(), "a".to_string()]);
+
+		tier.remove("namespace", "", "a", false).await.unwrap();
+		tier.write("namespace", "", "a", vec![3]).await.unwrap();
+		let page = PaginatedKVStore::list_paginated(&tier, "namespace", "", None).await.unwrap();
+		assert_eq!(page.keys, vec!["a".to_string(), "b".to_string()]);
+	}
+
+	#[tokio::test]
+	async fn namespace_initialization_preserves_existing_primary_order_across_pages() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let _cleanup = CleanupDir(base_dir);
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		for i in 0..55 {
+			primary_store
+				.write("namespace", "", &format!("existing-{i:02}"), vec![1])
+				.await
+				.unwrap();
+		}
+		let mut tier = setup_tier_store(primary_store, logger);
+		set_test_index_store(&mut tier);
+
+		let mut actual = Vec::new();
+		let mut page_token = None;
+		loop {
+			let page =
+				PaginatedKVStore::list_paginated(&tier, "namespace", "", page_token).await.unwrap();
+			actual.extend(page.keys);
+			match page.next_page_token {
+				Some(next_page_token) => page_token = Some(next_page_token),
+				None => break,
+			}
+		}
+
+		let expected = (0..55).rev().map(|i| format!("existing-{i:02}")).collect::<Vec<_>>();
+		assert_eq!(actual, expected);
+		assert_eq!(KVStore::list(&tier, "namespace", "").await.unwrap().len(), 55);
 	}
 
 	enum FailureMode {
