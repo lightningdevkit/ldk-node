@@ -1751,7 +1751,7 @@ impl Node {
 	fn discard_splice_intent(&self, payment_id: &PaymentId, restore: Option<Option<SpliceIntent>>) {
 		match restore {
 			Some(prior) => {
-				let _ = self.runtime.block_on(self.pending_payment_store.update(
+				if let Err(e) = self.runtime.block_on(self.pending_payment_store.update(
 					PendingPaymentDetailsUpdate {
 						id: *payment_id,
 						payment_update: None,
@@ -1759,10 +1759,28 @@ impl Node {
 						candidates: Vec::new(),
 						splice_intent: Some(prior),
 					},
-				));
+				)) {
+					log_error!(
+						self.logger,
+						"Failed to restore the prior splice intent of payment {} after the splice \
+						it was replaced with failed: the failed intent may be resubmitted after a \
+						restart: {}",
+						payment_id,
+						e
+					);
+				}
 			},
 			None => {
-				let _ = self.runtime.block_on(self.pending_payment_store.remove(payment_id));
+				if let Err(e) = self.runtime.block_on(self.pending_payment_store.remove(payment_id))
+				{
+					log_error!(
+						self.logger,
+						"Failed to remove the intent of failed splice payment {}: it may be \
+						resubmitted after a restart: {}",
+						payment_id,
+						e
+					);
+				}
 			},
 		}
 	}
