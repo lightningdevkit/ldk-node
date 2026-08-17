@@ -62,6 +62,17 @@ fn decide_retry(reason: &NegotiationFailureReason, attempts: u8) -> RetryDecisio
 	}
 }
 
+/// Why handing a splice intent back to LDK failed, distinguishing whether LDK ever received the
+/// contribution — only a received contribution produces a follow-up `SpliceNegotiationFailed`.
+enum SubmitError {
+	/// The incremented attempt count could not be persisted, so the contribution was never handed
+	/// to LDK: no follow-up event will fire for this attempt.
+	Persist,
+	/// LDK rejected the contribution; it enqueues its own `SpliceNegotiationFailed` for the
+	/// rejection, which re-enters [`SpliceRetrier::on_negotiation_failed`].
+	Contribute,
+}
+
 /// Resubmits user-initiated splices that LDK dropped before durably recording them.
 ///
 /// LDK only persists a splice once its negotiation reaches `AwaitingSignatures`, and it abandons an
@@ -174,7 +185,7 @@ where
 	async fn submit(
 		&self, id: PaymentId, channel_id: &ChannelId, counterparty_node_id: &PublicKey,
 		mut intent: SpliceIntent,
-	) -> Result<(), Error> {
+	) -> Result<(), SubmitError> {
 		intent.attempts += 1;
 		let contribution = intent.contribution.clone();
 		let update = PendingPaymentDetailsUpdate {
@@ -184,7 +195,16 @@ where
 			candidates: Vec::new(),
 			splice_intent: Some(Some(intent)),
 		};
-		self.pending_payment_store.update(update).await?;
+		self.pending_payment_store.update(update).await.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Failed to persist the splice attempt for channel {} with counterparty {}: {}",
+				channel_id,
+				counterparty_node_id,
+				e,
+			);
+			SubmitError::Persist
+		})?;
 
 		self.channel_manager
 			.funding_contributed(channel_id, counterparty_node_id, contribution, None)
@@ -196,8 +216,27 @@ where
 					counterparty_node_id,
 					e,
 				);
-				Error::ChannelSplicingFailed
+				SubmitError::Contribute
 			})
+	}
+
+	/// Hands the intent back to LDK and reports whether the failure being handled should be
+	/// surfaced to the user: a persist failure means LDK never received the contribution and
+	/// nothing further will fire for this attempt, so give up rather than swallow the failure.
+	/// On success — and on a rejected contribution, for which LDK enqueues a fresh
+	/// `SpliceNegotiationFailed` that re-enters the retry logic and bounds at
+	/// `MAX_SPLICE_ATTEMPTS` — the failure is not yet final.
+	async fn resubmit(
+		&self, id: PaymentId, has_payment: bool, channel_id: &ChannelId,
+		counterparty_node_id: &PublicKey, intent: SpliceIntent,
+	) -> bool {
+		match self.submit(id, channel_id, counterparty_node_id, intent).await {
+			Err(SubmitError::Persist) => {
+				self.clear_intent(id, has_payment).await;
+				true
+			},
+			Ok(()) | Err(SubmitError::Contribute) => false,
+		}
 	}
 
 	/// Drops a splice intent: removes a record with no classified funding payment behind it
@@ -277,8 +316,7 @@ where
 					channel_id,
 					counterparty_node_id,
 				);
-				let _ = self.submit(id, &channel_id, &counterparty_node_id, intent).await;
-				false
+				self.resubmit(id, has_payment, &channel_id, &counterparty_node_id, intent).await
 			},
 			RetryDecision::Rebuild => {
 				// The stored contribution went stale; rebuild a fresh one from the original params.
@@ -295,8 +333,8 @@ where
 						);
 						let mut intent = intent;
 						intent.contribution = contribution;
-						let _ = self.submit(id, &channel_id, &counterparty_node_id, intent).await;
-						false
+						self.resubmit(id, has_payment, &channel_id, &counterparty_node_id, intent)
+							.await
 					},
 					Err(e) => {
 						log_error!(
