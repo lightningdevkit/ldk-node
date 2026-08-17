@@ -38,6 +38,7 @@ use lightning::chain::chaininterface::{
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::{BlockLocator, ClaimId, Listen};
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::FundingContribution;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
@@ -57,7 +58,7 @@ use crate::config::{Config, ADDRESS_POOL_SIZE};
 use crate::data_store::StorableObject;
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
-use crate::payment::pending_payment_store::{PendingPaymentDetailsUpdate, SpliceKind};
+use crate::payment::pending_payment_store::PendingPaymentDetailsUpdate;
 use crate::payment::store::{ConfirmationStatus, PaymentDetailsUpdate};
 use crate::payment::{
 	FundingTxCandidate, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
@@ -2032,18 +2033,14 @@ impl Wallet {
 				.list_filter(|p| {
 					p.splice_intent().is_some_and(|intent| {
 						// A cooperative or force close also spends the funding outpoint, and a
-						// cooperative close pays a wallet address. A splice-in always adds wallet
-						// inputs while a close never has more than the funding input, so a second
-						// input disambiguates `SpliceKind::In`. A splice-out or fee bump can share
-						// the close's single-input shape; misattributing a close that races a
-						// still-live intent only affects which id keys its record.
-						let input_shape_matches = match intent.kind {
-							SpliceKind::In { .. } => tx.input.len() > 1,
-							SpliceKind::Out { .. } | SpliceKind::Rbf {} => true,
-						};
+						// cooperative close pays a wallet address, so spending the outpoint is
+						// not enough to identify the splice's transaction: adopting the
+						// splice-time id for a close would corrupt the splice record with the
+						// close's txid. Every round of the splice carries the intent's
+						// contribution — RBF rounds re-add it — while a close carries none of it.
 						let funding_txo = intent.pre_splice_funding_txo.into_bitcoin_outpoint();
-						input_shape_matches
-							&& tx.input.iter().any(|input| input.previous_output == funding_txo)
+						tx.input.iter().any(|input| input.previous_output == funding_txo)
+							&& tx_carries_contribution(tx, &intent.contribution)
 					})
 				})
 				.first()
@@ -2420,6 +2417,21 @@ fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
 		fee_paid_msat: Some(fee.to_sat() * 1000),
 		direction,
 	}
+}
+
+/// Whether `tx` includes all of the contribution's inputs and outputs. Every negotiated round of
+/// a splice carries the initiating contribution forward, so this distinguishes the splice's
+/// transaction from another transaction spending the same funding outpoint (e.g. a cooperative
+/// close). A contribution without material matches nothing: there is nothing left to recognize
+/// it by, and declining only affects which id keys the record.
+fn tx_carries_contribution(tx: &Transaction, contribution: &FundingContribution) -> bool {
+	let inputs = contribution.inputs();
+	let outputs = contribution.outputs();
+	(!inputs.is_empty() || !outputs.is_empty())
+		&& inputs
+			.iter()
+			.all(|utxo| tx.input.iter().any(|input| input.previous_output == utxo.outpoint()))
+		&& outputs.iter().all(|output| tx.output.contains(output))
 }
 
 impl Listen for Wallet {
@@ -2818,6 +2830,7 @@ mod tests {
 		PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
+	use crate::payment::pending_payment_store::SpliceKind;
 	use crate::types::{DynStore, DynStoreWrapper};
 	use crate::{NodeMetrics, PersistedNodeMetrics};
 
@@ -4244,9 +4257,9 @@ mod tests {
 
 	/// A crash between persisting a splice intent and classifying its broadcast leaves the intent
 	/// as the only trace of the splice-time PaymentId. The generic funding path must still
-	/// resolve the funding transaction — it spends the outpoint the intent was created for —
-	/// rather than keying the record by its txid, which the splice's own classification would
-	/// then duplicate.
+	/// resolve the funding transaction — it spends the outpoint the intent was created for and
+	/// carries the intent's contribution — rather than keying the record by its txid, which the
+	/// splice's own classification would then duplicate.
 	#[tokio::test]
 	async fn classify_funding_resolves_a_pre_broadcast_splice_intent() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -4262,13 +4275,27 @@ mod tests {
 			index: 0,
 		};
 
+		let script_pubkey = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::External)
+			.address
+			.script_pubkey();
+		let contributed_output = TxOut { value: Amount::from_sat(10_000), script_pubkey };
+
 		let payment_id = PaymentId([21u8; 32]);
 		let intent = crate::payment::pending_payment_store::SpliceIntent {
 			user_channel_id: crate::types::UserChannelId(42),
 			counterparty_node_id,
 			channel_id,
 			pre_splice_funding_txo,
-			contribution: crate::payment::pending_payment_store::test_funding_contribution(),
+			contribution:
+				crate::payment::pending_payment_store::test_funding_contribution_with_material(
+					253,
+					&[],
+					std::slice::from_ref(&contributed_output),
+				),
 			kind: SpliceKind::Rbf {},
 			attempts: 0,
 		};
@@ -4278,13 +4305,6 @@ mod tests {
 			.await
 			.unwrap();
 
-		let script_pubkey = wallet
-			.inner
-			.lock()
-			.unwrap()
-			.reveal_next_address(KeychainKind::External)
-			.address
-			.script_pubkey();
 		let tx = Transaction {
 			version: bitcoin::transaction::Version::TWO,
 			lock_time: LockTime::ZERO,
@@ -4294,7 +4314,7 @@ mod tests {
 				sequence: bitcoin::Sequence::MAX,
 				witness: bitcoin::Witness::new(),
 			}],
-			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
+			output: vec![contributed_output],
 		};
 
 		let channels = vec![(counterparty_node_id, channel_id)];
@@ -4304,6 +4324,190 @@ mod tests {
 		let payments = wallet.payment_store.list_filter(|_| true);
 		assert_eq!(payments.len(), 1);
 		assert_eq!(payments[0].id, payment_id, "the record must adopt the splice-time PaymentId");
+	}
+
+	/// A cooperative close spends the same funding outpoint a live splice intent was created for,
+	/// and pays a wallet address, so outpoint-spending alone cannot identify the splice's
+	/// transaction. Only a transaction carrying the intent's contribution is a round of the
+	/// splice; resolving a close to the splice-time PaymentId corrupts the splice record with
+	/// the close's txid.
+	#[tokio::test]
+	async fn splice_intent_probe_ignores_a_close_spending_the_funding_outpoint() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel_id = ChannelId([7u8; 32]);
+		let pre_splice_funding_txo = lightning::chain::transaction::OutPoint {
+			txid: Txid::from_byte_array([3u8; 32]),
+			index: 0,
+		};
+
+		// A splice-out withdrawing to this destination; every round of the splice carries it.
+		let destination = TxOut {
+			value: Amount::from_sat(25_000),
+			script_pubkey: bitcoin::ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array(
+				[8u8; 20],
+			)),
+		};
+		let payment_id = PaymentId([21u8; 32]);
+		let intent = crate::payment::pending_payment_store::SpliceIntent {
+			user_channel_id: crate::types::UserChannelId(42),
+			counterparty_node_id,
+			channel_id,
+			pre_splice_funding_txo,
+			contribution:
+				crate::payment::pending_payment_store::test_funding_contribution_with_material(
+					253,
+					&[],
+					std::slice::from_ref(&destination),
+				),
+			kind: SpliceKind::Out { outputs: vec![destination.clone()] },
+			attempts: 0,
+		};
+		wallet
+			.pending_payment_store
+			.insert(PendingPaymentDetails::pending_splice(payment_id, intent))
+			.await
+			.unwrap();
+
+		// A cooperative close: a single input spending the funding outpoint, paying only outputs
+		// the contribution doesn't name.
+		let close_tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: vec![bitcoin::TxIn {
+				previous_output: pre_splice_funding_txo.into_bitcoin_outpoint(),
+				script_sig: bitcoin::ScriptBuf::new(),
+				sequence: bitcoin::Sequence::MAX,
+				witness: bitcoin::Witness::new(),
+			}],
+			output: vec![TxOut {
+				value: Amount::from_sat(90_000),
+				script_pubkey: bitcoin::ScriptBuf::new_p2wpkh(
+					&bitcoin::WPubkeyHash::from_byte_array([9u8; 20]),
+				),
+			}],
+		};
+		assert_eq!(
+			wallet.find_payment_for_tx(&close_tx, close_tx.compute_txid()),
+			None,
+			"a close spending the funding outpoint must not resolve to the splice intent"
+		);
+
+		// The splice transaction: also spends the funding outpoint, but carries the withdrawal.
+		let mut splice_tx = close_tx.clone();
+		splice_tx.output.push(destination);
+		assert_eq!(
+			wallet.find_payment_for_tx(&splice_tx, splice_tx.compute_txid()),
+			Some(payment_id)
+		);
+	}
+
+	/// A splice-in's rounds are identified by the contributed wallet inputs they carry: another
+	/// multi-input transaction spending the funding outpoint (e.g. a counterparty-funded round
+	/// this node did not join) is not a round of this intent.
+	#[tokio::test]
+	async fn splice_intent_probe_matches_the_contributed_inputs() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel_id = ChannelId([7u8; 32]);
+		let pre_splice_funding_txo = lightning::chain::transaction::OutPoint {
+			txid: Txid::from_byte_array([3u8; 32]),
+			index: 0,
+		};
+
+		let prevtx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: vec![bitcoin::TxIn {
+				previous_output: bitcoin::OutPoint {
+					txid: Txid::from_byte_array([5u8; 32]),
+					vout: 0,
+				},
+				script_sig: bitcoin::ScriptBuf::new(),
+				sequence: bitcoin::Sequence::MAX,
+				witness: bitcoin::Witness::new(),
+			}],
+			output: vec![TxOut {
+				value: Amount::from_sat(50_000),
+				script_pubkey: bitcoin::ScriptBuf::new_p2wpkh(
+					&bitcoin::WPubkeyHash::from_byte_array([8u8; 20]),
+				),
+			}],
+		};
+		let contributed_input = ConfirmedUtxo::new_p2wpkh(prevtx, 0).unwrap();
+		let contributed_outpoint = contributed_input.outpoint();
+
+		let payment_id = PaymentId([21u8; 32]);
+		let intent = crate::payment::pending_payment_store::SpliceIntent {
+			user_channel_id: crate::types::UserChannelId(42),
+			counterparty_node_id,
+			channel_id,
+			pre_splice_funding_txo,
+			contribution:
+				crate::payment::pending_payment_store::test_funding_contribution_with_material(
+					253,
+					std::slice::from_ref(&contributed_input),
+					&[],
+				),
+			kind: SpliceKind::In { amount_sats: 50_000 },
+			attempts: 0,
+		};
+		wallet
+			.pending_payment_store
+			.insert(PendingPaymentDetails::pending_splice(payment_id, intent))
+			.await
+			.unwrap();
+
+		// Two inputs — a splice-in's shape — but the second is not the contributed UTXO.
+		let foreign_tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: vec![
+				bitcoin::TxIn {
+					previous_output: pre_splice_funding_txo.into_bitcoin_outpoint(),
+					script_sig: bitcoin::ScriptBuf::new(),
+					sequence: bitcoin::Sequence::MAX,
+					witness: bitcoin::Witness::new(),
+				},
+				bitcoin::TxIn {
+					previous_output: bitcoin::OutPoint {
+						txid: Txid::from_byte_array([6u8; 32]),
+						vout: 1,
+					},
+					script_sig: bitcoin::ScriptBuf::new(),
+					sequence: bitcoin::Sequence::MAX,
+					witness: bitcoin::Witness::new(),
+				},
+			],
+			output: vec![TxOut {
+				value: Amount::from_sat(150_000),
+				script_pubkey: bitcoin::ScriptBuf::new_p2wpkh(
+					&bitcoin::WPubkeyHash::from_byte_array([9u8; 20]),
+				),
+			}],
+		};
+		assert_eq!(
+			wallet.find_payment_for_tx(&foreign_tx, foreign_tx.compute_txid()),
+			None,
+			"a multi-input spend without the contributed input must not resolve to the intent"
+		);
+
+		let mut splice_tx = foreign_tx.clone();
+		splice_tx.input[1].previous_output = contributed_outpoint;
+		assert_eq!(
+			wallet.find_payment_for_tx(&splice_tx, splice_tx.compute_txid()),
+			Some(payment_id)
+		);
 	}
 
 	/// Barrier test, classification-first ordering: wallet sync's confirmation handling must

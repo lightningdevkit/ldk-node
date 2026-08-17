@@ -361,15 +361,50 @@ pub(crate) fn test_funding_contribution() -> FundingContribution {
 /// Like [`test_funding_contribution`], but with the given input-selection feerate in sat/kwu.
 #[cfg(test)]
 pub(crate) fn test_funding_contribution_with_feerate(feerate: u64) -> FundingContribution {
-	let mut tlv_bytes = vec![
-		33u8, // BigSize length prefix over the TLV records below
-		1, 8, 0, 0, 0, 0, 0, 0, 0, 0, // (1, estimated_fee: 0 sat)
-		9, 8, // (9, feerate)
-	];
-	tlv_bytes.extend_from_slice(&feerate.to_be_bytes());
-	tlv_bytes.extend_from_slice(&[11, 8]); // (11, max_feerate)
-	tlv_bytes.extend_from_slice(&feerate.to_be_bytes());
-	tlv_bytes.extend_from_slice(&[13, 1, 1]); // (13, is_splice: true)
+	test_funding_contribution_with_material(feerate, &[], &[])
+}
+
+/// Like [`test_funding_contribution_with_feerate`], but also carrying the given contributed
+/// inputs and outputs.
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_with_material(
+	feerate: u64, inputs: &[lightning::util::wallet_utils::ConfirmedUtxo], outputs: &[TxOut],
+) -> FundingContribution {
+	use lightning::util::ser::Writeable;
+
+	fn write_bigsize(buf: &mut Vec<u8>, value: u64) {
+		if value < 253 {
+			buf.push(value as u8);
+		} else {
+			assert!(value <= u16::MAX as u64, "test TLV streams stay small");
+			buf.push(0xfd);
+			buf.extend_from_slice(&(value as u16).to_be_bytes());
+		}
+	}
+
+	fn write_record(buf: &mut Vec<u8>, tlv_type: u64, value: &[u8]) {
+		write_bigsize(buf, tlv_type);
+		write_bigsize(buf, value.len() as u64);
+		buf.extend_from_slice(value);
+	}
+
+	let mut records = Vec::new();
+	write_record(&mut records, 1, &0u64.to_be_bytes()); // (1, estimated_fee: 0 sat)
+	if !inputs.is_empty() {
+		let inputs: Vec<u8> = inputs.iter().flat_map(|input| input.encode()).collect();
+		write_record(&mut records, 3, &inputs);
+	}
+	if !outputs.is_empty() {
+		let outputs: Vec<u8> = outputs.iter().flat_map(|output| output.encode()).collect();
+		write_record(&mut records, 5, &outputs);
+	}
+	write_record(&mut records, 9, &feerate.to_be_bytes());
+	write_record(&mut records, 11, &feerate.to_be_bytes());
+	write_record(&mut records, 13, &[1]); // (13, is_splice: true)
+
+	let mut tlv_bytes = Vec::new();
+	write_bigsize(&mut tlv_bytes, records.len() as u64);
+	tlv_bytes.extend_from_slice(&records);
 	lightning::util::ser::Readable::read(&mut &tlv_bytes[..])
 		.expect("hand-built TLV stream must decode")
 }
