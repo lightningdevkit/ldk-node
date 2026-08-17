@@ -192,7 +192,6 @@ pub use probing::ArcedProbingConfigBuilder as ProbingConfigBuilder;
 pub use probing::ProbingConfigError;
 use probing::{run_prober, Prober};
 use runtime::Runtime;
-pub use tokio;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
 	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
@@ -395,6 +394,22 @@ impl Node {
 			zero_fee_commitments_support_required,
 		))?;
 
+		let (onchain_sync_tx, mut onchain_sync_rx) = tokio::sync::mpsc::channel::<()>(1);
+
+		let liquidity_source = self.liquidity_source.clone();
+		let wallet_clone = Arc::clone(&self.wallet);
+
+		// Spawn background task waiting for messages after each wallet sync, so
+		// can check for LSPS1 onchain payments and process them accordingly.
+		self.runtime.spawn_background_task(async move {
+			while let Some(_) = onchain_sync_rx.recv().await {
+				liquidity_source
+					.lsps1_service()
+					.process_lsps1_onchain_payments(&wallet_clone)
+					.await;
+			}
+		});
+
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
@@ -410,6 +425,7 @@ impl Node {
 					sync_cman,
 					sync_cmon,
 					sync_sweeper,
+					onchain_sync_tx,
 				)
 				.await;
 		});
@@ -2227,6 +2243,12 @@ impl Node {
 					)
 					.await?;
 			}
+
+			self.liquidity_source
+				.lsps1_service()
+				.process_lsps1_onchain_payments(&Arc::clone(&self.wallet))
+				.await;
+
 			let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
 			Ok(())
 		})
