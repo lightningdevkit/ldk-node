@@ -181,11 +181,6 @@ impl StorableObject for PaymentDetails {
 		if let Some(hash_opt) = update.hash {
 			match self.kind {
 				PaymentKind::Bolt12Offer { ref mut hash, .. } => {
-					debug_assert_eq!(
-						self.direction,
-						PaymentDirection::Outbound,
-						"We should only ever override payment hash for outbound BOLT 12 payments"
-					);
 					debug_assert!(
 						hash.is_none() || *hash == hash_opt,
 						"We should never change a payment hash after being initially set"
@@ -193,11 +188,6 @@ impl StorableObject for PaymentDetails {
 					update_if_necessary!(*hash, hash_opt);
 				},
 				PaymentKind::Bolt12Refund { ref mut hash, .. } => {
-					debug_assert_eq!(
-						self.direction,
-						PaymentDirection::Outbound,
-						"We should only ever override payment hash for outbound BOLT 12 payments"
-					);
 					debug_assert!(
 						hash.is_none() || *hash == hash_opt,
 						"We should never change a payment hash after being initially set"
@@ -269,12 +259,13 @@ impl StorableObject for PaymentDetails {
 
 		if let Some(skimmed_fee_msat) = update.counterparty_skimmed_fee_msat {
 			match self.kind {
-				PaymentKind::Bolt11 { ref mut counterparty_skimmed_fee_msat, .. } => {
+				PaymentKind::Bolt11 { ref mut counterparty_skimmed_fee_msat, .. }
+				| PaymentKind::Bolt12Offer { ref mut counterparty_skimmed_fee_msat, .. } => {
 					update_if_necessary!(*counterparty_skimmed_fee_msat, skimmed_fee_msat);
 				},
 				_ => debug_assert!(
 					false,
-					"We should only ever override counterparty_skimmed_fee_msat for BOLT11 payments"
+					"We should only override counterparty_skimmed_fee_msat for invoice payments"
 				),
 			}
 		}
@@ -541,7 +532,7 @@ pub enum PaymentKind {
 		preimage: Option<PaymentPreimage>,
 		/// The secret used by the payment.
 		secret: Option<PaymentSecret>,
-		/// The value, in thousands of a satoshi, that was deducted from this payment as an extra
+		/// The value, in thousandths of a satoshi, that was deducted from this payment as an extra
 		/// fee taken by our channel counterparty.
 		///
 		/// Will only ever be `Some` for inbound payments received via an [bLIP-52 / LSPS 2]
@@ -561,6 +552,17 @@ pub enum PaymentKind {
 		preimage: Option<PaymentPreimage>,
 		/// The secret used by the payment.
 		secret: Option<PaymentSecret>,
+		/// The value, in thousandths of a satoshi, that was deducted from this payment as an extra
+		/// fee taken by our channel counterparty.
+		///
+		/// Will only ever be `Some` for inbound payments received via an [bLIP-52 / LSPS 2]
+		/// just-in-time channel, and only after the payment is observed; `None` otherwise.
+		///
+		/// This will always be `None` for payments serialized by versions that did not record
+		/// BOLT12 LSPS2 fees.
+		///
+		/// [bLIP-52 / LSPS 2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+		counterparty_skimmed_fee_msat: Option<u64>,
 		/// The ID of the offer this payment is for.
 		offer_id: OfferId,
 		/// The payer note for the payment.
@@ -640,6 +642,7 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(2, preimage, option),
 		(3, quantity, option),
 		(4, secret, option),
+		(5, counterparty_skimmed_fee_msat, option),
 		(6, offer_id, required),
 	},
 	(8, Spontaneous) => {
@@ -782,7 +785,8 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 		};
 
 		let counterparty_skimmed_fee_msat = match value.kind {
-			PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
+			PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. }
+			| PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
 				Some(counterparty_skimmed_fee_msat)
 			},
 			_ => None,
@@ -1438,6 +1442,96 @@ mod tests {
 			inserted.kind,
 			PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
 		));
+	}
+
+	#[test]
+	fn inbound_bolt12_offer_payments_can_be_failed() {
+		let payment_id = PaymentId([41; 32]);
+		let hash = PaymentHash([42; 32]);
+		let mut payment = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Bolt12Offer {
+				hash: Some(hash),
+				preimage: None,
+				secret: None,
+				counterparty_skimmed_fee_msat: None,
+				offer_id: OfferId([43; 32]),
+				payer_note: None,
+				quantity: None,
+			},
+			Some(100_000),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		payment.update(PaymentDetailsUpdate {
+			hash: Some(Some(hash)),
+			status: Some(PaymentStatus::Failed),
+			..PaymentDetailsUpdate::new(payment_id)
+		});
+
+		assert_eq!(payment.status, PaymentStatus::Failed);
+	}
+
+	#[test]
+	fn inbound_bolt12_refunds_can_be_failed() {
+		let payment_id = PaymentId([41; 32]);
+		let hash = PaymentHash([42; 32]);
+		let mut payment = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Bolt12Refund {
+				hash: Some(hash),
+				preimage: None,
+				secret: None,
+				payer_note: None,
+				quantity: None,
+			},
+			Some(100_000),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		payment.update(PaymentDetailsUpdate {
+			hash: Some(Some(hash)),
+			status: Some(PaymentStatus::Failed),
+			..PaymentDetailsUpdate::new(payment_id)
+		});
+
+		assert_eq!(payment.status, PaymentStatus::Failed);
+	}
+
+	#[test]
+	fn bolt12_offer_records_counterparty_skimmed_fee() {
+		let payment_id = PaymentId([41; 32]);
+		let mut payment = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Bolt12Offer {
+				hash: Some(PaymentHash([42; 32])),
+				preimage: None,
+				secret: None,
+				counterparty_skimmed_fee_msat: None,
+				offer_id: OfferId([43; 32]),
+				payer_note: None,
+				quantity: None,
+			},
+			Some(100_000),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		assert!(payment.update(PaymentDetailsUpdate {
+			counterparty_skimmed_fee_msat: Some(Some(1_000)),
+			..PaymentDetailsUpdate::new(payment_id)
+		}));
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat: Some(1_000), .. }
+		));
+		let encoded = payment.encode();
+		assert_eq!(payment, PaymentDetails::read(&mut &*encoded).unwrap());
 	}
 
 	#[derive(Clone, Debug, PartialEq, Eq)]

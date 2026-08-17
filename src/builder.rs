@@ -69,11 +69,13 @@ use crate::io::{
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
+use crate::liquidity::client::lsps2::router::LSPS2Router;
 use crate::liquidity::{LSPS2ServiceConfig, LiquiditySourceBuilder, LspConfig};
 use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::payment::NodeOffersMessageHandler;
 use crate::peer_store::PeerStore;
 use crate::probing::{
 	HighDegreeStrategy, Prober, ProbingConfig, ProbingStrategy, ProbingStrategyKind,
@@ -1933,12 +1935,16 @@ fn build_with_store_internal(
 	}
 
 	let scoring_fee_params = ProbabilisticScoringFeeParameters::default();
-	let router = Arc::new(DefaultRouter::new(
+	let router = Arc::new(LSPS2Router::new(
+		DefaultRouter::new(
+			Arc::clone(&network_graph),
+			Arc::clone(&logger),
+			Arc::clone(&keys_manager),
+			Arc::clone(&scorer),
+			scoring_fee_params,
+		),
 		Arc::clone(&network_graph),
-		Arc::clone(&logger),
 		Arc::clone(&keys_manager),
-		Arc::clone(&scorer),
-		scoring_fee_params,
 	));
 
 	let mut user_config = default_user_config(&config);
@@ -2022,6 +2028,15 @@ fn build_with_store_internal(
 	};
 
 	let channel_manager = Arc::new(channel_manager);
+	let offers_message_handler = Arc::new(NodeOffersMessageHandler::new(
+		config.network,
+		cur_time.as_secs().try_into().map_err(|_| BuildError::InvalidSystemTime)?,
+		Arc::clone(&channel_manager),
+		Arc::clone(&keys_manager),
+		Arc::clone(&router),
+		Arc::clone(&message_router),
+		Arc::clone(&logger),
+	));
 
 	// Give ChannelMonitors to ChainMonitor
 	for (_blockhash, channel_monitor) in channel_monitors.into_iter() {
@@ -2092,7 +2107,7 @@ fn build_with_store_internal(
 				Arc::clone(&logger),
 				Arc::clone(&channel_manager),
 				message_router,
-				Arc::clone(&channel_manager),
+				Arc::clone(&offers_message_handler),
 				Arc::clone(&channel_manager),
 				Arc::clone(&om_resolver),
 				IgnoringMessageHandler {},
@@ -2105,7 +2120,7 @@ fn build_with_store_internal(
 				Arc::clone(&logger),
 				Arc::clone(&channel_manager),
 				message_router,
-				Arc::clone(&channel_manager),
+				Arc::clone(&offers_message_handler),
 				Arc::clone(&channel_manager),
 				Arc::clone(&om_resolver),
 				IgnoringMessageHandler {},
@@ -2147,6 +2162,7 @@ fn build_with_store_internal(
 			Arc::clone(&keys_manager),
 			Arc::clone(&tx_broadcaster),
 			Arc::clone(&kv_store),
+			Arc::downgrade(&runtime),
 			Arc::clone(&config),
 			Arc::clone(&logger),
 		);
@@ -2231,6 +2247,12 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
 	));
+	offers_message_handler.initialize_jit_handling(
+		Arc::clone(&runtime),
+		liquidity_source.lsps2_client(),
+		Arc::downgrade(&connection_manager),
+		Arc::downgrade(&onion_messenger),
+	);
 
 	let output_sweeper = match sweeper_bytes_res {
 		Ok(output_sweeper) => Arc::new(output_sweeper),
@@ -2300,12 +2322,16 @@ fn build_with_store_internal(
 				if let Some(penalty) = probing_cfg.diversity_penalty_msat {
 					probing_fee_params.probing_diversity_penalty_msat = penalty;
 				}
-				let probing_router = Arc::new(DefaultRouter::new(
+				let probing_router = Arc::new(LSPS2Router::new(
+					DefaultRouter::new(
+						Arc::clone(&network_graph),
+						Arc::clone(&logger),
+						Arc::clone(&keys_manager),
+						Arc::clone(&scorer),
+						probing_fee_params,
+					),
 					Arc::clone(&network_graph),
-					Arc::clone(&logger),
 					Arc::clone(&keys_manager),
-					Arc::clone(&scorer),
-					probing_fee_params,
 				));
 				Arc::new(HighDegreeStrategy::new(
 					Arc::clone(&network_graph),
@@ -2363,6 +2389,7 @@ fn build_with_store_internal(
 		output_sweeper,
 		peer_manager,
 		onion_messenger,
+		offers_message_handler,
 		connection_manager,
 		keys_manager,
 		network_graph,
