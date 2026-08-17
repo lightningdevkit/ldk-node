@@ -355,13 +355,21 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 /// just the required TLV records: estimated fee, feerate, max feerate, and the is-splice flag.
 #[cfg(test)]
 pub(crate) fn test_funding_contribution() -> FundingContribution {
-	let tlv_bytes = [
+	test_funding_contribution_with_feerate(253)
+}
+
+/// Like [`test_funding_contribution`], but with the given input-selection feerate in sat/kwu.
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_with_feerate(feerate: u64) -> FundingContribution {
+	let mut tlv_bytes = vec![
 		33u8, // BigSize length prefix over the TLV records below
 		1, 8, 0, 0, 0, 0, 0, 0, 0, 0, // (1, estimated_fee: 0 sat)
-		9, 8, 0, 0, 0, 0, 0, 0, 0, 253, // (9, feerate: 253 sat/kwu)
-		11, 8, 0, 0, 0, 0, 0, 0, 0, 253, // (11, max_feerate: 253 sat/kwu)
-		13, 1, 1, // (13, is_splice: true)
+		9, 8, // (9, feerate)
 	];
+	tlv_bytes.extend_from_slice(&feerate.to_be_bytes());
+	tlv_bytes.extend_from_slice(&[11, 8]); // (11, max_feerate)
+	tlv_bytes.extend_from_slice(&feerate.to_be_bytes());
+	tlv_bytes.extend_from_slice(&[13, 1, 1]); // (13, is_splice: true)
 	lightning::util::ser::Readable::read(&mut &tlv_bytes[..])
 		.expect("hand-built TLV stream must decode")
 }

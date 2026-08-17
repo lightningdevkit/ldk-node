@@ -11,6 +11,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use bitcoin::secp256k1::PublicKey;
+use lightning::ln::channel_state::{SpliceCandidateDetails, SpliceCandidateStatus};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
 
@@ -98,33 +99,18 @@ where
 				continue;
 			}
 
-			// `splice_channel` is a read-only probe of LDK's splice state. It fails when we already
-			// have a splice in flight (a held contribution, an in-progress negotiation, or one
-			// awaiting signatures), all of which LDK drives to completion on its own.
-			let template = match self
-				.channel_manager
-				.splice_channel(&channel.channel_id, &intent.counterparty_node_id)
-			{
-				Ok(template) => template,
-				Err(_) => continue,
-			};
-
-			// LDK persists a splice once negotiated, so a prior contribution means the intent was
-			// carried out — unless the intent was a fee bump at a higher feerate than negotiated.
-			let should_retry = match (&intent.kind, template.prior_contribution()) {
-				(SpliceKind::Rbf {}, Some(prior)) => {
-					prior.feerate() < intent.contribution.feerate()
-				},
-				(SpliceKind::Rbf {}, None) => {
-					// The splice to bump is gone entirely; surface rather than guess.
+			let candidates = channel
+				.splice_details
+				.as_ref()
+				.map(|details| details.candidates.as_slice())
+				.unwrap_or(&[]);
+			match decide_reconcile(&intent, candidates) {
+				ReconcileDecision::Keep => continue,
+				ReconcileDecision::Abandon => {
 					self.abandon(id, has_payment, &intent).await;
 					continue;
 				},
-				(_, Some(_)) => false,
-				(_, None) => true,
-			};
-			if !should_retry {
-				continue;
+				ReconcileDecision::Resubmit => {},
 			}
 
 			if intent.attempts >= MAX_SPLICE_ATTEMPTS {
@@ -238,6 +224,53 @@ fn record_with_intent_cleared(
 	}
 }
 
+/// What [`SpliceRetrier::reconcile`] should do with a persisted intent, decided from the splice
+/// rounds LDK reports on the channel.
+#[derive(Debug, PartialEq, Eq)]
+enum ReconcileDecision {
+	/// Leave the intent in place without resubmitting.
+	Keep,
+	/// Hand the stored contribution back to LDK.
+	Resubmit,
+	/// Give up: drop the intent and surface the failure to the user.
+	Abandon,
+}
+
+/// Decides the startup action for a persisted intent from the channel's [`SpliceDetails`]
+/// candidates.
+///
+/// [`SpliceDetails`]: lightning::ln::channel_state::SpliceDetails
+fn decide_reconcile(
+	intent: &SpliceIntent, candidates: &[SpliceCandidateDetails],
+) -> ReconcileDecision {
+	// A round short of `Negotiated` is one LDK still drives on its own: only `AwaitingSignatures`
+	// survives a restart, and LDK resumes the signature exchange itself on reconnect.
+	let in_flight = candidates
+		.iter()
+		.any(|candidate| !matches!(candidate.status, SpliceCandidateStatus::Negotiated { .. }));
+	if in_flight {
+		return ReconcileDecision::Keep;
+	}
+
+	// LDK persists a splice once negotiated, so a negotiated candidate carrying our contribution
+	// means the intent was carried out — unless the intent was a fee bump at a higher feerate
+	// than negotiated. Rounds carry our contribution forward, so the newest one holds it.
+	let negotiated = candidates.iter().rev().find_map(|candidate| candidate.contribution.as_ref());
+	match (&intent.kind, negotiated) {
+		(SpliceKind::Rbf {}, Some(prior)) => {
+			if prior.feerate() < intent.contribution.feerate() {
+				ReconcileDecision::Resubmit
+			} else {
+				ReconcileDecision::Keep
+			}
+		},
+		// The splice to bump is gone entirely; surface rather than guess.
+		(SpliceKind::Rbf {}, None) => ReconcileDecision::Abandon,
+		(_, Some(_)) => ReconcileDecision::Keep,
+		(_, None) => ReconcileDecision::Resubmit,
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use std::str::FromStr;
@@ -246,8 +279,12 @@ mod tests {
 	use bitcoin::Txid;
 	use lightning::chain::transaction::OutPoint;
 
+	use lightning::ln::funding::FundingContribution;
+
 	use super::*;
-	use crate::payment::pending_payment_store::{test_funding_contribution, PendingPaymentDetails};
+	use crate::payment::pending_payment_store::{
+		test_funding_contribution, test_funding_contribution_with_feerate, PendingPaymentDetails,
+	};
 	use crate::payment::store::{ConfirmationStatus, PaymentDetails, PaymentKind};
 	use crate::payment::{PaymentDirection, PaymentStatus};
 	use crate::types::UserChannelId;
@@ -323,5 +360,79 @@ mod tests {
 		let replacement = replacement.expect("the entry must survive with its intent cleared");
 		assert_eq!(replacement.details(), Some(&details));
 		assert!(replacement.splice_intent().is_none());
+	}
+
+	fn negotiated_candidate(contribution: Option<FundingContribution>) -> SpliceCandidateDetails {
+		SpliceCandidateDetails {
+			contribution,
+			status: SpliceCandidateStatus::Negotiated {
+				txid: Txid::from_byte_array([9u8; 32]),
+				new_channel_value_satoshis: 100_000,
+			},
+		}
+	}
+
+	/// While any round is short of `Negotiated`, LDK drives the splice itself; the intent stays
+	/// untouched until it settles.
+	#[test]
+	fn reconcile_keeps_the_intent_while_ldk_drives_a_round() {
+		let intent = test_intent();
+		let in_flight = SpliceCandidateDetails {
+			contribution: Some(test_funding_contribution()),
+			status: SpliceCandidateStatus::AwaitingSignatures {
+				is_initiator: true,
+				funding_feerate_sat_per_1000_weight: 253,
+				new_channel_value_satoshis: 100_000,
+				txid: Txid::from_byte_array([9u8; 32]),
+			},
+		};
+		assert_eq!(decide_reconcile(&intent, &[in_flight]), ReconcileDecision::Keep);
+	}
+
+	/// A negotiated candidate carrying our contribution means the intent was carried out. This
+	/// holds on zero-conf channels too, where the `splice_channel` probe this replaced reported
+	/// no prior contribution and a splice-in would have been resubmitted as a duplicate.
+	#[test]
+	fn reconcile_trusts_a_negotiated_contribution() {
+		let mut intent = test_intent();
+		intent.kind = SpliceKind::In { amount_sats: 10_000 };
+		let negotiated = [negotiated_candidate(Some(test_funding_contribution()))];
+		assert_eq!(decide_reconcile(&intent, &negotiated), ReconcileDecision::Keep);
+	}
+
+	/// With no contribution of ours in LDK — no splice at all, or only a counterparty round — the
+	/// original splice is resubmitted, while a fee bump has nothing left to replace and gives up.
+	#[test]
+	fn reconcile_resubmits_when_ldk_holds_no_contribution() {
+		let mut intent = test_intent();
+		intent.kind = SpliceKind::In { amount_sats: 10_000 };
+		assert_eq!(decide_reconcile(&intent, &[]), ReconcileDecision::Resubmit);
+		let counterparty_only = [negotiated_candidate(None)];
+		assert_eq!(decide_reconcile(&intent, &counterparty_only), ReconcileDecision::Resubmit);
+
+		intent.kind = SpliceKind::Rbf {};
+		assert_eq!(decide_reconcile(&intent, &[]), ReconcileDecision::Abandon);
+		let counterparty_only = [negotiated_candidate(None)];
+		assert_eq!(decide_reconcile(&intent, &counterparty_only), ReconcileDecision::Abandon);
+	}
+
+	/// A fee bump resubmits only when it improves on the negotiated feerate, judged against the
+	/// newest round since rounds carry the contribution forward.
+	#[test]
+	fn reconcile_resubmits_a_bump_only_at_a_higher_feerate() {
+		let mut intent = test_intent();
+		intent.contribution = test_funding_contribution_with_feerate(500);
+
+		let lower = [negotiated_candidate(Some(test_funding_contribution_with_feerate(253)))];
+		assert_eq!(decide_reconcile(&intent, &lower), ReconcileDecision::Resubmit);
+
+		let higher = [negotiated_candidate(Some(test_funding_contribution_with_feerate(1000)))];
+		assert_eq!(decide_reconcile(&intent, &higher), ReconcileDecision::Keep);
+
+		let bumped_meanwhile = [
+			negotiated_candidate(Some(test_funding_contribution_with_feerate(253))),
+			negotiated_candidate(Some(test_funding_contribution_with_feerate(1000))),
+		];
+		assert_eq!(decide_reconcile(&intent, &bumped_meanwhile), ReconcileDecision::Keep);
 	}
 }
