@@ -12,12 +12,14 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use lightning::io;
 use lightning::util::persist::{
 	KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
 };
 use lightning_types::string::PrintableString;
+use rusqlite::ffi::ErrorCode;
 use rusqlite::{named_params, Connection};
 
 use crate::io::utils::check_namespace_key_validity;
@@ -26,6 +28,8 @@ mod migrations;
 
 /// LDK Node's database file name.
 pub const SQLITE_DB_FILE_NAME: &str = "ldk_node_data.sqlite";
+/// LDK Node's internal tier-store index database file name.
+pub(crate) const SQLITE_TIER_INDEX_DB_FILE_NAME: &str = "ldk_node_tier_index.sqlite";
 /// LDK Node's table in which we store all data.
 pub const KV_TABLE_NAME: &str = "ldk_node_data";
 
@@ -40,6 +44,17 @@ const SCHEMA_USER_VERSION: u16 = 3;
 
 // The number of entries returned per page in paginated list operations.
 const PAGE_SIZE: usize = 50;
+
+fn exclusive_lock_error_kind(error: &rusqlite::Error) -> io::ErrorKind {
+	match error {
+		rusqlite::Error::SqliteFailure(error, _)
+			if matches!(error.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) =>
+		{
+			io::ErrorKind::AlreadyExists
+		},
+		_ => io::ErrorKind::Other,
+	}
+}
 
 /// A [`KVStore`] implementation that writes to and reads from an [SQLite] database.
 ///
@@ -62,7 +77,22 @@ impl SqliteStore {
 	pub fn new(
 		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
 	) -> io::Result<Self> {
-		let inner = Arc::new(SqliteStoreInner::new(data_dir, db_file_name, kv_table_name)?);
+		Self::new_internal(data_dir, db_file_name, kv_table_name, false)
+	}
+
+	/// Constructs a new [`SqliteStore`] which exclusively owns its database for its lifetime.
+	pub(crate) fn new_exclusive(
+		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
+	) -> io::Result<Self> {
+		Self::new_internal(data_dir, db_file_name, kv_table_name, true)
+	}
+
+	fn new_internal(
+		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
+		exclusive: bool,
+	) -> io::Result<Self> {
+		let inner =
+			Arc::new(SqliteStoreInner::new(data_dir, db_file_name, kv_table_name, exclusive)?);
 
 		let next_write_version = AtomicU64::new(1);
 		Ok(Self { inner, next_write_version })
@@ -230,6 +260,7 @@ struct SqliteStoreInner {
 impl SqliteStoreInner {
 	fn new(
 		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
+		exclusive: bool,
 	) -> io::Result<Self> {
 		let db_file_name = db_file_name.unwrap_or(DEFAULT_SQLITE_DB_FILE_NAME.to_string());
 		let kv_table_name = kv_table_name.unwrap_or(DEFAULT_KV_TABLE_NAME.to_string());
@@ -250,6 +281,33 @@ impl SqliteStoreInner {
 				format!("Failed to open/create database file {}: {}", db_file_path.display(), e);
 			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
+
+		if exclusive {
+			connection.busy_timeout(Duration::ZERO).map_err(|e| {
+				let msg = format!(
+					"Failed to configure exclusive database lock timeout for {}: {}",
+					db_file_path.display(),
+					e
+				);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
+			connection.pragma_update(None, "locking_mode", "EXCLUSIVE").map_err(|e| {
+				let msg = format!(
+					"Failed to exclusively lock database file {}: {}",
+					db_file_path.display(),
+					e
+				);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
+			connection.execute_batch("BEGIN EXCLUSIVE; COMMIT;").map_err(|e| {
+				let msg = format!(
+					"Failed to exclusively lock database file {}: {}",
+					db_file_path.display(),
+					e
+				);
+				io::Error::new(exclusive_lock_error_kind(&e), msg)
+			})?;
+		}
 
 		let sql = format!("SELECT user_version FROM pragma_user_version");
 		let version_res: u16 = connection.query_row(&sql, [], |row| row.get(0)).map_err(|e| {
@@ -698,6 +756,21 @@ mod tests {
 				_ => {},
 			}
 		}
+	}
+
+	#[test]
+	fn exclusive_lock_error_kind_distinguishes_contention_from_other_failures() {
+		for result_code in [rusqlite::ffi::SQLITE_BUSY, rusqlite::ffi::SQLITE_LOCKED] {
+			let error =
+				rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(result_code), None);
+			assert_eq!(exclusive_lock_error_kind(&error), io::ErrorKind::AlreadyExists);
+		}
+
+		let io_error = rusqlite::Error::SqliteFailure(
+			rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+			None,
+		);
+		assert_eq!(exclusive_lock_error_kind(&io_error), io::ErrorKind::Other);
 	}
 
 	#[tokio::test]

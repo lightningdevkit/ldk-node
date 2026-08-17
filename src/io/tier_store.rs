@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -19,9 +20,63 @@ use lightning::util::persist::{
 use lightning::{io, log_error};
 use tokio::sync::Mutex as TokioMutex;
 
+use crate::io::sqlite_store::{SqliteStore, KV_TABLE_NAME, SQLITE_TIER_INDEX_DB_FILE_NAME};
 use crate::io::utils::{check_namespace_key_validity, EXTERNAL_PATHFINDING_SCORES_CACHE_KEY};
 use crate::logger::{LdkLogger, Logger};
-use crate::types::DynStore;
+use crate::types::{DynStore, DynStoreWrapper};
+
+const INDEX_DATABASE_ID_LEN: usize = 16;
+const INDEX_METADATA_PRIMARY_NAMESPACE: &str = "_tier_store_metadata";
+const INDEX_DATABASE_ID_KEY: &str = "index_database_id";
+
+pub(crate) struct TierStoreIndex {
+	// Holding the store keeps its exclusive SQLite lock for the lifetime of the tier store.
+	_store: Arc<DynStore>,
+}
+
+impl TierStoreIndex {
+	async fn new(data_dir: PathBuf) -> io::Result<Self> {
+		let store = SqliteStore::new_exclusive(
+			data_dir,
+			Some(SQLITE_TIER_INDEX_DB_FILE_NAME.to_string()),
+			Some(KV_TABLE_NAME.to_string()),
+		)?;
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(store));
+		Self::read_or_create_database_id(store.as_ref()).await?;
+		Ok(Self { _store: store })
+	}
+
+	async fn read_or_create_database_id(
+		store: &DynStore,
+	) -> io::Result<[u8; INDEX_DATABASE_ID_LEN]> {
+		match KVStore::read(store, INDEX_METADATA_PRIMARY_NAMESPACE, "", INDEX_DATABASE_ID_KEY)
+			.await
+		{
+			Ok(bytes) => bytes.try_into().map_err(|_| {
+				io::Error::new(io::ErrorKind::InvalidData, "Invalid tier-store index database ID")
+			}),
+			Err(e) if e.kind() == io::ErrorKind::NotFound => {
+				let mut database_id = [0; INDEX_DATABASE_ID_LEN];
+				getrandom::fill(&mut database_id).map_err(|e| {
+					io::Error::new(
+						io::ErrorKind::Other,
+						format!("Failed to generate tier-store index database ID: {e}"),
+					)
+				})?;
+				KVStore::write(
+					store,
+					INDEX_METADATA_PRIMARY_NAMESPACE,
+					"",
+					INDEX_DATABASE_ID_KEY,
+					database_id.to_vec(),
+				)
+				.await?;
+				Ok(database_id)
+			},
+			Err(e) => Err(e),
+		}
+	}
+}
 
 /// A 3-tiered [`KVStore`] implementation that routes data across
 /// storage backends that may be local or remote:
@@ -87,6 +142,20 @@ impl TierStore {
 
 		inner.ephemeral_store = Some(ephemeral);
 	}
+
+	pub(crate) fn set_index_store(&mut self, index: TierStoreIndex) {
+		debug_assert_eq!(Arc::strong_count(&self.inner), 1);
+
+		let inner = Arc::get_mut(&mut self.inner).expect(
+			"TierStore should not be shared during configuration. No other references should exist",
+		);
+
+		inner.index = Some(index);
+	}
+}
+
+pub(crate) async fn setup_index_store(data_dir: PathBuf) -> io::Result<TierStoreIndex> {
+	TierStoreIndex::new(data_dir).await
 }
 
 impl KVStore for TierStore {
@@ -188,6 +257,8 @@ struct TierStoreInner {
 	ephemeral_store: Option<Arc<DynStore>>,
 	/// An optional second durable store for primary-backed data.
 	backup_store: Option<Arc<DynStore>>,
+	/// The local store used to index the logical contents across tiers.
+	index: Option<TierStoreIndex>,
 	/// Per-key locks for serializing primary+backup operations and skipping stale writes.
 	locks: Mutex<HashMap<String, Arc<TokioMutex<u64>>>>,
 	next_write_version: AtomicU64,
@@ -201,6 +272,7 @@ impl TierStoreInner {
 			primary_store,
 			ephemeral_store: None,
 			backup_store: None,
+			index: None,
 			locks: Mutex::new(HashMap::new()),
 			next_write_version: AtomicU64::new(1),
 			logger,
@@ -647,6 +719,35 @@ mod tests {
 
 	fn setup_tier_store(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> TierStore {
 		TierStore::new(primary_store, logger)
+	}
+
+	#[tokio::test]
+	async fn index_store_is_internal_persistent_sqlite_store() {
+		let base_dir = random_storage_path();
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let index = setup_index_store(base_dir.clone()).await.unwrap();
+		assert!(base_dir.join(SQLITE_TIER_INDEX_DB_FILE_NAME).exists());
+
+		let database_id =
+			TierStoreIndex::read_or_create_database_id(index._store.as_ref()).await.unwrap();
+		let persisted_database_id =
+			TierStoreIndex::read_or_create_database_id(index._store.as_ref()).await.unwrap();
+		assert_ne!(database_id, [0; INDEX_DATABASE_ID_LEN]);
+		assert_eq!(persisted_database_id, database_id);
+	}
+
+	#[tokio::test]
+	async fn index_store_rejects_second_owner() {
+		let base_dir = random_storage_path();
+		let _cleanup = CleanupDir(base_dir.clone());
+
+		let _index = setup_index_store(base_dir.clone()).await.unwrap();
+		let error = match setup_index_store(base_dir).await {
+			Ok(_) => panic!("a second index-store owner must be rejected"),
+			Err(e) => e,
+		};
+		assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
 	}
 
 	enum FailureMode {
