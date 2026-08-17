@@ -182,6 +182,7 @@ impl BitcoindChainSource {
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
 		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		onchain_sync_tx: tokio::sync::mpsc::Sender<()>,
 	) {
 		// First register for the wallet polling status to make sure `Node::sync_wallets` calls
 		// wait on the result before proceeding.
@@ -369,7 +370,9 @@ impl BitcoindChainSource {
 							Arc::clone(&channel_manager),
 							Arc::clone(&chain_monitor),
 							Arc::clone(&output_sweeper)
-						) => {}
+						) => {
+							let _ = onchain_sync_tx.try_send(());
+						}
 					}
 				}
 				_ = fee_rate_update_interval.tick() => {

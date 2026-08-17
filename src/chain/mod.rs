@@ -279,7 +279,7 @@ impl ChainSource {
 	pub(crate) async fn continuously_sync_wallets(
 		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>, onchain_wallet: Arc<Wallet>,
 		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-		output_sweeper: Arc<Sweeper>,
+		output_sweeper: Arc<Sweeper>, onchain_sync_tx: tokio::sync::mpsc::Sender<()>,
 	) {
 		match &self.kind {
 			ChainSourceKind::Esplora(esplora_chain_source) => {
@@ -336,6 +336,7 @@ impl ChainSource {
 						channel_manager,
 						chain_monitor,
 						output_sweeper,
+						onchain_sync_tx,
 					)
 					.await
 			},
