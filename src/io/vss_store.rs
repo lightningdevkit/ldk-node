@@ -480,6 +480,7 @@ impl VssStoreInner {
 		secondary_namespace: &str, key_prefix: String, page_token: Option<String>,
 		page_size: Option<i32>,
 	) -> io::Result<(Vec<String>, Option<String>)> {
+		let page_token_was_supplied = page_token.is_some();
 		let request = ListKeyVersionsRequest {
 			store_id: self.store_id.clone(),
 			key_prefix: Some(key_prefix),
@@ -492,7 +493,13 @@ impl VssStoreInner {
 				"Failed to list keys in {}/{}: {}",
 				primary_namespace, secondary_namespace, e
 			);
-			Error::new(ErrorKind::Other, msg)
+			let kind = if page_token_was_supplied && matches!(e, VssError::InvalidRequestError(..))
+			{
+				ErrorKind::InvalidInput
+			} else {
+				ErrorKind::Other
+			};
+			Error::new(kind, msg)
 		})?;
 
 		let mut keys = Vec::with_capacity(response.key_versions.len());
