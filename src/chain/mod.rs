@@ -37,8 +37,14 @@ use crate::config::{BackgroundSyncConfig, Config, WALLET_SYNC_INTERVAL_MINIMUM_S
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
+use crate::tx_broadcaster::{BroadcastPackage, RetryQueue, ScheduleOutcome};
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
+
+/// How long to wait before re-classifying a package whose classification failed. Long enough to
+/// give a struggling store room to recover, short against the ~minutes until the transaction
+/// could confirm.
+const FAILED_CLASSIFY_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// We use this parent-child TRUC package to make sure the configured chain source supports
 /// broadcasting packages via the `submitpackage` Bitcoin Core RPC.
@@ -562,50 +568,91 @@ impl ChainSource {
 		}
 	}
 
+	/// Classifies the package's funding broadcasts into payment records, then broadcasts it.
+	/// Returns the package back on classification failure so the caller can retry it after a
+	/// delay: broadcasting a tx we failed to record would leave it on-chain without a payment,
+	/// while dropping the package would not keep an interactively funded tx off-chain (the
+	/// counterparty broadcasts it regardless), only leave it confirming without a recorded
+	/// candidate.
+	async fn classify_and_broadcast(
+		&self, package: BroadcastPackage,
+	) -> Result<(), BroadcastPackage> {
+		if let Err(e) = self.tx_broadcaster.classify_package(&package).await {
+			log_error!(
+				self.logger,
+				"Delaying broadcast: failed to persist payment records, will retry: {:?}",
+				e,
+			);
+			return Err(package);
+		}
+		let package = package.into_sorted_transactions();
+		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
+			ChainSourceKind::Esplora(esplora_chain_source) => {
+				esplora_chain_source.process_transaction_broadcast(package).await
+			},
+			#[cfg(feature = "chain-electrum")]
+			ChainSourceKind::Electrum(electrum_chain_source) => {
+				electrum_chain_source.process_transaction_broadcast(package).await
+			},
+			#[cfg(feature = "chain-bitcoind")]
+			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+				bitcoind_chain_source.process_transaction_broadcast(package).await
+			},
+		}
+		Ok(())
+	}
+
 	pub(crate) async fn continuously_process_broadcast_queue(
 		&self, mut stop_tx_bcast_receiver: tokio::sync::watch::Receiver<()>,
 	) {
 		let mut receiver = self.tx_broadcaster.get_broadcast_queue().await;
+		// Packages whose classification failed, each waiting out FAILED_CLASSIFY_RETRY_DELAY
+		// before its next attempt. New packages keep flowing while these wait, and pending
+		// retries die with the loop on shutdown rather than resurfacing after a later start.
+		let mut retries = RetryQueue::new();
 		loop {
-			let tx_bcast_logger = Arc::clone(&self.logger);
-			tokio::select! {
+			let next_retry_at = retries.next_retry_at();
+			let package = tokio::select! {
 				_ = stop_tx_bcast_receiver.changed() => {
 					log_debug!(
-						tx_bcast_logger,
+						self.logger,
 						"Stopping broadcasting transactions.",
 					);
 					return;
 				}
-				Some(next_package) = receiver.recv() => {
-					// Classify funding broadcasts into payment records before sending. If
-					// classification fails we skip the broadcast, since broadcasting a tx we
-					// failed to record would leave it on-chain without a payment.
-					let package = match self.tx_broadcaster.classify_package(next_package).await {
-						Ok(package) => package,
-						Err(e) => {
-							log_error!(
-								tx_bcast_logger,
-								"Skipping broadcast: failed to persist payment records: {:?}",
-								e,
-							);
-							continue;
-						},
-					};
-					let package = package.into_sorted_transactions();
-					match &self.kind {
-						#[cfg(feature = "chain-esplora")]
-						ChainSourceKind::Esplora(esplora_chain_source) => {
-							esplora_chain_source.process_transaction_broadcast(package).await
-						},
-						#[cfg(feature = "chain-electrum")]
-						ChainSourceKind::Electrum(electrum_chain_source) => {
-							electrum_chain_source.process_transaction_broadcast(package).await
-						},
-						#[cfg(feature = "chain-bitcoind")]
-						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
-							bitcoind_chain_source.process_transaction_broadcast(package).await
-						},
-					}
+				Some(next_package) = receiver.recv() => next_package,
+				_ = tokio::time::sleep_until(
+					next_retry_at.unwrap_or_else(tokio::time::Instant::now)
+				), if next_retry_at.is_some() => {
+					retries.pop_next().expect("a retry is queued")
+				}
+			};
+			if let Err(package) = self.classify_and_broadcast(package).await {
+				let retry_at = tokio::time::Instant::now() + FAILED_CLASSIFY_RETRY_DELAY;
+				match retries.schedule(package, retry_at) {
+					ScheduleOutcome::Scheduled { dropped: None } => {},
+					ScheduleOutcome::Scheduled { dropped: Some(dropped) } => {
+						log_error!(
+							self.logger,
+							"Dropped the oldest package awaiting a classification retry; LDK re-broadcasts its transactions periodically: {:?}",
+							dropped.sorted_txids(),
+						);
+					},
+					ScheduleOutcome::AlreadyQueued(duplicate) => {
+						log_debug!(
+							self.logger,
+							"Dropped a re-broadcast package; an identical one already awaits a classification retry: {:?}",
+							duplicate.sorted_txids(),
+						);
+					},
+					ScheduleOutcome::Refused(package) => {
+						log_error!(
+							self.logger,
+							"Dropped a package failing classification; too many await retries: {:?}",
+							package.sorted_txids(),
+						);
+					},
 				}
 			}
 		}
