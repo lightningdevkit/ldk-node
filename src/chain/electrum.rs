@@ -802,3 +802,95 @@ impl Filter for ElectrumRuntimeClient {
 		self.tx_sync.register_output(output)
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use std::io::{BufRead, BufReader, Write};
+	use std::net::TcpListener;
+	use std::sync::{mpsc, Arc, Barrier};
+	use std::thread;
+
+	use super::*;
+
+	#[test]
+	fn clean_eof_wakes_concurrent_electrum_requests() {
+		const REQUEST_COUNT: usize = 8;
+		for _ in 0..10 {
+			let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+			let server_address = listener.local_addr().unwrap();
+			let server = thread::spawn(move || {
+				let (stream, _) = listener.accept().unwrap();
+				let mut reader = BufReader::new(stream);
+				let mut version_request = String::new();
+				assert!(reader.read_line(&mut version_request).unwrap() > 0);
+				let version_request: serde_json::Value =
+					serde_json::from_str(&version_request).unwrap();
+				let version_response = serde_json::json!({
+					"jsonrpc": "2.0",
+					"id": version_request["id"],
+					"result": ["test-server", "1.4"],
+				});
+				writeln!(reader.get_mut(), "{version_response}").unwrap();
+				reader.get_mut().flush().unwrap();
+				reader.get_mut().set_read_timeout(Some(Duration::from_millis(250))).unwrap();
+
+				let mut requests_received = 0;
+				while requests_received < 2 {
+					let mut request = String::new();
+					match reader.read_line(&mut request) {
+						Ok(0) => break,
+						Ok(_) => requests_received += 1,
+						Err(e)
+							if matches!(
+								e.kind(),
+								std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+							) =>
+						{
+							break
+						},
+						Err(e) => panic!("failed to read Electrum request: {e}"),
+					}
+				}
+				if requests_received > 1 {
+					thread::sleep(Duration::from_millis(50));
+				}
+				requests_received
+			});
+
+			let config = ElectrumConfigBuilder::new().retry(0).build();
+			let client = Arc::new(
+				ElectrumClient::from_config(&format!("tcp://{server_address}"), config).unwrap(),
+			);
+			let start = Arc::new(Barrier::new(REQUEST_COUNT + 1));
+			let (finished_sender, finished_receiver) = mpsc::channel();
+			let mut requests = Vec::new();
+			for _ in 0..REQUEST_COUNT {
+				let client = Arc::clone(&client);
+				let start = Arc::clone(&start);
+				let finished_sender = finished_sender.clone();
+				requests.push(thread::spawn(move || {
+					start.wait();
+					let result =
+						client.raw_call("server.ping", Vec::<electrum_client::Param>::new());
+					finished_sender.send(result.is_err()).unwrap();
+				}));
+			}
+			start.wait();
+			let requests_received = server.join().unwrap();
+
+			for _ in 0..REQUEST_COUNT {
+				let failed_as_expected = finished_receiver
+					.recv_timeout(Duration::from_secs(5))
+					.expect("clean EOF must wake every concurrent Electrum request");
+				assert!(failed_as_expected);
+			}
+			for request in requests {
+				request.join().unwrap();
+			}
+			if requests_received > 1 {
+				return;
+			}
+		}
+		panic!("failed to issue concurrent Electrum requests");
+	}
+}

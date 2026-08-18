@@ -143,6 +143,9 @@ check-cfg = [
 name = "payments"
 harness = false
 
+[patch.crates-io]
+electrum-client = { git = "https://github.com/bitcoindevkit/rust-electrum-client", rev = "df535efbc6abc53f4d7a626ec32a005879bf63f8" }
+
 #[patch.crates-io]
 #lightning = { path = "../rust-lightning/lightning" }
 #lightning-types = { path = "../rust-lightning/lightning-types" }
