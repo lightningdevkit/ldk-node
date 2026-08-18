@@ -505,20 +505,21 @@ impl ChainSource {
 				}
 				Some(next_package) = receiver.recv() => {
 					// Classify funding broadcasts into payment records before sending. If
-					// classification fails we skip the broadcast, since broadcasting a tx we
-					// failed to record would leave it on-chain without a payment.
-					let package = match self.tx_broadcaster.classify_package(next_package).await {
-						Ok(package) => package,
-						Err(e) => {
-							log_error!(
-								tx_bcast_logger,
-								"Skipping broadcast: failed to persist payment records: {:?}",
-								e,
-							);
-							continue;
-						},
-					};
-					let package = package.into_sorted_transactions();
+					// classification fails we delay the broadcast and retry, since broadcasting
+					// a tx we failed to record would leave it on-chain without a payment —
+					// while dropping the package would not keep an interactively funded tx
+					// off-chain (the counterparty broadcasts it regardless), only leave it
+					// confirming without a recorded candidate.
+					if let Err(e) = self.tx_broadcaster.classify_package(&next_package).await {
+						log_error!(
+							tx_bcast_logger,
+							"Delaying broadcast: failed to persist payment records, will retry: {:?}",
+							e,
+						);
+						self.tx_broadcaster.requeue_failed_classify(next_package);
+						continue;
+					}
+					let package = next_package.into_sorted_transactions();
 					match &self.kind {
 						ChainSourceKind::Esplora(esplora_chain_source) => {
 							esplora_chain_source.process_transaction_broadcast(package).await

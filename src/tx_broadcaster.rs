@@ -7,6 +7,7 @@
 
 use std::ops::Deref;
 use std::sync::{Mutex as StdMutex, Weak};
+use std::time::Duration;
 
 use bitcoin::Transaction;
 use lightning::chain::chaininterface::{
@@ -19,6 +20,11 @@ use crate::types::Wallet;
 use crate::Error;
 
 const BCAST_PACKAGE_QUEUE_SIZE: usize = 256;
+
+/// How long to wait before re-classifying a package whose classification failed. Long enough to
+/// give a struggling store room to recover, short against the ~minutes until the transaction
+/// could confirm.
+const FAILED_CLASSIFY_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// A package of transactions that LDK handed to the broadcaster in one `broadcast_transactions`
 /// call, along with each transaction's type. Queued until the background task classifies and
@@ -133,12 +139,11 @@ where
 		self.queue_receiver.lock().await
 	}
 
-	/// Classifies a queued package into payment records and returns the package ready for the
-	/// chain client. Returns `Err` if any classification fails; callers must not broadcast the
-	/// package in that case, since a crash would leave the transaction on-chain without a record.
-	pub(crate) async fn classify_package(
-		&self, package: BroadcastPackage,
-	) -> Result<BroadcastPackage, Error> {
+	/// Classifies a queued package into payment records. Returns `Err` if any classification
+	/// fails; callers must not broadcast the package in that case, since a crash would leave the
+	/// transaction on-chain without a record — but must requeue it via
+	/// [`Self::requeue_failed_classify`] rather than drop it.
+	pub(crate) async fn classify_package(&self, package: &BroadcastPackage) -> Result<(), Error> {
 		let wallet_opt = self.wallet.lock().expect("lock").as_ref().and_then(Weak::upgrade);
 		if let Some(wallet) = wallet_opt {
 			for (tx, tx_type) in package.transactions() {
@@ -147,7 +152,21 @@ where
 				}
 			}
 		}
-		Ok(package)
+		Ok(())
+	}
+
+	/// Re-sends a package whose classification failed back into the queue after a delay, so a
+	/// transient persistence failure delays the broadcast instead of dropping the package.
+	/// Dropping an interactive-funding package would not even keep its transaction off-chain —
+	/// the counterparty broadcasts it regardless — it would only leave the transaction
+	/// confirming without a recorded candidate. If the queue has closed by the time the delay
+	/// elapses, the node is shutting down and the package is dropped with it.
+	pub(crate) fn requeue_failed_classify(&self, package: BroadcastPackage) {
+		let sender = self.queue_sender.clone();
+		tokio::spawn(async move {
+			tokio::time::sleep(FAILED_CLASSIFY_RETRY_DELAY).await;
+			let _ = sender.send(package).await;
+		});
 	}
 
 	pub(crate) fn broadcast_unclassified_transaction(&self, tx: Transaction) {
