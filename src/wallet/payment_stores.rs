@@ -13,7 +13,9 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use lightning::ln::channelmanager::PaymentId;
+use lightning::util::persist::PageToken;
 
+use crate::data_store::DataStorePage;
 use crate::payment::{PaymentDetails, PendingPaymentDetails};
 use crate::types::{PaymentStore, PendingPaymentStore};
 use crate::Error;
@@ -21,12 +23,12 @@ use crate::Error;
 /// The wallet's payment store and pending payment store, with the lock serializing their writers.
 ///
 /// The writers must observe the payment record and its pending-store entry (candidate history
-/// included) as one consistent unit: classification writes both stores for one payment, and
-/// wallet sync's event arms decide from payment-id resolution through their last write. Without
-/// the lock, a confirmation landing between classification's two writes sees the record
-/// classified but the candidate history absent — resolving the wrong payment id or stamping the
-/// confirmed candidate with another candidate's figures — and a classification landing inside an
-/// arm's decision sequence gets overwritten by the arm's stale generic fallback.
+/// included) as one consistent unit: classification and wallet sync's event arms each hold the
+/// lock from payment-id resolution through their last write (classification's being its two-store
+/// write pair). Without the lock, a confirmation landing between classification's two writes sees
+/// the record classified but the candidate history absent — resolving the wrong payment id or
+/// stamping the confirmed candidate with another candidate's figures — and a classification
+/// landing inside an arm's decision sequence gets overwritten by the arm's stale generic fallback.
 ///
 /// The writes are methods of [`PaymentStoresGuard`], which only [`Self::lock`] hands out, so a
 /// write compiles only for a holder of the lock. The reads are methods of this type and take no
@@ -68,6 +70,14 @@ impl PaymentStores {
 		&self, id: &PaymentId,
 	) -> Result<Option<PendingPaymentDetails>, Error> {
 		self.pending_payment_store.get(id).await
+	}
+
+	/// A page of payment records, ordered from most recently created to least recently created;
+	/// see [`DataStore::list_page`](crate::data_store::DataStore::list_page).
+	pub(super) async fn payments_page(
+		&self, page_token: Option<PageToken>,
+	) -> Result<DataStorePage<PaymentDetails>, Error> {
+		self.payment_store.list_page(page_token).await
 	}
 
 	/// Whether the pending store has an entry under `id`.
