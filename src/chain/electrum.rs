@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bdk_chain::bdk_core::spk_client::{
@@ -95,7 +95,17 @@ impl ElectrumChainSource {
 	}
 
 	pub(super) fn stop(&self) {
-		self.electrum_runtime_status.write().expect("lock").stop();
+		let client = self.electrum_runtime_status.write().expect("lock").stop();
+		if let Some(client) = client {
+			client.begin_shutdown();
+		}
+	}
+
+	pub(super) fn begin_shutdown(&self) {
+		let client = self.electrum_runtime_status.read().expect("lock").client();
+		if let Some(client) = client {
+			client.begin_shutdown();
+		}
 	}
 
 	pub(crate) async fn sync_onchain_wallet(
@@ -243,7 +253,7 @@ impl ElectrumChainSource {
 		let sync_cman = Arc::clone(&channel_manager);
 		let sync_cmon = Arc::clone(&chain_monitor);
 		let sync_sweeper = Arc::clone(&output_sweeper);
-		let confirmables = vec![
+		let confirmables: Vec<Arc<dyn Confirm + Sync + Send>> = vec![
 			sync_cman as Arc<dyn Confirm + Sync + Send>,
 			sync_cmon as Arc<dyn Confirm + Sync + Send>,
 			sync_sweeper as Arc<dyn Confirm + Sync + Send>,
@@ -261,7 +271,8 @@ impl ElectrumChainSource {
 			return Err(Error::TxSyncFailed);
 		};
 
-		let res = electrum_client.sync_confirmables(confirmables).await;
+		let confirmable = electrum_client.wrap_confirmables(&confirmables);
+		let res = electrum_client.sync_confirmables(vec![confirmable]).await;
 
 		if let Ok(_) = res {
 			let unix_time_secs_opt =
@@ -436,10 +447,10 @@ impl ElectrumRuntimeStatus {
 		Ok(())
 	}
 
-	pub(super) fn stop(&mut self) {
+	pub(super) fn stop(&mut self) -> Option<Arc<ElectrumRuntimeClient>> {
 		// Drop the client, but retain the registration inventory so we can replay it if we're
 		// started again.
-		self.client = None;
+		self.client.take()
 	}
 
 	fn client(&self) -> Option<Arc<ElectrumRuntimeClient>> {
@@ -471,6 +482,7 @@ struct ElectrumRuntimeClient {
 	runtime: Arc<Runtime>,
 	config: Arc<Config>,
 	logger: Arc<Logger>,
+	confirm_gate: Arc<ConfirmGate>,
 }
 
 impl ElectrumRuntimeClient {
@@ -507,7 +519,21 @@ impl ElectrumRuntimeClient {
 			runtime,
 			config,
 			logger,
+			confirm_gate: Arc::new(ConfirmGate::new()),
 		})
+	}
+
+	fn begin_shutdown(&self) {
+		self.confirm_gate.deactivate();
+	}
+
+	fn wrap_confirmables(
+		&self, confirmables: &[Arc<dyn Confirm + Sync + Send>],
+	) -> Arc<dyn Confirm + Sync + Send> {
+		Arc::new(ShutdownAwareConfirm::new(
+			Arc::downgrade(&self.confirm_gate),
+			confirmables.iter().map(Arc::downgrade).collect(),
+		))
 	}
 
 	async fn sync_confirmables(
@@ -538,6 +564,10 @@ impl ElectrumRuntimeClient {
 				log_error!(self.logger, "Sync of Lightning wallet failed: {}", e);
 				Error::TxSyncFailed
 			})?;
+
+		if !self.confirm_gate.is_active() {
+			return Err(Error::TxSyncFailed);
+		}
 
 		log_debug!(
 			self.logger,
@@ -795,11 +825,232 @@ impl ElectrumRuntimeClient {
 	}
 }
 
+struct ConfirmGate {
+	active: Mutex<bool>,
+}
+
+impl ConfirmGate {
+	fn new() -> Self {
+		Self { active: Mutex::new(true) }
+	}
+
+	fn deactivate(&self) {
+		*self.active.lock().expect("lock") = false;
+	}
+
+	fn is_active(&self) -> bool {
+		*self.active.lock().expect("lock")
+	}
+}
+
+struct ShutdownAwareConfirm {
+	gate: Weak<ConfirmGate>,
+	confirmables: Vec<Weak<dyn Confirm + Sync + Send>>,
+}
+
+impl ShutdownAwareConfirm {
+	fn new(gate: Weak<ConfirmGate>, confirmables: Vec<Weak<dyn Confirm + Sync + Send>>) -> Self {
+		Self { gate, confirmables }
+	}
+
+	fn with_confirmables<T>(
+		&self, inactive_result: T, f: impl FnOnce(&[Arc<dyn Confirm + Sync + Send>]) -> T,
+	) -> T {
+		let Some(gate) = self.gate.upgrade() else {
+			return inactive_result;
+		};
+		let active = gate.active.lock().expect("lock");
+		if !*active {
+			return inactive_result;
+		}
+
+		let Some(confirmables): Option<Vec<Arc<dyn Confirm + Sync + Send>>> =
+			self.confirmables.iter().map(Weak::upgrade).collect()
+		else {
+			return inactive_result;
+		};
+		f(&confirmables)
+	}
+}
+
+impl Confirm for ShutdownAwareConfirm {
+	fn transactions_confirmed(
+		&self, header: &bitcoin::block::Header,
+		txdata: &lightning::chain::transaction::TransactionData<'_>, height: u32,
+	) {
+		self.with_confirmables((), |confirmables| {
+			for confirmable in confirmables {
+				confirmable.transactions_confirmed(header, txdata, height);
+			}
+		})
+	}
+
+	fn transaction_unconfirmed(&self, txid: &Txid) {
+		self.with_confirmables((), |confirmables| {
+			for confirmable in confirmables {
+				confirmable.transaction_unconfirmed(txid);
+			}
+		})
+	}
+
+	fn best_block_updated(&self, header: &bitcoin::block::Header, height: u32) {
+		self.with_confirmables((), |confirmables| {
+			for confirmable in confirmables {
+				confirmable.best_block_updated(header, height);
+			}
+		})
+	}
+
+	fn get_relevant_txids(&self) -> Vec<(Txid, u32, Option<bitcoin::BlockHash>)> {
+		self.with_confirmables(Vec::new(), |confirmables| {
+			confirmables.iter().flat_map(|confirmable| confirmable.get_relevant_txids()).collect()
+		})
+	}
+}
+
 impl Filter for ElectrumRuntimeClient {
 	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
 		self.tx_sync.register_tx(txid, script_pubkey)
 	}
 	fn register_output(&self, output: WatchedOutput) {
 		self.tx_sync.register_output(output)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::sync::atomic::{AtomicUsize, Ordering};
+	use std::sync::mpsc;
+	use std::thread;
+
+	use bitcoin::blockdata::constants::genesis_block;
+
+	use super::*;
+
+	struct RecordingConfirm {
+		calls: AtomicUsize,
+		relevant_txid: Txid,
+	}
+
+	impl RecordingConfirm {
+		fn new(relevant_txid: Txid) -> Self {
+			Self { calls: AtomicUsize::new(0), relevant_txid }
+		}
+	}
+
+	impl Confirm for RecordingConfirm {
+		fn transactions_confirmed(
+			&self, _header: &bitcoin::block::Header,
+			_txdata: &lightning::chain::transaction::TransactionData<'_>, _height: u32,
+		) {
+			self.calls.fetch_add(1, Ordering::AcqRel);
+		}
+
+		fn transaction_unconfirmed(&self, _txid: &Txid) {
+			self.calls.fetch_add(1, Ordering::AcqRel);
+		}
+
+		fn best_block_updated(&self, _header: &bitcoin::block::Header, _height: u32) {
+			self.calls.fetch_add(1, Ordering::AcqRel);
+		}
+
+		fn get_relevant_txids(&self) -> Vec<(Txid, u32, Option<bitcoin::BlockHash>)> {
+			vec![(self.relevant_txid, 0, None)]
+		}
+	}
+
+	struct BlockingConfirm {
+		calls: AtomicUsize,
+		started: Mutex<Option<mpsc::SyncSender<()>>>,
+		release: Mutex<mpsc::Receiver<()>>,
+	}
+
+	impl Confirm for BlockingConfirm {
+		fn transactions_confirmed(
+			&self, _header: &bitcoin::block::Header,
+			_txdata: &lightning::chain::transaction::TransactionData<'_>, _height: u32,
+		) {
+		}
+
+		fn transaction_unconfirmed(&self, _txid: &Txid) {}
+
+		fn best_block_updated(&self, _header: &bitcoin::block::Header, _height: u32) {
+			self.calls.fetch_add(1, Ordering::AcqRel);
+			if let Some(started) = self.started.lock().expect("lock").take() {
+				started.send(()).expect("test should still be waiting");
+			}
+			self.release.lock().expect("lock").recv().expect("test should release callback");
+		}
+
+		fn get_relevant_txids(&self) -> Vec<(Txid, u32, Option<bitcoin::BlockHash>)> {
+			Vec::new()
+		}
+	}
+
+	#[test]
+	fn confirm_callbacks_are_ignored_after_shutdown() {
+		let block = genesis_block(Network::Regtest);
+		let txid = block.txdata[0].compute_txid();
+		let delegate = Arc::new(RecordingConfirm::new(txid));
+		let delegate_dyn: Arc<dyn Confirm + Sync + Send> = delegate.clone();
+		let gate = Arc::new(ConfirmGate::new());
+		let confirm =
+			ShutdownAwareConfirm::new(Arc::downgrade(&gate), vec![Arc::downgrade(&delegate_dyn)]);
+
+		confirm.best_block_updated(&block.header, 0);
+		assert_eq!(delegate.calls.load(Ordering::Acquire), 1);
+		assert_eq!(confirm.get_relevant_txids(), vec![(txid, 0, None)]);
+
+		gate.deactivate();
+		confirm.transactions_confirmed(&block.header, &[], 0);
+		confirm.transaction_unconfirmed(&txid);
+		confirm.best_block_updated(&block.header, 0);
+		assert_eq!(delegate.calls.load(Ordering::Acquire), 1);
+		assert!(confirm.get_relevant_txids().is_empty());
+	}
+
+	#[test]
+	fn shutdown_waits_for_the_whole_confirm_callback() {
+		let block = genesis_block(Network::Regtest);
+		let txid = block.txdata[0].compute_txid();
+		let (started_sender, started_receiver) = mpsc::sync_channel(1);
+		let (release_sender, release_receiver) = mpsc::sync_channel(1);
+		let blocking = Arc::new(BlockingConfirm {
+			calls: AtomicUsize::new(0),
+			started: Mutex::new(Some(started_sender)),
+			release: Mutex::new(release_receiver),
+		});
+		let trailing = Arc::new(RecordingConfirm::new(txid));
+		let blocking_dyn: Arc<dyn Confirm + Sync + Send> = blocking.clone();
+		let trailing_dyn: Arc<dyn Confirm + Sync + Send> = trailing.clone();
+		let gate = Arc::new(ConfirmGate::new());
+		let confirm = Arc::new(ShutdownAwareConfirm::new(
+			Arc::downgrade(&gate),
+			vec![Arc::downgrade(&blocking_dyn), Arc::downgrade(&trailing_dyn)],
+		));
+
+		let callback = {
+			let confirm = Arc::clone(&confirm);
+			thread::spawn(move || confirm.best_block_updated(&block.header, 0))
+		};
+		started_receiver.recv().expect("callback should start");
+
+		let (shutdown_done_sender, shutdown_done_receiver) = mpsc::sync_channel(1);
+		let shutdown = thread::spawn(move || {
+			gate.deactivate();
+			shutdown_done_sender.send(()).expect("test should still be waiting");
+		});
+		assert!(shutdown_done_receiver.recv_timeout(Duration::from_millis(50)).is_err());
+
+		release_sender.send(()).expect("callback should still be running");
+		callback.join().expect("callback should finish");
+		shutdown_done_receiver.recv().expect("shutdown should finish");
+		shutdown.join().expect("shutdown should not panic");
+
+		assert_eq!(blocking.calls.load(Ordering::Acquire), 1);
+		assert_eq!(trailing.calls.load(Ordering::Acquire), 1);
+		confirm.best_block_updated(&block.header, 0);
+		assert_eq!(blocking.calls.load(Ordering::Acquire), 1);
+		assert_eq!(trailing.calls.load(Ordering::Acquire), 1);
 	}
 }

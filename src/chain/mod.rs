@@ -255,6 +255,18 @@ impl ChainSource {
 		}
 	}
 
+	pub(crate) fn begin_shutdown(&self) {
+		match &self.kind {
+			ChainSourceKind::Electrum(electrum_chain_source) => {
+				electrum_chain_source.begin_shutdown()
+			},
+			_ => {
+				// Other chain sources don't leave synchronous callbacks running after their
+				// driving future is cancelled.
+			},
+		}
+	}
+
 	pub(crate) fn as_utxo_source(&self) -> Option<UtxoSourceClient> {
 		match &self.kind {
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
