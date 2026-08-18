@@ -83,6 +83,7 @@
 mod balance;
 mod builder;
 mod chain;
+mod channel;
 pub mod config;
 mod connection;
 mod data_store;
@@ -128,12 +129,14 @@ pub use builder::BuildError;
 #[cfg(not(feature = "uniffi"))]
 pub use builder::NodeBuilder as Builder;
 use chain::ChainSource;
+use channel::SpliceRetrier;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
 	LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
 	RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
+use data_store::StorableObject;
 pub use error::Error as NodeError;
 use error::Error;
 pub use event::Event;
@@ -153,6 +156,7 @@ use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 pub use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::FundingContribution;
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
@@ -171,6 +175,9 @@ use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use payment::pending_payment_store::{
+	PendingPaymentDetails, PendingPaymentDetailsUpdate, SpliceIntent, SpliceKind,
+};
 use payment::{
 	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, SpontaneousPayment,
 	UnifiedPayment,
@@ -183,8 +190,8 @@ use runtime::Runtime;
 pub use tokio;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
-	Wallet,
+	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, PendingPaymentStore,
+	Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{
 	ChannelCounterparty, ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId,
@@ -265,6 +272,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	pending_payment_store: Arc<PendingPaymentStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
@@ -661,6 +669,16 @@ impl Node {
 			None
 		};
 
+		let splice_retrier = Arc::new(SpliceRetrier::new(
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.fee_estimator),
+			Arc::clone(&self.pending_payment_store),
+			Arc::clone(&self.payment_store),
+			Arc::clone(&self.event_queue),
+			Arc::clone(&self.logger),
+		));
+
 		let event_handler = Arc::new(EventHandler::new(
 			Arc::clone(&self.event_queue),
 			Arc::clone(&self.wallet),
@@ -677,6 +695,7 @@ impl Node {
 			Arc::clone(&self.onion_messenger),
 			self.om_mailbox.clone(),
 			self.prober.clone(),
+			Arc::clone(&splice_retrier),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
@@ -688,6 +707,11 @@ impl Node {
 				run_prober(prober, stop_rx).await;
 			});
 		}
+
+		// Resubmit any persisted splice intents that LDK dropped before durably recording them.
+		self.runtime.spawn_background_task(async move {
+			splice_retrier.reconcile().await;
+		});
 
 		// Setup background processing
 		let background_persister = Arc::clone(&self.kv_store);
@@ -1665,6 +1689,105 @@ impl Node {
 		)
 	}
 
+	/// Persists a splice intent before its contribution is handed to LDK, so the splice can be
+	/// resubmitted if LDK drops it before durably recording it (a restart, or a disconnect
+	/// mid-negotiation). Must be called before `funding_contributed` so a crash in between is also
+	/// covered.
+	///
+	/// Reuses the channel's existing splice intent record when one is present -- so a splice and its
+	/// later fee bumps share one [`PaymentId`] and at most one intent ever exists per channel, which
+	/// [`Wallet::find_splice_payment_id`] and the retrier rely on -- otherwise generates a fresh id.
+	/// Returns the id and, for restoring on failure, `None` when a fresh record was created or
+	/// `Some(prior)` when an existing record's intent was replaced.
+	fn persist_splice_intent(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		channel_details: &LdkChannelDetails, contribution: FundingContribution, kind: SpliceKind,
+	) -> Result<(PaymentId, Option<Option<SpliceIntent>>), Error> {
+		let pre_splice_funding_txo = channel_details.funding_txo.ok_or_else(|| {
+			log_error!(self.logger, "Failed to splice channel: channel not yet ready");
+			Error::ChannelSplicingFailed
+		})?;
+		let intent = SpliceIntent {
+			user_channel_id: *user_channel_id,
+			counterparty_node_id,
+			channel_id: channel_details.channel_id,
+			pre_splice_funding_txo,
+			contribution,
+			kind,
+			attempts: 0,
+		};
+		let existing = self
+			.pending_payment_store
+			.list_filter(|p| {
+				p.splice_intent().is_some_and(|i| i.user_channel_id == *user_channel_id)
+			})
+			.into_iter()
+			.next();
+		match existing {
+			Some(record) => {
+				let payment_id = record.id();
+				let prior = record.splice_intent().cloned();
+				self.runtime.block_on(self.pending_payment_store.update(
+					PendingPaymentDetailsUpdate {
+						id: payment_id,
+						payment_update: None,
+						conflicting_txids: None,
+						candidates: Vec::new(),
+						splice_intent: Some(Some(intent)),
+					},
+				))?;
+				Ok((payment_id, Some(prior)))
+			},
+			None => {
+				let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
+				self.runtime.block_on(
+					self.pending_payment_store
+						.insert(PendingPaymentDetails::pending_splice(payment_id, intent)),
+				)?;
+				Ok((payment_id, None))
+			},
+		}
+	}
+
+	/// Undoes a splice intent persisted for an originating call whose `funding_contributed` then
+	/// failed: restores an existing record's prior intent, or removes a freshly created record.
+	fn discard_splice_intent(&self, payment_id: &PaymentId, restore: Option<Option<SpliceIntent>>) {
+		match restore {
+			Some(prior) => {
+				if let Err(e) = self.runtime.block_on(self.pending_payment_store.update(
+					PendingPaymentDetailsUpdate {
+						id: *payment_id,
+						payment_update: None,
+						conflicting_txids: None,
+						candidates: Vec::new(),
+						splice_intent: Some(prior),
+					},
+				)) {
+					log_error!(
+						self.logger,
+						"Failed to restore the prior splice intent of payment {} after the splice \
+						it was replaced with failed: the failed intent may be resubmitted after a \
+						restart: {}",
+						payment_id,
+						e
+					);
+				}
+			},
+			None => {
+				if let Err(e) = self.runtime.block_on(self.pending_payment_store.remove(payment_id))
+				{
+					log_error!(
+						self.logger,
+						"Failed to remove the intent of failed splice payment {}: it may be \
+						resubmitted after a restart: {}",
+						payment_id,
+						e
+					);
+				}
+			},
+		}
+	}
+
 	fn splice_in_inner(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: FundingAmount,
@@ -1773,6 +1896,14 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			let (payment_id, restore) = self.persist_splice_intent(
+				user_channel_id,
+				counterparty_node_id,
+				channel_details,
+				contribution.clone(),
+				SpliceKind::In { amount_sats: splice_amount_sats },
+			)?;
+
 			self.channel_manager
 				.funding_contributed(
 					&channel_details.channel_id,
@@ -1782,6 +1913,7 @@ impl Node {
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					self.discard_splice_intent(&payment_id, restore);
 					Error::ChannelSplicingFailed
 				})
 		} else {
@@ -1800,6 +1932,11 @@ impl Node {
 	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
+	///
+	/// The splice is retried automatically, including across restarts, until it either completes or
+	/// fails for a reason retrying cannot address, at which point [`Event::SpliceNegotiationFailed`]
+	/// is emitted. If this method returns an error, the splice is abandoned; however, if the
+	/// abandonment cannot be persisted, the splice may still be retried after a restart.
 	///
 	/// # Experimental API
 	///
@@ -1825,6 +1962,11 @@ impl Node {
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
 	///
+	/// The splice is retried automatically, including across restarts, until it either completes or
+	/// fails for a reason retrying cannot address, at which point [`Event::SpliceNegotiationFailed`]
+	/// is emitted. If this method returns an error, the splice is abandoned; however, if the
+	/// abandonment cannot be persisted, the splice may still be retried after a restart.
+	///
 	/// # Experimental API
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
@@ -1840,6 +1982,11 @@ impl Node {
 	/// This provides for decreasing a channel's outbound liquidity without re-balancing or closing
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
+	///
+	/// The splice is retried automatically, including across restarts, until it either completes or
+	/// fails for a reason retrying cannot address, at which point [`Event::SpliceNegotiationFailed`]
+	/// is emitted. If this method returns an error, the splice is abandoned; however, if the
+	/// abandonment cannot be persisted, the splice may still be retried after a restart.
 	///
 	/// # Experimental API
 	///
@@ -1897,11 +2044,20 @@ impl Node {
 				value: Amount::from_sat(splice_amount_sats),
 				script_pubkey: address.script_pubkey(),
 			}];
-			let contribution =
-				funding_template.splice_out(outputs, feerate, max_feerate).map_err(|e| {
-					log_error!(self.logger, "Failed to splice channel: {}", e);
-					Error::ChannelSplicingFailed
-				})?;
+			let contribution = funding_template
+				.splice_out(outputs.clone(), feerate, max_feerate)
+				.map_err(|e| {
+				log_error!(self.logger, "Failed to splice channel: {}", e);
+				Error::ChannelSplicingFailed
+			})?;
+
+			let (payment_id, restore) = self.persist_splice_intent(
+				user_channel_id,
+				counterparty_node_id,
+				channel_details,
+				contribution.clone(),
+				SpliceKind::Out { outputs },
+			)?;
 
 			self.channel_manager
 				.funding_contributed(
@@ -1912,6 +2068,7 @@ impl Node {
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {:?}", e);
+					self.discard_splice_intent(&payment_id, restore);
 					Error::ChannelSplicingFailed
 				})
 		} else {
@@ -1928,6 +2085,12 @@ impl Node {
 	/// Fee-bumps the pending splice on a channel by replacing its in-flight funding transaction
 	/// (RBF). The splice's amount and destination are preserved; only the fee rate is raised.
 	/// Errors if the channel has no pending splice to bump.
+	///
+	/// The fee bump is retried automatically, including across restarts, until it either completes
+	/// or fails for a reason retrying cannot address, at which point
+	/// [`Event::SpliceNegotiationFailed`] is emitted. If this method returns an error, the fee bump
+	/// is abandoned; however, if the abandonment cannot be persisted, the fee bump may still be
+	/// retried after a restart.
 	pub fn bump_channel_funding_fee(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
@@ -1974,6 +2137,14 @@ impl Node {
 					Error::ChannelSplicingFailed
 				})?;
 
+			let (payment_id, restore) = self.persist_splice_intent(
+				user_channel_id,
+				counterparty_node_id,
+				channel_details,
+				contribution.clone(),
+				SpliceKind::Rbf {},
+			)?;
+
 			self.channel_manager
 				.funding_contributed(
 					&channel_details.channel_id,
@@ -1983,6 +2154,7 @@ impl Node {
 				)
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to RBF channel: {:?}", e);
+					self.discard_splice_intent(&payment_id, restore);
 					Error::ChannelSplicingFailed
 				})
 		} else {
