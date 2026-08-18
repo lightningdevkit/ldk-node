@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bitcoin::hashes::{sha256, Hash, HashEngine};
+use bitcoin::hex::{DisplayHex, FromHex};
 use lightning::util::persist::{
 	KVStore, PageToken, PaginatedKVStore, PaginatedListResponse, NETWORK_GRAPH_PERSISTENCE_KEY,
 	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
@@ -28,6 +29,7 @@ use crate::logger::{LdkLogger, Logger};
 use crate::types::{DynStore, DynStoreWrapper};
 
 const INDEX_DATABASE_ID_LEN: usize = 16;
+const PAGE_TOKEN_FORMAT_VERSION: u8 = 1;
 const INDEX_ENTRIES_PRIMARY_NAMESPACE: &str = "_tier_store_entries";
 const INDEX_JOURNAL_PRIMARY_NAMESPACE: &str = "_tier_store_journal";
 const INDEX_METADATA_PRIMARY_NAMESPACE: &str = "_tier_store_metadata";
@@ -99,9 +101,65 @@ impl JournalEntry {
 	}
 }
 
+struct TierStorePageToken {
+	format_version: u8,
+	index_database_id: Vec<u8>,
+	namespace_id: String,
+	index_page_token: String,
+}
+
+impl_writeable_tlv_based!(TierStorePageToken, {
+	(0, format_version, required),
+	(2, index_database_id, required),
+	(4, namespace_id, required),
+	(6, index_page_token, required),
+});
+
+impl TierStorePageToken {
+	/// Wraps an index-store page token with the context required to validate its later use.
+	fn encode(
+		index_database_id: &[u8; INDEX_DATABASE_ID_LEN], namespace_id: String,
+		index_page_token: PageToken,
+	) -> PageToken {
+		let token = Self {
+			format_version: PAGE_TOKEN_FORMAT_VERSION,
+			index_database_id: index_database_id.to_vec(),
+			namespace_id,
+			index_page_token: index_page_token.to_string(),
+		};
+		PageToken::new(Writeable::encode(&token).to_lower_hex_string())
+	}
+
+	/// Decodes a TierStore token and rejects tokens issued for another index or namespace.
+	fn decode(
+		token: PageToken, expected_database_id: &[u8; INDEX_DATABASE_ID_LEN],
+		expected_namespace_id: &str,
+	) -> io::Result<PageToken> {
+		let encoded = Vec::from_hex(token.as_str()).map_err(|_| {
+			io::Error::new(io::ErrorKind::InvalidInput, "Invalid TierStore page token")
+		})?;
+		let mut reader = &*encoded;
+		let token: Self = Readable::read(&mut reader).map_err(|_| {
+			io::Error::new(io::ErrorKind::InvalidInput, "Invalid TierStore page token")
+		})?;
+		if !reader.is_empty()
+			|| token.format_version != PAGE_TOKEN_FORMAT_VERSION
+			|| token.index_database_id != expected_database_id
+			|| token.namespace_id != expected_namespace_id
+		{
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				"TierStore page token does not belong to this index namespace",
+			));
+		}
+		Ok(PageToken::new(token.index_page_token))
+	}
+}
+
 pub(crate) struct TierStoreIndex {
 	// Holding the store keeps its exclusive SQLite lock for the lifetime of the tier store.
 	store: Arc<DynStore>,
+	database_id: [u8; INDEX_DATABASE_ID_LEN],
 }
 
 impl TierStoreIndex {
@@ -113,14 +171,22 @@ impl TierStoreIndex {
 			Some(KV_TABLE_NAME.to_string()),
 		)?;
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(store));
-		Self::read_or_create_database_id(store.as_ref()).await?;
-		Ok(Self { store })
+		let database_id = Self::read_or_create_database_id(store.as_ref()).await?;
+		Ok(Self { store, database_id })
 	}
 
 	/// Constructs an index over the supplied store for tests that do not need SQLite persistence.
 	#[cfg(test)]
 	fn from_store(store: Arc<DynStore>) -> Self {
-		Self { store }
+		Self { store, database_id: [1; INDEX_DATABASE_ID_LEN] }
+	}
+
+	/// Constructs a test index with a specified database identity.
+	#[cfg(test)]
+	fn from_store_with_database_id(
+		store: Arc<DynStore>, database_id: [u8; INDEX_DATABASE_ID_LEN],
+	) -> Self {
+		Self { store, database_id }
 	}
 
 	/// Derives the internal secondary namespace for a logical namespace pair.
@@ -263,17 +329,25 @@ impl TierStoreIndex {
 		.await
 	}
 
-	/// Lists logical keys in the index store's creation order.
+	/// Lists logical keys in the index store's creation order using a namespace-bound token.
 	async fn list_paginated(
 		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
 	) -> io::Result<PaginatedListResponse> {
-		PaginatedKVStore::list_paginated(
+		let namespace_id = Self::namespace_id(primary_namespace, secondary_namespace);
+		let index_page_token = page_token
+			.map(|token| TierStorePageToken::decode(token, &self.database_id, &namespace_id))
+			.transpose()?;
+		let response = PaginatedKVStore::list_paginated(
 			self.store.as_ref(),
 			INDEX_ENTRIES_PRIMARY_NAMESPACE,
-			&Self::namespace_id(primary_namespace, secondary_namespace),
-			page_token,
+			&namespace_id,
+			index_page_token,
 		)
-		.await
+		.await?;
+		let next_page_token = response
+			.next_page_token
+			.map(|token| TierStorePageToken::encode(&self.database_id, namespace_id, token));
+		Ok(PaginatedListResponse { keys: response.keys, next_page_token })
 	}
 
 	/// Persists a pending operation before its value-store effects begin.
@@ -1351,6 +1425,57 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn page_token_roundtrips_and_validates_context() {
+		let database_id = [2; INDEX_DATABASE_ID_LEN];
+		let namespace_id = TierStoreIndex::namespace_id("primary", "secondary");
+		let token = TierStorePageToken::encode(
+			&database_id,
+			namespace_id.clone(),
+			PageToken::new("opaque:index-token".to_string()),
+		);
+
+		let decoded =
+			TierStorePageToken::decode(token.clone(), &database_id, &namespace_id).unwrap();
+		assert_eq!(decoded.as_str(), "opaque:index-token");
+		assert_eq!(
+			TierStorePageToken::decode(token.clone(), &[3; INDEX_DATABASE_ID_LEN], &namespace_id)
+				.unwrap_err()
+				.kind(),
+			io::ErrorKind::InvalidInput
+		);
+		assert_eq!(
+			TierStorePageToken::decode(token, &database_id, "another-namespace")
+				.unwrap_err()
+				.kind(),
+			io::ErrorKind::InvalidInput
+		);
+		assert_eq!(
+			TierStorePageToken::decode(
+				PageToken::new("not-a-tier-store-token".to_string()),
+				&database_id,
+				&namespace_id,
+			)
+			.unwrap_err()
+			.kind(),
+			io::ErrorKind::InvalidInput
+		);
+		let unsupported_version = TierStorePageToken {
+			format_version: PAGE_TOKEN_FORMAT_VERSION + 1,
+			index_database_id: database_id.to_vec(),
+			namespace_id: namespace_id.clone(),
+			index_page_token: "opaque:index-token".to_string(),
+		};
+		let unsupported_version =
+			PageToken::new(Writeable::encode(&unsupported_version).to_lower_hex_string());
+		assert_eq!(
+			TierStorePageToken::decode(unsupported_version, &database_id, &namespace_id)
+				.unwrap_err()
+				.kind(),
+			io::ErrorKind::InvalidInput
+		);
+	}
+
 	#[tokio::test]
 	async fn index_store_is_internal_persistent_sqlite_store() {
 		let base_dir = random_storage_path();
@@ -1496,6 +1621,47 @@ mod tests {
 		let expected = (0..55).rev().map(|i| format!("existing-{i:02}")).collect::<Vec<_>>();
 		assert_eq!(actual, expected);
 		assert_eq!(KVStore::list(&tier, "namespace", "").await.unwrap().len(), 55);
+	}
+
+	#[tokio::test]
+	async fn paginated_listing_rejects_tokens_from_another_namespace_or_index() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let _cleanup = CleanupDir(base_dir);
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger));
+		let index_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		tier.set_index_store(TierStoreIndex::from_store_with_database_id(
+			index_store,
+			[1; INDEX_DATABASE_ID_LEN],
+		));
+		for i in 0..51 {
+			tier.write("namespace", "", &format!("key-{i:02}"), vec![1]).await.unwrap();
+		}
+		let token = PaginatedKVStore::list_paginated(&tier, "namespace", "", None)
+			.await
+			.unwrap()
+			.next_page_token
+			.unwrap();
+
+		let namespace_error =
+			PaginatedKVStore::list_paginated(&tier, "other-namespace", "", Some(token.clone()))
+				.await
+				.unwrap_err();
+		assert_eq!(namespace_error.kind(), io::ErrorKind::InvalidInput);
+
+		let replacement_index_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		tier.set_index_store(TierStoreIndex::from_store_with_database_id(
+			replacement_index_store,
+			[2; INDEX_DATABASE_ID_LEN],
+		));
+		let index_error = PaginatedKVStore::list_paginated(&tier, "namespace", "", Some(token))
+			.await
+			.unwrap_err();
+		assert_eq!(index_error.kind(), io::ErrorKind::InvalidInput);
 	}
 
 	#[tokio::test]
