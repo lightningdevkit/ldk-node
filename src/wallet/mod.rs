@@ -346,12 +346,12 @@ impl Wallet {
 					// duplicating) the record classification just wrote.
 					let guard = self.funding_payment_update_lock.lock().await;
 
-					let payment_id = self
+					let mut payment_id = self
 						.find_payment_by_txid(txid)
 						.await?
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
-					if self
+					match self
 						.apply_funding_status_update_locked(
 							&guard,
 							payment_id,
@@ -360,7 +360,13 @@ impl Wallet {
 						)
 						.await?
 					{
-						continue;
+						FundingStatusUpdate::Applied => continue,
+						FundingStatusUpdate::NotFunding => {},
+						// Not part of the funding payment's history (e.g. a close spending the
+						// funding outpoint): record it under its own id below instead.
+						FundingStatusUpdate::Foreign => {
+							payment_id = PaymentId(txid.to_byte_array());
+						},
 					}
 
 					let payment = {
@@ -487,12 +493,12 @@ impl Wallet {
 					// with classification.
 					let guard = self.funding_payment_update_lock.lock().await;
 
-					let payment_id = self
+					let mut payment_id = self
 						.find_payment_by_txid(txid)
 						.await?
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
-					if self
+					match self
 						.apply_funding_status_update_locked(
 							&guard,
 							payment_id,
@@ -501,7 +507,13 @@ impl Wallet {
 						)
 						.await?
 					{
-						continue;
+						FundingStatusUpdate::Applied => continue,
+						FundingStatusUpdate::NotFunding => {},
+						// Not part of the funding payment's history (e.g. a close spending the
+						// funding outpoint): record it under its own id below instead.
+						FundingStatusUpdate::Foreign => {
+							payment_id = PaymentId(txid.to_byte_array());
+						},
 					}
 
 					let payment = {
@@ -563,12 +575,12 @@ impl Wallet {
 					// with classification.
 					let guard = self.funding_payment_update_lock.lock().await;
 
-					let payment_id = self
+					let mut payment_id = self
 						.find_payment_by_txid(txid)
 						.await?
 						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
 
-					if self
+					match self
 						.apply_funding_status_update_locked(
 							&guard,
 							payment_id,
@@ -577,7 +589,13 @@ impl Wallet {
 						)
 						.await?
 					{
-						continue;
+						FundingStatusUpdate::Applied => continue,
+						FundingStatusUpdate::NotFunding => {},
+						// Not part of the funding payment's history (e.g. a close spending the
+						// funding outpoint): record it under its own id below instead.
+						FundingStatusUpdate::Foreign => {
+							payment_id = PaymentId(txid.to_byte_array());
+						},
 					}
 
 					let payment = {
@@ -1949,9 +1967,11 @@ impl Wallet {
 	/// If `payment_id` refers to a classified funding payment, refreshes its confirmation status
 	/// and the candidate txid the event refers to, while preserving the contribution-derived
 	/// amount/fee and `tx_type` that wallet sync must not recompute from its own view: the wallet's
-	/// `sent`/`received` don't capture our contribution to a shared funding output. Returns `true`
-	/// when it handled the payment, so the caller skips the default on-chain path. Graduation to
-	/// `Succeeded` is left to `ChainTipChanged` after `ANTI_REORG_DELAY`.
+	/// `sent`/`received` don't capture our contribution to a shared funding output. Returns
+	/// [`FundingStatusUpdate::Applied`] when it handled the payment, so the caller skips the
+	/// default on-chain path — or [`FundingStatusUpdate::Foreign`] when the transaction is not
+	/// part of the payment's funding history, so the caller records it under its own id.
+	/// Graduation to `Succeeded` is left to `ChainTipChanged` after `ANTI_REORG_DELAY`.
 	///
 	/// The caller must hold [`Self::funding_payment_update_lock`] — from resolving `payment_id`
 	/// through its own last write, not just across this call — so that classification's two-store
@@ -1960,38 +1980,51 @@ impl Wallet {
 	async fn apply_funding_status_update_locked(
 		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, payment_id: PaymentId, event_txid: Txid,
 		confirmation_status: ConfirmationStatus,
-	) -> Result<bool, Error> {
+	) -> Result<FundingStatusUpdate, Error> {
 		// The caller's wallet-level lock keeps the candidate history stable while we await its
-		// read. The funding-type gate and write then share the payment store's mutation lock:
-		// against a separate payment `get`, a classification merging in between would have its
-		// `tx_type` and contribution figures clobbered by this stale snapshot.
+		// read. The funding-type gate, the candidate lookup, and the write then share the payment
+		// store's mutation lock: against a separate payment `get`, a classification merging in
+		// between would have its `tx_type` and contribution figures clobbered by this stale
+		// snapshot.
 		let pending_payment = self.pending_payment_store.get(&payment_id).await?;
+		let mut outcome = FundingStatusUpdate::NotFunding;
 		let mut handled = None;
 		self.payment_store
 			.mutate(&payment_id, |existing| {
 				let payment = existing?;
-				let tx_type = match &payment.kind {
+				let (current_txid, tx_type) = match &payment.kind {
 					PaymentKind::Onchain {
+						txid,
 						tx_type:
 							tx_type @ Some(
 								TransactionType::Funding { .. }
 								| TransactionType::InteractiveFunding { .. },
 							),
 						..
-					} => tx_type.clone(),
+					} => (*txid, tx_type.clone()),
 					_ => return None,
 				};
+				// Adopt the event's txid only when the transaction is part of this payment's
+				// funding history: its current txid or a classified candidate. A conflicting
+				// transaction that is neither — a close also spends the funding outpoint — must
+				// not overwrite the record.
+				let owns_event_tx = event_txid == current_txid
+					|| pending_payment.as_ref().is_some_and(|p| p.candidate(event_txid).is_some());
+				if !owns_event_tx {
+					outcome = FundingStatusUpdate::Foreign;
+					return None;
+				}
 				// Report the figures of the candidate that actually confirmed, which need not be
 				// the last one broadcast (an earlier, lower-fee candidate may win) and may carry
 				// no figures at all (`None`) for a round we didn't contribute to. (`direction` is
 				// invariant across a splice's candidates and cannot be changed through the store
 				// anyway.)
 				let mut target = payment.clone();
-				if let Some(pending) = pending_payment.as_ref() {
-					if let Some(candidate) = pending.candidate(event_txid) {
-						target.amount_msat = candidate.amount_msat;
-						target.fee_paid_msat = candidate.fee_paid_msat;
-					}
+				if let Some(candidate) =
+					pending_payment.as_ref().and_then(|p| p.candidate(event_txid))
+				{
+					target.amount_msat = candidate.amount_msat;
+					target.fee_paid_msat = candidate.fee_paid_msat;
 				}
 				target.kind =
 					PaymentKind::Onchain { txid: event_txid, status: confirmation_status, tx_type };
@@ -2009,7 +2042,7 @@ impl Wallet {
 			})
 			.await?;
 		let Some(payment) = handled else {
-			return Ok(false);
+			return Ok(outcome);
 		};
 		// Mirror the refreshed confirmation status onto the pending entry: `ChainTipChanged`
 		// graduates by reading the pending entry's details, so it must see the new status. This is
@@ -2019,7 +2052,7 @@ impl Wallet {
 			let pending = self.create_pending_payment_from_tx(payment, Vec::new());
 			self.pending_payment_store.insert_or_update(pending).await?;
 		}
-		Ok(true)
+		Ok(FundingStatusUpdate::Applied)
 	}
 
 	#[allow(deprecated)]
@@ -2320,6 +2353,20 @@ fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
 		fee_paid_msat: Some(fee.to_sat() * 1000),
 		direction,
 	}
+}
+
+/// The outcome of [`Wallet::apply_funding_status_update_locked`].
+enum FundingStatusUpdate {
+	/// The event's transaction belongs to the funding payment; its refreshed confirmation status
+	/// was applied (or was already current).
+	Applied,
+	/// The resolved payment is not a classified funding payment; the caller's default on-chain
+	/// handling applies under the resolved id.
+	NotFunding,
+	/// The event's transaction is not part of the funding payment's history — e.g. a close
+	/// spending the same funding outpoint — so the funding record must not adopt it; the caller
+	/// should record the transaction under its own txid-derived id.
+	Foreign,
 }
 
 impl Listen for Wallet {
@@ -4046,6 +4093,98 @@ mod tests {
 
 		// Removing an id known to neither store is also a no-op rather than an error.
 		wallet.remove_payment(&PaymentId([8u8; 32])).await.unwrap();
+	}
+
+	/// A cooperative close conflicts with a pending splice's funding transaction — both spend the
+	/// pre-splice funding outpoint — so sync records the close among the splice record's
+	/// conflicting txids, and the close's confirmation then resolves to the splice's PaymentId.
+	/// The funding record must not adopt the close's txid and confirmation as its own: the close
+	/// is not a round of the splice. It must land on a record keyed by the close's own id.
+	#[tokio::test]
+	async fn funding_record_does_not_adopt_a_conflicting_close() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let funding_outpoint =
+			bitcoin::OutPoint { txid: Txid::from_byte_array([3u8; 32]), vout: 0 };
+
+		// The close pays the shutdown script, which is a wallet address.
+		let script_pubkey = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::External)
+			.address
+			.script_pubkey();
+		let close_tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: vec![bitcoin::TxIn {
+				previous_output: funding_outpoint,
+				script_sig: bitcoin::ScriptBuf::new(),
+				sequence: bitcoin::Sequence::MAX,
+				witness: bitcoin::Witness::new(),
+			}],
+			output: vec![TxOut { value: Amount::from_sat(90_000), script_pubkey }],
+		};
+		let close_txid = close_tx.compute_txid();
+
+		let splice_txid = Txid::from_byte_array([2u8; 32]);
+		let payment_id = PaymentId([21u8; 32]);
+		let candidates = vec![FundingTxCandidate {
+			txid: splice_txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let details =
+			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+		wallet.persist_funding_payment(details, candidates).await.unwrap();
+
+		// Sync saw the close double-spend the splice's funding transaction.
+		wallet
+			.pending_payment_store
+			.update(PendingPaymentDetailsUpdate {
+				id: payment_id,
+				payment_update: None,
+				conflicting_txids: Some(vec![close_txid]),
+				candidates: Vec::new(),
+			})
+			.await
+			.unwrap();
+
+		let event = WalletEvent::TxConfirmed {
+			txid: close_txid,
+			tx: Arc::new(close_tx),
+			block_time: confirmed_block_time(5),
+			old_block_time: None,
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let funding = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		match &funding.kind {
+			PaymentKind::Onchain { txid, status, tx_type } => {
+				assert_eq!(*txid, splice_txid, "the record must not adopt the close's txid");
+				assert!(matches!(status, ConfirmationStatus::Unconfirmed));
+				assert!(matches!(tx_type, Some(TransactionType::InteractiveFunding { .. })));
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
+		assert_eq!(funding.amount_msat, Some(1_000_000));
+		assert_eq!(funding.fee_paid_msat, Some(500));
+
+		let close = wallet
+			.payment_store
+			.get(&PaymentId(close_txid.to_byte_array()))
+			.await
+			.unwrap()
+			.unwrap();
+		match &close.kind {
+			PaymentKind::Onchain { txid, status, .. } => {
+				assert_eq!(*txid, close_txid);
+				assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
 	}
 
 	/// A funding-typed broadcast that doesn't touch the on-chain wallet must not be recorded.
