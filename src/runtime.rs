@@ -13,6 +13,8 @@ use std::time::Duration;
 
 use lightning::util::native_async::FutureSpawner;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 use crate::config::{
 	BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECS, LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS,
@@ -28,13 +30,20 @@ pub(crate) struct Runtime {
 }
 
 struct CancellableBackgroundTasks {
-	tasks: JoinSet<()>,
-	accepting_tasks: bool,
+	tasks: TaskTracker,
+	cancellation_token: CancellationToken,
 }
 
 impl CancellableBackgroundTasks {
 	fn new() -> Self {
-		Self { tasks: JoinSet::new(), accepting_tasks: true }
+		Self { tasks: TaskTracker::new(), cancellation_token: CancellationToken::new() }
+	}
+}
+
+impl Drop for CancellableBackgroundTasks {
+	fn drop(&mut self) {
+		self.tasks.close();
+		self.cancellation_token.cancel();
 	}
 }
 
@@ -109,9 +118,8 @@ impl Runtime {
 	where
 		F: Future<Output = ()> + Send + 'static,
 	{
-		let mut cancellable_background_tasks =
-			self.cancellable_background_tasks.lock().expect("lock");
-		if !cancellable_background_tasks.accepting_tasks {
+		let cancellable_background_tasks = self.cancellable_background_tasks.lock().expect("lock");
+		if cancellable_background_tasks.tasks.is_closed() {
 			log_trace!(
 				self.logger,
 				"Ignoring cancellable background task spawned during shutdown."
@@ -122,11 +130,28 @@ impl Runtime {
 		// Since it seems to make a difference to `tokio` (see
 		// https://docs.rs/tokio/latest/tokio/time/fn.timeout.html#panics) we make sure the futures
 		// are always put in an `async` / `.await` closure.
-		cancellable_background_tasks.tasks.spawn_on(async { future.await }, runtime_handle);
+		let cancellation_token = cancellable_background_tasks.cancellation_token.clone();
+		// Detach the handle while the tracker continues tracking the task.
+		let _ = cancellable_background_tasks.tasks.spawn_on(
+			async move {
+				tokio::select! {
+					biased;
+					_ = cancellation_token.cancelled() => {},
+					_ = future => {},
+				}
+			},
+			runtime_handle,
+		);
 	}
 
 	pub fn allow_cancellable_background_task_spawns(&self) {
-		self.cancellable_background_tasks.lock().expect("lock").accepting_tasks = true;
+		let mut cancellable_background_tasks =
+			self.cancellable_background_tasks.lock().expect("lock");
+		if cancellable_background_tasks.tasks.is_closed() {
+			// An abort may still be waiting on a clone of the previous task tracker. Start a new
+			// generation instead of reopening that tracker underneath the in-flight wait.
+			*cancellable_background_tasks = CancellableBackgroundTasks::new();
+		}
 	}
 
 	pub fn spawn_background_processor_task<F>(&self, future: F)
@@ -164,15 +189,14 @@ impl Runtime {
 	}
 
 	pub fn abort_cancellable_background_tasks(&self) {
-		let mut tasks = {
-			let mut cancellable_background_tasks =
+		let tasks = {
+			let cancellable_background_tasks =
 				self.cancellable_background_tasks.lock().expect("lock");
-			cancellable_background_tasks.accepting_tasks = false;
-			core::mem::take(&mut cancellable_background_tasks.tasks)
+			cancellable_background_tasks.tasks.close();
+			cancellable_background_tasks.cancellation_token.cancel();
+			cancellable_background_tasks.tasks.clone()
 		};
-		debug_assert!(tasks.len() > 0, "Expected some cancellable background_tasks");
-		tasks.abort_all();
-		self.block_on(async { while let Some(_) = tasks.join_next().await {} })
+		self.block_on(tasks.wait())
 	}
 
 	pub fn wait_on_background_tasks(&self) {
@@ -381,19 +405,68 @@ impl FutureSpawner for RuntimeSpawner {
 
 #[cfg(test)]
 mod tests {
-	use tokio::sync::oneshot;
+	use tokio::sync::{mpsc, oneshot};
 
 	use super::*;
+
+	struct DropNotifier(Option<oneshot::Sender<()>>);
+
+	impl Drop for DropNotifier {
+		fn drop(&mut self) {
+			if let Some(sender) = self.0.take() {
+				let _ = sender.send(());
+			}
+		}
+	}
 
 	fn test_runtime() -> Runtime {
 		Runtime::new(Arc::new(Logger::new_log_facade())).unwrap()
 	}
 
 	#[test]
+	fn completed_cancellable_tasks_are_released_before_shutdown() {
+		const TASK_COUNT: usize = 64;
+
+		let runtime = test_runtime();
+		let (completion_sender, mut completion_receiver) = mpsc::channel(TASK_COUNT);
+		for _ in 0..TASK_COUNT {
+			let completion_sender = completion_sender.clone();
+			runtime.spawn_cancellable_background_task(async move {
+				completion_sender.send(()).await.expect("completion receiver should be open");
+			});
+		}
+		drop(completion_sender);
+
+		let completed_tasks_are_released = runtime.block_on(async {
+			for _ in 0..TASK_COUNT {
+				completion_receiver.recv().await.expect("cancellable task should complete");
+			}
+
+			tokio::time::timeout(Duration::from_secs(1), async {
+				loop {
+					if runtime.cancellable_background_tasks.lock().expect("lock").tasks.is_empty() {
+						break;
+					}
+					tokio::task::yield_now().await;
+				}
+			})
+			.await
+			.is_ok()
+		});
+
+		assert!(
+			completed_tasks_are_released,
+			"completed cancellable tasks should be released before shutdown"
+		);
+	}
+
+	#[test]
 	fn late_cancellable_spawns_are_not_polled_after_abort() {
 		let runtime = test_runtime();
 		let (started_sender, started_receiver) = oneshot::channel();
+		let (dropped_sender, dropped_receiver) = oneshot::channel();
 		runtime.spawn_cancellable_background_task(async move {
+			let _drop_notifier = DropNotifier(Some(dropped_sender));
 			let _ = started_sender.send(());
 			std::future::pending::<()>().await;
 		});
@@ -402,6 +475,9 @@ mod tests {
 		});
 
 		runtime.abort_cancellable_background_tasks();
+		runtime.block_on(async {
+			dropped_receiver.await.expect("aborted task should be dropped before abort returns");
+		});
 
 		let (late_spawn_sender, late_spawn_receiver) = oneshot::channel();
 		runtime.spawn_cancellable_background_task(async move {
@@ -429,5 +505,99 @@ mod tests {
 			restarted_receiver.await.expect("spawn should be allowed after restart");
 		});
 		runtime.abort_cancellable_background_tasks();
+	}
+
+	#[test]
+	fn restart_does_not_reopen_draining_task_tracker() {
+		let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
+			.worker_threads(1)
+			.enable_all()
+			.build()
+			.expect("test runtime");
+		let runtime = Arc::new(Runtime::with_handle(
+			tokio_runtime.handle().clone(),
+			Arc::new(Logger::new_log_facade()),
+		));
+
+		let (tracked_started_sender, tracked_started_receiver) = std::sync::mpsc::sync_channel(1);
+		runtime.spawn_cancellable_background_task(async move {
+			tracked_started_sender.send(()).expect("test should still be running");
+			std::future::pending::<()>().await;
+		});
+		tracked_started_receiver
+			.recv_timeout(Duration::from_secs(1))
+			.expect("tracked task should start");
+
+		// Keep the only worker busy so cancellation cannot finish before a restart begins.
+		let blocker_barrier = Arc::new(std::sync::Barrier::new(2));
+		let task_barrier = Arc::clone(&blocker_barrier);
+		let (blocker_started_sender, blocker_started_receiver) = std::sync::mpsc::sync_channel(1);
+		tokio_runtime.handle().spawn(async move {
+			blocker_started_sender.send(()).expect("test should still be running");
+			task_barrier.wait();
+		});
+		blocker_started_receiver
+			.recv_timeout(Duration::from_secs(1))
+			.expect("worker blocker should start");
+
+		let abort_runtime = Arc::clone(&runtime);
+		let abort_thread =
+			std::thread::spawn(move || abort_runtime.abort_cancellable_background_tasks());
+		let deadline = std::time::Instant::now() + Duration::from_secs(1);
+		let draining_tasks = loop {
+			let tasks = runtime.cancellable_background_tasks.lock().expect("lock").tasks.clone();
+			if tasks.is_closed() {
+				break tasks;
+			}
+			assert!(std::time::Instant::now() < deadline, "abort should close the task tracker");
+			std::thread::yield_now();
+		};
+
+		let restart_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			runtime.allow_cancellable_background_task_spawns();
+		}));
+		let draining_tracker_stayed_closed = draining_tasks.is_closed();
+		// Ensure a broken implementation that reopens the old generation can still shut down.
+		if !draining_tracker_stayed_closed {
+			draining_tasks.close();
+		}
+		blocker_barrier.wait();
+		abort_thread.join().expect("abort should finish");
+
+		assert!(
+			restart_result.is_ok(),
+			"restart should use a new task tracker while the previous tracker drains"
+		);
+		assert!(draining_tracker_stayed_closed, "restart should not reopen the draining tracker");
+	}
+
+	#[test]
+	fn dropping_runtime_cancels_detached_tasks() {
+		let tokio_runtime =
+			tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("test runtime");
+		let runtime = Runtime::with_handle(
+			tokio_runtime.handle().clone(),
+			Arc::new(Logger::new_log_facade()),
+		);
+		let (started_sender, started_receiver) = oneshot::channel();
+		let (dropped_sender, dropped_receiver) = oneshot::channel();
+		runtime.spawn_cancellable_background_task(async move {
+			let _drop_notifier = DropNotifier(Some(dropped_sender));
+			let _ = started_sender.send(());
+			std::future::pending::<()>().await;
+		});
+		tokio_runtime.block_on(async {
+			started_receiver.await.expect("task should start");
+		});
+
+		drop(runtime);
+
+		let task_was_dropped = tokio_runtime.block_on(async {
+			matches!(
+				tokio::time::timeout(Duration::from_secs(1), dropped_receiver).await,
+				Ok(Ok(()))
+			)
+		});
+		assert!(task_was_dropped, "dropping the runtime should cancel detached tasks");
 	}
 }
