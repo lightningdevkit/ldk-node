@@ -363,25 +363,38 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 pub(crate) fn random_chain_source<'a>(
 	bitcoind: &'a BitcoinD, electrsd: &'a ElectrsD,
 ) -> TestChainSource<'a> {
-	let r = rand::random_range(0..4);
-	match r {
-		0 => {
+	let configured_sources = env::var("LDK_NODE_TEST_CHAIN_SOURCES").ok().map(|value| {
+		value
+			.split(|c: char| c == ',' || c.is_ascii_whitespace())
+			.filter(|source| !source.is_empty())
+			.map(|source| source.to_ascii_uppercase())
+			.collect::<Vec<_>>()
+	});
+	let sources = configured_sources.unwrap_or_else(|| {
+		["ESPLORA", "ELECTRUM", "BITCOIND_RPC", "BITCOIND_REST"]
+			.into_iter()
+			.map(String::from)
+			.collect()
+	});
+	let source = &sources[rand::random_range(0..sources.len())];
+	match source.as_str() {
+		"ESPLORA" => {
 			println!("Randomly setting up Esplora chain syncing...");
 			TestChainSource::Esplora(electrsd)
 		},
-		1 => {
+		"ELECTRUM" => {
 			println!("Randomly setting up Electrum chain syncing...");
 			TestChainSource::Electrum(electrsd)
 		},
-		2 => {
+		"BITCOIND_RPC" => {
 			println!("Randomly setting up Bitcoind RPC chain syncing...");
 			TestChainSource::BitcoindRpcSync(bitcoind)
 		},
-		3 => {
+		"BITCOIND_REST" => {
 			println!("Randomly setting up Bitcoind REST chain syncing...");
 			TestChainSource::BitcoindRestSync(bitcoind)
 		},
-		_ => unreachable!(),
+		_ => panic!("Unknown test chain source: {source}"),
 	}
 }
 
