@@ -93,6 +93,20 @@ fun waitForBlock(esploraEndpoint: String, blockHash: String) {
     }
 }
 
+fun closeChannelWithRetry(closeChannel: () -> Unit) {
+    repeat(50) { attempt ->
+        try {
+            closeChannel()
+            return
+        } catch (exception: NodeException.ChannelClosingFailed) {
+            if (attempt == 49) {
+                throw exception
+            }
+            Thread.sleep(100)
+        }
+    }
+}
+
 class CustomLogWriter(private var currentLogLevel: LogLevel = LogLevel.INFO) :
     LogWriter {
     enum class LogLevel {
@@ -304,7 +318,7 @@ class LibraryTest {
         assert(node1.listPayments().size == 3)
         assert(node2.listPayments().size == 2)
 
-        node2.closeChannel(userChannelId, nodeId1)
+        closeChannelWithRetry { node2.closeChannel(userChannelId, nodeId1) }
 
         val channelClosedEvent1 = node1.waitNextEvent()
         println("Got event: $channelClosedEvent1")
