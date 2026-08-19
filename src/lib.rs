@@ -173,7 +173,7 @@ use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, PaymentDetailsPage,
+	Bolt11Payment, Bolt12Payment, HRNResolver, OnchainPayment, PaymentDetails, PaymentDetailsPage,
 	SpontaneousPayment, UnifiedPayment,
 };
 use peer_store::{PeerInfo, PeerStore};
@@ -184,8 +184,7 @@ use runtime::Runtime;
 pub use tokio;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	HRNResolver, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper,
-	Wallet,
+	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{
 	ChannelCounterparty, ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId,

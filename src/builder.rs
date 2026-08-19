@@ -77,6 +77,7 @@ use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::payment::HRNResolver;
 use crate::peer_store::PeerStore;
 use crate::probing::{
 	HighDegreeStrategy, Prober, ProbingConfig, ProbingStrategy, ProbingStrategyKind,
@@ -86,8 +87,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
-	PeerManager, PendingPaymentStore,
+	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
+	PendingPaymentStore,
 };
 use crate::wallet::persist::{read_address_pool, KVStoreWalletPersister};
 use crate::wallet::Wallet;

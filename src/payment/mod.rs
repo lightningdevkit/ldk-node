@@ -10,6 +10,7 @@
 pub(crate) mod asynchronous;
 mod bolt11;
 mod bolt12;
+mod hrn;
 mod onchain;
 pub(crate) mod pending_payment_store;
 mod spontaneous;
@@ -19,6 +20,7 @@ mod unified;
 pub use bolt11::Bolt11Payment;
 pub(crate) use bolt11::PaymentMetadata;
 pub use bolt12::{Bolt12Payment, PayerProofOptions};
+pub(crate) use hrn::HRNResolver;
 pub use onchain::OnchainPayment;
 pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
 pub use spontaneous::SpontaneousPayment;

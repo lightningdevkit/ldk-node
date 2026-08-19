@@ -33,8 +33,8 @@ use crate::config::HRN_RESOLUTION_TIMEOUT_SECS;
 use crate::error::Error;
 use crate::ffi::maybe_wrap;
 use crate::logger::{log_error, LdkLogger, Logger};
+use crate::payment::HRNResolver;
 use crate::payment::{Bolt11Payment, Bolt12Payment, OnchainPayment};
-use crate::types::HRNResolver;
 use crate::Config;
 
 type Uri<'a> = bip21::Uri<'a, NetworkChecked, Extras>;
