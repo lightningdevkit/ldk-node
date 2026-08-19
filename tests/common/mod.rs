@@ -591,6 +591,9 @@ impl Default for TestConfig {
 		let store_type = Default::default();
 
 		let mnemonic = generate_entropy_mnemonic(None);
+		#[cfg(feature = "uniffi")]
+		let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic.to_string(), None).unwrap();
+		#[cfg(not(feature = "uniffi"))]
 		let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 		let async_payments_role = None;
 		let wallet_rescan_from_height = None;

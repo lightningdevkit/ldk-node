@@ -19,6 +19,8 @@ use crate::io;
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Error))]
 pub enum EntropyError {
+	/// The given BIP 39 mnemonic is invalid.
+	InvalidMnemonic,
 	/// The given seed bytes are invalid, e.g., have invalid length.
 	InvalidSeedBytes,
 	/// The given seed file is invalid, e.g., has invalid length, or could not be read.
@@ -28,6 +30,7 @@ pub enum EntropyError {
 impl fmt::Display for EntropyError {
 	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
 		match *self {
+			Self::InvalidMnemonic => write!(f, "Given BIP 39 mnemonic is invalid."),
 			Self::InvalidSeedBytes => write!(f, "Given seed bytes are invalid."),
 			Self::InvalidSeedFile => write!(f, "Given seed file is invalid or could not be read."),
 		}
@@ -45,6 +48,18 @@ impl std::error::Error for EntropyError {}
 pub struct NodeEntropy([u8; WALLET_KEYS_SEED_LEN]);
 
 impl NodeEntropy {
+	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
+	///
+	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
+	/// [`Node`]: crate::Node
+	#[cfg(not(feature = "uniffi"))]
+	pub fn from_bip39_mnemonic(mnemonic: Mnemonic, passphrase: Option<String>) -> Self {
+		match passphrase {
+			Some(passphrase) => Self(mnemonic.to_seed(passphrase)),
+			None => Self(mnemonic.to_seed("")),
+		}
+	}
+
 	/// Configures the [`Node`] instance to source its wallet entropy from the given
 	/// [`WALLET_KEYS_SEED_LEN`] seed bytes.
 	///
@@ -63,13 +78,19 @@ impl NodeEntropy {
 impl NodeEntropy {
 	/// Configures the [`Node`] instance to source its wallet entropy from a [BIP 39] mnemonic.
 	///
+	/// Will return an error if the given mnemonic is invalid.
+	///
 	/// [BIP 39]: https://github.com/bitcoin/bips/blob/master/bip-0039.mediawiki
 	/// [`Node`]: crate::Node
-	#[cfg_attr(feature = "uniffi", uniffi::constructor)]
-	pub fn from_bip39_mnemonic(mnemonic: Mnemonic, passphrase: Option<String>) -> Self {
+	#[cfg(feature = "uniffi")]
+	#[uniffi::constructor]
+	pub fn from_bip39_mnemonic(
+		mnemonic: String, passphrase: Option<String>,
+	) -> Result<NodeEntropy, EntropyError> {
+		let mnemonic = Mnemonic::parse(&mnemonic).map_err(|_| EntropyError::InvalidMnemonic)?;
 		match passphrase {
-			Some(passphrase) => Self(mnemonic.to_seed(passphrase)),
-			None => Self(mnemonic.to_seed("")),
+			Some(passphrase) => Ok(Self(mnemonic.to_seed(passphrase))),
+			None => Ok(Self(mnemonic.to_seed(""))),
 		}
 	}
 
@@ -165,6 +186,21 @@ impl WordCount {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[cfg(feature = "uniffi")]
+	#[test]
+	fn invalid_mnemonic_returns_error() {
+		// A bad checksum must yield an error rather than an argument-lift panic that
+		// aborts the process in the Swift bindings.
+		let invalid = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
+		assert_eq!(
+			NodeEntropy::from_bip39_mnemonic(invalid.to_string(), None).err(),
+			Some(EntropyError::InvalidMnemonic)
+		);
+
+		let valid = generate_entropy_mnemonic(None);
+		assert!(NodeEntropy::from_bip39_mnemonic(valid.to_string(), None).is_ok());
+	}
 
 	#[test]
 	fn mnemonic_to_entropy_to_mnemonic() {
