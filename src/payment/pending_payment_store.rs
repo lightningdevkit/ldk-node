@@ -9,7 +9,7 @@ use bitcoin::Txid;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
 
-use crate::data_store::{StorableObject, StorableObjectUpdate};
+use crate::data_store::{StorableObject, StorableObjectUpdate, UpdatableObject};
 use crate::payment::store::PaymentDetailsUpdate;
 use crate::payment::{PaymentDetails, PaymentKind};
 
@@ -78,11 +78,14 @@ pub(crate) struct PendingPaymentDetailsUpdate {
 
 impl StorableObject for PendingPaymentDetails {
 	type Id = PaymentId;
-	type Update = PendingPaymentDetailsUpdate;
 
 	fn id(&self) -> Self::Id {
 		self.details.id
 	}
+}
+
+impl UpdatableObject for PendingPaymentDetails {
+	type Update = PendingPaymentDetailsUpdate;
 
 	fn update(&mut self, update: Self::Update) -> bool {
 		let mut updated = false;
