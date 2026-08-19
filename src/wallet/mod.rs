@@ -2033,6 +2033,13 @@ impl Wallet {
 	pub(crate) async fn bump_fee_rbf(
 		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>, cur_anchor_reserve_sats: u64,
 	) -> Result<Txid, Error> {
+		let mut locked_persister = self.persister.lock().await;
+		// Hold the cross-store lock from the record read through the replacement writes: funding
+		// classification re-types records concurrently, and a classification landing after the
+		// funding-kind check below would let the RBF replace a funding transaction. Acquired
+		// after the persister, matching the lock order of the wallet sync paths.
+		let funding_guard = self.funding_payment_update_lock.lock().await;
+
 		let payment = self.payment_store.get(&payment_id).ok_or_else(|| {
 			log_error!(self.logger, "Payment {} not found in payment store", payment_id);
 			Error::InvalidPaymentId
@@ -2091,7 +2098,6 @@ impl Wallet {
 			},
 		};
 
-		let mut locked_persister = self.persister.lock().await;
 		let mut locked_wallet = self.inner.lock().expect("lock");
 
 		debug_assert!(
@@ -2278,6 +2284,7 @@ impl Wallet {
 
 		self.payment_store.insert_or_update(new_payment).await?;
 		self.pending_payment_store.insert_or_update(pending_payment_store).await?;
+		drop(funding_guard);
 
 		self.broadcaster.broadcast_unclassified_transaction(fee_bumped_tx);
 
@@ -4426,5 +4433,106 @@ mod tests {
 			&payment.kind,
 			PaymentKind::Onchain { tx_type: Some(TransactionType::InteractiveFunding { .. }), .. }
 		));
+	}
+
+	/// An on-chain RBF bump must not replace a record a concurrent classification re-types as
+	/// channel funding: the replacement would double-spend the channel's funding transaction.
+	/// The bump is parked on the persister lock and classification lands while it waits; unless
+	/// the bump holds the cross-store lock from its funding-kind check through its writes, it
+	/// proceeds on the stale pre-classification read and retargets the funding record to the
+	/// replacement it broadcasts.
+	#[tokio::test]
+	async fn fee_bump_waits_for_funding_classification() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		// A confirmed parent funds the wallet so it can build and sign a replaceable spend. The
+		// checkpoint and anchor make the parent canonical: fee bumping resolves the spent
+		// prevouts and signing reads the full parent transaction from the graph.
+		let parent_spk = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::External)
+			.address
+			.script_pubkey();
+		let parent = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: Vec::new(),
+			output: vec![TxOut { value: Amount::from_sat(100_000), script_pubkey: parent_spk }],
+		};
+		let parent_txid = parent.compute_txid();
+		{
+			let mut locked_wallet = wallet.inner.lock().unwrap();
+			let block_id =
+				BlockId { height: 100, hash: bitcoin::BlockHash::from_byte_array([1u8; 32]) };
+			let chain = locked_wallet.latest_checkpoint().insert(block_id);
+			let mut tx_update = bdk_chain::TxUpdate::default();
+			tx_update.txs = vec![Arc::new(parent)];
+			tx_update.anchors =
+				[(ConfirmationBlockTime { block_id, confirmation_time: 0 }, parent_txid)].into();
+			let update = bdk_wallet::Update { chain: Some(chain), tx_update, ..Default::default() };
+			locked_wallet.apply_update(update).unwrap();
+		}
+
+		// The wallet builds and signs the replaceable transaction itself, which keeps it
+		// RBF-signaling and its change output claimable for the extra fee.
+		let tx = {
+			let mut locked_wallet = wallet.inner.lock().unwrap();
+			let foreign_spk =
+				ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([0xab; 20]));
+			let mut builder = locked_wallet.build_tx();
+			builder.add_recipient(foreign_spk, Amount::from_sat(20_000));
+			let mut psbt = builder.finish().unwrap();
+			assert!(locked_wallet.sign(&mut psbt, SignOptions::default()).unwrap());
+			psbt.extract_tx().unwrap()
+		};
+		let txid = tx.compute_txid();
+		let payment_id = PaymentId(txid.to_byte_array());
+
+		// Observing the spend in the mempool mints the plain on-chain record — the same state an
+		// interactively funded round observed by wallet sync before classification leaves behind.
+		wallet.apply_mempool_txs(vec![(tx, 1_000)], Vec::new()).await.unwrap();
+		let seeded = wallet.payment_store.get(&payment_id).expect("record for the mempool tx");
+		assert!(matches!(&seeded.kind, PaymentKind::Onchain { tx_type: None, .. }));
+		assert_eq!(seeded.direction, PaymentDirection::Outbound);
+
+		// Park the bump on the persister lock and classify while it waits. Classification
+		// serializes on the cross-store lock, not the persister, so it runs to completion while
+		// the bump is parked. Polling the bump first runs it synchronously to its first await:
+		// with an unlocked gate that is the persister acquisition after the funding-kind check,
+		// so the stale decision is already made; code that takes the locks before reading parks
+		// before the read, so either arrival order converges on the same final state.
+		let persister_guard = wallet.persister.lock().await;
+		let candidates = vec![FundingTxCandidate {
+			txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let details = interactive_funding_details(payment_id, txid, Some(1_000_000), Some(500));
+		let bump = wallet.bump_fee_rbf(payment_id, None, 0);
+		let classify = async {
+			wallet.persist_funding_payment(details, candidates).await.unwrap();
+			drop(persister_guard);
+		};
+		let (result, ()) = tokio::join!(bump, classify);
+
+		assert!(result.is_err(), "an RBF bump replaced a freshly-classified funding record");
+		let payments = wallet.payment_store.list_filter(|_| true);
+		assert_eq!(payments.len(), 1);
+		let payment = &payments[0];
+		assert_eq!(payment.amount_msat, Some(1_000_000));
+		assert_eq!(payment.fee_paid_msat, Some(500));
+		match &payment.kind {
+			PaymentKind::Onchain {
+				txid: current,
+				tx_type: Some(TransactionType::InteractiveFunding { .. }),
+				..
+			} => {
+				assert_eq!(*current, txid, "the funding record must keep its own transaction");
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
 	}
 }
