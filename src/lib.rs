@@ -123,11 +123,7 @@ use bitcoin::secp256k1::PublicKey;
 #[cfg(feature = "uniffi")]
 pub use bitcoin::FeeRate;
 use bitcoin::{Address, Amount, BlockHash, Network};
-#[cfg(feature = "uniffi")]
-pub use builder::ArcedNodeBuilder as Builder;
-pub use builder::BuildError;
-#[cfg(not(feature = "uniffi"))]
-pub use builder::NodeBuilder as Builder;
+pub use builder::{BuildError, Builder};
 use chain::ChainSource;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,

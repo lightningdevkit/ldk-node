@@ -318,6 +318,9 @@ pub struct NodeBuilder {
 	probing_config: Option<ProbingConfig>,
 }
 
+#[cfg(not(feature = "uniffi"))]
+pub use self::NodeBuilder as Builder;
+
 impl NodeBuilder {
 	/// Creates a new builder instance with the default configuration.
 	pub fn new() -> Self {
@@ -966,6 +969,9 @@ impl NodeBuilder {
 pub struct ArcedNodeBuilder {
 	inner: RwLock<NodeBuilder>,
 }
+
+#[cfg(feature = "uniffi")]
+pub use self::ArcedNodeBuilder as Builder;
 
 #[cfg(feature = "uniffi")]
 impl ArcedNodeBuilder {
