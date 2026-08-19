@@ -14,7 +14,7 @@ use crate::chain::ChainSource;
 use crate::config::{RGS_SNAPSHOT_MAX_SIZE, RGS_SYNC_TIMEOUT_SECS};
 use crate::logger::{log_error, log_trace, LdkLogger, Logger};
 use crate::runtime::{Runtime, RuntimeSpawner};
-use crate::types::{GossipSync, Graph, P2PGossipSync, RapidGossipSync};
+use crate::types::{GossipSync, Graph, P2PGossipSync, RapidGossipSync, UtxoLookup};
 use crate::Error;
 
 pub(crate) enum GossipSource {
@@ -36,6 +36,7 @@ impl GossipSource {
 	) -> Self {
 		let verifier = chain_source.as_utxo_source().map(|utxo_source| {
 			Arc::new(GossipVerifier::new(Arc::new(utxo_source), RuntimeSpawner::new(runtime)))
+				as Arc<UtxoLookup>
 		});
 
 		let gossip_sync = Arc::new(P2PGossipSync::new(network_graph, verifier, logger));
