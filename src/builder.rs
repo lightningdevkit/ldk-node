@@ -998,14 +998,17 @@ pub struct ArcedNodeBuilder {
 pub use self::ArcedNodeBuilder as Builder;
 
 #[cfg(feature = "uniffi")]
-impl ArcedNodeBuilder {
+#[uniffi::export]
+impl Builder {
 	/// Creates a new builder instance with the default configuration.
+	#[uniffi::constructor]
 	pub fn new() -> Self {
 		let inner = RwLock::new(NodeBuilder::new());
 		Self { inner }
 	}
 
 	/// Creates a new builder instance from an [`Config`].
+	#[uniffi::constructor]
 	pub fn from_config(config: Config) -> Self {
 		let inner = RwLock::new(NodeBuilder::from_config(config));
 		Self { inner }
@@ -1013,7 +1016,8 @@ impl ArcedNodeBuilder {
 }
 
 #[cfg(all(feature = "uniffi", feature = "chain-esplora"))]
-impl ArcedNodeBuilder {
+#[uniffi::export]
+impl Builder {
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
 	///
 	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
@@ -1023,7 +1027,10 @@ impl ArcedNodeBuilder {
 	) {
 		self.inner.write().expect("lock").set_chain_source_esplora(server_url, sync_config);
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "chain-esplora"))]
+impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
 	///
 	/// The given `headers` will be included in all requests to the Esplora server, typically used for
@@ -1044,7 +1051,8 @@ impl ArcedNodeBuilder {
 }
 
 #[cfg(all(feature = "uniffi", feature = "chain-electrum"))]
-impl ArcedNodeBuilder {
+#[uniffi::export]
+impl Builder {
 	/// Configures the [`Node`] instance to source its chain data from the given Electrum server.
 	///
 	/// If no `sync_config` is given, default values are used. See [`ElectrumSyncConfig`] for more
@@ -1057,7 +1065,8 @@ impl ArcedNodeBuilder {
 }
 
 #[cfg(all(feature = "uniffi", feature = "chain-bitcoind"))]
-impl ArcedNodeBuilder {
+#[uniffi::export]
+impl Builder {
 	/// Configures the [`Node`] instance to connect to a Bitcoin Core node via RPC.
 	///
 	/// This method establishes an RPC connection that enables all essential chain operations including
@@ -1113,7 +1122,8 @@ impl ArcedNodeBuilder {
 }
 
 #[cfg(feature = "uniffi")]
-impl ArcedNodeBuilder {
+#[uniffi::export]
+impl Builder {
 	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
 	/// network.
 	pub fn set_gossip_source_p2p(&self) {
@@ -1157,7 +1167,10 @@ impl ArcedNodeBuilder {
 			trust_peer_0conf,
 		);
 	}
+}
 
+#[cfg(feature = "uniffi")]
+impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
 	/// channels to clients.
 	///
@@ -1167,7 +1180,11 @@ impl ArcedNodeBuilder {
 	pub fn enable_liquidity_provider(&self, lsps2_service_config: LSPS2ServiceConfig) {
 		self.inner.write().expect("lock").enable_liquidity_provider(lsps2_service_config);
 	}
+}
 
+#[cfg(feature = "uniffi")]
+#[uniffi::export]
+impl Builder {
 	/// Sets the used storage directory path.
 	pub fn set_storage_dir_path(&self, storage_dir_path: String) {
 		self.inner.write().expect("lock").set_storage_dir_path(storage_dir_path);
@@ -1264,7 +1281,8 @@ impl ArcedNodeBuilder {
 }
 
 #[cfg(all(feature = "uniffi", feature = "storage-sqlite"))]
-impl ArcedNodeBuilder {
+#[uniffi::export]
+impl Builder {
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
@@ -1273,7 +1291,8 @@ impl ArcedNodeBuilder {
 }
 
 #[cfg(all(feature = "uniffi", feature = "storage-postgres"))]
-impl ArcedNodeBuilder {
+#[uniffi::export]
+impl Builder {
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
 	/// previously configured.
 	///
@@ -1322,22 +1341,9 @@ impl ArcedNodeBuilder {
 	}
 }
 
-#[cfg(all(feature = "uniffi", not(feature = "storage-postgres")))]
-impl ArcedNodeBuilder {
-	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
-	/// previously configured.
-	///
-	/// This requires the `storage-postgres` crate feature.
-	pub fn build_with_postgres_store(
-		&self, _node_entropy: Arc<NodeEntropy>, _connection_string: String,
-		_db_name: Option<String>, _kv_table_name: Option<String>, _certificate_pem: Option<String>,
-	) -> Result<Arc<Node>, BuildError> {
-		Err(BuildError::KVStoreSetupFailed)
-	}
-}
-
 #[cfg(all(feature = "uniffi", feature = "storage-filesystem"))]
-impl ArcedNodeBuilder {
+#[uniffi::export]
+impl Builder {
 	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
 	/// previously configured.
 	pub fn build_with_fs_store(
@@ -1348,7 +1354,8 @@ impl ArcedNodeBuilder {
 }
 
 #[cfg(all(feature = "uniffi", feature = "storage-vss"))]
-impl ArcedNodeBuilder {
+#[uniffi::export]
+impl Builder {
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
 	/// previously configured.
 	///
