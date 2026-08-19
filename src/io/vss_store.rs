@@ -111,7 +111,6 @@ impl VssStore {
 		let mut entropy_seed = [0u8; 32];
 		getrandom::fill(&mut entropy_seed).expect("Failed to generate random bytes");
 		let entropy_source = RandomBytes::new(entropy_seed);
-		let setup_entropy_source = RandomBytes::new(entropy_seed);
 
 		let setup_retry_policy = retry_policy();
 		let setup_client = VssClient::new_with_headers(
@@ -126,19 +125,22 @@ impl VssStore {
 
 		let setup_store_id = store_id.clone();
 		let runtime_handle = internal_runtime.handle().clone();
-		let schema_version = std::thread::spawn(move || {
-			runtime_handle.block_on(async {
-				determine_and_write_schema_version(
-					&setup_client,
-					&setup_store_id,
-					data_encryption_key,
-					&setup_key_obfuscator,
-					&setup_entropy_source,
-				)
-				.await
-			})
+		let schema_version = std::thread::scope(|scope| {
+			scope
+				.spawn(|| {
+					runtime_handle.block_on(async {
+						determine_and_write_schema_version(
+							&setup_client,
+							&setup_store_id,
+							data_encryption_key,
+							&setup_key_obfuscator,
+							&entropy_source,
+						)
+						.await
+					})
+				})
+				.join()
 		})
-		.join()
 		.map_err(|_| io::Error::new(io::ErrorKind::Other, "VSS schema setup task panicked"))??;
 
 		let inner = Arc::new(VssStoreInner::new(
@@ -1108,6 +1110,115 @@ impl VssStoreBuilder {
 		.map_err(|_| VssStoreBuildError::StoreSetupFailed)?;
 
 		Ok(vss_store)
+	}
+}
+
+#[cfg(test)]
+mod nonce_tests {
+	use std::io::{Read, Write};
+	use std::net::{TcpListener, TcpStream};
+
+	use vss_client::types::{ErrorCode, ErrorResponse, ListKeyVersionsResponse, PutObjectResponse};
+
+	use super::*;
+
+	fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
+		let mut request = Vec::new();
+		let header_end = loop {
+			let mut buffer = [0; 1024];
+			let bytes_read = stream.read(&mut buffer).unwrap();
+			assert!(bytes_read > 0, "HTTP request ended before its headers");
+			request.extend_from_slice(&buffer[..bytes_read]);
+			if let Some(header_end) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+				break header_end + 4;
+			}
+		};
+
+		let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+		let path = headers.split_whitespace().nth(1).unwrap().to_string();
+		let content_length = headers
+			.lines()
+			.filter_map(|line| line.split_once(':'))
+			.find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+			.map(|(_, value)| value.trim().parse::<usize>().unwrap())
+			.unwrap_or(0);
+		while request.len() < header_end + content_length {
+			let mut buffer = [0; 1024];
+			let bytes_read = stream.read(&mut buffer).unwrap();
+			assert!(bytes_read > 0, "HTTP request ended before its body");
+			request.extend_from_slice(&buffer[..bytes_read]);
+		}
+
+		(path, request[header_end..header_end + content_length].to_vec())
+	}
+
+	fn write_response(stream: &mut TcpStream, status: &str, body: Vec<u8>) {
+		let headers = format!(
+			"HTTP/1.1 {status}\r\ncontent-length: {}\r\nvss-protocol-version: 0\r\nconnection: close\r\n\r\n",
+			body.len()
+		);
+		stream.write_all(headers.as_bytes()).unwrap();
+		stream.write_all(&body).unwrap();
+	}
+
+	fn serve_empty_vss(listener: TcpListener) -> Vec<PutObjectRequest> {
+		let mut put_requests = Vec::new();
+		while put_requests.len() < 2 {
+			let (mut stream, _) = listener.accept().unwrap();
+			let (path, body) = read_request(&mut stream);
+			match path.as_str() {
+				"/getObject" => {
+					let response = ErrorResponse {
+						error_code: ErrorCode::NoSuchKeyException.into(),
+						message: "missing".to_string(),
+					};
+					write_response(&mut stream, "404 Not Found", response.encode_to_vec());
+				},
+				"/listKeyVersions" => write_response(
+					&mut stream,
+					"200 OK",
+					ListKeyVersionsResponse::default().encode_to_vec(),
+				),
+				"/putObjects" => {
+					put_requests.push(PutObjectRequest::decode(&body[..]).unwrap());
+					write_response(
+						&mut stream,
+						"200 OK",
+						PutObjectResponse::default().encode_to_vec(),
+					);
+				},
+				_ => panic!("unexpected VSS endpoint: {path}"),
+			}
+		}
+		put_requests
+	}
+
+	fn nonce(request: &PutObjectRequest) -> Vec<u8> {
+		let storable = Storable::decode(&request.transaction_items[0].value[..]).unwrap();
+		storable.encryption_metadata.unwrap().nonce
+	}
+
+	#[tokio::test]
+	async fn schema_and_main_writes_use_unique_nonces() {
+		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+		let base_url = format!("http://{}", listener.local_addr().unwrap());
+		let server = std::thread::spawn(move || serve_empty_vss(listener));
+
+		let store = VssStore::new(
+			base_url,
+			"store".to_string(),
+			[42; 32],
+			Arc::new(FixedHeaders::new(HashMap::new())),
+		)
+		.unwrap();
+		KVStore::write(&store, "namespace", "", "key", vec![42]).await.unwrap();
+
+		let put_requests = server.join().unwrap();
+		assert_ne!(
+			nonce(&put_requests[0]),
+			nonce(&put_requests[1]),
+			"schema setup and the first store write reused an encryption nonce"
+		);
 	}
 }
 
