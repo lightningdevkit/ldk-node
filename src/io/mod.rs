@@ -7,6 +7,7 @@
 
 //! Objects and traits for data persistence.
 
+pub(crate) mod fs_store;
 #[cfg(feature = "postgres")]
 pub mod postgres_store;
 pub mod sqlite_store;

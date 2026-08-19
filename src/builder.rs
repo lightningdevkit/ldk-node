@@ -59,11 +59,12 @@ use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
+use crate::io::fs_store::open_or_migrate_fs_store;
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
-	open_or_migrate_fs_store, read_all_objects, read_event_queue,
-	read_external_pathfinding_scores_from_cache, read_n_objects, read_network_graph,
-	read_node_metrics, read_output_sweeper, read_peer_info, read_scorer,
+	read_all_objects, read_event_queue, read_external_pathfinding_scores_from_cache,
+	read_n_objects, read_network_graph, read_node_metrics, read_output_sweeper, read_peer_info,
+	read_scorer,
 };
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
