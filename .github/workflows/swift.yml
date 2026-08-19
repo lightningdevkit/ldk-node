@@ -11,6 +11,9 @@ jobs:
     timeout-minutes: 120
     runs-on: macos-latest
 
+    env:
+      LDK_NODE_EXTRA_FEATURES: chain-bitcoind
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

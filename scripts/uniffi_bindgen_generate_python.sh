@@ -7,6 +7,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BINDINGS_DIR="$REPO_ROOT/bindings/python/src/ldk_node"
 TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
 CARGO_BUILD_ARGS=()
+UNIFFI_FEATURES="uniffi-default"
+
+if [[ -n "${LDK_NODE_EXTRA_FEATURES:-}" ]]; then
+	UNIFFI_FEATURES+=",$LDK_NODE_EXTRA_FEATURES"
+fi
 
 case " ${RUSTFLAGS:-} " in
 	*" --cfg tokio_unstable "*|*" --cfg=tokio_unstable "*) ;;
@@ -41,7 +46,8 @@ esac
 cd "$REPO_ROOT"
 mkdir -p "$BINDINGS_DIR"
 
-cargo build "${CARGO_BUILD_ARGS[@]}" --profile release-smaller --features uniffi
+cargo build "${CARGO_BUILD_ARGS[@]}" --profile release-smaller --no-default-features \
+	--features "$UNIFFI_FEATURES"
 cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml -- \
 	generate bindings/ldk_node.udl \
 	--lib-file "$DYNAMIC_LIB_PATH" \

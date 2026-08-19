@@ -3,6 +3,11 @@ set -eox pipefail
 
 BINDINGS_DIR="./bindings/swift"
 UNIFFI_BINDGEN_BIN="cargo run --manifest-path bindings/uniffi-bindgen/Cargo.toml"
+UNIFFI_FEATURES="uniffi-default"
+
+if [[ -n "${LDK_NODE_EXTRA_FEATURES:-}" ]]; then
+	UNIFFI_FEATURES+=",$LDK_NODE_EXTRA_FEATURES"
+fi
 
 case " ${RUSTFLAGS:-} " in
 	*" --cfg tokio_unstable "*|*" --cfg=tokio_unstable "*) ;;
@@ -19,12 +24,12 @@ rustup target add aarch64-apple-ios-sim --toolchain stable
 rustup target add aarch64-apple-darwin x86_64-apple-darwin --toolchain stable
 
 # Build rust target libs
-cargo build --profile release-smaller --features uniffi || exit 1
-cargo build --profile release-smaller --features uniffi --target x86_64-apple-darwin || exit 1
-cargo build --profile release-smaller --features uniffi --target aarch64-apple-darwin || exit 1
-cargo build --profile release-smaller --features uniffi --target x86_64-apple-ios || exit 1
-cargo build --profile release-smaller --features uniffi --target aarch64-apple-ios || exit 1
-cargo +stable build --release --features uniffi --target aarch64-apple-ios-sim || exit 1
+cargo build --profile release-smaller --no-default-features --features "$UNIFFI_FEATURES" || exit 1
+cargo build --profile release-smaller --no-default-features --features "$UNIFFI_FEATURES" --target x86_64-apple-darwin || exit 1
+cargo build --profile release-smaller --no-default-features --features "$UNIFFI_FEATURES" --target aarch64-apple-darwin || exit 1
+cargo build --profile release-smaller --no-default-features --features "$UNIFFI_FEATURES" --target x86_64-apple-ios || exit 1
+cargo build --profile release-smaller --no-default-features --features "$UNIFFI_FEATURES" --target aarch64-apple-ios || exit 1
+cargo +stable build --release --no-default-features --features "$UNIFFI_FEATURES" --target aarch64-apple-ios-sim || exit 1
 
 # Combine ios-sim and apple-darwin (macos) libs for x86_64 and aarch64 (m1)
 mkdir -p target/lipo-ios-sim/release-smaller || exit 1

@@ -13,6 +13,7 @@ jobs:
 
     env:
       CARGO_TARGET_DIR: /tmp/cargo-target-ldk-node-python-ci
+      LDK_NODE_EXTRA_FEATURES: chain-bitcoind
       LDK_NODE_PYTHON_DIR: bindings/python
 
     steps:

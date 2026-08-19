@@ -12,6 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      LDK_NODE_EXTRA_FEATURES: chain-bitcoind
       LDK_NODE_JVM_DIR: bindings/kotlin/ldk-node-jvm
       LDK_NODE_ANDROID_DIR: bindings/kotlin/ldk-node-android
 
