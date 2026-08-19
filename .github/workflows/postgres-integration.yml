@@ -32,6 +32,13 @@ jobs:
       - name: Install Rust stable toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable
+      - name: Check all features
+        run: cargo check --all-features --tests --verbose --color always
+      - name: Check sparse feature sets
+        run: |
+          cargo check --no-default-features --features uniffi,chain-bitcoind,storage-postgres --verbose --color always
+          cargo test --lib --no-run --no-default-features --features chain-electrum,storage-postgres --verbose --color always
+          cargo check --test integration_tests_postgres --no-default-features --features chain-electrum,storage-postgres --verbose --color always
       - name: Enable caching for bitcoind
         id: cache-bitcoind
         uses: actions/cache@v4
