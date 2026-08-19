@@ -34,11 +34,11 @@ class AndroidLibTest {
         val builder1 = Builder.fromConfig(config1)
         val builder2 = Builder.fromConfig(config2)
 
-        val mnemonic1 = generateEntropyMnemonic(null)
+        val mnemonic1 = Mnemonic.generate(24u)
         val nodeEntropy1 = NodeEntropy.fromBip39Mnemonic(mnemonic1, null)
         val node1 = builder1.build(nodeEntropy1)
 
-        val mnemonic2 = generateEntropyMnemonic(null)
+        val mnemonic2 = Mnemonic.generate(24u)
         val nodeEntropy2 = NodeEntropy.fromBip39Mnemonic(mnemonic2, null)
         val node2 = builder2.build(nodeEntropy2)
 

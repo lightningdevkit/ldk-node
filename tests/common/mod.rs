@@ -37,11 +37,12 @@ use bitcoin::{
 use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::electrum_client::ElectrumApi;
 use electrsd::{corepc_node, ElectrsD};
+use ldk_node::bip39::Mnemonic;
 use ldk_node::config::{
 	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
 	HumanReadableNamesConfig,
 };
-use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
+use ldk_node::entropy::NodeEntropy;
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, TransactionType,
@@ -644,8 +645,11 @@ impl Default for TestConfig {
 		let log_writer = Default::default();
 		let store_type = Default::default();
 
-		let mnemonic = generate_entropy_mnemonic(None);
+		let mnemonic = Mnemonic::generate(24).unwrap();
+		#[cfg(not(feature = "uniffi"))]
 		let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
+		#[cfg(feature = "uniffi")]
+		let node_entropy = NodeEntropy::from_seed_bytes(mnemonic.to_seed("").to_vec()).unwrap();
 		let async_payments_role = None;
 		let wallet_rescan_from_height = None;
 		let force_wallet_full_scan = false;

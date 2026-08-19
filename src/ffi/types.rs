@@ -151,7 +151,7 @@ impl VssClientHeaderProvider for VssHeaderProviderAdapter {
 
 use crate::builder::sanitize_alias;
 pub use crate::config::{default_config, ElectrumSyncConfig, EsploraSyncConfig, TorConfig};
-pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
+pub use crate::entropy::NodeEntropy;
 use crate::error::Error;
 pub use crate::liquidity::LSPS1OrderStatus;
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
@@ -1175,14 +1175,11 @@ impl Mnemonic {
 	}
 
 	/// Generates a random English mnemonic with the specified word count.
-	///
-	/// Defaults to 24 words when no word count is specified.
 	#[uniffi::constructor]
-	pub fn generate(word_count: Option<WordCount>) -> Self {
-		let word_count = word_count.unwrap_or(WordCount::Words24).word_count();
-		let inner = Bip39Mnemonic::generate(word_count)
-			.expect("WordCount always maps to a valid BIP 39 word count");
-		Self { inner }
+	pub fn generate(word_count: u8) -> Result<Self, Error> {
+		Bip39Mnemonic::generate(word_count.into())
+			.map(Self::from)
+			.map_err(|_| Error::InvalidMnemonic)
 	}
 
 	/// Returns the words in the mnemonic.
@@ -3009,7 +3006,8 @@ mod tests {
 		assert_eq!(mnemonic.to_entropy(), entropy);
 		assert_eq!(mnemonic.checksum(), 3);
 		assert_eq!(mnemonic.to_seed("TREZOR").len(), 64);
-		assert_eq!(Mnemonic::generate(Some(WordCount::Words12)).word_count(), 12);
+		assert_eq!(Mnemonic::generate(12).unwrap().word_count(), 12);
+		assert_eq!(Mnemonic::generate(13), Err(Error::InvalidMnemonic));
 		assert_eq!(Mnemonic::from_entropy(&[0; 15]), Err(Error::InvalidMnemonic));
 	}
 }

@@ -1,5 +1,4 @@
 namespace ldk_node {
-	Mnemonic generate_entropy_mnemonic(WordCount? word_count);
 	Config default_config();
 };
 
@@ -14,8 +13,6 @@ typedef dictionary TorConfig;
 typedef interface NodeEntropy;
 
 typedef interface ProbingConfig;
-
-typedef enum WordCount;
 
 [Remote]
 enum LogLevel {

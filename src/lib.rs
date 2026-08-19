@@ -29,7 +29,8 @@
 //!
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use ldk_node::bitcoin::Network;
-//! use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
+//! use ldk_node::bip39::Mnemonic;
+//! use ldk_node::entropy::NodeEntropy;
 //! use ldk_node::lightning::ln::msgs::SocketAddress;
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
 //! use ldk_node::Builder;
@@ -42,7 +43,7 @@
 //! 		"https://rapidsync.lightningdevkit.org/testnet/v2/snapshot".to_string(),
 //! 	);
 //!
-//! 	let mnemonic = generate_entropy_mnemonic(None);
+//! 	let mnemonic = Mnemonic::generate(24).unwrap();
 //! 	let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 //! 	let node = builder.build(node_entropy).unwrap();
 //!
@@ -2212,11 +2213,14 @@ impl Node {
 	///
 	/// For example, you could retrieve all stored outbound payments as follows:
 	/// ```
+	/// # #[cfg(not(feature = "uniffi"))]
+	/// # fn main() -> Result<(), ldk_node::NodeError> {
 	/// # use ldk_node::Builder;
 	/// # use ldk_node::config::Config;
 	/// # use ldk_node::payment::{PaymentDetails, PaymentDirection};
 	/// # use ldk_node::bitcoin::Network;
-	/// # use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
+	/// # use ldk_node::bip39::Mnemonic;
+	/// # use ldk_node::entropy::NodeEntropy;
 	/// # use rand::distr::Alphanumeric;
 	/// # use rand::{rng, Rng};
 	/// # let mut config = Config::default();
@@ -2226,7 +2230,7 @@ impl Node {
 	/// # temp_path.push(rand_dir);
 	/// # config.storage_dir_path = temp_path.display().to_string();
 	/// # let builder = Builder::from_config(config);
-	/// # let mnemonic = generate_entropy_mnemonic(None);
+	/// # let mnemonic = Mnemonic::generate(24).unwrap();
 	/// # let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 	/// # let node = builder.build(node_entropy.into()).unwrap();
 	/// let mut outbound = Vec::new();
@@ -2241,7 +2245,10 @@ impl Node {
 	/// 		None => break,
 	/// 	}
 	/// }
-	/// # Ok::<(), ldk_node::NodeError>(())
+	/// # Ok(())
+	/// # }
+	/// # #[cfg(feature = "uniffi")]
+	/// # fn main() {}
 	/// ```
 	pub fn list_payments(
 		&self, page_token: Option<payment::PageToken>,
