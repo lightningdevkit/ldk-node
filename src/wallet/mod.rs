@@ -213,6 +213,7 @@ impl Wallet {
 		self.inner.lock().expect("lock").tx_graph().full_txs().map(|tx_node| tx_node.tx).collect()
 	}
 
+	#[cfg(feature = "chain-bitcoind")]
 	pub(crate) fn get_unconfirmed_txids(&self) -> Vec<Txid> {
 		self.inner
 			.lock()
@@ -223,6 +224,7 @@ impl Wallet {
 			.collect()
 	}
 
+	#[cfg(feature = "chain-bitcoind")]
 	pub(crate) fn current_best_block(&self) -> BlockLocator {
 		let checkpoint = self.inner.lock().expect("lock").latest_checkpoint();
 		let mut current_block = Some(checkpoint.clone());
@@ -261,6 +263,7 @@ impl Wallet {
 		Ok(())
 	}
 
+	#[cfg(feature = "chain-bitcoind")]
 	pub(crate) async fn apply_mempool_txs(
 		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
 	) -> Result<(), Error> {
@@ -2682,7 +2685,7 @@ fn funding_reclassification_update(
 	update
 }
 
-#[cfg(test)]
+#[cfg(all(test, any(feature = "chain-esplora", feature = "chain-electrum")))]
 mod tests {
 	use std::sync::atomic::{AtomicBool, Ordering};
 	use std::time::Duration;
@@ -2695,7 +2698,11 @@ mod tests {
 	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 
 	use super::*;
-	use crate::config::{EsploraSyncConfig, PAYMENT_CACHE_CAPACITY};
+	#[cfg(all(not(feature = "chain-esplora"), feature = "chain-electrum"))]
+	use crate::config::ElectrumSyncConfig;
+	#[cfg(feature = "chain-esplora")]
+	use crate::config::EsploraSyncConfig;
+	use crate::config::PAYMENT_CACHE_CAPACITY;
 	use crate::io::test_utils::InMemoryStore;
 	use crate::io::{
 		BDK_WALLET_ADDRESS_POOL_KEY, BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
@@ -2807,6 +2814,7 @@ mod tests {
 		let fee_estimator = Arc::new(OnchainFeeEstimator::new());
 		let broadcaster = Arc::new(Broadcaster::new(Arc::clone(&logger)));
 		let node_metrics = Arc::new(PersistedNodeMetrics::new(NodeMetrics::default()));
+		#[cfg(feature = "chain-esplora")]
 		let (chain_source, _) = ChainSource::new_esplora(
 			"http://localhost:1".to_string(),
 			HashMap::new(),
@@ -2819,6 +2827,17 @@ mod tests {
 			node_metrics,
 		)
 		.unwrap();
+		#[cfg(all(not(feature = "chain-esplora"), feature = "chain-electrum"))]
+		let (chain_source, _) = ChainSource::new_electrum(
+			"tcp://localhost:1".to_string(),
+			ElectrumSyncConfig::default(),
+			Arc::clone(&fee_estimator),
+			Arc::clone(&broadcaster),
+			Arc::clone(&store),
+			Arc::clone(&config),
+			Arc::clone(&logger),
+			node_metrics,
+		);
 		let payment_store = Arc::new(PaymentStore::new(
 			Vec::new(),
 			KeepLeastRecentlyUsed::new(PAYMENT_CACHE_CAPACITY),

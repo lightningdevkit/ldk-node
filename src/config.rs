@@ -187,7 +187,10 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_
 /// | `anchor_channels_config`               | AnchorChannelsConfig::default()      |
 /// | `route_parameters`                     | None                                 |
 /// | `tor_config`                           | None                                 |
-/// | `hrn_config`                           | HumanReadableNamesConfig::default()  |
+#[cfg_attr(
+	feature = "unified-payments",
+	doc = "| `hrn_config`                           | HumanReadableNamesConfig::default()  |"
+)]
 /// | `manually_handle_unknown_bolt11_payments` | false                              |
 ///
 /// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
@@ -252,6 +255,7 @@ pub struct Config {
 	/// Configuration options for Human-Readable Names ([BIP 353]).
 	///
 	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
+	#[cfg(feature = "unified-payments")]
 	pub hrn_config: HumanReadableNamesConfig,
 	/// Whether to emit [`Event::PaymentClaimable`] for unknown BOLT 11 payments that were created
 	/// with a user-provided payment hash and therefore need to be manually claimed.
@@ -279,6 +283,7 @@ impl Default for Config {
 			tor_config: None,
 			route_parameters: None,
 			node_alias: None,
+			#[cfg(feature = "unified-payments")]
 			hrn_config: HumanReadableNamesConfig::default(),
 			manually_handle_unknown_bolt11_payments: false,
 		}

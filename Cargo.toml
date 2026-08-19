@@ -12,6 +12,10 @@ readme = "README.md"
 keywords = ["bitcoin", "lightning", "ldk", "bdk"]
 categories = ["cryptography::cryptocurrencies"]
 
+[package.metadata.docs.rs]
+features = ["storage-postgres-vendored-tls"]
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
 name = "ldk_node"
@@ -24,8 +28,49 @@ codegen-units = 1   # Reduce number of codegen units to increase optimizations.
 panic = 'abort'     # Abort on panic
 
 [features]
-default = []
-postgres = ["dep:tokio-postgres", "dep:native-tls", "dep:postgres-native-tls"]
+default = [
+	"chain-esplora",
+	"chain-electrum",
+	"chain-bitcoind",
+	"storage-sqlite",
+	"storage-filesystem",
+	"storage-vss",
+	"unified-payments",
+]
+chain-esplora = [
+	"dep:bdk_esplora",
+	"dep:esplora-client",
+	"dep:ldk-esplora-client",
+	"dep:lightning-transaction-sync",
+	"lightning-transaction-sync/esplora-async-https",
+	"lightning-transaction-sync/time",
+]
+chain-electrum = [
+	"dep:bdk_electrum",
+	"dep:electrum-client",
+	"dep:lightning-transaction-sync",
+	"lightning-transaction-sync/electrum-rustls-ring",
+]
+chain-bitcoind = ["dep:lightning-block-sync"]
+storage-sqlite = ["dep:rusqlite"]
+storage-filesystem = ["dep:lightning-persister"]
+storage-vss = ["dep:vss-client", "dep:prost"]
+storage-postgres = ["dep:tokio-postgres", "dep:native-tls", "dep:postgres-native-tls"]
+storage-postgres-vendored-tls = ["storage-postgres", "native-tls/vendored"]
+unified-payments = [
+	"dep:bip21",
+	"dep:bitcoin-payment-instructions",
+	"dep:lightning-dns-resolver",
+]
+uniffi = ["dep:uniffi"]
+uniffi-default = [
+	"uniffi",
+	"chain-esplora",
+	"chain-electrum",
+	"storage-sqlite",
+	"storage-vss",
+	"unified-payments",
+]
 
 [dependencies]
 #lightning = { version = "0.2.0", features = ["std"] }
@@ -45,35 +90,35 @@ lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "
 lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb" }
 lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb", features = ["std"] }
 lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb" }
-lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb", features = ["tokio"] }
+lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb", features = ["tokio"], optional = true }
 lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb" }
 lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb" }
-lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb", features = ["rest-client", "rpc-client", "tokio"] }
-lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb", features = ["esplora-async-https", "time", "electrum-rustls-ring"] }
+lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb", features = ["rest-client", "rpc-client", "tokio"], optional = true }
+lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb", optional = true }
 lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb", features = ["std"] }
 lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb" }
-lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb" }
+lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "9174965af9437196c527a9aa0df36bbcf050c8bb", optional = true }
 
 bdk_chain = { version = "0.23.3", default-features = false, features = ["std"] }
-bdk_esplora = { version = "0.22.2", default-features = false, features = ["async-https-rustls", "tokio"]}
-bdk_electrum = { version = "0.24.0", default-features = false, features = ["use-rustls-ring"]}
+bdk_esplora = { version = "0.22.2", default-features = false, features = ["async-https-rustls", "tokio"], optional = true }
+bdk_electrum = { version = "0.24.0", default-features = false, features = ["use-rustls-ring"], optional = true }
 bdk_wallet = { version = "3.1.0", default-features = false, features = ["std", "keys-bip39"]}
 
 bitreq = { version = "0.3", default-features = false, features = ["async-https", "json-using-serde"] }
 rustls = { version = "0.23", default-features = false }
-rusqlite = { version = "0.31.0", features = ["bundled"] }
+rusqlite = { version = "0.31.0", features = ["bundled"], optional = true }
 bitcoin = "0.32.7"
 bip39 = { version = "2.0.0", features = ["rand"] }
-bip21 = { version = "0.5", features = ["std"], default-features = false }
+bip21 = { version = "0.5", features = ["std"], default-features = false, optional = true }
 
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 getrandom = { version = "0.3", default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio = { version = "1.39", default-features = false, features = [ "rt-multi-thread", "time", "sync", "macros", "net" ] }
 tokio-util = { version = "0.7.10", default-features = false, features = ["rt"] }
-esplora-client = { version = "0.12", default-features = false, features = ["tokio", "async-https-rustls"] }
-ldk-esplora-client = { package = "esplora-client", version = "0.13", default-features = false, features = ["tokio", "async-https-rustls"] }
-electrum-client = { version = "0.25", default-features = false, features = ["proxy", "use-rustls-ring"] }
+esplora-client = { version = "0.12", default-features = false, features = ["tokio", "async-https-rustls"], optional = true }
+ldk-esplora-client = { package = "esplora-client", version = "0.13", default-features = false, features = ["tokio", "async-https-rustls"], optional = true }
+electrum-client = { version = "0.25", default-features = false, features = ["proxy", "use-rustls-ring"], optional = true }
 libc = "0.2"
 uniffi = { version = "0.29.5", features = ["build"], optional = true }
 serde = { version = "1.0.210", default-features = false, features = ["std", "derive"] }
@@ -84,10 +129,10 @@ async-trait = { version = "0.1", default-features = false }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"], optional = true }
 native-tls = { version = "0.2", default-features = false, optional = true }
 postgres-native-tls = { version = "0.5", default-features = false, features = ["runtime"], optional = true }
-vss-client = { package = "vss-client-ng", version = "0.6" }
-prost = { version = "0.11.6", default-features = false}
+vss-client = { package = "vss-client-ng", version = "0.6", optional = true }
+prost = { version = "0.11.6", default-features = false, optional = true}
 #bitcoin-payment-instructions = { version = "0.6" }
-bitcoin-payment-instructions = { git = "https://github.com/tnull/bitcoin-payment-instructions", rev = "1d6ffaa8962391ddc84aeef98bd7439e55ccae9d" }
+bitcoin-payment-instructions = { git = "https://github.com/tnull/bitcoin-payment-instructions", rev = "1d6ffaa8962391ddc84aeef98bd7439e55ccae9d", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }

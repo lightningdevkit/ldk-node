@@ -53,6 +53,7 @@ use lightning_types::features::{
 };
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
+#[cfg(feature = "storage-vss")]
 use vss_client::headers::{
 	VssHeaderProvider as VssClientHeaderProvider,
 	VssHeaderProviderError as VssClientHeaderProviderError,
@@ -100,6 +101,7 @@ impl std::fmt::Display for VssHeaderProviderError {
 
 impl std::error::Error for VssHeaderProviderError {}
 
+#[cfg(feature = "storage-vss")]
 impl From<VssHeaderProviderError> for VssClientHeaderProviderError {
 	fn from(e: VssHeaderProviderError) -> Self {
 		match e {
@@ -130,16 +132,19 @@ pub trait VssHeaderProvider: Send + Sync {
 
 /// An adapter that wraps the local [`VssHeaderProvider`] and implements the upstream
 /// [`VssClientHeaderProvider`] trait.
+#[cfg(feature = "storage-vss")]
 pub(crate) struct VssHeaderProviderAdapter {
 	inner: Arc<dyn VssHeaderProvider>,
 }
 
+#[cfg(feature = "storage-vss")]
 impl VssHeaderProviderAdapter {
 	pub(crate) fn new(inner: Arc<dyn VssHeaderProvider>) -> Self {
 		Self { inner }
 	}
 }
 
+#[cfg(feature = "storage-vss")]
 #[async_trait::async_trait]
 impl VssClientHeaderProvider for VssHeaderProviderAdapter {
 	async fn get_headers(

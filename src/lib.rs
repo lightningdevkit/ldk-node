@@ -81,6 +81,13 @@
 #![allow(ellipsis_inclusive_range_patterns)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+#[cfg(not(any(
+	feature = "chain-esplora",
+	feature = "chain-electrum",
+	feature = "chain-bitcoind"
+)))]
+compile_error!("at least one chain source feature must be enabled");
+
 mod balance;
 mod builder;
 mod chain;
@@ -169,9 +176,11 @@ use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
-	Bolt11Payment, Bolt12Payment, HRNResolver, OnchainPayment, PaymentDetails, PaymentDetailsPage,
-	SpontaneousPayment, UnifiedPayment,
+	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, PaymentDetailsPage,
+	SpontaneousPayment,
 };
+#[cfg(feature = "unified-payments")]
+use payment::{HRNResolver, UnifiedPayment};
 use peer_store::{PeerInfo, PeerStore};
 #[cfg(feature = "uniffi")]
 pub use probing::ArcedProbingConfigBuilder as ProbingConfigBuilder;
@@ -185,6 +194,7 @@ use types::{
 pub use types::{
 	ChannelCounterparty, ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId,
 };
+#[cfg(feature = "storage-vss")]
 pub use vss_client;
 
 use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY};
@@ -266,6 +276,7 @@ pub struct Node {
 	node_metrics: Arc<PersistedNodeMetrics>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	#[cfg(feature = "unified-payments")]
 	hrn_resolver: HRNResolver,
 	prober: Option<Arc<Prober>>,
 	#[cfg(cycle_tests)]
@@ -1151,7 +1162,7 @@ impl Node {
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
-	#[cfg(not(feature = "uniffi"))]
+	#[cfg(all(feature = "unified-payments", not(feature = "uniffi")))]
 	pub fn unified_payment(&self) -> UnifiedPayment {
 		UnifiedPayment::new(
 			self.onchain_payment().into(),
@@ -1162,7 +1173,11 @@ impl Node {
 			self.hrn_resolver.clone(),
 		)
 	}
+}
 
+#[cfg(all(feature = "unified-payments", feature = "uniffi"))]
+#[uniffi::export]
+impl Node {
 	/// Returns a payment handler that supports creating and paying to [BIP 21] URIs with on-chain,
 	/// [BOLT 11], and [BOLT 12] payment options.
 	///
@@ -1172,7 +1187,6 @@ impl Node {
 	/// [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 	/// [BIP 21]: https://github.com/bitcoin/bips/blob/master/bip-0021.mediawiki
 	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
-	#[cfg(feature = "uniffi")]
 	pub fn unified_payment(&self) -> Arc<UnifiedPayment> {
 		Arc::new(UnifiedPayment::new(
 			self.onchain_payment(),
@@ -1183,7 +1197,9 @@ impl Node {
 			self.hrn_resolver.clone(),
 		))
 	}
+}
 
+impl Node {
 	/// Authenticates the user via [LNURL-auth] for the given LNURL string.
 	///
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md

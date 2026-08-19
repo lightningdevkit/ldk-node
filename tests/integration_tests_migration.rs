@@ -7,7 +7,7 @@
 
 // The migration test exercises the filesystem, SQLite, and Postgres stores. It is gated on the
 // `postgres` feature because Postgres is the only one of the three that needs an external service.
-#![cfg(feature = "postgres")]
+#![cfg(feature = "storage-postgres")]
 
 mod common;
 

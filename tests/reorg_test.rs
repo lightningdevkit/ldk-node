@@ -16,6 +16,7 @@ use crate::common::{
 	TestChainSource,
 };
 
+#[cfg(feature = "chain-bitcoind")]
 #[test]
 fn bitcoind_rest_follows_valid_reorg() {
 	let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();

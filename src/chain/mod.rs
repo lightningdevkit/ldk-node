@@ -5,24 +5,35 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+#[cfg(feature = "chain-bitcoind")]
 pub(crate) mod bitcoind;
+#[cfg(feature = "chain-electrum")]
 mod electrum;
+#[cfg(feature = "chain-esplora")]
 mod esplora;
 
-use std::collections::{HashMap, HashSet};
+#[cfg(feature = "chain-esplora")]
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bitcoin::{Script, Txid};
 use lightning::chain::{BlockLocator, Filter};
 
+#[cfg(feature = "chain-bitcoind")]
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
+#[cfg(feature = "chain-electrum")]
 use crate::chain::electrum::ElectrumChainSource;
+#[cfg(feature = "chain-esplora")]
 use crate::chain::esplora::EsploraChainSource;
-use crate::config::{
-	BackgroundSyncConfig, BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig,
-	WALLET_SYNC_INTERVAL_MINIMUM_SECS,
-};
+#[cfg(feature = "chain-bitcoind")]
+use crate::config::BitcoindRestClientConfig;
+#[cfg(feature = "chain-electrum")]
+use crate::config::ElectrumSyncConfig;
+#[cfg(feature = "chain-esplora")]
+use crate::config::EsploraSyncConfig;
+use crate::config::{BackgroundSyncConfig, Config, WALLET_SYNC_INTERVAL_MINIMUM_SECS};
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
@@ -140,12 +151,16 @@ pub(crate) struct ChainSource {
 }
 
 enum ChainSourceKind {
+	#[cfg(feature = "chain-esplora")]
 	Esplora(EsploraChainSource),
+	#[cfg(feature = "chain-electrum")]
 	Electrum(ElectrumChainSource),
+	#[cfg(feature = "chain-bitcoind")]
 	Bitcoind(BitcoindChainSource),
 }
 
 impl ChainSource {
+	#[cfg(feature = "chain-esplora")]
 	pub(crate) fn new_esplora(
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
@@ -167,6 +182,7 @@ impl ChainSource {
 		Ok((Self { kind, registered_txids, tx_broadcaster, logger }, None))
 	}
 
+	#[cfg(feature = "chain-electrum")]
 	pub(crate) fn new_electrum(
 		server_url: String, sync_config: ElectrumSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
@@ -187,6 +203,7 @@ impl ChainSource {
 		(Self { kind, registered_txids, tx_broadcaster, logger }, None)
 	}
 
+	#[cfg(feature = "chain-bitcoind")]
 	pub(crate) async fn new_bitcoind_rpc(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
@@ -210,6 +227,7 @@ impl ChainSource {
 		(Self { kind, registered_txids, tx_broadcaster, logger }, best_block)
 	}
 
+	#[cfg(feature = "chain-bitcoind")]
 	pub(crate) async fn new_bitcoind_rest(
 		rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
@@ -236,9 +254,8 @@ impl ChainSource {
 
 	pub(crate) fn start(&self, runtime: Arc<Runtime>) -> Result<(), Error> {
 		match &self.kind {
-			ChainSourceKind::Electrum(electrum_chain_source) => {
-				electrum_chain_source.start(runtime)?
-			},
+			#[cfg(feature = "chain-electrum")]
+			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.start(runtime)?,
 			_ => {
 				// Nothing to do for other chain sources.
 			},
@@ -248,6 +265,7 @@ impl ChainSource {
 
 	pub(crate) fn stop(&self) {
 		match &self.kind {
+			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.stop(),
 			_ => {
 				// Nothing to do for other chain sources.
@@ -257,9 +275,8 @@ impl ChainSource {
 
 	pub(crate) fn begin_shutdown(&self) {
 		match &self.kind {
-			ChainSourceKind::Electrum(electrum_chain_source) => {
-				electrum_chain_source.begin_shutdown()
-			},
+			#[cfg(feature = "chain-electrum")]
+			ChainSourceKind::Electrum(electrum_chain_source) => electrum_chain_source.begin_shutdown(),
 			_ => {
 				// Other chain sources don't leave synchronous callbacks running after their
 				// driving future is cancelled.
@@ -267,6 +284,7 @@ impl ChainSource {
 		}
 	}
 
+	#[cfg(feature = "chain-bitcoind")]
 	pub(crate) fn as_utxo_source(&self) -> Option<UtxoSourceClient> {
 		match &self.kind {
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
@@ -282,8 +300,11 @@ impl ChainSource {
 
 	pub(crate) fn is_transaction_based(&self) -> bool {
 		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
 			ChainSourceKind::Esplora(_) => true,
+			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum { .. } => true,
+			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind { .. } => false,
 		}
 	}
@@ -294,6 +315,7 @@ impl ChainSource {
 		output_sweeper: Arc<Sweeper>,
 	) {
 		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
 			ChainSourceKind::Esplora(esplora_chain_source) => {
 				if let Some(background_sync_config) =
 					esplora_chain_source.sync_config.background_sync_config.as_ref()
@@ -317,6 +339,7 @@ impl ChainSource {
 					return;
 				}
 			},
+			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				if let Some(background_sync_config) =
 					electrum_chain_source.sync_config.background_sync_config.as_ref()
@@ -340,6 +363,7 @@ impl ChainSource {
 					return;
 				}
 			},
+			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				bitcoind_chain_source
 					.continuously_sync_wallets(
@@ -419,12 +443,15 @@ impl ChainSource {
 		&self, onchain_wallet: Arc<Wallet>,
 	) -> Result<(), Error> {
 		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
 			ChainSourceKind::Esplora(esplora_chain_source) => {
 				esplora_chain_source.sync_onchain_wallet(onchain_wallet).await
 			},
+			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source.sync_onchain_wallet(onchain_wallet).await
 			},
+			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind { .. } => {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go via
 				// `ChainPoller`. So nothing to do here.
@@ -440,16 +467,19 @@ impl ChainSource {
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
 			ChainSourceKind::Esplora(esplora_chain_source) => {
 				esplora_chain_source
 					.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper)
 					.await
 			},
+			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source
 					.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper)
 					.await
 			},
+			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind { .. } => {
 				// In BitcoindRpc mode we sync lightning and onchain wallet in one go via
 				// `ChainPoller`. So nothing to do here.
@@ -462,17 +492,23 @@ impl ChainSource {
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
+		#[cfg(not(feature = "chain-bitcoind"))]
+		let _ = (&onchain_wallet, &channel_manager, &chain_monitor, &output_sweeper);
+
 		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
 			ChainSourceKind::Esplora { .. } => {
 				// In Esplora mode we sync lightning and onchain wallets via
 				// `sync_onchain_wallet` and `sync_lightning_wallet`. So nothing to do here.
 				unreachable!("Listeners will be synced via transction-based syncing")
 			},
+			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum { .. } => {
 				// In Electrum mode we sync lightning and onchain wallets via
 				// `sync_onchain_wallet` and `sync_lightning_wallet`. So nothing to do here.
 				unreachable!("Listeners will be synced via transction-based syncing")
 			},
+			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				bitcoind_chain_source
 					.poll_and_update_listeners(
@@ -488,12 +524,15 @@ impl ChainSource {
 
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
 		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
 			ChainSourceKind::Esplora(esplora_chain_source) => {
 				esplora_chain_source.update_fee_rate_estimates().await
 			},
+			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source.update_fee_rate_estimates().await
 			},
+			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				bitcoind_chain_source.update_fee_rate_estimates().await
 			},
@@ -508,12 +547,15 @@ impl ChainSource {
 		}
 
 		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
 			ChainSourceKind::Esplora(esplora_chain_source) => {
 				esplora_chain_source.validate_zero_fee_commitments_support().await
 			},
+			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source.validate_zero_fee_commitments_support().await
 			},
+			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 				bitcoind_chain_source.validate_zero_fee_commitments_support().await
 			},
@@ -551,12 +593,15 @@ impl ChainSource {
 					};
 					let package = package.into_sorted_transactions();
 					match &self.kind {
+						#[cfg(feature = "chain-esplora")]
 						ChainSourceKind::Esplora(esplora_chain_source) => {
 							esplora_chain_source.process_transaction_broadcast(package).await
 						},
+						#[cfg(feature = "chain-electrum")]
 						ChainSourceKind::Electrum(electrum_chain_source) => {
 							electrum_chain_source.process_transaction_broadcast(package).await
 						},
+						#[cfg(feature = "chain-bitcoind")]
 						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
 							bitcoind_chain_source.process_transaction_broadcast(package).await
 						},
@@ -571,23 +616,27 @@ impl Filter for ChainSource {
 	fn register_tx(&self, txid: &Txid, script_pubkey: &Script) {
 		self.registered_txids.lock().expect("lock").insert(*txid);
 		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
 			ChainSourceKind::Esplora(esplora_chain_source) => {
 				esplora_chain_source.register_tx(txid, script_pubkey)
 			},
+			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source.register_tx(txid, script_pubkey)
 			},
+			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind { .. } => (),
 		}
 	}
 	fn register_output(&self, output: lightning::chain::WatchedOutput) {
 		match &self.kind {
-			ChainSourceKind::Esplora(esplora_chain_source) => {
-				esplora_chain_source.register_output(output)
-			},
+			#[cfg(feature = "chain-esplora")]
+			ChainSourceKind::Esplora(esplora_chain_source) => esplora_chain_source.register_output(output),
+			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source.register_output(output)
 			},
+			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind { .. } => (),
 		}
 	}

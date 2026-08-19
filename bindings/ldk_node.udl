@@ -108,7 +108,6 @@ interface Node {
 	Bolt12Payment bolt12_payment();
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
-	UnifiedPayment unified_payment();
 	Liquidity liquidity();
 	[Throws=NodeError]
 	void lnurl_auth(string lnurl);
@@ -178,8 +177,6 @@ interface FeeRate {
 	u64 to_sat_per_vb_floor();
 	u64 to_sat_per_vb_ceil();
 };
-
-typedef interface UnifiedPayment;
 
 typedef interface Liquidity;
 

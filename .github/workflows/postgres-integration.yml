@@ -58,9 +58,9 @@ jobs:
       - name: Run PostgreSQL store tests
         env:
           TEST_POSTGRES_URL: "host=localhost user=postgres password=postgres"
-        run: cargo test --features postgres io::postgres_store
+        run: cargo test --features storage-postgres io::postgres_store
       - name: Run PostgreSQL integration tests
         env:
           TEST_POSTGRES_URL: "host=localhost user=postgres password=postgres"
         run: |
-          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --features postgres --test integration_tests_postgres
+          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --features storage-postgres --test integration_tests_postgres

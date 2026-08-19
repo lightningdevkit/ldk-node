@@ -8,12 +8,15 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
+#[cfg(feature = "chain-bitcoind")]
 use lightning_block_sync::gossip::GossipVerifier;
 
 use crate::chain::ChainSource;
 use crate::config::{RGS_SNAPSHOT_MAX_SIZE, RGS_SYNC_TIMEOUT_SECS};
 use crate::logger::{log_error, log_trace, LdkLogger, Logger};
-use crate::runtime::{Runtime, RuntimeSpawner};
+use crate::runtime::Runtime;
+#[cfg(feature = "chain-bitcoind")]
+use crate::runtime::RuntimeSpawner;
 use crate::types::{GossipSync, Graph, P2PGossipSync, RapidGossipSync, UtxoLookup};
 use crate::Error;
 
@@ -34,10 +37,16 @@ impl GossipSource {
 		network_graph: Arc<Graph>, chain_source: Arc<ChainSource>, runtime: Arc<Runtime>,
 		logger: Arc<Logger>,
 	) -> Self {
+		#[cfg(feature = "chain-bitcoind")]
 		let verifier = chain_source.as_utxo_source().map(|utxo_source| {
 			Arc::new(GossipVerifier::new(Arc::new(utxo_source), RuntimeSpawner::new(runtime)))
 				as Arc<UtxoLookup>
 		});
+		#[cfg(not(feature = "chain-bitcoind"))]
+		let verifier: Option<Arc<UtxoLookup>> = {
+			let _ = (chain_source, runtime);
+			None
+		};
 
 		let gossip_sync = Arc::new(P2PGossipSync::new(network_graph, verifier, logger));
 		Self::P2PNetwork { gossip_sync }

@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-#![cfg(feature = "postgres")]
+#![cfg(feature = "storage-postgres")]
 
 mod common;
 

@@ -72,6 +72,7 @@ pub struct UnifiedPayment {
 	onchain_payment: Arc<OnchainPayment>,
 	bolt11_invoice: Arc<Bolt11Payment>,
 	bolt12_payment: Arc<Bolt12Payment>,
+	#[cfg(not(hrn_tests))]
 	config: Arc<Config>,
 	logger: Arc<Logger>,
 	hrn_resolver: HRNResolver,
@@ -85,10 +86,14 @@ impl UnifiedPayment {
 		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
 		hrn_resolver: HRNResolver,
 	) -> Self {
+		#[cfg(hrn_tests)]
+		let _ = config;
+
 		Self {
 			onchain_payment,
 			bolt11_invoice,
 			bolt12_payment,
+			#[cfg(not(hrn_tests))]
 			config,
 			logger,
 			hrn_resolver,
