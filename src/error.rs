@@ -81,6 +81,8 @@ pub enum Error {
 	InvalidPublicKey,
 	/// The given secret key is invalid.
 	InvalidSecretKey,
+	/// The given BIP 39 mnemonic is invalid.
+	InvalidMnemonic,
 	/// The given offer id is invalid.
 	InvalidOfferId,
 	/// The given node id is invalid.
@@ -188,6 +190,7 @@ impl fmt::Display for Error {
 			Self::InvalidSocketAddress => write!(f, "The given network address is invalid."),
 			Self::InvalidPublicKey => write!(f, "The given public key is invalid."),
 			Self::InvalidSecretKey => write!(f, "The given secret key is invalid."),
+			Self::InvalidMnemonic => write!(f, "The given BIP 39 mnemonic is invalid."),
 			Self::InvalidOfferId => write!(f, "The given offer id is invalid."),
 			Self::InvalidNodeId => write!(f, "The given node id is invalid."),
 			Self::InvalidPaymentId => write!(f, "The given payment id is invalid."),

@@ -10,10 +10,16 @@
 use std::fmt;
 
 use bip39::rand::rngs::OsRng;
-use bip39::{Language, Mnemonic};
+use bip39::{Language, Mnemonic as Bip39Mnemonic};
 
 use crate::config::WALLET_KEYS_SEED_LEN;
+use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::io;
+
+#[cfg(not(feature = "uniffi"))]
+type Mnemonic = Bip39Mnemonic;
+#[cfg(feature = "uniffi")]
+type Mnemonic = std::sync::Arc<crate::ffi::Mnemonic>;
 
 /// An error that could arise during [`NodeEntropy`] construction.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +73,7 @@ impl NodeEntropy {
 	/// [`Node`]: crate::Node
 	#[cfg_attr(feature = "uniffi", uniffi::constructor)]
 	pub fn from_bip39_mnemonic(mnemonic: Mnemonic, passphrase: Option<String>) -> Self {
+		let mnemonic = maybe_deref(&mnemonic);
 		match passphrase {
 			Some(passphrase) => Self(mnemonic.to_seed(passphrase)),
 			None => Self(mnemonic.to_seed("")),
@@ -129,8 +136,9 @@ impl fmt::Debug for NodeEntropy {
 /// [`Node`]: crate::Node
 pub fn generate_entropy_mnemonic(word_count: Option<WordCount>) -> Mnemonic {
 	let word_count = word_count.unwrap_or(WordCount::Words24).word_count();
-	Mnemonic::generate_in_with(&mut OsRng, Language::English, word_count)
-		.expect("Failed to generate mnemonic")
+	let mnemonic = Bip39Mnemonic::generate_in_with(&mut OsRng, Language::English, word_count)
+		.expect("Failed to generate mnemonic");
+	maybe_wrap(mnemonic)
 }
 
 /// Supported BIP39 mnemonic word counts for entropy generation.
@@ -170,9 +178,10 @@ mod tests {
 	fn mnemonic_to_entropy_to_mnemonic() {
 		// Test default (24 words)
 		let mnemonic = generate_entropy_mnemonic(None);
-		let entropy = mnemonic.to_entropy();
-		assert_eq!(mnemonic, Mnemonic::from_entropy(&entropy).unwrap());
-		assert_eq!(mnemonic.word_count(), 24);
+		let mnemonic_inner = maybe_deref(&mnemonic);
+		let entropy = mnemonic_inner.to_entropy();
+		assert_eq!(mnemonic_inner, &Bip39Mnemonic::from_entropy(&entropy).unwrap());
+		assert_eq!(mnemonic_inner.word_count(), 24);
 
 		// Test with different word counts
 		let word_counts = [
@@ -185,8 +194,9 @@ mod tests {
 
 		for word_count in word_counts {
 			let mnemonic = generate_entropy_mnemonic(Some(word_count));
-			let entropy = mnemonic.to_entropy();
-			assert_eq!(mnemonic, Mnemonic::from_entropy(&entropy).unwrap());
+			let mnemonic_inner = maybe_deref(&mnemonic);
+			let entropy = mnemonic_inner.to_entropy();
+			assert_eq!(mnemonic_inner, &Bip39Mnemonic::from_entropy(&entropy).unwrap());
 
 			// Verify expected word count
 			let expected_words = match word_count {
@@ -196,7 +206,7 @@ mod tests {
 				WordCount::Words21 => 21,
 				WordCount::Words24 => 24,
 			};
-			assert_eq!(mnemonic.word_count(), expected_words);
+			assert_eq!(mnemonic_inner.word_count(), expected_words);
 		}
 	}
 }

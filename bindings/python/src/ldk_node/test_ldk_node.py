@@ -8,6 +8,7 @@ import requests
 import socket
 
 from ldk_node import *
+from ldk_node import ldk_node as bindings
 
 DEFAULT_ESPLORA_SERVER_URL = "http://127.0.0.1:3002"
 DEFAULT_TEST_NETWORK = Network.REGTEST
@@ -204,6 +205,45 @@ def init_features_exposed(test_case, init_features):
     assert_feature_helpers_return_bool(test_case, init_features)
     test_case.assertIsInstance(init_features.initial_routing_sync(), bool)
 
+
+class TestMnemonic(unittest.TestCase):
+    def test_invalid_mnemonic_returns_node_error(self):
+        invalid_mnemonic = "abandon " * 11 + "abandon"
+        mnemonic_constructor = getattr(bindings.Mnemonic, "from_str", bindings.Mnemonic)
+
+        with self.assertRaises(NodeError) as error:
+            mnemonic_constructor(invalid_mnemonic)
+
+        self.assertIsInstance(error.exception, NodeError.InvalidMnemonic)
+
+    def test_mnemonic_round_trip(self):
+        mnemonic = generate_entropy_mnemonic(None)
+        parsed_mnemonic = bindings.Mnemonic.from_str(str(mnemonic))
+
+        self.assertIsInstance(mnemonic, bindings.Mnemonic)
+        self.assertEqual(parsed_mnemonic, mnemonic)
+        self.assertIsInstance(NodeEntropy.from_bip39_mnemonic(parsed_mnemonic, None), NodeEntropy)
+
+    def test_mnemonic_functionality(self):
+        entropy = bytes(16)
+        mnemonic = bindings.Mnemonic.from_entropy(entropy)
+
+        self.assertEqual(mnemonic.words(), ["abandon"] * 11 + ["about"])
+        self.assertEqual(mnemonic.word_indices(), [0] * 11 + [3])
+        self.assertEqual(mnemonic.word_count(), 12)
+        self.assertEqual(mnemonic.to_entropy(), entropy)
+        self.assertEqual(mnemonic.checksum(), 3)
+        self.assertEqual(
+            mnemonic.to_seed("TREZOR").hex(),
+            "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e5349553"
+            "1f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
+        )
+        self.assertEqual(bindings.Mnemonic.generate(WordCount.WORDS12).word_count(), 12)
+
+        with self.assertRaises(NodeError) as error:
+            bindings.Mnemonic.from_entropy(bytes(15))
+
+        self.assertIsInstance(error.exception, NodeError.InvalidMnemonic)
 
 
 class TestLdkNode(unittest.TestCase):
