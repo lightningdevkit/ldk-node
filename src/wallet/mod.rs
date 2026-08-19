@@ -1589,10 +1589,27 @@ impl Wallet {
 	async fn prepare_wallet_broadcast(
 		&self, tx: &Transaction, is_funding: bool,
 	) -> Result<bool, Error> {
+		let txid = tx.compute_txid();
+		let is_pending_outbound_tx = !is_funding
+			&& !self
+				.pending_payment_store
+				.list_filter(|payment| {
+					payment.details.direction == PaymentDirection::Outbound
+						&& payment.details.status == PaymentStatus::Pending
+						&& matches!(
+							payment.details.kind,
+							PaymentKind::Onchain {
+								txid: current_txid,
+								status: ConfirmationStatus::Unconfirmed,
+								..
+							} if current_txid == txid
+						)
+				})
+				.await
+				.is_empty();
 		let mut locked_persister = self.persister.lock().await;
 		let (should_broadcast, change_set) = {
 			let mut locked_wallet = self.inner.lock().expect("lock");
-			let txid = tx.compute_txid();
 			let is_canonical = locked_wallet.get_tx(txid).is_some();
 			let was_known = locked_wallet.tx_graph().get_tx(txid).is_some();
 
@@ -1609,22 +1626,7 @@ impl Wallet {
 							None => (has_conflict, has_confirmed),
 						}
 					});
-				let is_current_outbound_tx = has_canonical_conflict
-					&& !is_funding && !self
-					.pending_payment_store
-					.list_filter(|payment| {
-						payment.details.direction == PaymentDirection::Outbound
-							&& payment.details.status == PaymentStatus::Pending
-							&& matches!(
-								payment.details.kind,
-								PaymentKind::Onchain {
-									txid: current_txid,
-									status: ConfirmationStatus::Unconfirmed,
-									..
-								} if current_txid == txid
-							)
-					})
-					.is_empty();
+				let is_current_outbound_tx = has_canonical_conflict && is_pending_outbound_tx;
 				let unavailable_conflict =
 					has_canonical_conflict && (!is_current_outbound_tx || has_confirmed_conflict);
 				let has_locked_input = tx
@@ -4600,6 +4602,7 @@ mod tests {
 
 		let payment_store = Arc::new(PaymentStore::new(
 			Vec::new(),
+			KeepLeastRecentlyUsed::new(PAYMENT_CACHE_CAPACITY),
 			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
 			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&store),
@@ -4607,6 +4610,7 @@ mod tests {
 		));
 		let pending_payment_store = Arc::new(PendingPaymentStore::new(
 			Vec::new(),
+			KeepAllEntries,
 			PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
 			PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&store),

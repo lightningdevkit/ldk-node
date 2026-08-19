@@ -4795,8 +4795,10 @@ async fn onchain_fee_bump_rbf() {
 	let txid =
 		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
 	let payment_id = PaymentId(txid.to_byte_array());
-	let original_payment =
-		node_b.payment(&payment_id).expect("outbound payment must be recorded before wallet sync");
+	let original_payment = node_b
+		.payment(&payment_id)
+		.expect("payment lookup must succeed")
+		.expect("outbound payment must be recorded before wallet sync");
 	let original_fee = original_payment.fee_paid_msat.unwrap();
 
 	wait_for_tx(&electrsd.client, txid).await;
