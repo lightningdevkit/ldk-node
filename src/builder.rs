@@ -1010,12 +1010,14 @@ impl ArcedNodeBuilder {
 		let inner = RwLock::new(NodeBuilder::from_config(config));
 		Self { inner }
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "chain-esplora"))]
+impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
 	///
 	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
 	/// information.
-	#[cfg(feature = "chain-esplora")]
 	pub fn set_chain_source_esplora(
 		&self, server_url: String, sync_config: Option<EsploraSyncConfig>,
 	) {
@@ -1029,7 +1031,6 @@ impl ArcedNodeBuilder {
 	///
 	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
 	/// information.
-	#[cfg(feature = "chain-esplora")]
 	pub fn set_chain_source_esplora_with_headers(
 		&self, server_url: String, headers: HashMap<String, String>,
 		sync_config: Option<EsploraSyncConfig>,
@@ -1040,18 +1041,23 @@ impl ArcedNodeBuilder {
 			sync_config,
 		);
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "chain-electrum"))]
+impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to source its chain data from the given Electrum server.
 	///
 	/// If no `sync_config` is given, default values are used. See [`ElectrumSyncConfig`] for more
 	/// information.
-	#[cfg(feature = "chain-electrum")]
 	pub fn set_chain_source_electrum(
 		&self, server_url: String, sync_config: Option<ElectrumSyncConfig>,
 	) {
 		self.inner.write().expect("lock").set_chain_source_electrum(server_url, sync_config);
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "chain-bitcoind"))]
+impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to connect to a Bitcoin Core node via RPC.
 	///
 	/// This method establishes an RPC connection that enables all essential chain operations including
@@ -1064,7 +1070,6 @@ impl ArcedNodeBuilder {
 	///   startup, before wallet state exists. Existing wallets are not rewound. The height must
 	///   be at or below the current tip. Passing `Some(0)` rescans from genesis; passing `None`
 	///   checkpoints at the current tip.
-	#[cfg(feature = "chain-bitcoind")]
 	pub fn set_chain_source_bitcoind_rpc(
 		&self, rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		wallet_rescan_from_height: Option<u32>,
@@ -1091,7 +1096,6 @@ impl ArcedNodeBuilder {
 	///   startup, before wallet state exists. Existing wallets are not rewound. The height must
 	///   be at or below the current tip. Passing `Some(0)` rescans from genesis; passing `None`
 	///   checkpoints at the current tip.
-	#[cfg(feature = "chain-bitcoind")]
 	pub fn set_chain_source_bitcoind_rest(
 		&self, rest_host: String, rest_port: u16, rpc_host: String, rpc_port: u16,
 		rpc_user: String, rpc_password: String, wallet_rescan_from_height: Option<u32>,
@@ -1106,7 +1110,10 @@ impl ArcedNodeBuilder {
 			wallet_rescan_from_height,
 		);
 	}
+}
 
+#[cfg(feature = "uniffi")]
+impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
 	/// network.
 	pub fn set_gossip_source_p2p(&self) {
@@ -1254,14 +1261,19 @@ impl ArcedNodeBuilder {
 	pub fn set_probing_config(&self, config: Arc<ProbingConfig>) {
 		self.inner.write().expect("lock").set_probing_config((*config).clone());
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "storage-sqlite"))]
+impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
-	#[cfg(feature = "storage-sqlite")]
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build(*node_entropy).map(Arc::new)
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "storage-postgres"))]
+impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
 	/// previously configured.
 	///
@@ -1292,7 +1304,6 @@ impl ArcedNodeBuilder {
 	/// will be unencrypted.
 	///
 	/// [PostgreSQL]: https://www.postgresql.org
-	#[cfg(feature = "storage-postgres")]
 	pub fn build_with_postgres_store(
 		&self, node_entropy: Arc<NodeEntropy>, connection_string: String, db_name: Option<String>,
 		kv_table_name: Option<String>, certificate_pem: Option<String>,
@@ -1309,28 +1320,35 @@ impl ArcedNodeBuilder {
 			)
 			.map(Arc::new)
 	}
+}
 
+#[cfg(all(feature = "uniffi", not(feature = "storage-postgres")))]
+impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
 	/// previously configured.
 	///
 	/// This requires the `storage-postgres` crate feature.
-	#[cfg(not(feature = "storage-postgres"))]
 	pub fn build_with_postgres_store(
 		&self, _node_entropy: Arc<NodeEntropy>, _connection_string: String,
 		_db_name: Option<String>, _kv_table_name: Option<String>, _certificate_pem: Option<String>,
 	) -> Result<Arc<Node>, BuildError> {
 		Err(BuildError::KVStoreSetupFailed)
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "storage-filesystem"))]
+impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
 	/// previously configured.
-	#[cfg(feature = "storage-filesystem")]
 	pub fn build_with_fs_store(
 		&self, node_entropy: Arc<NodeEntropy>,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build_with_fs_store(*node_entropy).map(Arc::new)
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "storage-vss"))]
+impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
 	/// previously configured.
 	///
@@ -1348,7 +1366,6 @@ impl ArcedNodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	#[cfg(feature = "storage-vss")]
 	pub fn build_with_vss_store(
 		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
@@ -1382,7 +1399,6 @@ impl ArcedNodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
-	#[cfg(feature = "storage-vss")]
 	pub fn build_with_vss_store_and_lnurl_auth(
 		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
 		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
@@ -1412,7 +1428,6 @@ impl ArcedNodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	#[cfg(feature = "storage-vss")]
 	pub fn build_with_vss_store_and_fixed_headers(
 		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
@@ -1435,7 +1450,6 @@ impl ArcedNodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
-	#[cfg(feature = "storage-vss")]
 	pub fn build_with_vss_store_and_header_provider(
 		&self, node_entropy: Arc<NodeEntropy>, vss_url: String, store_id: String,
 		header_provider: Arc<dyn crate::ffi::VssHeaderProvider>,
@@ -1447,7 +1461,10 @@ impl ArcedNodeBuilder {
 			.build_with_vss_store_and_header_provider(*node_entropy, vss_url, store_id, adapter)
 			.map(Arc::new)
 	}
+}
 
+#[cfg(feature = "uniffi")]
+impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
 	// this so its not needed.
