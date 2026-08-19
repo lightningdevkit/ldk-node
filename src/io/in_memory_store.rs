@@ -15,7 +15,7 @@ use lightning::util::persist::{
 	KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
 };
 
-const IN_MEMORY_PAGE_SIZE: usize = 50;
+pub(crate) const IN_MEMORY_PAGE_SIZE: usize = 50;
 
 pub struct InMemoryStore {
 	persisted_bytes: Mutex<HashMap<String, HashMap<String, Vec<u8>>>>,

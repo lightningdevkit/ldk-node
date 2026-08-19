@@ -143,7 +143,10 @@ async fn v0_7_for_hash_payments_can_be_manually_resolved_after_upgrade() {
 	let received_payment_id = expect_payment_received_event!(receiver, CLAIM_AMOUNT_MSAT);
 	assert_eq!(received_payment_id, claim_payment_id);
 	expect_payment_successful_event!(payer, payer_claim_id, None);
-	assert_eq!(receiver.payment(&claim_payment_id).unwrap().status, PaymentStatus::Succeeded);
+	assert_eq!(
+		receiver.payment(&claim_payment_id).unwrap().unwrap().status,
+		PaymentStatus::Succeeded
+	);
 
 	let fail_invoice = CurrentBolt11Invoice::from_str(&fail_invoice).unwrap();
 	let payer_fail_id = payer.bolt11_payment().send(&fail_invoice, None).unwrap();
@@ -152,8 +155,8 @@ async fn v0_7_for_hash_payments_can_be_manually_resolved_after_upgrade() {
 	assert_eq!(fail_payment_id, PaymentId(fail_hash.0));
 	receiver.bolt11_payment().fail_for_id(fail_payment_id).unwrap();
 	expect_event!(payer, PaymentFailed);
-	assert_eq!(payer.payment(&payer_fail_id).unwrap().status, PaymentStatus::Failed);
-	assert_eq!(receiver.payment(&fail_payment_id).unwrap().status, PaymentStatus::Failed);
+	assert_eq!(payer.payment(&payer_fail_id).unwrap().unwrap().status, PaymentStatus::Failed);
+	assert_eq!(receiver.payment(&fail_payment_id).unwrap().unwrap().status, PaymentStatus::Failed);
 
 	payer.stop().unwrap();
 	receiver.stop().unwrap();
@@ -201,7 +204,7 @@ fn payment_hash_from_preimage(preimage: [u8; 32]) -> PaymentHash {
 
 fn assert_legacy_manual_payment(node: &Node, payment_hash: PaymentHash, amount_msat: u64) {
 	let payment_id = PaymentId(payment_hash.0);
-	let payment = node.payment(&payment_id).unwrap();
+	let payment = node.payment(&payment_id).unwrap().unwrap();
 	assert_eq!(payment.id, payment_id);
 	assert_eq!(payment.amount_msat, Some(amount_msat));
 	assert_eq!(payment.direction, PaymentDirection::Inbound);

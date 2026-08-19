@@ -691,23 +691,31 @@ where
 		})
 	}
 
-	fn resolve_inbound_payment_id(
+	async fn resolve_inbound_payment_id(
 		&self, event_payment_id: Option<PaymentId>, payment_hash: &PaymentHash,
-	) -> (PaymentId, Option<PaymentDetails>) {
+	) -> Result<(PaymentId, Option<PaymentDetails>), ReplayEvent> {
 		let legacy_id = PaymentId(payment_hash.0);
 		let payment_id = event_payment_id.unwrap_or(legacy_id);
 
-		if let Some(info) = self.payment_store.get(&payment_id) {
-			return (payment_id, Some(info));
+		let payment_info = self.payment_store.get(&payment_id).await.map_err(|e| {
+			log_error!(self.logger, "Failed to access payment store: {}", e);
+			ReplayEvent()
+		})?;
+		if let Some(info) = payment_info {
+			return Ok((payment_id, Some(info)));
 		}
 
 		if legacy_id != payment_id {
-			if let Some(info) = self.payment_store.get(&legacy_id) {
-				return (legacy_id, Some(info));
+			let legacy_payment_info = self.payment_store.get(&legacy_id).await.map_err(|e| {
+				log_error!(self.logger, "Failed to access payment store: {}", e);
+				ReplayEvent()
+			})?;
+			if let Some(info) = legacy_payment_info {
+				return Ok((legacy_id, Some(info)));
 			}
 		}
 
-		(payment_id, None)
+		Ok((payment_id, None))
 	}
 
 	pub async fn handle_event(&self, event: LdkEvent) -> Result<(), ReplayEvent> {
@@ -827,7 +835,7 @@ where
 				..
 			} => {
 				let (payment_id, mut payment_info) =
-					self.resolve_inbound_payment_id(payment_id, &payment_hash);
+					self.resolve_inbound_payment_id(payment_id, &payment_hash).await?;
 				if let Some(info) = payment_info.as_ref() {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
@@ -987,25 +995,14 @@ where
 							PaymentStatus::Pending,
 						);
 
-						match self.payment_store.insert(payment.clone()).await {
-							Ok(false) => (),
-							Ok(true) => {
-								log_error!(
-									self.logger,
-									"Bolt11InvoicePayment with ID {} was previously known",
-									payment_id,
-								);
-								debug_assert!(false);
-							},
-							Err(e) => {
-								log_error!(
-									self.logger,
-									"Failed to insert payment with ID {}: {}",
-									payment_id,
-									e
-								);
-								return Err(ReplayEvent());
-							},
+						if let Err(e) = self.payment_store.insert(payment.clone()).await {
+							log_error!(
+								self.logger,
+								"Failed to insert payment with ID {}: {}",
+								payment_id,
+								e
+							);
+							return Err(ReplayEvent());
 						}
 						payment_info = Some(payment);
 					}
@@ -1088,25 +1085,14 @@ where
 								PaymentStatus::Pending,
 							);
 
-							match self.payment_store.insert(payment).await {
-								Ok(false) => (),
-								Ok(true) => {
-									log_error!(
-										self.logger,
-										"Bolt11InvoicePayment with ID {} was previously known",
-										payment_id,
-									);
-									debug_assert!(false);
-								},
-								Err(e) => {
-									log_error!(
-										self.logger,
-										"Failed to insert payment with ID {}: {}",
-										payment_id,
-										e
-									);
-									return Err(ReplayEvent());
-								},
+							if let Err(e) = self.payment_store.insert(payment).await {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
 							}
 						}
 
@@ -1140,25 +1126,14 @@ where
 								PaymentStatus::Pending,
 							);
 
-							match self.payment_store.insert(payment).await {
-								Ok(false) => (),
-								Ok(true) => {
-									log_error!(
-										self.logger,
-										"Bolt12OfferPayment with ID {} was previously known",
-										payment_id,
-									);
-									debug_assert!(false);
-								},
-								Err(e) => {
-									log_error!(
-										self.logger,
-										"Failed to insert payment with ID {}: {}",
-										payment_id,
-										e
-									);
-									return Err(ReplayEvent());
-								},
+							if let Err(e) = self.payment_store.insert(payment).await {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
 							}
 						}
 						payment_preimage
@@ -1189,25 +1164,14 @@ where
 								PaymentStatus::Pending,
 							);
 
-							match self.payment_store.insert(payment).await {
-								Ok(false) => (),
-								Ok(true) => {
-									log_error!(
-										self.logger,
-										"Bolt12RefundPayment with ID {} was previously known",
-										payment_id,
-									);
-									debug_assert!(false);
-								},
-								Err(e) => {
-									log_error!(
-										self.logger,
-										"Failed to insert payment with ID {}: {}",
-										payment_id,
-										e
-									);
-									return Err(ReplayEvent());
-								},
+							if let Err(e) = self.payment_store.insert(payment).await {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
 							}
 						}
 						payment_preimage
@@ -1228,25 +1192,14 @@ where
 								PaymentStatus::Pending,
 							);
 
-							match self.payment_store.insert(payment).await {
-								Ok(false) => (),
-								Ok(true) => {
-									log_error!(
-										self.logger,
-										"Spontaneous payment with ID {} was previously known",
-										payment_id,
-									);
-									debug_assert!(false);
-								},
-								Err(e) => {
-									log_error!(
-										self.logger,
-										"Failed to insert payment with ID {}: {}",
-										payment_id,
-										e
-									);
-									return Err(ReplayEvent());
-								},
+							if let Err(e) = self.payment_store.insert(payment).await {
+								log_error!(
+									self.logger,
+									"Failed to insert payment with ID {}: {}",
+									payment_id,
+									e
+								);
+								return Err(ReplayEvent());
 							}
 						}
 
@@ -1288,7 +1241,8 @@ where
 				sender_intended_total_msat: _,
 				onion_fields,
 			} => {
-				let (payment_id, _) = self.resolve_inbound_payment_id(payment_id, &payment_hash);
+				let (payment_id, _) =
+					self.resolve_inbound_payment_id(payment_id, &payment_hash).await?;
 				log_info!(
 					self.logger,
 					"Claimed payment with ID {} from payment hash {} of {}msat.",
@@ -1459,22 +1413,33 @@ where
 					},
 				};
 
-				self.payment_store.get(&payment_id).map(|payment| {
-					let amount_msat = payment.amount_msat.expect(
-						"outbound payments should record their amount before they can succeed",
-					);
-					log_info!(
-						self.logger,
-						"Successfully sent payment of {}msat{} with payment hash {}",
-						amount_msat,
-						if let Some(fee) = fee_paid_msat {
-							format!(" (fee {} msat)", fee)
-						} else {
-							"".to_string()
-						},
-						hex_utils::to_string(&payment_hash.0),
-					);
-				});
+				match self.payment_store.get(&payment_id).await {
+					Ok(Some(payment)) => {
+						let amount_msat = payment.amount_msat.expect(
+							"outbound payments should record their amount before they can succeed",
+						);
+						log_info!(
+							self.logger,
+							"Successfully sent payment of {}msat{} with payment hash {}",
+							amount_msat,
+							if let Some(fee) = fee_paid_msat {
+								format!(" (fee {} msat)", fee)
+							} else {
+								"".to_string()
+							},
+							hex_utils::to_string(&payment_hash.0),
+						);
+					},
+					Ok(None) => {},
+					Err(e) => {
+						log_error!(
+							self.logger,
+							"Failed to read payment {} for success logging: {}",
+							payment_id,
+							e
+						);
+					},
+				};
 				let event = Event::PaymentSuccessful {
 					payment_id,
 					payment_hash,

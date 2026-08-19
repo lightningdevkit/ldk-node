@@ -43,7 +43,9 @@ use ldk_node::config::{
 };
 use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
 use ldk_node::io::sqlite_store::SqliteStore;
-use ldk_node::payment::{PaymentDirection, PaymentKind, PaymentStatus, TransactionType};
+use ldk_node::payment::{
+	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, TransactionType,
+};
 use ldk_node::probing::ProbingConfig;
 use ldk_node::{
 	Builder, ChannelShutdownState, CustomTlvRecord, Event, LightningBalance, Node, NodeError,
@@ -224,7 +226,7 @@ macro_rules! expect_payment_received_event {
 			ref e @ Event::PaymentReceived { payment_id, amount_msat, .. } => {
 				println!("{} got event {:?}", $node.node_id(), e);
 				assert_eq!(amount_msat, $amount_msat);
-				let payment = $node.payment(&payment_id).unwrap();
+				let payment = $node.payment(&payment_id).unwrap().unwrap();
 				if !matches!(payment.kind, ldk_node::payment::PaymentKind::Onchain { .. }) {
 					assert_eq!(payment.fee_paid_msat, None);
 				}
@@ -322,7 +324,7 @@ macro_rules! expect_payment_successful_event {
 				if let Some(fee_msat) = $fee_paid_msat {
 					assert_eq!(fee_paid_msat, fee_msat);
 				}
-				let payment = $node.payment(&$payment_id).unwrap();
+				let payment = $node.payment(&$payment_id).unwrap().unwrap();
 				assert_eq!(payment.fee_paid_msat, fee_paid_msat);
 				assert_eq!(payment_id, $payment_id);
 				$node.event_handled().unwrap();
@@ -440,8 +442,60 @@ pub(crate) type TestNode = Arc<Node>;
 #[cfg(not(feature = "uniffi"))]
 pub(crate) type TestNode = Node;
 
+/// Payment listing helpers for tests.
+///
+/// These exist so that tests state *what* they want from the payment history rather than how it is
+/// retrieved, and so that the retrieval can change in one place.
+pub(crate) trait NodePaymentExt {
+	/// Returns all known payments, from most recently created to least recently created.
+	fn list_all_payments(&self) -> Vec<PaymentDetails>;
+
+	/// Returns all known payments matching `f`, from most recently created to least recently
+	/// created.
+	fn list_payments_matching<F: FnMut(&&PaymentDetails) -> bool>(
+		&self, f: F,
+	) -> Vec<PaymentDetails>;
+}
+
+// Implemented on `Node` rather than on `TestNode` so that it applies both when `TestNode` is a
+// `Node` and when it is an `Arc<Node>`.
+impl NodePaymentExt for Node {
+	fn list_all_payments(&self) -> Vec<PaymentDetails> {
+		let mut all = Vec::new();
+		let mut seen = HashSet::new();
+		let mut page_token = None;
+		let mut num_pages = 0;
+		loop {
+			let page = self.list_payments(page_token).unwrap();
+			for payment in page.payments {
+				// Every test that looks at payments now exercises pagination, so assert the
+				// properties it is supposed to have while we are here.
+				assert!(
+					seen.insert(payment.id),
+					"Payment {:?} was returned on more than one page",
+					payment.id
+				);
+				all.push(payment);
+			}
+			num_pages += 1;
+			assert!(num_pages < 1_000, "Pagination did not terminate after {} pages", num_pages);
+			match page.next_page_token {
+				Some(token) => page_token = Some(token),
+				None => break,
+			}
+		}
+		all
+	}
+
+	fn list_payments_matching<F: FnMut(&&PaymentDetails) -> bool>(
+		&self, mut f: F,
+	) -> Vec<PaymentDetails> {
+		self.list_all_payments().into_iter().filter(|p| f(&p)).collect()
+	}
+}
+
 fn has_onchain_tx_type<F: Fn(&TransactionType) -> bool>(node: &TestNode, predicate: F) -> bool {
-	node.list_payments().into_iter().any(|payment| {
+	node.list_all_payments().into_iter().any(|payment| {
 		matches!(
 			payment.kind,
 			PaymentKind::Onchain { tx_type: Some(ref tx_type), .. } if predicate(tx_type)
@@ -459,7 +513,7 @@ fn assert_any_node_has_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>(
 	let observed: Vec<String> = nodes
 		.iter()
 		.flat_map(|(name, node)| {
-			node.list_payments().into_iter().filter_map(move |payment| match payment.kind {
+			node.list_all_payments().into_iter().filter_map(move |payment| match payment.kind {
 				PaymentKind::Onchain { tx_type, .. } => Some(format!("{}:{:?}", name, tx_type)),
 				_ => None,
 			})
@@ -478,7 +532,7 @@ fn assert_all_nodes_have_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>
 	let observed: Vec<String> = nodes
 		.iter()
 		.flat_map(|(name, node)| {
-			node.list_payments().into_iter().filter_map(move |payment| match payment.kind {
+			node.list_all_payments().into_iter().filter_map(move |payment| match payment.kind {
 				PaymentKind::Onchain { tx_type, .. } => Some(format!("{}:{:?}", name, tx_type)),
 				_ => None,
 			})
@@ -1121,28 +1175,28 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	// Check we saw the node funding transactions.
 	assert_eq!(
 		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		1
 	);
 	assert_eq!(
 		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Outbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		0
 	);
 	assert_eq!(
 		node_b
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		1
 	);
 	assert_eq!(
 		node_b
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Outbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		0
@@ -1195,7 +1249,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	// Check we now see the channel funding transaction as outbound.
 	assert_eq!(
 		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Outbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		1
@@ -1273,24 +1327,24 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let outbound_payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
 	assert_eq!(Err(NodeError::DuplicatePayment), node_a.bolt11_payment().send(&invoice, None));
 
-	assert!(!node_a.list_payments_with_filter(|p| p.id == outbound_payment_id).is_empty());
+	assert!(!node_a.list_payments_matching(|p| p.id == outbound_payment_id).is_empty());
 
-	let outbound_payments_a = node_a.list_payments_with_filter(|p| {
+	let outbound_payments_a = node_a.list_payments_matching(|p| {
 		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
 	});
 	assert_eq!(outbound_payments_a.len(), 1);
 
-	let inbound_payments_a = node_a.list_payments_with_filter(|p| {
+	let inbound_payments_a = node_a.list_payments_matching(|p| {
 		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
 	});
 	assert_eq!(inbound_payments_a.len(), 0);
 
-	let outbound_payments_b = node_b.list_payments_with_filter(|p| {
+	let outbound_payments_b = node_b.list_payments_matching(|p| {
 		p.direction == PaymentDirection::Outbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
 	});
 	assert_eq!(outbound_payments_b.len(), 0);
 
-	let inbound_payments_b = node_b.list_payments_with_filter(|p| {
+	let inbound_payments_b = node_b.list_payments_matching(|p| {
 		p.direction == PaymentDirection::Inbound && matches!(p.kind, PaymentKind::Bolt11 { .. })
 	});
 	assert_eq!(inbound_payments_b.len(), 0);
@@ -1307,12 +1361,12 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		},
 	}
 	let inbound_payment_id = expect_payment_received_event!(node_b, invoice_amount_1_msat);
-	let outbound_payment = node_a.payment(&outbound_payment_id).unwrap();
+	let outbound_payment = node_a.payment(&outbound_payment_id).unwrap().unwrap();
 	assert_eq!(outbound_payment.status, PaymentStatus::Succeeded);
 	assert_eq!(outbound_payment.direction, PaymentDirection::Outbound);
 	assert_eq!(outbound_payment.amount_msat, Some(invoice_amount_1_msat));
 	assert!(matches!(&outbound_payment.kind, PaymentKind::Bolt11 { .. }));
-	let inbound_payment = node_b.payment(&inbound_payment_id).unwrap();
+	let inbound_payment = node_b.payment(&inbound_payment_id).unwrap().unwrap();
 	assert_eq!(inbound_payment.status, PaymentStatus::Succeeded);
 	assert_eq!(inbound_payment.direction, PaymentDirection::Inbound);
 	assert_eq!(inbound_payment.amount_msat, Some(invoice_amount_1_msat));
@@ -1353,12 +1407,12 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_amount, overpaid_amount_msat);
-	let outbound_payment = node_a.payment(&outbound_payment_id).unwrap();
+	let outbound_payment = node_a.payment(&outbound_payment_id).unwrap().unwrap();
 	assert_eq!(outbound_payment.status, PaymentStatus::Succeeded);
 	assert_eq!(outbound_payment.direction, PaymentDirection::Outbound);
 	assert_eq!(outbound_payment.amount_msat, Some(overpaid_amount_msat));
 	assert!(matches!(&outbound_payment.kind, PaymentKind::Bolt11 { .. }));
-	let inbound_payment = node_b.payment(&inbound_payment_id).unwrap();
+	let inbound_payment = node_b.payment(&inbound_payment_id).unwrap().unwrap();
 	assert_eq!(inbound_payment.status, PaymentStatus::Succeeded);
 	assert_eq!(inbound_payment.direction, PaymentDirection::Inbound);
 	assert_eq!(inbound_payment.amount_msat, Some(overpaid_amount_msat));
@@ -1393,12 +1447,12 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		},
 	};
 	assert_eq!(received_amount, determined_amount_msat);
-	let outbound_payment = node_a.payment(&outbound_payment_id).unwrap();
+	let outbound_payment = node_a.payment(&outbound_payment_id).unwrap().unwrap();
 	assert_eq!(outbound_payment.status, PaymentStatus::Succeeded);
 	assert_eq!(outbound_payment.direction, PaymentDirection::Outbound);
 	assert_eq!(outbound_payment.amount_msat, Some(determined_amount_msat));
 	assert!(matches!(&outbound_payment.kind, PaymentKind::Bolt11 { .. }));
-	let inbound_payment = node_b.payment(&inbound_payment_id).unwrap();
+	let inbound_payment = node_b.payment(&inbound_payment_id).unwrap().unwrap();
 	assert_eq!(inbound_payment.status, PaymentStatus::Succeeded);
 	assert_eq!(inbound_payment.direction, PaymentDirection::Inbound);
 	assert_eq!(inbound_payment.amount_msat, Some(determined_amount_msat));
@@ -1429,12 +1483,12 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let received_payment_id = expect_payment_received_event!(node_b, claimable_amount_msat);
 	assert_eq!(received_payment_id, manual_payment_id);
 	expect_payment_successful_event!(node_a, outbound_manual_payment_id, None);
-	let outbound_manual_payment = node_a.payment(&outbound_manual_payment_id).unwrap();
+	let outbound_manual_payment = node_a.payment(&outbound_manual_payment_id).unwrap().unwrap();
 	assert_eq!(outbound_manual_payment.status, PaymentStatus::Succeeded);
 	assert_eq!(outbound_manual_payment.direction, PaymentDirection::Outbound);
 	assert_eq!(outbound_manual_payment.amount_msat, Some(invoice_amount_3_msat));
 	assert!(matches!(&outbound_manual_payment.kind, PaymentKind::Bolt11 { .. }));
-	let manual_payment = node_b.payment(&manual_payment_id).unwrap();
+	let manual_payment = node_b.payment(&manual_payment_id).unwrap().unwrap();
 	assert_eq!(manual_payment.status, PaymentStatus::Succeeded);
 	assert_eq!(manual_payment.direction, PaymentDirection::Inbound);
 	assert_eq!(manual_payment.amount_msat, Some(invoice_amount_3_msat));
@@ -1462,12 +1516,13 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_ne!(manual_fail_payment_id.0, manual_fail_payment_hash.0);
 	node_b.bolt11_payment().fail_for_id(manual_fail_payment_id).unwrap();
 	expect_event!(node_a, PaymentFailed);
-	let outbound_manual_fail_payment = node_a.payment(&outbound_manual_fail_payment_id).unwrap();
+	let outbound_manual_fail_payment =
+		node_a.payment(&outbound_manual_fail_payment_id).unwrap().unwrap();
 	assert_eq!(outbound_manual_fail_payment.status, PaymentStatus::Failed);
 	assert_eq!(outbound_manual_fail_payment.direction, PaymentDirection::Outbound);
 	assert_eq!(outbound_manual_fail_payment.amount_msat, Some(invoice_amount_4_msat));
 	assert!(matches!(&outbound_manual_fail_payment.kind, PaymentKind::Bolt11 { .. }));
-	let manual_fail_payment = node_b.payment(&manual_fail_payment_id).unwrap();
+	let manual_fail_payment = node_b.payment(&manual_fail_payment_id).unwrap().unwrap();
 	assert_eq!(manual_fail_payment.status, PaymentStatus::Failed);
 	assert_eq!(manual_fail_payment.direction, PaymentDirection::Inbound);
 	assert_eq!(manual_fail_payment.amount_msat, Some(invoice_amount_4_msat));
@@ -1497,35 +1552,31 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			},
 		};
 	assert_eq!(received_keysend_amount, keysend_amount_msat);
-	let keysend_payment = node_a.payment(&keysend_payment_id).unwrap();
+	let keysend_payment = node_a.payment(&keysend_payment_id).unwrap().unwrap();
 	assert_eq!(keysend_payment.status, PaymentStatus::Succeeded);
 	assert_eq!(keysend_payment.direction, PaymentDirection::Outbound);
 	assert_eq!(keysend_payment.amount_msat, Some(keysend_amount_msat));
 	assert!(matches!(&keysend_payment.kind, PaymentKind::Spontaneous { .. }));
 	assert_eq!(received_custom_records, &custom_tlvs);
-	let received_keysend_payment = node_b.payment(&received_keysend_payment_id).unwrap();
+	let received_keysend_payment = node_b.payment(&received_keysend_payment_id).unwrap().unwrap();
 	assert_eq!(received_keysend_payment.status, PaymentStatus::Succeeded);
 	assert_eq!(received_keysend_payment.direction, PaymentDirection::Inbound);
 	assert_eq!(received_keysend_payment.amount_msat, Some(keysend_amount_msat));
 	assert!(matches!(&received_keysend_payment.kind, PaymentKind::Spontaneous { .. }));
 	assert_eq!(
-		node_a.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
+		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
 		5
 	);
 	assert_eq!(
-		node_b.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
+		node_b.list_payments_matching(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
 		5
 	);
 	assert_eq!(
-		node_a
-			.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Spontaneous { .. }))
-			.len(),
+		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Spontaneous { .. })).len(),
 		1
 	);
 	assert_eq!(
-		node_b
-			.list_payments_with_filter(|p| matches!(p.kind, PaymentKind::Spontaneous { .. }))
-			.len(),
+		node_b.list_payments_matching(|p| matches!(p.kind, PaymentKind::Spontaneous { .. })).len(),
 		1
 	);
 
@@ -1551,7 +1602,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	assert_eq!(
 		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Inbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		2
@@ -1573,7 +1624,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	assert_eq!(
 		node_a
-			.list_payments_with_filter(|p| p.direction == PaymentDirection::Outbound
+			.list_payments_matching(|p| p.direction == PaymentDirection::Outbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. }))
 			.len(),
 		2
@@ -1750,13 +1801,13 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	// Now we should have seen the channel closing transaction on-chain.
 	let node_a_inbound_onchain_count = node_a
-		.list_payments_with_filter(|p| {
+		.list_payments_matching(|p| {
 			p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. })
 		})
 		.len();
 	let node_b_inbound_onchain_count = node_b
-		.list_payments_with_filter(|p| {
+		.list_payments_matching(|p| {
 			p.direction == PaymentDirection::Inbound
 				&& matches!(p.kind, PaymentKind::Onchain { .. })
 		})

@@ -117,6 +117,8 @@ pub enum Error {
 	InvalidFeeRate,
 	/// The given script public key is invalid.
 	InvalidScriptPubKey,
+	/// The given page token is invalid.
+	InvalidPageToken,
 	/// A payment with the given hash has already been initiated.
 	DuplicatePayment,
 	/// The provided offer was denonminated in an unsupported currency.
@@ -204,6 +206,7 @@ impl fmt::Display for Error {
 			Self::InvalidDateTime => write!(f, "The given date time is invalid."),
 			Self::InvalidFeeRate => write!(f, "The given fee rate is invalid."),
 			Self::InvalidScriptPubKey => write!(f, "The given script pubkey is invalid."),
+			Self::InvalidPageToken => write!(f, "The given page token is invalid."),
 			Self::DuplicatePayment => {
 				write!(f, "A payment with the given hash has already been initiated.")
 			},
