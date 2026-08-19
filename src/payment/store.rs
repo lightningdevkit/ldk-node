@@ -22,7 +22,7 @@ use lightning::{
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning_types::string::UntrustedString;
 
-use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate};
+use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate, UpdatableObject};
 use crate::hex_utils;
 
 /// An opaque token used to continue a paginated listing.
@@ -192,11 +192,14 @@ impl StorableObjectId for PaymentId {
 }
 impl StorableObject for PaymentDetails {
 	type Id = PaymentId;
-	type Update = PaymentDetailsUpdate;
 
 	fn id(&self) -> Self::Id {
 		self.id
 	}
+}
+
+impl UpdatableObject for PaymentDetails {
+	type Update = PaymentDetailsUpdate;
 
 	fn update(&mut self, update: Self::Update) -> bool {
 		debug_assert_eq!(

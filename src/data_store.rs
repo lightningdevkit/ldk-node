@@ -21,11 +21,20 @@ use crate::logger::{log_debug, log_error, LdkLogger};
 use crate::types::DynStore;
 use crate::Error;
 
+/// An object a store can read, write and delete as a whole, keyed by its own id.
 pub(crate) trait StorableObject: Clone + Readable + Writeable {
 	type Id: StorableObjectId;
-	type Update: StorableObjectUpdate<Self>;
 
 	fn id(&self) -> Self::Id;
+}
+
+/// A [`StorableObject`] that a [`DataStore`] can merge an update into in place.
+///
+/// Separate from [`StorableObject`] because stores that only ever replace whole objects have no use
+/// for this, and requiring it of them would mean supplying an update representation nothing calls.
+pub(crate) trait UpdatableObject: StorableObject {
+	type Update: StorableObjectUpdate<Self>;
+
 	fn update(&mut self, update: Self::Update) -> bool;
 	fn to_update(&self) -> Self::Update;
 }
@@ -321,33 +330,6 @@ where
 		Ok(())
 	}
 
-	/// Like [`Self::insert`], but when an entry with the object's id already exists, merges the
-	/// object's full update ([`StorableObject::to_update`]) into it instead of replacing it.
-	///
-	/// Returns whether anything was written.
-	pub(crate) async fn insert_or_update(&self, object: SO) -> Result<bool, Error> {
-		let _guard = self.mutation_lock.write().await;
-
-		let id = object.id();
-		// Note we have to look through to the store here: merging against a cache miss would
-		// overwrite an evicted object with whatever the caller happens to know about it.
-		let data_to_persist = match self.lookup(&id).await? {
-			Some(mut existing_object) => {
-				existing_object.update(object.to_update()).then_some(existing_object)
-			},
-			None => Some(object),
-		};
-
-		match data_to_persist {
-			Some(updated_object) => {
-				self.persist(&updated_object).await?;
-				self.cache.lock().expect("lock").insert(id, updated_object);
-				Ok(true)
-			},
-			None => Ok(false),
-		}
-	}
-
 	/// Removes the object stored under `id`, if any.
 	pub(crate) async fn remove(&self, id: &SO::Id) -> Result<(), Error> {
 		let _guard = self.mutation_lock.write().await;
@@ -388,23 +370,6 @@ where
 	pub(crate) async fn get(&self, id: &SO::Id) -> Result<Option<SO>, Error> {
 		let _guard = self.mutation_lock.read().await;
 		self.lookup(id).await
-	}
-
-	/// Applies `update` to the object stored under its id.
-	pub(crate) async fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
-		let _guard = self.mutation_lock.write().await;
-
-		let id = update.id();
-		let Some(mut updated_object) = self.lookup(&id).await? else {
-			return Ok(DataStoreUpdateResult::NotFound);
-		};
-		if !updated_object.update(update) {
-			return Ok(DataStoreUpdateResult::Unchanged);
-		}
-
-		self.persist(&updated_object).await?;
-		self.cache.lock().expect("lock").insert(id, updated_object);
-		Ok(DataStoreUpdateResult::Updated)
 	}
 
 	/// Atomically transforms the entry for `id` through `f` and persists the result.
@@ -730,6 +695,55 @@ where
 	}
 }
 
+impl<SO: UpdatableObject, L: Deref, P: CachePolicy> DataStore<SO, L, P>
+where
+	L::Target: LdkLogger,
+{
+	/// Like [`Self::insert`], but when an entry with the object's id already exists, merges the
+	/// object's full update ([`UpdatableObject::to_update`]) into it instead of replacing it.
+	///
+	/// Returns whether anything was written.
+	pub(crate) async fn insert_or_update(&self, object: SO) -> Result<bool, Error> {
+		let _guard = self.mutation_lock.write().await;
+
+		let id = object.id();
+		// Note we have to look through to the store here: merging against a cache miss would
+		// overwrite an evicted object with whatever the caller happens to know about it.
+		let data_to_persist = match self.lookup(&id).await? {
+			Some(mut existing_object) => {
+				existing_object.update(object.to_update()).then_some(existing_object)
+			},
+			None => Some(object),
+		};
+
+		match data_to_persist {
+			Some(updated_object) => {
+				self.persist(&updated_object).await?;
+				self.cache.lock().expect("lock").insert(id, updated_object);
+				Ok(true)
+			},
+			None => Ok(false),
+		}
+	}
+
+	/// Applies `update` to the object stored under its id.
+	pub(crate) async fn update(&self, update: SO::Update) -> Result<DataStoreUpdateResult, Error> {
+		let _guard = self.mutation_lock.write().await;
+
+		let id = update.id();
+		let Some(mut updated_object) = self.lookup(&id).await? else {
+			return Ok(DataStoreUpdateResult::NotFound);
+		};
+		if !updated_object.update(update) {
+			return Ok(DataStoreUpdateResult::Unchanged);
+		}
+
+		self.persist(&updated_object).await?;
+		self.cache.lock().expect("lock").insert(id, updated_object);
+		Ok(DataStoreUpdateResult::Updated)
+	}
+}
+
 impl<SO: StorableObject, L: Deref> DataStore<SO, L, KeepAllEntries>
 where
 	L::Target: LdkLogger,
@@ -832,11 +846,14 @@ mod tests {
 
 	impl StorableObject for TestObject {
 		type Id = TestObjectId;
-		type Update = TestObjectUpdate;
 
 		fn id(&self) -> Self::Id {
 			self.id
 		}
+	}
+
+	impl UpdatableObject for TestObject {
+		type Update = TestObjectUpdate;
 
 		fn update(&mut self, update: Self::Update) -> bool {
 			let mut updated = false;
