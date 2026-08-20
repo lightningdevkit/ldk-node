@@ -1693,7 +1693,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
-	wait_for_outpoint_spend(electrsd, funding_txo_b).await;
+	wait_for_outpoint_spend(electrsd, splice_in_txo).await;
 
 	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
 	node_a.sync_wallets().unwrap();
