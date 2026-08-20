@@ -9,10 +9,8 @@
 
 mod common;
 
-use common::{drop_table, test_connection_string};
-use ldk_node::entropy::NodeEntropy;
+use common::{configure_chain_source, drop_table, random_chain_source, test_connection_string};
 use ldk_node::Builder;
-use rand::RngCore;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn channel_full_cycle_with_postgres_store() {
@@ -20,11 +18,11 @@ async fn channel_full_cycle_with_postgres_store() {
 	drop_table("channel_cycle_b").await;
 
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	println!("== Node A ==");
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let config_a = common::random_config();
-	let mut builder_a = Builder::from_config(config_a.node_config);
-	builder_a.set_chain_source_esplora(esplora_url.clone(), None);
+	let mut builder_a = Builder::from_config(config_a.node_config.clone());
+	configure_chain_source(&chain_source, &mut builder_a, &config_a);
 	let node_a = builder_a
 		.build_with_postgres_store(
 			config_a.node_entropy.into(),
@@ -39,8 +37,8 @@ async fn channel_full_cycle_with_postgres_store() {
 	println!("\n== Node B ==");
 	let mut config_b = common::random_config();
 	config_b.node_config.manually_handle_unknown_bolt11_payments = true;
-	let mut builder_b = Builder::from_config(config_b.node_config);
-	builder_b.set_chain_source_esplora(esplora_url.clone(), None);
+	let mut builder_b = Builder::from_config(config_b.node_config.clone());
+	configure_chain_source(&chain_source, &mut builder_b, &config_b);
 	let node_b = builder_b
 		.build_with_postgres_store(
 			config_b.node_entropy.into(),
@@ -73,23 +71,18 @@ async fn postgres_node_restart() {
 	drop_table("restart_test").await;
 
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
-	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
 	let connection_string = test_connection_string();
 
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
-	let mut seed_bytes = [42u8; 64];
-	rand::rng().fill_bytes(&mut seed_bytes);
-	#[cfg(feature = "uniffi")]
-	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes.to_vec()).unwrap();
-	#[cfg(not(feature = "uniffi"))]
-	let node_entropy = NodeEntropy::from_seed_bytes(seed_bytes);
+	let mut config = common::random_config();
+	config.node_config.storage_dir_path = storage_path;
+	let node_entropy = config.node_entropy;
 
 	// Setup initial node and fund it.
 	let (expected_balance_sats, expected_node_id) = {
-		let mut builder = Builder::new();
-		builder.set_network(bitcoin::Network::Regtest);
-		builder.set_storage_dir_path(storage_path.clone());
-		builder.set_chain_source_esplora(esplora_url.clone(), None);
+		let mut builder = Builder::from_config(config.node_config.clone());
+		configure_chain_source(&chain_source, &mut builder, &config);
 		let node = builder
 			.build_with_postgres_store(
 				node_entropy.into(),
@@ -120,10 +113,8 @@ async fn postgres_node_restart() {
 	};
 
 	// Verify node can be restarted from PostgreSQL backend.
-	let mut builder = Builder::new();
-	builder.set_network(bitcoin::Network::Regtest);
-	builder.set_storage_dir_path(storage_path);
-	builder.set_chain_source_esplora(esplora_url, None);
+	let mut builder = Builder::from_config(config.node_config.clone());
+	configure_chain_source(&chain_source, &mut builder, &config);
 
 	let node = builder
 		.build_with_postgres_store(
