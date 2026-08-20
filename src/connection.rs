@@ -14,7 +14,7 @@ use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::SocketAddress;
 
 use crate::config::TorConfig;
-use crate::logger::{log_debug, log_error, log_info, LdkLogger};
+use crate::logger::{log_debug, log_error, log_info, log_warn, LdkLogger};
 use crate::types::{KeysManager, PeerManager};
 use crate::Error;
 
@@ -57,6 +57,7 @@ where
 {
 	pending_connections: PendingConnections,
 	peer_manager: Arc<PeerManager>,
+	disable_outbound_lightning_connections: bool,
 	tor_proxy_config: Option<TorConfig>,
 	keys_manager: Arc<KeysManager>,
 	logger: L,
@@ -67,12 +68,19 @@ where
 	L::Target: LdkLogger,
 {
 	pub(crate) fn new(
-		peer_manager: Arc<PeerManager>, tor_proxy_config: Option<TorConfig>,
-		keys_manager: Arc<KeysManager>, logger: L,
+		peer_manager: Arc<PeerManager>, disable_outbound_lightning_connections: bool,
+		tor_proxy_config: Option<TorConfig>, keys_manager: Arc<KeysManager>, logger: L,
 	) -> Self {
 		let pending_connections = Mutex::new(HashMap::new());
 
-		Self { pending_connections, peer_manager, tor_proxy_config, keys_manager, logger }
+		Self {
+			pending_connections,
+			peer_manager,
+			disable_outbound_lightning_connections,
+			tor_proxy_config,
+			keys_manager,
+			logger,
+		}
 	}
 
 	pub(crate) async fn connect_peer_if_necessary(
@@ -115,6 +123,11 @@ where
 	async fn do_connect_peer_internal(
 		&self, node_id: PublicKey, addr: SocketAddress,
 	) -> Result<(), Error> {
+		if self.disable_outbound_lightning_connections {
+			log_warn!(self.logger, "Outbound Lightning peer connections are disabled.");
+			return Err(Error::ConnectionFailed);
+		}
+
 		log_info!(self.logger, "Connecting to peer: {}@{}", node_id, addr);
 
 		match addr {
