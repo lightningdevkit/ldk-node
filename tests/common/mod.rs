@@ -684,13 +684,72 @@ impl Default for TestConfig {
 macro_rules! setup_builder {
 	($builder:ident, $config:expr) => {
 		#[cfg(feature = "uniffi")]
-		let $builder = Builder::from_config($config.clone());
+		let mut $builder = Builder::from_config($config.clone());
 		#[cfg(not(feature = "uniffi"))]
 		let mut $builder = Builder::from_config($config.clone());
 	};
 }
 
 pub(crate) use setup_builder;
+
+pub(crate) fn configure_chain_source(
+	chain_source: &TestChainSource, builder: &mut Builder, config: &TestConfig,
+) {
+	match chain_source {
+		TestChainSource::Esplora(electrsd) => {
+			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+			let mut sync_config = EsploraSyncConfig::default();
+			sync_config.background_sync_config = None;
+			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
+			if let Some(full_scan_stop_gap) = config.full_scan_stop_gap {
+				sync_config.full_scan_stop_gap = full_scan_stop_gap;
+			}
+			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+		},
+		TestChainSource::Electrum(electrsd) => {
+			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+			let mut sync_config = ElectrumSyncConfig::default();
+			sync_config.background_sync_config = None;
+			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
+			if let Some(full_scan_stop_gap) = config.full_scan_stop_gap {
+				sync_config.full_scan_stop_gap = full_scan_stop_gap;
+			}
+			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
+		},
+		TestChainSource::BitcoindRpcSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			let rpc_user = values.user;
+			let rpc_password = values.password;
+			builder.set_chain_source_bitcoind_rpc(
+				rpc_host,
+				rpc_port,
+				rpc_user,
+				rpc_password,
+				config.wallet_rescan_from_height,
+			);
+		},
+		TestChainSource::BitcoindRestSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			let rpc_user = values.user;
+			let rpc_password = values.password;
+			let rest_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rest_port = bitcoind.params.rpc_socket.port();
+			builder.set_chain_source_bitcoind_rest(
+				rest_host,
+				rest_port,
+				rpc_host,
+				rpc_port,
+				rpc_user,
+				rpc_password,
+				config.wallet_rescan_from_height,
+			);
+		},
+	}
+}
 
 #[cfg(any(cln_test, lnd_test, eclair_test))]
 pub(crate) mod scenarios;
@@ -747,60 +806,7 @@ pub(crate) fn setup_two_nodes_with_store(
 
 pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
 	setup_builder!(builder, config.node_config);
-	match chain_source {
-		TestChainSource::Esplora(electrsd) => {
-			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-			let mut sync_config = EsploraSyncConfig::default();
-			sync_config.background_sync_config = None;
-			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
-			if let Some(full_scan_stop_gap) = config.full_scan_stop_gap {
-				sync_config.full_scan_stop_gap = full_scan_stop_gap;
-			}
-			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-		},
-		TestChainSource::Electrum(electrsd) => {
-			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
-			let mut sync_config = ElectrumSyncConfig::default();
-			sync_config.background_sync_config = None;
-			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
-			if let Some(full_scan_stop_gap) = config.full_scan_stop_gap {
-				sync_config.full_scan_stop_gap = full_scan_stop_gap;
-			}
-			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
-		},
-		TestChainSource::BitcoindRpcSync(bitcoind) => {
-			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rpc_port = bitcoind.params.rpc_socket.port();
-			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
-			let rpc_user = values.user;
-			let rpc_password = values.password;
-			builder.set_chain_source_bitcoind_rpc(
-				rpc_host,
-				rpc_port,
-				rpc_user,
-				rpc_password,
-				config.wallet_rescan_from_height,
-			);
-		},
-		TestChainSource::BitcoindRestSync(bitcoind) => {
-			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rpc_port = bitcoind.params.rpc_socket.port();
-			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
-			let rpc_user = values.user;
-			let rpc_password = values.password;
-			let rest_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rest_port = bitcoind.params.rpc_socket.port();
-			builder.set_chain_source_bitcoind_rest(
-				rest_host,
-				rest_port,
-				rpc_host,
-				rpc_port,
-				rpc_user,
-				rpc_password,
-				config.wallet_rescan_from_height,
-			);
-		},
-	}
+	configure_chain_source(chain_source, &mut builder, &config);
 
 	match &config.log_writer {
 		TestLogWriter::FileWriter => {
