@@ -1899,10 +1899,13 @@ async fn do_connection_restart_behavior(persist: bool) {
 	assert_eq!(peer_details_a.is_persisted, persist);
 	assert!(peer_details_a.is_connected);
 
+	// Sleep a bit to allow for the connection to happen.
+	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
 	let peer_details_b = node_b.list_peers().first().unwrap().clone();
 	assert_eq!(peer_details_b.node_id, node_id_a);
 	assert_eq!(peer_details_b.is_persisted, false);
-	assert!(peer_details_a.is_connected);
+	assert!(peer_details_b.is_connected);
 
 	// Restart nodes.
 	node_a.stop().unwrap();
