@@ -36,6 +36,7 @@ use lightning::chain::chaininterface::{
 	INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
 };
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
+use lightning::chain::transaction::OutPoint as LdkOutPoint;
 use lightning::chain::{BlockLocator, ClaimId, Listen};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::inbound_payment::ExpandedKey;
@@ -2490,6 +2491,22 @@ impl WalletKeysManager {
 
 	pub fn verify_signature(&self, msg: &[u8], sig: &str, pkey: &PublicKey) -> bool {
 		message_signing::verify(msg, sig, pkey)
+	}
+
+	pub(crate) fn possible_v2_counterparty_closed_balance_spks<C: bitcoin::secp256k1::Signing>(
+		&self, secp_ctx: &Secp256k1<C>,
+	) -> Vec<ScriptBuf> {
+		self.inner.possible_v2_counterparty_closed_balance_spks(secp_ctx)
+	}
+
+	pub(crate) fn spendable_output_descriptor_for_v2_counterparty_closed_balance<
+		C: bitcoin::secp256k1::Signing,
+	>(
+		&self, outpoint: LdkOutPoint, output: TxOut, secp_ctx: &Secp256k1<C>,
+	) -> Option<SpendableOutputDescriptor> {
+		self.inner.spendable_output_descriptor_for_v2_counterparty_closed_balance(
+			outpoint, output, secp_ctx,
+		)
 	}
 }
 

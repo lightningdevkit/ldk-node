@@ -48,6 +48,14 @@ pub(super) struct EsploraChainSource {
 }
 
 impl EsploraChainSource {
+	pub(super) fn recovery_client(&self) -> EsploraAsyncClient {
+		self.esplora_client.clone()
+	}
+
+	pub(super) fn force_wallet_full_scan(&self) {
+		self.force_wallet_full_scan.store(true, Ordering::Release);
+	}
+
 	pub(crate) fn new(
 		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,

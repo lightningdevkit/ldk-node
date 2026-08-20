@@ -60,6 +60,18 @@ pub(super) struct ElectrumChainSource {
 }
 
 impl ElectrumChainSource {
+	pub(super) fn recovery_client(&self) -> Option<(Arc<ElectrumClient>, Arc<Runtime>)> {
+		self.electrum_runtime_status
+			.read()
+			.expect("lock")
+			.client()
+			.map(|client| (Arc::clone(&client.electrum_client), Arc::clone(&client.runtime)))
+	}
+
+	pub(super) fn force_wallet_full_scan(&self) {
+		self.force_wallet_full_scan.store(true, Ordering::Release);
+	}
+
 	pub(super) fn new(
 		server_url: String, sync_config: ElectrumSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,

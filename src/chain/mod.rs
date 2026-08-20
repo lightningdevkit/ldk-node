@@ -19,6 +19,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bitcoin::{Script, Txid};
+#[cfg(feature = "chain-electrum")]
+use electrum_client::Client as ElectrumClient;
+#[cfg(feature = "chain-esplora")]
+use esplora_client::AsyncClient as EsploraAsyncClient;
 use lightning::chain::{BlockLocator, Filter};
 
 #[cfg(feature = "chain-bitcoind")]
@@ -159,6 +163,15 @@ enum ChainSourceKind {
 	Bitcoind(BitcoindChainSource),
 }
 
+pub(crate) enum RecoveryChainSource {
+	#[cfg(feature = "chain-esplora")]
+	Esplora(EsploraAsyncClient),
+	#[cfg(feature = "chain-electrum")]
+	Electrum { client: Arc<ElectrumClient>, runtime: Arc<Runtime> },
+	#[cfg(feature = "chain-bitcoind")]
+	Bitcoind(UtxoSourceClient),
+}
+
 impl ChainSource {
 	#[cfg(feature = "chain-esplora")]
 	pub(crate) fn new_esplora(
@@ -291,6 +304,31 @@ impl ChainSource {
 				Some(bitcoind_chain_source.as_utxo_source())
 			},
 			_ => None,
+		}
+	}
+
+	pub(crate) fn recovery_source(&self) -> Result<RecoveryChainSource, Error> {
+		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
+			ChainSourceKind::Esplora(source) => Ok(RecoveryChainSource::Esplora(source.recovery_client())),
+			#[cfg(feature = "chain-electrum")]
+			ChainSourceKind::Electrum(source) => source
+				.recovery_client()
+				.map(|(client, runtime)| RecoveryChainSource::Electrum { client, runtime })
+				.ok_or(Error::ConnectionFailed),
+			#[cfg(feature = "chain-bitcoind")]
+			ChainSourceKind::Bitcoind(source) => Ok(RecoveryChainSource::Bitcoind(source.as_utxo_source())),
+		}
+	}
+
+	pub(crate) fn force_recovery_wallet_full_scan(&self) {
+		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
+			ChainSourceKind::Esplora(source) => source.force_wallet_full_scan(),
+			#[cfg(feature = "chain-electrum")]
+			ChainSourceKind::Electrum(source) => source.force_wallet_full_scan(),
+			#[cfg(feature = "chain-bitcoind")]
+			ChainSourceKind::Bitcoind(_) => {},
 		}
 	}
 
