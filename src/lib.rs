@@ -27,9 +27,9 @@
 //! # {
 //! use std::str::FromStr;
 //!
+//! use ldk_node::bip39::Mnemonic;
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use ldk_node::bitcoin::Network;
-//! use ldk_node::bip39::Mnemonic;
 //! use ldk_node::entropy::NodeEntropy;
 //! use ldk_node::lightning::ln::msgs::SocketAddress;
 //! use ldk_node::lightning_invoice::Bolt11Invoice;
@@ -426,7 +426,9 @@ impl Node {
 			);
 		}
 
-		if let Some(listening_addresses) = &self.config.listening_addresses {
+		if self.config.disable_peer_networking {
+			log_info!(self.logger, "Lightning peer networking is disabled.");
+		} else if let Some(listening_addresses) = &self.config.listening_addresses {
 			// Setup networking
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
 			let listening_logger = Arc::clone(&self.logger);
@@ -520,17 +522,18 @@ impl Node {
 			}
 		}
 
-		// Regularly reconnect to persisted peers.
-		let connect_cm = Arc::clone(&self.connection_manager);
-		let connect_pm = Arc::clone(&self.peer_manager);
-		let connect_logger = Arc::clone(&self.logger);
-		let connect_peer_store = Arc::clone(&self.peer_store);
-		let mut stop_connect = self.stop_sender.subscribe();
-		self.runtime.spawn_cancellable_background_task(async move {
-			let mut interval = tokio::time::interval(PEER_RECONNECTION_INTERVAL);
-			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				tokio::select! {
+		if !self.config.disable_peer_networking {
+			// Regularly reconnect to persisted peers.
+			let connect_cm = Arc::clone(&self.connection_manager);
+			let connect_pm = Arc::clone(&self.peer_manager);
+			let connect_logger = Arc::clone(&self.logger);
+			let connect_peer_store = Arc::clone(&self.peer_store);
+			let mut stop_connect = self.stop_sender.subscribe();
+			self.runtime.spawn_cancellable_background_task(async move {
+				let mut interval = tokio::time::interval(PEER_RECONNECTION_INTERVAL);
+				interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+				loop {
+					tokio::select! {
 						_ = stop_connect.changed() => {
 							log_debug!(
 								connect_logger,
@@ -549,12 +552,13 @@ impl Node {
 								let _ = connect_cm.do_connect_peer(
 									peer_info.node_id,
 									peer_info.address.clone(),
-									).await;
+								).await;
 							}
 						}
+					}
 				}
-			}
-		});
+			});
+		}
 
 		// Regularly broadcast node announcements.
 		let bcast_cm = Arc::clone(&self.channel_manager);
@@ -565,7 +569,7 @@ impl Node {
 		let bcast_node_metrics = Arc::clone(&self.node_metrics);
 		let mut stop_bcast = self.stop_sender.subscribe();
 		let node_alias = self.config.node_alias.clone();
-		if may_announce_channel(&self.config).is_ok() {
+		if !self.config.disable_peer_networking && may_announce_channel(&self.config).is_ok() {
 			self.runtime.spawn_cancellable_background_task(async move {
 				// We check every 30 secs whether our last broadcast is NODE_ANN_BCAST_INTERVAL away.
 				#[cfg(not(test))]

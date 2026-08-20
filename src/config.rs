@@ -179,6 +179,7 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_
 /// |----------------------------------------|--------------------------------------|
 /// | `storage_dir_path`                     | /tmp/ldk_node/                       |
 /// | `network`                              | Bitcoin                              |
+/// | `disable_peer_networking`               | false                                |
 /// | `listening_addresses`                  | None                                 |
 /// | `announcement_addresses`               | None                                 |
 /// | `node_alias`                           | None                                 |
@@ -199,6 +200,12 @@ pub struct Config {
 	pub storage_dir_path: String,
 	/// The used Bitcoin network.
 	pub network: Network,
+	/// Whether Lightning peer networking is disabled.
+	///
+	/// If enabled, the node won't listen for incoming peer connections, reconnect to persisted
+	/// peers, or initiate new peer connections. Chain synchronization and on-chain transaction
+	/// broadcasting remain enabled.
+	pub disable_peer_networking: bool,
 	/// The addresses on which the node will listen for incoming connections.
 	///
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
@@ -271,6 +278,7 @@ impl Default for Config {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
 			network: DEFAULT_NETWORK,
+			disable_peer_networking: false,
 			listening_addresses: None,
 			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
@@ -884,6 +892,11 @@ mod tests {
 	fn full_scan_stop_gap_defaults() {
 		assert_eq!(EsploraSyncConfig::default().full_scan_stop_gap, DEFAULT_FULL_SCAN_STOP_GAP);
 		assert_eq!(ElectrumSyncConfig::default().full_scan_stop_gap, DEFAULT_FULL_SCAN_STOP_GAP);
+	}
+
+	#[test]
+	fn peer_networking_is_enabled_by_default() {
+		assert!(!Config::default().disable_peer_networking);
 	}
 
 	#[test]
