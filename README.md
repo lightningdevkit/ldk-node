@@ -17,7 +17,8 @@ The primary abstraction of the library is the [`Node`][api_docs_node], which can
 ```rust
 use ldk_node::bitcoin::secp256k1::PublicKey;
 use ldk_node::bitcoin::Network;
-use ldk_node::entropy::{generate_entropy_mnemonic, NodeEntropy};
+use ldk_node::bip39::Mnemonic;
+use ldk_node::entropy::NodeEntropy;
 use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::lightning_invoice::Bolt11Invoice;
 use ldk_node::Builder;
@@ -32,7 +33,7 @@ fn main() {
 	);
 
 
-	let mnemonic = generate_entropy_mnemonic(None);
+	let mnemonic = Mnemonic::generate(24).unwrap();
 	let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 	let node = builder.build(node_entropy).unwrap();
 

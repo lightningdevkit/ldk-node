@@ -1,5 +1,4 @@
 namespace ldk_node {
-	Mnemonic generate_entropy_mnemonic(WordCount? word_count);
 	Config default_config();
 };
 
@@ -14,8 +13,6 @@ typedef dictionary TorConfig;
 typedef interface NodeEntropy;
 
 typedef interface ProbingConfig;
-
-typedef enum WordCount;
 
 [Remote]
 enum LogLevel {
@@ -220,6 +217,7 @@ enum NodeError {
 	"InvalidSocketAddress",
 	"InvalidPublicKey",
 	"InvalidSecretKey",
+	"InvalidMnemonic",
 	"InvalidOfferId",
 	"InvalidNodeId",
 	"InvalidPaymentId",
@@ -419,8 +417,7 @@ typedef string ChannelId;
 [Custom]
 typedef string UserChannelId;
 
-[Custom]
-typedef string Mnemonic;
+typedef interface Mnemonic;
 
 [Custom]
 typedef string UntrustedString;

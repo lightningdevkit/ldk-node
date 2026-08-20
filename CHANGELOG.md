@@ -1,6 +1,12 @@
 # Pending
 
 ## Compatibility Notes
+- The language bindings now expose `Mnemonic` as an object instead of a string alias. Existing
+  mnemonic phrases must be passed through its fallible constructor, which returns
+  `NodeError::InvalidMnemonic` for invalid input; generated mnemonics can be converted back to a
+  string through their language's standard string conversion.
+- `generate_entropy_mnemonic` has been removed. Use `bip39::Mnemonic::generate` in Rust and
+  `Mnemonic::generate` in the language bindings instead.
 - Migrating between storage backends does not preserve the relative creation order of
   pre-existing payments, as the generic KV store migration copies entries in an unspecified
   order. Expect the order in which `Node::list_payments` returns pre-existing payments to
@@ -23,6 +29,8 @@
   `Event::PaymentClaimable`.
 
 ## Feature and API updates
+- Language-binding `Mnemonic` objects can be generated or constructed from entropy and expose
+  their words, word indices, word count, entropy, checksum, and passphrase-derived seed.
 - `Node::list_payments` is now paginated: it takes an optional `PageToken` and returns a
   `PaymentDetailsPage` holding one page of payments, ordered from most recently created to
   least recently created, plus the token for the next page. Ordering and page tokens come

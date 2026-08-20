@@ -17,7 +17,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use bip39::Mnemonic;
+use bip39::Mnemonic as Bip39Mnemonic;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
@@ -151,7 +151,7 @@ impl VssClientHeaderProvider for VssHeaderProviderAdapter {
 
 use crate::builder::sanitize_alias;
 pub use crate::config::{default_config, ElectrumSyncConfig, EsploraSyncConfig, TorConfig};
-pub use crate::entropy::{generate_entropy_mnemonic, NodeEntropy, WordCount};
+pub use crate::entropy::NodeEntropy;
 use crate::error::Error;
 pub use crate::liquidity::LSPS1OrderStatus;
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
@@ -1151,15 +1151,104 @@ uniffi::custom_type!(BlockHash, String, {
 	},
 });
 
-uniffi::custom_type!(Mnemonic, String, {
-	remote,
-	try_lift: |val| {
-		Ok(Mnemonic::from_str(&val).map_err(|_| Error::InvalidSecretKey)?)
-	},
-	lower: |obj| {
-		obj.to_string()
-	},
-});
+/// A syntactically and semantically valid BIP 39 mnemonic.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Display, Eq)]
+pub struct Mnemonic {
+	pub(crate) inner: Bip39Mnemonic,
+}
+
+#[uniffi::export]
+impl Mnemonic {
+	/// Constructs a mnemonic from its BIP 39 phrase.
+	#[uniffi::constructor]
+	pub fn from_str(mnemonic_str: &str) -> Result<Self, Error> {
+		mnemonic_str.parse()
+	}
+
+	/// Constructs an English mnemonic from 128-256 bits of entropy.
+	///
+	/// The entropy must be a multiple of 32 bits.
+	#[uniffi::constructor]
+	pub fn from_entropy(entropy: &[u8]) -> Result<Self, Error> {
+		Bip39Mnemonic::from_entropy(entropy).map(Self::from).map_err(|_| Error::InvalidMnemonic)
+	}
+
+	/// Generates a random English mnemonic with the specified word count.
+	#[uniffi::constructor]
+	pub fn generate(word_count: u8) -> Result<Self, Error> {
+		Bip39Mnemonic::generate(word_count.into())
+			.map(Self::from)
+			.map_err(|_| Error::InvalidMnemonic)
+	}
+
+	/// Returns the words in the mnemonic.
+	pub fn words(&self) -> Vec<String> {
+		self.inner.words().map(String::from).collect()
+	}
+
+	/// Returns the indices of the mnemonic's words in the English BIP 39 word list.
+	pub fn word_indices(&self) -> Vec<u16> {
+		self.inner.word_indices().map(|index| index as u16).collect()
+	}
+
+	/// Returns the number of words in the mnemonic.
+	pub fn word_count(&self) -> u8 {
+		self.inner.word_count() as u8
+	}
+
+	/// Returns the entropy used to construct the mnemonic.
+	pub fn to_entropy(&self) -> Vec<u8> {
+		self.inner.to_entropy()
+	}
+
+	/// Derives the 64-byte BIP 39 seed using the given passphrase.
+	pub fn to_seed(&self, passphrase: &str) -> Vec<u8> {
+		self.inner.to_seed(passphrase).to_vec()
+	}
+
+	/// Returns the checksum encoded in the mnemonic's last word.
+	pub fn checksum(&self) -> u8 {
+		self.inner.checksum()
+	}
+}
+
+impl FromStr for Mnemonic {
+	type Err = Error;
+
+	fn from_str(mnemonic_str: &str) -> Result<Self, Self::Err> {
+		mnemonic_str
+			.parse::<Bip39Mnemonic>()
+			.map(|inner| Self { inner })
+			.map_err(|_| Error::InvalidMnemonic)
+	}
+}
+
+impl From<Bip39Mnemonic> for Mnemonic {
+	fn from(inner: Bip39Mnemonic) -> Self {
+		Self { inner }
+	}
+}
+
+impl Deref for Mnemonic {
+	type Target = Bip39Mnemonic;
+
+	fn deref(&self) -> &Self::Target {
+		&self.inner
+	}
+}
+
+impl AsRef<Bip39Mnemonic> for Mnemonic {
+	fn as_ref(&self) -> &Bip39Mnemonic {
+		self.deref()
+	}
+}
+
+impl std::fmt::Display for Mnemonic {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "{}", self.inner)
+	}
+}
 
 uniffi::custom_type!(SocketAddress, String, {
 	remote,
@@ -2886,6 +2975,40 @@ mod tests {
 
 		let hrn3 = hrn1;
 		assert_eq!(hrn1, hrn3);
+	}
+
+	#[test]
+	fn test_mnemonic_traits() {
+		let mnemonic_str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+		let mnemonic = Mnemonic::from_str(mnemonic_str).unwrap();
+		let bip39_mnemonic = Bip39Mnemonic::from_str(mnemonic_str).unwrap();
+
+		assert_eq!(mnemonic.as_ref(), &bip39_mnemonic);
+		assert_eq!(mnemonic.to_string(), mnemonic_str);
+		assert_eq!(mnemonic, Mnemonic::from(bip39_mnemonic));
+		assert!(format!("{:?}", mnemonic).contains("Mnemonic"));
+
+		let invalid_mnemonic = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon";
+		assert_eq!(Mnemonic::from_str(invalid_mnemonic), Err(Error::InvalidMnemonic));
+	}
+
+	#[test]
+	fn test_mnemonic_functionality() {
+		let entropy = [0; 16];
+		let mnemonic = Mnemonic::from_entropy(&entropy).unwrap();
+
+		assert_eq!(
+			mnemonic.words(),
+			[vec!["abandon".to_string(); 11], vec!["about".to_string()]].concat()
+		);
+		assert_eq!(mnemonic.word_indices(), [vec![0; 11], vec![3]].concat());
+		assert_eq!(mnemonic.word_count(), 12);
+		assert_eq!(mnemonic.to_entropy(), entropy);
+		assert_eq!(mnemonic.checksum(), 3);
+		assert_eq!(mnemonic.to_seed("TREZOR").len(), 64);
+		assert_eq!(Mnemonic::generate(12).unwrap().word_count(), 12);
+		assert_eq!(Mnemonic::generate(13), Err(Error::InvalidMnemonic));
+		assert_eq!(Mnemonic::from_entropy(&[0; 15]), Err(Error::InvalidMnemonic));
 	}
 }
 
