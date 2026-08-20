@@ -317,7 +317,20 @@ impl StorableObject for PaymentDetails {
 		}
 
 		if let Some(status) = update.status {
-			update_if_necessary!(self.status, status);
+			// LDK may, in exceedingly rare cases, emit `PaymentFailed` after
+			// `PaymentSent` for the same outbound payment. In that case the
+			// failure must be ignored and the payment must remain succeeded.
+			//
+			// Keep this invariant scoped to outbound Lightning payments as
+			// on-chain payment state may legitimately be revised after a reorg.
+			let is_outbound_lightning_payment = self.direction == PaymentDirection::Outbound
+				&& !matches!(self.kind, PaymentKind::Onchain { .. });
+			let is_late_failure = is_outbound_lightning_payment
+				&& self.status == PaymentStatus::Succeeded
+				&& status == PaymentStatus::Failed;
+			if !is_late_failure {
+				update_if_necessary!(self.status, status);
+			}
 		}
 
 		if let Some(confirmation_status) = update.confirmation_status {
@@ -1589,6 +1602,23 @@ mod bounded_cache_tests {
 		)
 	}
 
+	fn bolt12_payment(seed: u8) -> PaymentDetails {
+		PaymentDetails::new(
+			PaymentId([seed; 32]),
+			PaymentKind::Bolt12Refund {
+				hash: Some(PaymentHash([seed; 32])),
+				preimage: Some(PaymentPreimage([seed.wrapping_add(1); 32])),
+				secret: Some(PaymentSecret([seed.wrapping_add(2); 32])),
+				payer_note: None,
+				quantity: None,
+			},
+			Some(seed as u64 * 1_000),
+			Some(seed as u64 * 3),
+			PaymentDirection::Outbound,
+			PaymentStatus::Succeeded,
+		)
+	}
+
 	#[tokio::test]
 	async fn evicted_payments_survive_a_round_trip_through_the_store() {
 		// A bounded store hands back objects it deserialized rather than ones it kept, so every
@@ -1614,6 +1644,10 @@ mod bounded_cache_tests {
 		let data_store = new_bounded_payment_store(1);
 
 		let mut stored = bolt11_payment(1);
+		stored.status = PaymentStatus::Pending;
+		if let PaymentKind::Bolt11 { ref mut preimage, .. } = stored.kind {
+			*preimage = None;
+		}
 		stored.fee_paid_msat = Some(4_242);
 		data_store.insert(stored.clone()).await.unwrap();
 
@@ -1629,6 +1663,25 @@ mod bounded_cache_tests {
 		assert_eq!(Some(4_242), updated.fee_paid_msat);
 		assert_eq!(stored.kind, updated.kind);
 		assert_eq!(stored.amount_msat, updated.amount_msat);
+	}
+
+	#[tokio::test]
+	async fn late_failure_does_not_downgrade_succeeded_outbound_lightning_payment() {
+		let data_store = new_bounded_payment_store(1);
+
+		for succeeded in [bolt11_payment(1), bolt12_payment(2)] {
+			data_store.insert(succeeded.clone()).await.unwrap();
+
+			// Exercise the persistence-backed update path rather than relying on the cache.
+			data_store.insert(bolt11_payment(3)).await.unwrap();
+
+			let mut update = PaymentDetailsUpdate::new(succeeded.id);
+			update.status = Some(PaymentStatus::Failed);
+			assert_eq!(Ok(DataStoreUpdateResult::Unchanged), data_store.update(update).await);
+
+			let stored = data_store.get(&succeeded.id).await.unwrap().unwrap();
+			assert_eq!(PaymentStatus::Succeeded, stored.status);
+		}
 	}
 
 	#[tokio::test]

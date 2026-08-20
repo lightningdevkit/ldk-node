@@ -1457,13 +1457,6 @@ where
 				};
 			},
 			LdkEvent::PaymentFailed { payment_id, payment_hash, reason, .. } => {
-				log_info!(
-					self.logger,
-					"Failed to send payment with ID {} due to {:?}.",
-					payment_id,
-					reason
-				);
-
 				let update = PaymentDetailsUpdate {
 					hash: Some(payment_hash),
 					status: Some(PaymentStatus::Failed),
@@ -1476,6 +1469,32 @@ where
 						return Err(ReplayEvent());
 					},
 				};
+
+				// LDK may emit `PaymentFailed` after `PaymentSent` in exceedingly rare cases.
+				// The payment-store update above preserves success in that case; re-read the
+				// resulting state so we also avoid surfacing a contradictory public event.
+				match self.payment_store.get(&payment_id).await {
+					Ok(Some(payment)) if payment.status == PaymentStatus::Succeeded => {
+						log_info!(
+							self.logger,
+							"Ignoring late payment failure for already-succeeded payment with ID {}.",
+							payment_id
+						);
+						return Ok(());
+					},
+					Ok(_) => {},
+					Err(e) => {
+						log_error!(self.logger, "Failed to access payment store: {}", e);
+						return Err(ReplayEvent());
+					},
+				}
+
+				log_info!(
+					self.logger,
+					"Failed to send payment with ID {} due to {:?}.",
+					payment_id,
+					reason
+				);
 
 				let event = Event::PaymentFailed { payment_id, payment_hash, reason };
 				match self.event_queue.add_event(event).await {
