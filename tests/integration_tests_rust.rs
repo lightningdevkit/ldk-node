@@ -676,11 +676,6 @@ async fn multi_hop_sending() {
 
 	open_channel(&nodes[0], &nodes[1], 100_000, true, &electrsd).await;
 	open_channel(&nodes[1], &nodes[2], 1_000_000, true, &electrsd).await;
-	// We need to sync wallets in-between back-to-back channel opens from the same node so BDK
-	// wallet picks up on the broadcast funding tx and doesn't double-spend itself.
-	//
-	// TODO: Remove once fixed in BDK.
-	nodes[1].sync_wallets().unwrap();
 	open_channel(&nodes[1], &nodes[3], 1_000_000, true, &electrsd).await;
 	open_channel(&nodes[2], &nodes[4], 1_000_000, true, &electrsd).await;
 	open_channel(&nodes[3], &nodes[4], 1_000_000, true, &electrsd).await;
@@ -730,6 +725,49 @@ async fn multi_hop_sending() {
 	expect_payment_received_event!(&nodes[4], 2_500_000);
 	let fee_paid_msat = Some(2000);
 	expect_payment_successful_event!(nodes[0], outbound_payment_id, Some(fee_paid_msat));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn back_to_back_onchain_sends_before_sync() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let config = random_config();
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+	setup_builder!(builder, config.node_config);
+	builder.set_chain_source_esplora(esplora_url, Some(sync_config));
+	let node = builder.build(config.node_entropy.into()).unwrap();
+	node.start().unwrap();
+
+	let funding_address = node.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![funding_address],
+		Amount::from_sat(500_000),
+	)
+	.await;
+	node.sync_wallets().unwrap();
+
+	let first_address = bitcoind.client.new_address().unwrap();
+	let second_address = bitcoind.client.new_address().unwrap();
+	let first_txid = node.onchain_payment().send_to_address(&first_address, 100_000, None).unwrap();
+	let second_txid =
+		node.onchain_payment().send_to_address(&second_address, 100_000, None).unwrap();
+
+	for _ in 0..50 {
+		let mempool = bitcoind.client.get_raw_mempool().unwrap().into_model().unwrap();
+		if mempool.0.contains(&first_txid) && mempool.0.contains(&second_txid) {
+			return;
+		}
+		tokio::time::sleep(Duration::from_millis(100)).await;
+	}
+
+	let mempool = bitcoind.client.get_raw_mempool().unwrap().into_model().unwrap();
+	assert!(
+		mempool.0.contains(&first_txid) && mempool.0.contains(&second_txid),
+		"both back-to-back transactions must coexist in the mempool"
+	);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -4383,17 +4421,19 @@ async fn onchain_fee_bump_rbf() {
 	let amount_to_send_sats = 100_000;
 	let txid =
 		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+	let payment_id = PaymentId(txid.to_byte_array());
+	let original_payment = node_b
+		.payment(&payment_id)
+		.expect("payment lookup must succeed")
+		.expect("outbound payment must be recorded before wallet sync");
+	let original_fee = original_payment.fee_paid_msat.unwrap();
+
 	wait_for_tx(&electrsd.client, txid).await;
 	// Give the chain source time to index the unconfirmed transaction before syncing.
 	// Without this, Esplora may not yet have the tx, causing sync to miss it and
 	// leaving the BDK wallet graph empty.
 	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
-
-	let payment_id = PaymentId(txid.to_byte_array());
-	let original_payment = node_b.payment(&payment_id).unwrap().unwrap();
-	let original_fee = original_payment.fee_paid_msat.unwrap();
 
 	// Non-existent payment id
 	let fake_txid =

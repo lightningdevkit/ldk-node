@@ -1302,18 +1302,18 @@ impl BitcoindClient {
 		&self, bdk_unconfirmed_txids: Vec<Txid>,
 	) -> Result<Vec<(Txid, u64)>, BitcoindClientError> {
 		match self {
-			BitcoindClient::Rpc { latest_mempool_timestamp, mempool_entries_cache, .. } => {
+			BitcoindClient::Rpc { mempool_entries_cache, latest_mempool_timestamp, .. } => {
 				Self::get_evicted_mempool_txids_and_timestamp_inner(
-					latest_mempool_timestamp,
 					mempool_entries_cache,
+					latest_mempool_timestamp,
 					bdk_unconfirmed_txids,
 				)
 				.await
 			},
-			BitcoindClient::Rest { latest_mempool_timestamp, mempool_entries_cache, .. } => {
+			BitcoindClient::Rest { mempool_entries_cache, latest_mempool_timestamp, .. } => {
 				Self::get_evicted_mempool_txids_and_timestamp_inner(
-					latest_mempool_timestamp,
 					mempool_entries_cache,
+					latest_mempool_timestamp,
 					bdk_unconfirmed_txids,
 				)
 				.await
@@ -1322,16 +1322,17 @@ impl BitcoindClient {
 	}
 
 	async fn get_evicted_mempool_txids_and_timestamp_inner(
-		latest_mempool_timestamp: &AtomicU64,
 		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
-		bdk_unconfirmed_txids: Vec<Txid>,
+		latest_mempool_timestamp: &AtomicU64, bdk_unconfirmed_txids: Vec<Txid>,
 	) -> Result<Vec<(Txid, u64)>, BitcoindClientError> {
-		let latest_mempool_timestamp = latest_mempool_timestamp.load(Ordering::Relaxed);
 		let mempool_entries_cache = mempool_entries_cache.lock().await;
+		let observed_at =
+			SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+		let evicted_at = observed_at.max(latest_mempool_timestamp.load(Ordering::Relaxed));
 		let evicted_txids = bdk_unconfirmed_txids
 			.into_iter()
 			.filter(|txid| !mempool_entries_cache.contains_key(txid))
-			.map(|txid| (txid, latest_mempool_timestamp))
+			.map(|txid| (txid, evicted_at))
 			.collect();
 		Ok(evicted_txids)
 	}
@@ -1616,8 +1617,10 @@ impl std::error::Error for BitcoindClientError {}
 
 #[cfg(test)]
 mod tests {
+	use std::collections::HashMap;
+	use std::sync::atomic::{AtomicU64, Ordering};
 	use std::sync::Mutex;
-	use std::time::Duration;
+	use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 	use bitcoin::hashes::Hash;
 	use bitcoin::{FeeRate, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
@@ -1628,7 +1631,7 @@ mod tests {
 	use serde_json::json;
 
 	use crate::chain::bitcoind::{
-		acquire_initial_wallet_sync_guard, FeeResponse, GetMempoolEntryResponse,
+		acquire_initial_wallet_sync_guard, BitcoindClient, FeeResponse, GetMempoolEntryResponse,
 		GetRawMempoolResponse, GetRawTransactionResponse, MempoolMinFeeResponse,
 	};
 	use crate::chain::{WalletSyncGuard, WalletSyncStatus};
@@ -1657,6 +1660,55 @@ mod tests {
 			"background sync should own the next sync"
 		);
 		acquired_guard.complete(Ok(()));
+	}
+
+	#[tokio::test]
+	async fn eviction_uses_absence_observation_time() {
+		let txid = Txid::all_zeros();
+		let mempool_entries = tokio::sync::Mutex::new(HashMap::new());
+		let latest_mempool_timestamp = AtomicU64::new(0);
+		let before = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+		let evicted = BitcoindClient::get_evicted_mempool_txids_and_timestamp_inner(
+			&mempool_entries,
+			&latest_mempool_timestamp,
+			vec![txid],
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(evicted.len(), 1);
+		assert_eq!(evicted[0].0, txid);
+		assert!(evicted[0].1 >= before, "eviction timestamp must record when absence was observed");
+	}
+
+	#[tokio::test]
+	async fn eviction_preserves_newer_mempool_time() {
+		let txid = Txid::from_byte_array([1; 32]);
+		let client = BitcoindClient::new_rpc(
+			"127.0.0.1".to_string(),
+			18443,
+			"user".to_string(),
+			"password".to_string(),
+		);
+		let observed_at =
+			SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+		let newer_mempool_time = observed_at.saturating_add(60);
+		match &client {
+			BitcoindClient::Rpc { latest_mempool_timestamp, .. } => {
+				latest_mempool_timestamp.store(newer_mempool_time, Ordering::Relaxed);
+			},
+			BitcoindClient::Rest { .. } => unreachable!(),
+		}
+
+		let evicted = client.get_evicted_mempool_txids_and_timestamp(vec![txid]).await.unwrap();
+
+		assert_eq!(evicted.len(), 1);
+		assert_eq!(evicted[0].0, txid);
+		assert_eq!(
+			evicted[0].1, newer_mempool_time,
+			"eviction timestamp must not precede Bitcoin Core's mempool time"
+		);
 	}
 
 	prop_compose! {

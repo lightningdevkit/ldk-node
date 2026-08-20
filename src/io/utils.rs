@@ -19,6 +19,7 @@ use bdk_chain::local_chain::ChangeSet as BdkLocalChainChangeSet;
 use bdk_chain::miniscript::{Descriptor, DescriptorPublicKey};
 use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
 use bdk_chain::ConfirmationBlockTime;
+use bdk_wallet::locked_outpoints::ChangeSet as BdkLockedOutpointsChangeSet;
 use bdk_wallet::ChangeSet as BdkWalletChangeSet;
 use bitcoin::Network;
 use lightning::ln::msgs::DecodeError;
@@ -716,6 +717,15 @@ impl_read_write_change_set_type!(
 );
 
 impl_read_write_change_set_type!(
+	read_bdk_wallet_locked_outpoints,
+	write_bdk_wallet_locked_outpoints,
+	BdkLockedOutpointsChangeSet,
+	BDK_WALLET_LOCKED_OUTPOINTS_PRIMARY_NAMESPACE,
+	BDK_WALLET_LOCKED_OUTPOINTS_SECONDARY_NAMESPACE,
+	BDK_WALLET_LOCKED_OUTPOINTS_KEY
+);
+
+impl_read_write_change_set_type!(
 	read_bdk_wallet_indexer,
 	write_bdk_wallet_indexer,
 	BdkIndexerChangeSet,
@@ -757,6 +767,9 @@ pub(crate) async fn read_bdk_wallet_change_set(
 	read_bdk_wallet_tx_graph(&*kv_store, logger)
 		.await?
 		.map(|tx_graph| change_set.tx_graph = tx_graph);
+	read_bdk_wallet_locked_outpoints(&*kv_store, logger)
+		.await?
+		.map(|locked_outpoints| change_set.locked_outpoints = locked_outpoints);
 	read_bdk_wallet_indexer(&*kv_store, logger).await?.map(|indexer| change_set.indexer = indexer);
 	Ok(Some(change_set))
 }

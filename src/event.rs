@@ -538,6 +538,28 @@ impl Future for EventFuture {
 	}
 }
 
+fn discarded_funding_transaction(funding_info: FundingInfo) -> Option<bitcoin::Transaction> {
+	match funding_info {
+		FundingInfo::Tx { transaction } => Some(transaction),
+		FundingInfo::Contribution { inputs, outputs } => Some(bitcoin::Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: bitcoin::absolute::LockTime::ZERO,
+			input: inputs
+				.into_iter()
+				.map(|previous_output| bitcoin::TxIn {
+					previous_output,
+					..bitcoin::TxIn::default()
+				})
+				.collect(),
+			output: outputs
+				.into_iter()
+				.map(|script_pubkey| bitcoin::TxOut { value: bitcoin::Amount::ZERO, script_pubkey })
+				.collect(),
+		}),
+		FundingInfo::OutPoint { .. } => None,
+	}
+}
+
 pub(crate) struct EventHandler<L: Deref + Clone + Sync + Send + 'static>
 where
 	L::Target: LdkLogger,
@@ -748,6 +770,7 @@ where
 					.await;
 				match funding_transaction {
 					Ok(final_tx) => {
+						let final_tx_for_cancel = final_tx.clone();
 						let needs_manual_broadcast = self
 							.liquidity_source
 							.lsps2_service()
@@ -778,27 +801,39 @@ where
 
 						match result {
 							Ok(()) => {},
-							Err(APIError::APIMisuseError { err }) => {
-								log_error!(
-									self.logger,
-									"Encountered APIMisuseError, this should never happen: {}",
-									err
-								);
-								debug_assert!(false, "APIMisuseError: {}", err);
-							},
-							Err(APIError::ChannelUnavailable { err }) => {
-								log_error!(
-									self.logger,
-									"Failed to process funding transaction as channel went away before we could fund it: {}",
-									err
-								)
-							},
 							Err(err) => {
-								log_error!(
-									self.logger,
-									"Failed to process funding transaction: {:?}",
-									err
-								)
+								if let Err(e) = self.wallet.cancel_tx(final_tx_for_cancel).await {
+									log_error!(
+										self.logger,
+										"Failed to release funding inputs: {}",
+										e
+									);
+									return Err(ReplayEvent());
+								}
+								match err {
+									APIError::APIMisuseError { err } => {
+										log_error!(
+											self.logger,
+											"Encountered APIMisuseError, this should never happen: {}",
+											err
+										);
+										debug_assert!(false, "APIMisuseError: {}", err);
+									},
+									APIError::ChannelUnavailable { err } => {
+										log_error!(
+											self.logger,
+											"Failed to process funding transaction as channel went away before we could fund it: {}",
+											err
+										)
+									},
+									err => {
+										log_error!(
+											self.logger,
+											"Failed to process funding transaction: {:?}",
+											err
+										)
+									},
+								}
 							},
 						}
 					},
@@ -1941,27 +1976,14 @@ where
 				}
 			},
 			LdkEvent::DiscardFunding { channel_id, funding_info } => {
-				if let FundingInfo::Contribution { inputs: _, outputs } = funding_info {
+				if let Some(tx) = discarded_funding_transaction(funding_info) {
 					log_info!(
 						self.logger,
-						"Reclaiming unused addresses from channel {} funding",
+						"Reclaiming unused wallet state from channel {} funding",
 						channel_id,
 					);
-
-					let tx = bitcoin::Transaction {
-						version: bitcoin::transaction::Version::TWO,
-						lock_time: bitcoin::absolute::LockTime::ZERO,
-						input: vec![],
-						output: outputs
-							.into_iter()
-							.map(|script_pubkey| bitcoin::TxOut {
-								value: bitcoin::Amount::ZERO,
-								script_pubkey,
-							})
-							.collect(),
-					};
 					if let Err(e) = self.wallet.cancel_tx(tx).await {
-						log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
+						log_error!(self.logger, "Failed reclaiming unused wallet state: {}", e);
 						return Err(ReplayEvent());
 					}
 				}
@@ -2230,12 +2252,35 @@ mod tests {
 	use std::sync::atomic::{AtomicU16, Ordering};
 	use std::time::Duration;
 
+	use bitcoin::hashes::Hash;
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
 	use crate::io::test_utils::InMemoryStore;
 	use crate::payment::store::LSPS2Parameters;
 	use crate::types::DynStoreWrapper;
+
+	#[test]
+	fn discarded_contribution_preserves_inputs_and_outputs() {
+		let inputs = vec![
+			OutPoint::new(bitcoin::Txid::from_byte_array([1; 32]), 2),
+			OutPoint::new(bitcoin::Txid::from_byte_array([3; 32]), 4),
+		];
+		let outputs =
+			vec![bitcoin::ScriptBuf::from_bytes(vec![5]), bitcoin::ScriptBuf::from_bytes(vec![6])];
+
+		let tx = discarded_funding_transaction(FundingInfo::Contribution {
+			inputs: inputs.clone(),
+			outputs: outputs.clone(),
+		})
+		.unwrap();
+
+		assert_eq!(tx.input.iter().map(|txin| txin.previous_output).collect::<Vec<_>>(), inputs,);
+		assert_eq!(
+			tx.output.iter().map(|txout| txout.script_pubkey.clone()).collect::<Vec<_>>(),
+			outputs,
+		);
+	}
 
 	#[test]
 	fn lsps2_payment_metadata_decodes_total_fee_limit() {
