@@ -845,6 +845,10 @@ impl Node {
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
 
+		// Prevent blocking Electrum syncs from making any further callbacks before persistence
+		// tasks stop accepting work.
+		self.chain_source.begin_shutdown();
+
 		// Stop background tasks.
 		self.stop_sender
 			.send(())
