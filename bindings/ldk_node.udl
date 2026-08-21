@@ -10,6 +10,8 @@ typedef dictionary ElectrumSyncConfig;
 
 typedef dictionary TorConfig;
 
+typedef enum ForwardedPaymentTrackingMode;
+
 typedef interface NodeEntropy;
 
 typedef interface ProbingConfig;
@@ -68,6 +70,7 @@ interface Node {
 	SpontaneousPayment spontaneous_payment();
 	OnchainPayment onchain_payment();
 	Liquidity liquidity();
+	ForwardingAnalytics forwarding_analytics();
 	[Throws=NodeError]
 	void lnurl_auth(string lnurl);
 	[Throws=NodeError]
@@ -139,6 +142,8 @@ interface FeeRate {
 
 typedef interface Liquidity;
 
+typedef interface ForwardingAnalytics;
+
 [Error]
 enum NodeError {
 	"AlreadyRunning",
@@ -177,6 +182,8 @@ enum NodeError {
 	"InvalidOfferId",
 	"InvalidNodeId",
 	"InvalidPaymentId",
+	"InvalidForwardedPaymentId",
+	"InvalidChannelPairForwardingStatsId",
 	"InvalidPaymentHash",
 	"InvalidPaymentPreimage",
 	"InvalidPaymentSecret",
@@ -359,6 +366,12 @@ typedef string OfferId;
 typedef string PaymentId;
 
 [Custom]
+typedef string ForwardedPaymentId;
+
+[Custom]
+typedef string ChannelPairForwardingStatsId;
+
+[Custom]
 typedef string PaymentHash;
 
 [Custom]
@@ -395,3 +408,15 @@ typedef enum Event;
 typedef interface HRNResolverConfig;
 
 typedef dictionary HumanReadableNamesConfig;
+
+typedef dictionary ForwardedPaymentDetails;
+
+typedef dictionary ChannelForwardingStats;
+
+typedef dictionary ChannelPairForwardingStats;
+
+typedef dictionary ForwardedPaymentDetailsPage;
+
+typedef dictionary ChannelForwardingStatsPage;
+
+typedef dictionary ChannelPairForwardingStatsPage;

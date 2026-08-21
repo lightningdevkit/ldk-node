@@ -175,9 +175,11 @@ use lnurl_auth::LnurlAuth;
 use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+pub use payment::forwarding_store::aggregate_channel_pair_stats;
+use payment::forwarding_store::{run_forwarded_payment_aggregation, ForwardingStore};
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, PaymentDetailsPage,
-	SpontaneousPayment,
+	Bolt11Payment, Bolt12Payment, ForwardingAnalytics, OnchainPayment, PaymentDetails,
+	PaymentDetailsPage, SpontaneousPayment,
 };
 #[cfg(feature = "unified-payments")]
 use payment::{HRNResolver, UnifiedPayment};
@@ -271,6 +273,8 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	forwarding_store: Arc<ForwardingStore>,
+	forwarded_payment_aggregation_retention_secs: u64,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
@@ -654,6 +658,14 @@ impl Node {
 			chain_source.continuously_process_broadcast_queue(stop_tx_bcast).await
 		});
 
+		let retention_secs = self.forwarded_payment_aggregation_retention_secs;
+		let stop_aggregation = self.stop_sender.subscribe();
+		let forwarding_store = Arc::clone(&self.forwarding_store);
+		self.runtime.spawn_cancellable_background_task(async move {
+			run_forwarded_payment_aggregation(stop_aggregation, forwarding_store, retention_secs)
+				.await;
+		});
+
 		let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
 			Arc::clone(&self.tx_broadcaster),
 			Arc::new(LdkWallet::new(Arc::clone(&self.wallet), Arc::clone(&self.logger))),
@@ -678,6 +690,7 @@ impl Node {
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.forwarding_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.keys_manager),
 			static_invoice_store,
@@ -1200,6 +1213,26 @@ impl Node {
 }
 
 impl Node {
+	/// Returns a handler allowing to query forwarded payments and forwarding statistics.
+	#[cfg(not(feature = "uniffi"))]
+	pub fn forwarding_analytics(&self) -> ForwardingAnalytics {
+		ForwardingAnalytics::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.forwarding_store),
+			Arc::clone(&self.config),
+		)
+	}
+
+	/// Returns a handler allowing to query forwarded payments and forwarding statistics.
+	#[cfg(feature = "uniffi")]
+	pub fn forwarding_analytics(&self) -> Arc<ForwardingAnalytics> {
+		Arc::new(ForwardingAnalytics::new(
+			Arc::clone(&self.runtime),
+			Arc::clone(&self.forwarding_store),
+			Arc::clone(&self.config),
+		))
+	}
+
 	/// Authenticates the user via [LNURL-auth] for the given LNURL string.
 	///
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md

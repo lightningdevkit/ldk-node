@@ -89,6 +89,10 @@ pub enum Error {
 	InvalidNodeId,
 	/// The given payment id is invalid.
 	InvalidPaymentId,
+	/// The given forwarded payment id is invalid.
+	InvalidForwardedPaymentId,
+	/// The given channel-pair forwarding statistics id is invalid.
+	InvalidChannelPairForwardingStatsId,
 	/// The given payment hash is invalid.
 	InvalidPaymentHash,
 	/// The given payment pre-image is invalid.
@@ -194,6 +198,12 @@ impl fmt::Display for Error {
 			Self::InvalidOfferId => write!(f, "The given offer id is invalid."),
 			Self::InvalidNodeId => write!(f, "The given node id is invalid."),
 			Self::InvalidPaymentId => write!(f, "The given payment id is invalid."),
+			Self::InvalidForwardedPaymentId => {
+				write!(f, "The given forwarded payment id is invalid.")
+			},
+			Self::InvalidChannelPairForwardingStatsId => {
+				write!(f, "The given channel-pair forwarding statistics id is invalid.")
+			},
 			Self::InvalidPaymentHash => write!(f, "The given payment hash is invalid."),
 			Self::InvalidPaymentPreimage => write!(f, "The given payment preimage is invalid."),
 			Self::InvalidPaymentSecret => write!(f, "The given payment secret is invalid."),
