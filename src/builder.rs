@@ -2336,6 +2336,7 @@ fn build_with_store_internal(
 
 	let connection_manager = Arc::new(ConnectionManager::new(
 		Arc::clone(&peer_manager),
+		config.disable_peer_networking,
 		config.tor_config.clone(),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),

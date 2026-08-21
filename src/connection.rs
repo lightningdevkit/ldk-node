@@ -57,6 +57,7 @@ where
 {
 	pending_connections: PendingConnections,
 	peer_manager: Arc<PeerManager>,
+	disable_peer_networking: bool,
 	tor_proxy_config: Option<TorConfig>,
 	keys_manager: Arc<KeysManager>,
 	logger: L,
@@ -67,12 +68,19 @@ where
 	L::Target: LdkLogger,
 {
 	pub(crate) fn new(
-		peer_manager: Arc<PeerManager>, tor_proxy_config: Option<TorConfig>,
-		keys_manager: Arc<KeysManager>, logger: L,
+		peer_manager: Arc<PeerManager>, disable_peer_networking: bool,
+		tor_proxy_config: Option<TorConfig>, keys_manager: Arc<KeysManager>, logger: L,
 	) -> Self {
 		let pending_connections = Mutex::new(HashMap::new());
 
-		Self { pending_connections, peer_manager, tor_proxy_config, keys_manager, logger }
+		Self {
+			pending_connections,
+			peer_manager,
+			disable_peer_networking,
+			tor_proxy_config,
+			keys_manager,
+			logger,
+		}
 	}
 
 	pub(crate) async fn connect_peer_if_necessary(
@@ -92,6 +100,11 @@ where
 	pub(crate) async fn do_connect_peer(
 		&self, node_id: PublicKey, addr: SocketAddress,
 	) -> Result<(), Error> {
+		if self.disable_peer_networking {
+			log_debug!(self.logger, "Peer networking is disabled.");
+			return Err(Error::ConnectionFailed);
+		}
+
 		// If another task is already connecting, subscribe to its result instead of starting a
 		// duplicate attempt.
 		if let Some(pending_connection_ready_receiver) =
