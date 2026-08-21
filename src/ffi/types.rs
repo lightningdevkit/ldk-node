@@ -159,6 +159,7 @@ pub use crate::config::default_config;
 use crate::error::Error;
 pub use crate::liquidity::LSPS1OrderStatus;
 pub use crate::logger::{LogLevel, LogRecord, LogWriter};
+use crate::payment::{ChannelPairForwardingStatsId, ForwardedPaymentId};
 pub use crate::probing::ProbingConfig;
 use crate::{hex_utils, SocketAddress, UserChannelId};
 
@@ -1057,6 +1058,26 @@ uniffi::custom_type!(PaymentId, String, {
 	},
 	lower: |obj| {
 		hex_utils::to_string(&obj.0)
+	},
+});
+
+uniffi::custom_type!(ForwardedPaymentId, String, {
+	remote,
+	try_lift: |val| {
+		Ok(ForwardedPaymentId::from_str(&val)?)
+	},
+	lower: |obj| {
+		obj.to_string()
+	},
+});
+
+uniffi::custom_type!(ChannelPairForwardingStatsId, String, {
+	remote,
+	try_lift: |val| {
+		Ok(ChannelPairForwardingStatsId::from_str(&val)?)
+	},
+	lower: |obj| {
+		obj.to_string()
 	},
 });
 
