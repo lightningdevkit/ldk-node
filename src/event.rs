@@ -48,6 +48,7 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use crate::payment::forwarding_store::{ForwardRecord, ForwardingStore};
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
@@ -551,6 +552,7 @@ where
 	network_graph: Arc<Graph>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	forwarding_store: Arc<ForwardingStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
 	static_invoice_store: Option<StaticInvoiceStore>,
@@ -572,10 +574,10 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
-		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
-		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
-		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		forwarding_store: Arc<ForwardingStore>, peer_store: Arc<PeerStore<L>>,
+		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
+		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
+		prober: Option<Arc<Prober>>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -587,6 +589,7 @@ where
 			network_graph,
 			liquidity_source,
 			payment_store,
+			forwarding_store,
 			peer_store,
 			keys_manager,
 			static_invoice_store,
@@ -1751,6 +1754,18 @@ where
 						.await;
 				}
 
+				self.forwarding_store
+					.record_forward(ForwardRecord {
+						prev_htlcs: &prev_htlcs,
+						next_htlcs: &next_htlcs,
+						total_fee_earned_msat,
+						skimmed_fee_msat,
+						claim_from_onchain_tx,
+						outbound_amount_forwarded_msat,
+					})
+					.await
+					.map_err(|_| ReplayEvent())?;
+
 				let event = Event::PaymentForwarded {
 					prev_htlcs: prev_htlcs.into_iter().map(HTLCLocator::from).collect(),
 					next_htlcs: next_htlcs.into_iter().map(HTLCLocator::from).collect(),
@@ -2237,6 +2252,16 @@ mod tests {
 	use crate::payment::store::LSPS2Parameters;
 	use crate::types::DynStoreWrapper;
 
+	fn ldk_htlc_locator(channel_byte: u8) -> LdkHtlcLocator {
+		LdkHtlcLocator {
+			channel_id: ChannelId([channel_byte; 32]),
+			htlc_id: None,
+			amount_msat: Some(channel_byte as u64),
+			user_channel_id: Some(channel_byte as u128),
+			node_id: None,
+		}
+	}
+
 	#[test]
 	fn lsps2_payment_metadata_decodes_total_fee_limit() {
 		let metadata = PaymentMetadata {
@@ -2459,6 +2484,52 @@ mod tests {
 			expected_event.encode(),
 			"legacy forwarded amount should normalize to zero"
 		);
+	}
+
+	#[test]
+	fn event_queue_reads_legacy_multi_htlc_forward() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let prev_htlcs =
+			vec![HTLCLocator::from(ldk_htlc_locator(1)), HTLCLocator::from(ldk_htlc_locator(2))];
+		let next_htlcs = vec![HTLCLocator::from(ldk_htlc_locator(3))];
+		let legacy_event = LegacyEvent::PaymentForwarded {
+			prev_htlcs: prev_htlcs.clone(),
+			next_htlcs: next_htlcs.clone(),
+			total_fee_earned_msat: Some(200),
+			skimmed_fee_msat: None,
+			claim_from_onchain_tx: false,
+			outbound_amount_forwarded_msat: Some(800),
+		};
+		let persisted_bytes = encode_legacy_event_queue(legacy_event);
+
+		let event_queue =
+			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
+		assert_eq!(
+			event_queue.next_event(),
+			Some(Event::PaymentForwarded {
+				prev_htlcs,
+				next_htlcs,
+				total_fee_earned_msat: Some(200),
+				skimmed_fee_msat: None,
+				claim_from_onchain_tx: false,
+				outbound_amount_forwarded_msat: 800,
+			})
+		);
+	}
+
+	#[test]
+	fn payment_forwarded_event_roundtrips() {
+		let event = Event::PaymentForwarded {
+			prev_htlcs: vec![HTLCLocator::from(ldk_htlc_locator(1))],
+			next_htlcs: vec![HTLCLocator::from(ldk_htlc_locator(2))],
+			total_fee_earned_msat: Some(200),
+			skimmed_fee_msat: None,
+			claim_from_onchain_tx: false,
+			outbound_amount_forwarded_msat: 800,
+		};
+
+		assert_eq!(Event::read(&mut &event.encode()[..]).unwrap(), event);
 	}
 
 	#[tokio::test]

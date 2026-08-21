@@ -35,13 +35,14 @@ use common::{
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
 use ldk_node::config::{
-	AsyncPaymentsRole, EsploraSyncConfig, ADDRESS_POOL_SIZE, DEFAULT_FULL_SCAN_STOP_GAP,
+	AsyncPaymentsRole, EsploraSyncConfig, ForwardedPaymentTrackingMode, ADDRESS_POOL_SIZE,
+	DEFAULT_FULL_SCAN_STOP_GAP,
 };
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
-	ConfirmationStatus, PayerProofOptions, PaymentDetails, PaymentDirection, PaymentKind,
-	PaymentStatus, TransactionType, UnifiedPaymentResult,
+	ConfirmationStatus, ForwardedPaymentId, PayerProofOptions, PaymentDetails, PaymentDirection,
+	PaymentKind, PaymentStatus, TransactionType, UnifiedPaymentResult,
 };
 use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType};
 use lightning::ln::channelmanager::PaymentId;
@@ -731,6 +732,152 @@ async fn multi_hop_sending() {
 	expect_payment_received_event!(&nodes[4], 2_500_000);
 	let fee_paid_msat = Some(2000);
 	expect_payment_successful_event!(nodes[0], outbound_payment_id, Some(fee_paid_msat));
+
+	// N1 forwarded the payment, so it records the forward against both of its channels: the one it
+	// received on and the one it sent on. N0 only sent, so it records nothing.
+	let forwarding = nodes[1].forwarding_analytics();
+	assert_eq!(forwarding.tracking_mode(), ForwardedPaymentTrackingMode::Stats);
+
+	let inbound_channel_id = nodes[1]
+		.list_channels()
+		.iter()
+		.find(|c| c.counterparty.node_id == nodes[0].node_id())
+		.unwrap()
+		.channel_id;
+	let inbound_stats = forwarding.channel_stats(&inbound_channel_id).unwrap().unwrap();
+	assert_eq!(inbound_stats.inbound_payments_forwarded, 1);
+	assert_eq!(inbound_stats.outbound_payments_forwarded, 0);
+	assert_eq!(inbound_stats.counterparty_node_id, Some(nodes[0].node_id()));
+	// Fees are attributed to the incoming channel, so all of N1's fee lands here.
+	let fee_earned_msat = inbound_stats.total_fee_earned_msat.unwrap();
+	assert!(fee_earned_msat > 0);
+	assert_eq!(inbound_stats.total_outbound_amount_msat, 0);
+
+	// Exactly one of N1's two outgoing channels carried the forward, since the payment took either
+	// the N2 or the N3 route.
+	let outbound_stats = forwarding
+		.list_channel_stats(None)
+		.unwrap()
+		.stats
+		.into_iter()
+		.filter(|s| s.outbound_payments_forwarded > 0)
+		.collect::<Vec<_>>();
+	assert_eq!(outbound_stats.len(), 1);
+	assert_eq!(outbound_stats[0].outbound_payments_forwarded, 1);
+	assert_eq!(outbound_stats[0].inbound_payments_forwarded, 0);
+	assert_ne!(outbound_stats[0].channel_id, inbound_channel_id);
+
+	// N1 sends on more than the recipient gets, because the next hop takes a fee of its own too.
+	// What N1 received is what it sent on plus the fee it kept.
+	assert!(outbound_stats[0].total_outbound_amount_msat > 2_500_000);
+	assert_eq!(
+		inbound_stats.total_inbound_amount_msat,
+		outbound_stats[0].total_outbound_amount_msat + fee_earned_msat
+	);
+
+	// `Stats` is the default mode, so no per-payment detail is kept.
+	assert!(forwarding.list_payments(None).unwrap().payments.is_empty());
+
+	assert!(nodes[0].forwarding_analytics().list_channel_stats(None).unwrap().stats.is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn detailed_forwarded_payment_tracking() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let node_a = setup_node(&chain_source, random_config());
+	let mut router_config = random_config();
+	router_config.node_config.forwarded_payment_tracking_mode =
+		ForwardedPaymentTrackingMode::Detailed;
+	let node_b = setup_node(&chain_source, router_config);
+	let node_c = setup_node(&chain_source, random_config());
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	let addr_c = node_c.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b, addr_c],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	for node in [&node_a, &node_b, &node_c] {
+		node.sync_wallets().unwrap();
+	}
+
+	// A -> B -> C, announced so that A can find the route through B.
+	open_channel(&node_a, &node_b, 1_000_000, true, &electrsd).await;
+	open_channel(&node_b, &node_c, 1_000_000, true, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	for node in [&node_a, &node_b, &node_c] {
+		node.sync_wallets().unwrap();
+	}
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_events!(node_b, node_a.node_id(), node_c.node_id());
+	expect_channel_ready_event!(node_c, node_b.node_id());
+
+	// Sleep a bit for gossip to propagate.
+	tokio::time::sleep(Duration::from_secs(1)).await;
+
+	let forwarding = node_b.forwarding_analytics();
+	assert_eq!(forwarding.tracking_mode(), ForwardedPaymentTrackingMode::Detailed);
+
+	let amount_msat = 2_500_000;
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("detailed")).unwrap());
+	let invoice =
+		node_c.bolt11_payment().receive(amount_msat, &invoice_description.into(), 3600).unwrap();
+	let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
+
+	expect_event!(node_b, PaymentForwarded);
+	expect_payment_received_event!(node_c, amount_msat);
+	expect_payment_successful_event!(node_a, payment_id, None);
+
+	// In `Detailed` mode the forward is kept as an individual record until its bucket closes.
+	let page = forwarding.list_payments(None).unwrap();
+	assert_eq!(page.payments.len(), 1);
+	assert!(page.next_page_token.is_none());
+	let details = &page.payments[0];
+
+	let inbound_channel_id = node_b
+		.list_channels()
+		.iter()
+		.find(|c| c.counterparty.node_id == node_a.node_id())
+		.unwrap()
+		.channel_id;
+	let outbound_channel_id = node_b
+		.list_channels()
+		.iter()
+		.find(|c| c.counterparty.node_id == node_c.node_id())
+		.unwrap()
+		.channel_id;
+	assert_eq!(details.prev_channel_id, inbound_channel_id);
+	assert_eq!(details.next_channel_id, outbound_channel_id);
+	assert_eq!(details.prev_node_id, Some(node_a.node_id()));
+	assert_eq!(details.next_node_id, Some(node_c.node_id()));
+	assert_eq!(details.outbound_amount_forwarded_msat, Some(amount_msat));
+	assert!(!details.claim_from_onchain_tx);
+
+	let fee_earned_msat = details.total_fee_earned_msat.unwrap();
+	assert_eq!(details.inbound_amount_forwarded_msat, Some(amount_msat + fee_earned_msat));
+
+	// The opaque id round-trips through the single-payment lookup.
+	assert_eq!(forwarding.payment(&details.id).unwrap().as_ref(), Some(details));
+	assert!(forwarding.payment(&ForwardedPaymentId([0; 32])).unwrap().is_none());
+
+	// Channel statistics are recorded in both modes, so they agree with the detail record.
+	let inbound_stats = forwarding.channel_stats(&inbound_channel_id).unwrap().unwrap();
+	assert_eq!(inbound_stats.inbound_payments_forwarded, 1);
+	assert_eq!(inbound_stats.total_fee_earned_msat, Some(fee_earned_msat));
+	let outbound_stats = forwarding.channel_stats(&outbound_channel_id).unwrap().unwrap();
+	assert_eq!(outbound_stats.outbound_payments_forwarded, 1);
+	assert_eq!(outbound_stats.total_outbound_amount_msat, amount_msat);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

@@ -80,7 +80,9 @@ use crate::io::utils::{
 #[cfg(feature = "storage-vss")]
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
-	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	self, CHANNEL_FORWARDING_STATS_PERSISTENCE_SECONDARY_NAMESPACE,
+	FORWARDED_PAYMENT_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+	PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
@@ -89,6 +91,7 @@ use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::payment::forwarding_store::ForwardingStore;
 #[cfg(feature = "unified-payments")]
 use crate::payment::HRNResolver;
 use crate::peer_store::PeerStore;
@@ -1524,26 +1527,37 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res, address_pool_res) = runtime
-		.block_on(async move {
-			tokio::join!(
-				read_n_objects(
-					&*kv_store_ref,
-					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					PAYMENT_CACHE_WARMUP_COUNT,
-					Arc::clone(&logger_ref),
-				),
-				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_all_objects(
-					&*kv_store_ref,
-					PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					Arc::clone(&logger_ref),
-				),
-				read_address_pool(&*kv_store_ref, &*logger_ref)
-			)
-		});
+	let (
+		payment_store_res,
+		channel_forwarding_stats_res,
+		node_metris_res,
+		pending_payment_store_res,
+		address_pool_res,
+	) = runtime.block_on(async move {
+		tokio::join!(
+			read_n_objects(
+				&*kv_store_ref,
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				PAYMENT_CACHE_WARMUP_COUNT,
+				Arc::clone(&logger_ref),
+			),
+			read_all_objects(
+				&*kv_store_ref,
+				FORWARDED_PAYMENT_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_FORWARDING_STATS_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+			read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
+			read_all_objects(
+				&*kv_store_ref,
+				PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+			read_address_pool(&*kv_store_ref, &*logger_ref),
+		)
+	});
 
 	// Initialize the status fields.
 	let node_metrics = match node_metris_res {
@@ -1572,6 +1586,14 @@ fn build_with_store_internal(
 		)),
 		Err(e) => {
 			log_error!(logger, "Failed to read payment data from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
+	let channel_forwarding_stats = match channel_forwarding_stats_res {
+		Ok(stats) => stats,
+		Err(e) => {
+			log_error!(logger, "Failed to read channel forwarding stats from store: {}", e);
 			return Err(BuildError::ReadFailed);
 		},
 	};
@@ -1900,6 +1922,12 @@ fn build_with_store_internal(
 		cur_time.as_secs(),
 		cur_time.subsec_nanos(),
 		Arc::clone(&wallet),
+		Arc::clone(&logger),
+	));
+	let forwarding_store = Arc::new(ForwardingStore::new(
+		channel_forwarding_stats,
+		config.forwarded_payment_tracking_mode,
+		Arc::clone(&kv_store),
 		Arc::clone(&logger),
 	));
 
@@ -2457,6 +2485,16 @@ fn build_with_store_internal(
 		_leak_checker.0.push(Arc::downgrade(&wallet) as Weak<dyn Any + Send + Sync>);
 	}
 
+	// How long detail records are kept before being folded into channel-pair buckets. `Stats` keeps
+	// none of its own, and only drains records a previous `Detailed` configuration left behind.
+	let forwarded_payment_aggregation_retention_secs = match config.forwarded_payment_tracking_mode
+	{
+		crate::config::ForwardedPaymentTrackingMode::Detailed => {
+			crate::payment::forwarding_store::FORWARDED_PAYMENT_AGGREGATION_BUCKET_SIZE_SECS
+		},
+		crate::config::ForwardedPaymentTrackingMode::Stats => 0,
+	};
+
 	Ok(Node {
 		runtime,
 		stop_sender,
@@ -2484,6 +2522,8 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		forwarding_store,
+		forwarded_payment_aggregation_retention_secs,
 		lnurl_auth,
 		is_running,
 		node_metrics,

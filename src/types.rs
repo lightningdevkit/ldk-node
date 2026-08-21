@@ -37,12 +37,14 @@ use lightning_types::features::ChannelTypeFeatures;
 
 use crate::chain::ChainSource;
 use crate::config::{AnchorChannelsConfig, ChannelConfig};
-use crate::data_store::{DataStore, KeepAllEntries, KeepLeastRecentlyUsed};
+use crate::data_store::{DataStore, KeepAllEntries, KeepLeastRecentlyUsed, KeepNoEntries};
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::{PaymentDetails, PendingPaymentDetails};
+use crate::payment::{
+	ChannelPairForwardingStats, ForwardedPaymentDetails, PaymentDetails, PendingPaymentDetails,
+};
 use crate::runtime::RuntimeSpawner;
 
 #[cfg(feature = "uniffi")]
@@ -333,6 +335,12 @@ pub(crate) type BumpTransactionEventHandler =
 	>;
 
 pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>, KeepLeastRecentlyUsed>;
+pub(crate) type ForwardedPaymentStore =
+	DataStore<ForwardedPaymentDetails, Arc<Logger>, KeepNoEntries>;
+pub(crate) type ChannelForwardingStatsStore =
+	DataStore<crate::payment::forwarding_store::StoredChannelForwardingStats, Arc<Logger>>;
+pub(crate) type ChannelPairForwardingStatsStore =
+	DataStore<ChannelPairForwardingStats, Arc<Logger>, KeepNoEntries>;
 
 /// A local, potentially user-provided, identifier of a channel.
 ///
