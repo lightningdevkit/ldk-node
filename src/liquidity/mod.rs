@@ -33,6 +33,7 @@ use crate::builder::BuildError;
 use crate::connection::ConnectionManager;
 use crate::liquidity::client::lsps1::LSPS1Client;
 use crate::liquidity::client::lsps2::LSPS2Client;
+use crate::liquidity::service::lsps1::{LSPS1Service, LSPS1ServiceLiquiditySource};
 use crate::liquidity::service::lsps2::{LSPS2Service, LSPS2ServiceLiquiditySource};
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
@@ -239,6 +240,7 @@ where
 	L::Target: LdkLogger,
 {
 	lsp_nodes: Vec<LspConfig>,
+	lsps1_service: Option<LSPS1Service>,
 	lsps2_service: Option<LSPS2Service>,
 	wallet: Arc<Wallet>,
 	channel_manager: Arc<ChannelManager>,
@@ -258,9 +260,12 @@ where
 		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>, logger: L,
 	) -> Self {
 		let lsp_nodes = Vec::new();
+		let lsps1_service = None;
 		let lsps2_service = None;
+
 		Self {
 			lsp_nodes,
+			lsps1_service,
 			lsps2_service,
 			wallet,
 			channel_manager,
@@ -277,6 +282,11 @@ where
 		self
 	}
 
+	pub(crate) fn lsps1_service(&mut self, service_config: LSPS1Service) -> &mut Self {
+		self.lsps1_service = Some(service_config);
+		self
+	}
+
 	pub(crate) fn lsps2_service(
 		&mut self, promise_secret: [u8; 32], service_config: LSPS2ServiceConfig,
 	) -> &mut Self {
@@ -286,17 +296,26 @@ where
 	}
 
 	pub(crate) async fn build(self) -> Result<LiquiditySource<L>, BuildError> {
-		let liquidity_service_config = self.lsps2_service.as_ref().map(|s| {
-			let lsps2_service_config = Some(s.ldk_service_config.clone());
-			let lsps5_service_config = None;
-			let advertise_service = s.service_config.advertise_service;
-			LiquidityServiceConfig {
-				lsps1_service_config: None,
-				lsps2_service_config,
-				lsps5_service_config,
-				advertise_service,
-			}
-		});
+		let lsps1_service_config = self.lsps1_service.clone();
+
+		let (lsps2_service_config, advertise_service) = match &self.lsps2_service {
+			Some(s) => (Some(s.ldk_service_config.clone()), s.service_config.advertise_service),
+			None => (None, false),
+		};
+
+		let lsps5_service_config = None;
+
+		let liquidity_service_config =
+			if lsps1_service_config.is_some() || lsps2_service_config.is_some() {
+				Some(LiquidityServiceConfig {
+					lsps1_service_config,
+					lsps2_service_config,
+					lsps5_service_config,
+					advertise_service,
+				})
+			} else {
+				None
+			};
 
 		let (discovery_done_tx, discovery_done_rx) = tokio::sync::watch::channel(false);
 
@@ -346,6 +365,14 @@ where
 				liquidity_manager: Arc::clone(&liquidity_manager),
 				logger: self.logger.clone(),
 			}),
+			lsps1_service: Arc::new(LSPS1ServiceLiquiditySource {
+				lsps1_service_config: self.lsps1_service,
+				channel_manager: self.channel_manager,
+				peer_manager: RwLock::new(None),
+				liquidity_manager: Arc::clone(&liquidity_manager),
+				kv_store: self.kv_store,
+				logger: self.logger,
+			}),
 			lsps2_client: Arc::new(LSPS2Client {
 				lsp_nodes: Arc::clone(&lsp_nodes),
 				pending_lsps2_fee_requests: Mutex::new(HashMap::new()),
@@ -382,6 +409,7 @@ where
 {
 	lsp_nodes: Arc<RwLock<Vec<LspNode>>>,
 	lsps1_client: Arc<LSPS1Client<L>>,
+	lsps1_service: Arc<LSPS1ServiceLiquiditySource<L>>,
 	lsps2_client: Arc<LSPS2Client<L>>,
 	lsps2_service: Arc<LSPS2ServiceLiquiditySource<L>>,
 	pending_lsps0_discovery: Mutex<HashMap<PublicKey, PendingRequest<Vec<u16>>>>,
@@ -403,6 +431,10 @@ where
 		Arc::clone(&self.lsps1_client)
 	}
 
+	pub(crate) fn lsps1_service(&self) -> Arc<LSPS1ServiceLiquiditySource<L>> {
+		Arc::clone(&self.lsps1_service)
+	}
+
 	pub(crate) fn lsps2_client(&self) -> Arc<LSPS2Client<L>> {
 		Arc::clone(&self.lsps2_client)
 	}
@@ -414,6 +446,7 @@ where
 	pub(crate) async fn handle_next_event(&self) {
 		match self.liquidity_manager.next_event_async().await {
 			LiquidityEvent::LSPS1Client(event) => self.lsps1_client.handle_event(event).await,
+			LiquidityEvent::LSPS1Service(event) => self.lsps1_service.handle_event(event).await,
 			LiquidityEvent::LSPS2Client(event) => self.lsps2_client.handle_event(event).await,
 			LiquidityEvent::LSPS2Service(event) => self.lsps2_service.handle_event(event).await,
 

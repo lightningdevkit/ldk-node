@@ -44,6 +44,7 @@ use crate::io::{
 	EVENT_QUEUE_PERSISTENCE_KEY, EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
 	EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
 };
+use crate::liquidity::service::lsps1::{PendingLSPS1Channel, PendingLSPS1Order};
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
@@ -834,6 +835,124 @@ where
 				counterparty_skimmed_fee_msat,
 				..
 			} => {
+				// We intercept early and check if the payment was an LSPS1
+				// order payment and handle properly.
+				if let Ok(bytes) = self.event_queue.kv_store.read(
+					"lsps1_pending_orders",
+					"",
+					&payment_hash.0.to_string(),
+				) {
+					if let Ok(pending_order) = PendingLSPS1Order::read(&mut &bytes[..]) {
+						let (payment_preimage, payment_method) = match purpose {
+							PaymentPurpose::Bolt11InvoicePayment { payment_preimage, .. } => (
+								payment_preimage,
+								lightning_liquidity::lsps1::service::PaymentMethod::Bolt11,
+							),
+							PaymentPurpose::Bolt12OfferPayment { payment_preimage, .. } => (
+								payment_preimage,
+								lightning_liquidity::lsps1::service::PaymentMethod::Bolt12,
+							),
+							_ => (None, lightning_liquidity::lsps1::service::PaymentMethod::Bolt11),
+						};
+
+						if let Some(preimage) = payment_preimage {
+							let expected_msat =
+								pending_order.order_total_amount_sat.saturating_mul(1000);
+
+							if amount_msat < expected_msat {
+								log_error!(
+                                    self.logger,
+                                    "Refused LSPS1 payment: underpaid. Expected {} msat, received {} msat.",
+                                    expected_msat,
+                                    amount_msat
+                                );
+								self.channel_manager.fail_htlc_backwards(&payment_hash);
+								return Ok(());
+							}
+
+							self.runtime.block_on(async {
+								self.liquidity_source
+									.lsps1_service()
+									.handle_order_payment_received(
+										pending_order.counterparty_node_id,
+										pending_order.request_id.into(),
+										payment_method,
+									)
+									.await
+							});
+
+							self.channel_manager.claim_funds(preimage);
+
+							let mut config = self.channel_manager.get_current_config();
+
+							// We set the forwarding fee to 0 for now as we're getting paid by the channel fee.
+							config.channel_config.forwarding_fee_base_msat = 0;
+
+							let channel_size_sat = pending_order.order_params.lsp_balance_sat
+								+ pending_order.order_params.client_balance_sat;
+
+							let push_msat =
+								pending_order.order_params.client_balance_sat.saturating_mul(1000);
+
+							let user_channel_id: u128 = u128::from_ne_bytes(
+								self.keys_manager.get_secure_random_bytes()[..16]
+									.try_into()
+									.expect("slice is exactly 16 bytes"),
+							);
+
+							let pending_channel = PendingLSPS1Channel {
+								order_id: pending_order.request_id.into().clone(),
+								channel_expiry_blocks: pending_order
+									.order_params
+									.channel_expiry_blocks,
+							};
+
+							let _ = self.event_queue.kv_store.write(
+								"lsps1_pending_channels",
+								"",
+								&user_channel_id.to_string(),
+								pending_channel.encode(),
+							);
+
+							if let Err(e) = self.channel_manager.create_channel(
+								pending_order.counterparty_node_id,
+								channel_size_sat,
+								push_msat,
+								user_channel_id,
+								None,
+								Some(config),
+							) {
+								log_error!(
+									self.logger,
+									"Failed to open LSPS1 channel after claiming funds: {:?}",
+									e
+								);
+								self.liquidity_source
+									.lsps1_service()
+									.handle_order_failed_and_refunded(
+										pending_order.counterparty_node_id,
+										pending_order.request_id.into(),
+									)
+									.await
+							}
+
+							let _ = self.event_queue.kv_store.remove(
+								"lsps1_pending_orders",
+								"",
+								&payment_hash.0.to_string(),
+								false,
+							);
+						} else {
+							log_error!(
+                                self.logger,
+                                "Failed to claim LSPS1 payment: preimage unknown or unsupported payment purpose."
+                            );
+							self.channel_manager.fail_htlc_backwards(&payment_hash);
+						}
+						return Ok(());
+					}
+				}
+
 				let (payment_id, mut payment_info) =
 					self.resolve_inbound_payment_id(payment_id, &payment_hash).await?;
 				if let Some(info) = payment_info.as_ref() {
@@ -1778,6 +1897,58 @@ where
 					channel_id,
 					counterparty_node_id,
 				);
+
+				// We check if this event was triggered by an LSPS1 order and handle it properly
+				if let Ok(bytes) = self.event_queue.kv_store.read(
+					"lsps1_pending_channels",
+					"",
+					&user_channel_id.to_string(),
+				) {
+					if let Ok(pending_channel) = PendingLSPS1Channel::read(&mut &bytes[..]) {
+						let now_secs = std::time::SystemTime::now()
+							.duration_since(std::time::UNIX_EPOCH)
+							.unwrap_or_default()
+							.as_secs();
+
+						let funded_at =
+							lightning_liquidity::lsps0::ser::LSPSDateTime::from_unix_timestamp(
+								now_secs,
+							)
+							.expect("Valid timestamp");
+
+						let expiry_secs =
+							now_secs + (pending_channel.channel_expiry_blocks as u64 * 600);
+						let expires_at =
+							lightning_liquidity::lsps0::ser::LSPSDateTime::from_unix_timestamp(
+								expiry_secs,
+							)
+							.expect("Valid timestamp");
+
+						let channel_info = LSPS1ChannelInfo {
+							funded_at,
+							funding_outpoint: funding_txo.into_bitcoin_outpoint(),
+							expires_at,
+						};
+
+						self.runtime.block_on(async {
+							self.liquidity_source
+								.lsps1_service()
+								.handle_order_channel_opened(
+									counterparty_node_id,
+									pending_channel.order_id,
+									channel_info,
+								)
+								.await
+						});
+
+						let _ = self.event_queue.kv_store.remove(
+							"lsps1_pending_channels",
+							"",
+							&user_channel_id.to_string(),
+							false,
+						);
+					}
+				}
 
 				let former_temporary_channel_id = former_temporary_channel_id.expect(
 					"LDK Node has only ever persisted ChannelPending events from rust-lightning 0.0.115 or later",
