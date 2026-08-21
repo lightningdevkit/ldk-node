@@ -43,4 +43,4 @@ jobs:
       - name: Run HRN Integration Tests
         run: |
           RUSTFLAGS="--cfg no_download --cfg hrn_tests $RUSTFLAGS" cargo test --test integration_tests_hrn
-          RUSTFLAGS="--cfg no_download --cfg hrn_tests $RUSTFLAGS" cargo test --test integration_tests_hrn --features uniffi
+          RUSTFLAGS="--cfg no_download --cfg hrn_tests $RUSTFLAGS" cargo test --test integration_tests_hrn --no-default-features --features uniffi-default

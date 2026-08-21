@@ -22,6 +22,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::future::Future;
 use std::path::PathBuf;
+#[cfg(hrn_tests)]
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
@@ -38,11 +39,15 @@ use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::electrum_client::ElectrumApi;
 use electrsd::{corepc_node, ElectrsD};
 use ldk_node::bip39::Mnemonic;
-use ldk_node::config::{
-	AsyncPaymentsRole, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
-	HumanReadableNamesConfig,
-};
+#[cfg(feature = "chain-electrum")]
+use ldk_node::config::ElectrumSyncConfig;
+#[cfg(feature = "chain-esplora")]
+use ldk_node::config::EsploraSyncConfig;
+use ldk_node::config::{AsyncPaymentsRole, Config};
+#[cfg(hrn_tests)]
+use ldk_node::config::{HRNResolverConfig, HumanReadableNamesConfig};
 use ldk_node::entropy::NodeEntropy;
+#[cfg(feature = "storage-sqlite")]
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{
 	PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus, TransactionType,
@@ -363,25 +368,52 @@ pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 pub(crate) fn random_chain_source<'a>(
 	bitcoind: &'a BitcoinD, electrsd: &'a ElectrsD,
 ) -> TestChainSource<'a> {
-	let r = rand::random_range(0..4);
-	match r {
-		0 => {
+	#[cfg(not(feature = "chain-bitcoind"))]
+	let _ = bitcoind;
+
+	let configured_sources = env::var("LDK_NODE_TEST_CHAIN_SOURCES").ok().map(|value| {
+		value
+			.split(|c: char| c == ',' || c.is_ascii_whitespace())
+			.filter(|source| !source.is_empty())
+			.map(|source| source.to_ascii_uppercase())
+			.collect::<Vec<_>>()
+	});
+	let sources = configured_sources.unwrap_or_else(|| {
+		let mut sources = Vec::new();
+		#[cfg(feature = "chain-esplora")]
+		sources.push("ESPLORA".to_string());
+		#[cfg(feature = "chain-electrum")]
+		sources.push("ELECTRUM".to_string());
+		#[cfg(feature = "chain-bitcoind")]
+		{
+			sources.push("BITCOIND_RPC".to_string());
+			sources.push("BITCOIND_REST".to_string());
+		}
+		sources
+	});
+	let source = &sources[rand::random_range(0..sources.len())];
+	match source.as_str() {
+		#[cfg(feature = "chain-esplora")]
+		"ESPLORA" => {
 			println!("Randomly setting up Esplora chain syncing...");
 			TestChainSource::Esplora(electrsd)
 		},
-		1 => {
+		#[cfg(feature = "chain-electrum")]
+		"ELECTRUM" => {
 			println!("Randomly setting up Electrum chain syncing...");
 			TestChainSource::Electrum(electrsd)
 		},
-		2 => {
+		#[cfg(feature = "chain-bitcoind")]
+		"BITCOIND_RPC" => {
 			println!("Randomly setting up Bitcoind RPC chain syncing...");
 			TestChainSource::BitcoindRpcSync(bitcoind)
 		},
-		3 => {
+		#[cfg(feature = "chain-bitcoind")]
+		"BITCOIND_REST" => {
 			println!("Randomly setting up Bitcoind REST chain syncing...");
 			TestChainSource::BitcoindRestSync(bitcoind)
 		},
-		_ => unreachable!(),
+		_ => panic!("Unknown test chain source: {source}"),
 	}
 }
 
@@ -607,16 +639,22 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 
 #[derive(Clone)]
 pub(crate) enum TestChainSource<'a> {
+	#[cfg(feature = "chain-esplora")]
 	Esplora(&'a ElectrsD),
+	#[cfg(feature = "chain-electrum")]
 	Electrum(&'a ElectrsD),
+	#[cfg(feature = "chain-bitcoind")]
 	BitcoindRpcSync(&'a BitcoinD),
+	#[cfg(feature = "chain-bitcoind")]
 	BitcoindRestSync(&'a BitcoinD),
 }
 
 #[derive(Clone, Copy)]
 pub(crate) enum TestStoreType {
 	TestSyncStore,
+	#[cfg(feature = "storage-sqlite")]
 	Sqlite,
+	#[cfg(feature = "storage-filesystem")]
 	FilesystemStore,
 }
 
@@ -671,13 +709,76 @@ impl Default for TestConfig {
 macro_rules! setup_builder {
 	($builder:ident, $config:expr) => {
 		#[cfg(feature = "uniffi")]
-		let $builder = Builder::from_config($config.clone());
+		let mut $builder = Builder::from_config($config.clone());
 		#[cfg(not(feature = "uniffi"))]
 		let mut $builder = Builder::from_config($config.clone());
 	};
 }
 
 pub(crate) use setup_builder;
+
+pub(crate) fn configure_chain_source(
+	chain_source: &TestChainSource, builder: &mut Builder, config: &TestConfig,
+) {
+	match chain_source {
+		#[cfg(feature = "chain-esplora")]
+		TestChainSource::Esplora(electrsd) => {
+			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+			let mut sync_config = EsploraSyncConfig::default();
+			sync_config.background_sync_config = None;
+			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
+			if let Some(full_scan_stop_gap) = config.full_scan_stop_gap {
+				sync_config.full_scan_stop_gap = full_scan_stop_gap;
+			}
+			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+		},
+		#[cfg(feature = "chain-electrum")]
+		TestChainSource::Electrum(electrsd) => {
+			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
+			let mut sync_config = ElectrumSyncConfig::default();
+			sync_config.background_sync_config = None;
+			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
+			if let Some(full_scan_stop_gap) = config.full_scan_stop_gap {
+				sync_config.full_scan_stop_gap = full_scan_stop_gap;
+			}
+			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
+		},
+		#[cfg(feature = "chain-bitcoind")]
+		TestChainSource::BitcoindRpcSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			let rpc_user = values.user;
+			let rpc_password = values.password;
+			builder.set_chain_source_bitcoind_rpc(
+				rpc_host,
+				rpc_port,
+				rpc_user,
+				rpc_password,
+				config.wallet_rescan_from_height,
+			);
+		},
+		#[cfg(feature = "chain-bitcoind")]
+		TestChainSource::BitcoindRestSync(bitcoind) => {
+			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rpc_port = bitcoind.params.rpc_socket.port();
+			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			let rpc_user = values.user;
+			let rpc_password = values.password;
+			let rest_host = bitcoind.params.rpc_socket.ip().to_string();
+			let rest_port = bitcoind.params.rpc_socket.port();
+			builder.set_chain_source_bitcoind_rest(
+				rest_host,
+				rest_port,
+				rpc_host,
+				rpc_port,
+				rpc_user,
+				rpc_password,
+				config.wallet_rescan_from_height,
+			);
+		},
+	}
+}
 
 #[cfg(any(cln_test, lnd_test, eclair_test))]
 pub(crate) mod scenarios;
@@ -701,7 +802,8 @@ pub(crate) fn setup_two_nodes_with_store(
 	let mut config_a = random_config();
 	config_a.store_type = store_type;
 
-	if cfg!(hrn_tests) {
+	#[cfg(hrn_tests)]
+	{
 		config_a.node_config.hrn_config =
 			HumanReadableNamesConfig { resolution_config: HRNResolverConfig::Blip32 };
 	}
@@ -713,7 +815,8 @@ pub(crate) fn setup_two_nodes_with_store(
 	config_b.store_type = store_type;
 	config_b.node_config.manually_handle_unknown_bolt11_payments = true;
 
-	if cfg!(hrn_tests) {
+	#[cfg(hrn_tests)]
+	{
 		config_b.node_config.hrn_config = HumanReadableNamesConfig {
 			resolution_config: HRNResolverConfig::Dns {
 				dns_server_address: SocketAddress::from_str("8.8.8.8:53").unwrap(),
@@ -734,60 +837,7 @@ pub(crate) fn setup_two_nodes_with_store(
 
 pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
 	setup_builder!(builder, config.node_config);
-	match chain_source {
-		TestChainSource::Esplora(electrsd) => {
-			let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
-			let mut sync_config = EsploraSyncConfig::default();
-			sync_config.background_sync_config = None;
-			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
-			if let Some(full_scan_stop_gap) = config.full_scan_stop_gap {
-				sync_config.full_scan_stop_gap = full_scan_stop_gap;
-			}
-			builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-		},
-		TestChainSource::Electrum(electrsd) => {
-			let electrum_url = format!("tcp://{}", electrsd.electrum_url);
-			let mut sync_config = ElectrumSyncConfig::default();
-			sync_config.background_sync_config = None;
-			sync_config.force_wallet_full_scan = config.force_wallet_full_scan;
-			if let Some(full_scan_stop_gap) = config.full_scan_stop_gap {
-				sync_config.full_scan_stop_gap = full_scan_stop_gap;
-			}
-			builder.set_chain_source_electrum(electrum_url.clone(), Some(sync_config));
-		},
-		TestChainSource::BitcoindRpcSync(bitcoind) => {
-			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rpc_port = bitcoind.params.rpc_socket.port();
-			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
-			let rpc_user = values.user;
-			let rpc_password = values.password;
-			builder.set_chain_source_bitcoind_rpc(
-				rpc_host,
-				rpc_port,
-				rpc_user,
-				rpc_password,
-				config.wallet_rescan_from_height,
-			);
-		},
-		TestChainSource::BitcoindRestSync(bitcoind) => {
-			let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rpc_port = bitcoind.params.rpc_socket.port();
-			let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
-			let rpc_user = values.user;
-			let rpc_password = values.password;
-			let rest_host = bitcoind.params.rpc_socket.ip().to_string();
-			let rest_port = bitcoind.params.rpc_socket.port();
-			builder.set_chain_source_bitcoind_rest(
-				rest_host,
-				rest_port,
-				rpc_host,
-				rpc_port,
-				rpc_user,
-				rpc_password,
-				config.wallet_rescan_from_height,
-			);
-		},
-	}
+	configure_chain_source(chain_source, &mut builder, &config);
 
 	match &config.log_writer {
 		TestLogWriter::FileWriter => {
@@ -812,7 +862,9 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 			let kv_store = TestSyncStore::new(config.node_config.storage_dir_path.into());
 			builder.build_with_store(config.node_entropy.into(), kv_store).unwrap()
 		},
+		#[cfg(feature = "storage-sqlite")]
 		TestStoreType::Sqlite => builder.build(config.node_entropy.into()).unwrap(),
+		#[cfg(feature = "storage-filesystem")]
 		TestStoreType::FilesystemStore => {
 			builder.build_with_fs_store(config.node_entropy.into()).unwrap()
 		},
@@ -1906,6 +1958,7 @@ struct TestSyncStoreInner {
 	serializer: tokio::sync::RwLock<()>,
 	test_store: InMemoryStore,
 	fs_store: FilesystemStore,
+	#[cfg(feature = "storage-sqlite")]
 	sqlite_store: SqliteStore,
 }
 
@@ -1915,8 +1968,11 @@ impl TestSyncStoreInner {
 		let mut fs_dir = dest_dir.clone();
 		fs_dir.push("fs_store");
 		let fs_store = FilesystemStore::new(fs_dir);
+		#[cfg(feature = "storage-sqlite")]
 		let mut sql_dir = dest_dir.clone();
+		#[cfg(feature = "storage-sqlite")]
 		sql_dir.push("sqlite_store");
+		#[cfg(feature = "storage-sqlite")]
 		let sqlite_store = SqliteStore::new(
 			sql_dir,
 			Some("test_sync_db".to_string()),
@@ -1924,15 +1980,21 @@ impl TestSyncStoreInner {
 		)
 		.unwrap();
 		let test_store = InMemoryStore::new();
-		Self { serializer, fs_store, sqlite_store, test_store }
+		Self {
+			serializer,
+			fs_store,
+			#[cfg(feature = "storage-sqlite")]
+			sqlite_store,
+			test_store,
+		}
 	}
 
 	async fn do_list_async(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> lightning::io::Result<Vec<String>> {
 		let fs_res = KVStore::list(&self.fs_store, primary_namespace, secondary_namespace).await;
-		let sqlite_res =
-			KVStore::list(&self.sqlite_store, primary_namespace, secondary_namespace).await;
+		#[cfg(feature = "storage-sqlite")]
+		let sqlite_res = KVStore::list(&self.sqlite_store, primary_namespace, secondary_namespace).await;
 		let test_res =
 			KVStore::list(&self.test_store, primary_namespace, secondary_namespace).await;
 
@@ -1940,9 +2002,12 @@ impl TestSyncStoreInner {
 			Ok(mut list) => {
 				list.sort();
 
-				let mut sqlite_list = sqlite_res.unwrap();
-				sqlite_list.sort();
-				assert_eq!(list, sqlite_list);
+				#[cfg(feature = "storage-sqlite")]
+				{
+					let mut sqlite_list = sqlite_res.unwrap();
+					sqlite_list.sort();
+					assert_eq!(list, sqlite_list);
+				}
 
 				let mut test_list = test_res.unwrap();
 				test_list.sort();
@@ -1951,6 +2016,7 @@ impl TestSyncStoreInner {
 				Ok(list)
 			},
 			Err(e) => {
+				#[cfg(feature = "storage-sqlite")]
 				assert!(sqlite_res.is_err());
 				assert!(test_res.is_err());
 				Err(e)
@@ -1969,6 +2035,7 @@ impl TestSyncStoreInner {
 		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
 	) -> lightning::io::Result<PaginatedListResponse> {
 		let _guard = self.serializer.read().await;
+		#[cfg(feature = "storage-sqlite")]
 		let sqlite_res = PaginatedKVStore::list_paginated(
 			&self.sqlite_store,
 			primary_namespace,
@@ -1984,7 +2051,8 @@ impl TestSyncStoreInner {
 		)
 		.await;
 
-		match sqlite_res {
+		#[cfg(feature = "storage-sqlite")]
+		return match sqlite_res {
 			Ok(sqlite_response) => {
 				assert_eq!(sqlite_response, test_res.unwrap());
 				Ok(sqlite_response)
@@ -1993,7 +2061,10 @@ impl TestSyncStoreInner {
 				assert!(test_res.is_err());
 				Err(e)
 			},
-		}
+		};
+
+		#[cfg(not(feature = "storage-sqlite"))]
+		test_res
 	}
 
 	async fn read_internal_async(
@@ -2003,6 +2074,7 @@ impl TestSyncStoreInner {
 
 		let fs_res =
 			KVStore::read(&self.fs_store, primary_namespace, secondary_namespace, key).await;
+		#[cfg(feature = "storage-sqlite")]
 		let sqlite_res =
 			KVStore::read(&self.sqlite_store, primary_namespace, secondary_namespace, key).await;
 		let test_res =
@@ -2010,13 +2082,17 @@ impl TestSyncStoreInner {
 
 		match fs_res {
 			Ok(read) => {
+				#[cfg(feature = "storage-sqlite")]
 				assert_eq!(read, sqlite_res.unwrap());
 				assert_eq!(read, test_res.unwrap());
 				Ok(read)
 			},
 			Err(e) => {
-				assert!(sqlite_res.is_err());
-				assert_eq!(e.kind(), unsafe { sqlite_res.unwrap_err_unchecked().kind() });
+				#[cfg(feature = "storage-sqlite")]
+				{
+					assert!(sqlite_res.is_err());
+					assert_eq!(e.kind(), unsafe { sqlite_res.unwrap_err_unchecked().kind() });
+				}
 				assert!(test_res.is_err());
 				assert_eq!(e.kind(), unsafe { test_res.unwrap_err_unchecked().kind() });
 				Err(e)
@@ -2036,6 +2112,7 @@ impl TestSyncStoreInner {
 			buf.clone(),
 		)
 		.await;
+		#[cfg(feature = "storage-sqlite")]
 		let sqlite_res = KVStore::write(
 			&self.sqlite_store,
 			primary_namespace,
@@ -2061,11 +2138,13 @@ impl TestSyncStoreInner {
 
 		match fs_res {
 			Ok(()) => {
+				#[cfg(feature = "storage-sqlite")]
 				assert!(sqlite_res.is_ok());
 				assert!(test_res.is_ok());
 				Ok(())
 			},
 			Err(e) => {
+				#[cfg(feature = "storage-sqlite")]
 				assert!(sqlite_res.is_err());
 				assert!(test_res.is_err());
 				Err(e)
@@ -2080,6 +2159,7 @@ impl TestSyncStoreInner {
 		let fs_res =
 			KVStore::remove(&self.fs_store, primary_namespace, secondary_namespace, key, lazy)
 				.await;
+		#[cfg(feature = "storage-sqlite")]
 		let sqlite_res =
 			KVStore::remove(&self.sqlite_store, primary_namespace, secondary_namespace, key, lazy)
 				.await;
@@ -2095,11 +2175,13 @@ impl TestSyncStoreInner {
 
 		match fs_res {
 			Ok(()) => {
+				#[cfg(feature = "storage-sqlite")]
 				assert!(sqlite_res.is_ok());
 				assert!(test_res.is_ok());
 				Ok(())
 			},
 			Err(e) => {
+				#[cfg(feature = "storage-sqlite")]
 				assert!(sqlite_res.is_err());
 				assert!(test_res.is_err());
 				Err(e)
@@ -2110,7 +2192,7 @@ impl TestSyncStoreInner {
 
 /// The PostgreSQL connection string used by the Postgres-backed tests, overridable via the
 /// `TEST_POSTGRES_URL` environment variable.
-#[cfg(feature = "postgres")]
+#[cfg(feature = "storage-postgres")]
 pub(crate) fn test_connection_string() -> String {
 	std::env::var("TEST_POSTGRES_URL")
 		.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string())
@@ -2118,7 +2200,7 @@ pub(crate) fn test_connection_string() -> String {
 
 /// Drops the given table from the `ldk_db` database, ignoring the case where the database doesn't
 /// exist yet. Used to ensure a clean slate before and after Postgres-backed tests.
-#[cfg(feature = "postgres")]
+#[cfg(feature = "storage-postgres")]
 pub(crate) async fn drop_table(table_name: &str) {
 	let connection_string = format!("{} dbname=ldk_db", test_connection_string());
 	let Ok((client, connection)) =

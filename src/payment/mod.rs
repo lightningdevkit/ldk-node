@@ -10,15 +10,20 @@
 pub(crate) mod asynchronous;
 mod bolt11;
 mod bolt12;
+#[cfg(feature = "unified-payments")]
+mod hrn;
 mod onchain;
 pub(crate) mod pending_payment_store;
 mod spontaneous;
 pub(crate) mod store;
+#[cfg(feature = "unified-payments")]
 mod unified;
 
 pub use bolt11::Bolt11Payment;
 pub(crate) use bolt11::PaymentMetadata;
 pub use bolt12::{Bolt12Payment, PayerProofOptions};
+#[cfg(feature = "unified-payments")]
+pub(crate) use hrn::HRNResolver;
 pub use onchain::OnchainPayment;
 pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
 pub use spontaneous::SpontaneousPayment;
@@ -26,4 +31,5 @@ pub use store::{
 	Channel, ConfirmationStatus, LSPS2Parameters, PageToken, PaymentDetails, PaymentDetailsPage,
 	PaymentDirection, PaymentKind, PaymentStatus, TransactionType,
 };
+#[cfg(feature = "unified-payments")]
 pub use unified::{UnifiedPayment, UnifiedPaymentResult};

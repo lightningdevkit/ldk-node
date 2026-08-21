@@ -5,10 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+#[cfg(any(feature = "chain-esplora", feature = "storage-vss"))]
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::default::Default;
+#[cfg(feature = "unified-payments")]
 use std::net::ToSocketAddrs;
+#[cfg(feature = "storage-filesystem")]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
@@ -20,7 +23,9 @@ use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
+#[cfg(feature = "unified-payments")]
 use bitcoin_payment_instructions::dns_resolver::DNSHrnResolver;
+#[cfg(feature = "unified-payments")]
 use bitcoin_payment_instructions::onion_message_resolver::LDKOnionMessageDNSSECHrnResolver;
 use lightning::chain::{chainmonitor, BlockLocator};
 use lightning::ln::channelmanager::{self, ChainParameters, ChannelManagerReadArgs};
@@ -42,14 +47,18 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::ReadableArgs;
 use lightning::util::sweep::OutputSweeper;
+#[cfg(feature = "unified-payments")]
 use lightning_dns_resolver::OMDomainResolver;
+#[cfg(feature = "storage-vss")]
 use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
+#[cfg(feature = "chain-bitcoind")]
+use crate::config::BitcoindRestClientConfig;
 use crate::config::{
-	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole,
-	BitcoindRestClientConfig, Config, ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig,
-	TorConfig, DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
+	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole, Config,
+	ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig, TorConfig,
+	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT, PAYMENT_CACHE_CAPACITY,
 	PAYMENT_CACHE_WARMUP_COUNT,
 };
@@ -59,12 +68,16 @@ use crate::entropy::NodeEntropy;
 use crate::event::EventQueue;
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::gossip::GossipSource;
+#[cfg(feature = "storage-filesystem")]
+use crate::io::fs_store::open_or_migrate_fs_store;
+#[cfg(feature = "storage-sqlite")]
 use crate::io::sqlite_store::SqliteStore;
 use crate::io::utils::{
-	open_or_migrate_fs_store, read_all_objects, read_event_queue,
-	read_external_pathfinding_scores_from_cache, read_n_objects, read_network_graph,
-	read_node_metrics, read_output_sweeper, read_peer_info, read_scorer,
+	read_all_objects, read_event_queue, read_external_pathfinding_scores_from_cache,
+	read_n_objects, read_network_graph, read_node_metrics, read_output_sweeper, read_peer_info,
+	read_scorer,
 };
+#[cfg(feature = "storage-vss")]
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
 	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -76,6 +89,8 @@ use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+#[cfg(feature = "unified-payments")]
+use crate::payment::HRNResolver;
 use crate::peer_store::PeerStore;
 use crate::probing::{
 	HighDegreeStrategy, Prober, ProbingConfig, ProbingStrategy, ProbingStrategyKind,
@@ -85,8 +100,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, HRNResolver, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
-	PeerManager, PendingPaymentStore,
+	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
+	PendingPaymentStore,
 };
 use crate::wallet::persist::{read_address_pool, KVStoreWalletPersister};
 use crate::wallet::Wallet;
@@ -97,15 +112,15 @@ const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
 
 #[derive(Debug, Clone)]
 enum ChainDataSourceConfig {
+	#[cfg(feature = "chain-esplora")]
 	Esplora {
 		server_url: String,
 		headers: HashMap<String, String>,
 		sync_config: Option<EsploraSyncConfig>,
 	},
-	Electrum {
-		server_url: String,
-		sync_config: Option<ElectrumSyncConfig>,
-	},
+	#[cfg(feature = "chain-electrum")]
+	Electrum { server_url: String, sync_config: Option<ElectrumSyncConfig> },
+	#[cfg(feature = "chain-bitcoind")]
 	Bitcoind {
 		rpc_host: String,
 		rpc_port: u16,
@@ -316,6 +331,9 @@ pub struct NodeBuilder {
 	probing_config: Option<ProbingConfig>,
 }
 
+#[cfg(not(feature = "uniffi"))]
+pub use self::NodeBuilder as Builder;
+
 impl NodeBuilder {
 	/// Creates a new builder instance with the default configuration.
 	pub fn new() -> Self {
@@ -359,6 +377,7 @@ impl NodeBuilder {
 	///
 	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
 	/// information.
+	#[cfg(feature = "chain-esplora")]
 	pub fn set_chain_source_esplora(
 		&mut self, server_url: String, sync_config: Option<EsploraSyncConfig>,
 	) -> &mut Self {
@@ -377,6 +396,7 @@ impl NodeBuilder {
 	///
 	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
 	/// information.
+	#[cfg(feature = "chain-esplora")]
 	pub fn set_chain_source_esplora_with_headers(
 		&mut self, server_url: String, headers: HashMap<String, String>,
 		sync_config: Option<EsploraSyncConfig>,
@@ -390,6 +410,7 @@ impl NodeBuilder {
 	///
 	/// If no `sync_config` is given, default values are used. See [`ElectrumSyncConfig`] for more
 	/// information.
+	#[cfg(feature = "chain-electrum")]
 	pub fn set_chain_source_electrum(
 		&mut self, server_url: String, sync_config: Option<ElectrumSyncConfig>,
 	) -> &mut Self {
@@ -410,6 +431,7 @@ impl NodeBuilder {
 	///   startup, before wallet state exists. Existing wallets are not rewound. The height must
 	///   be at or below the current tip. Passing `Some(0)` rescans from genesis; passing `None`
 	///   checkpoints at the current tip.
+	#[cfg(feature = "chain-bitcoind")]
 	pub fn set_chain_source_bitcoind_rpc(
 		&mut self, rpc_host: String, rpc_port: u16, rpc_user: String, rpc_password: String,
 		wallet_rescan_from_height: Option<u32>,
@@ -438,6 +460,7 @@ impl NodeBuilder {
 	///   startup, before wallet state exists. Existing wallets are not rewound. The height must
 	///   be at or below the current tip. Passing `Some(0)` rescans from genesis; passing `None`
 	///   checkpoints at the current tip.
+	#[cfg(feature = "chain-bitcoind")]
 	pub fn set_chain_source_bitcoind_rest(
 		&mut self, rest_host: String, rest_port: u16, rpc_host: String, rpc_port: u16,
 		rpc_user: String, rpc_password: String, wallet_rescan_from_height: Option<u32>,
@@ -665,6 +688,7 @@ impl NodeBuilder {
 
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
+	#[cfg(feature = "storage-sqlite")]
 	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let storage_dir_path = self.config.storage_dir_path.clone();
@@ -712,7 +736,7 @@ impl NodeBuilder {
 	/// will be unencrypted.
 	///
 	/// [PostgreSQL]: https://www.postgresql.org
-	#[cfg(feature = "postgres")]
+	#[cfg(feature = "storage-postgres")]
 	pub fn build_with_postgres_store(
 		&self, node_entropy: NodeEntropy, connection_string: String, db_name: Option<String>,
 		kv_table_name: Option<String>, certificate_pem: Option<String>,
@@ -741,6 +765,7 @@ impl NodeBuilder {
 	/// automatically migrated to the v2 format.
 	///
 	/// [`FilesystemStoreV2`]: lightning_persister::fs_store::v2::FilesystemStoreV2
+	#[cfg(feature = "storage-filesystem")]
 	pub fn build_with_fs_store(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let runtime = self.setup_runtime(&logger)?;
@@ -768,6 +793,7 @@ impl NodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	#[cfg(feature = "storage-vss")]
 	pub fn build_with_vss_store(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
@@ -804,6 +830,7 @@ impl NodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [LNURL-auth]: https://github.com/lnurl/luds/blob/luds/04.md
+	#[cfg(feature = "storage-vss")]
 	pub fn build_with_vss_store_and_lnurl_auth(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
@@ -832,6 +859,7 @@ impl NodeBuilder {
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
 	/// [`FixedHeaders`]: vss_client::headers::FixedHeaders
+	#[cfg(feature = "storage-vss")]
 	pub fn build_with_vss_store_and_fixed_headers(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
@@ -857,6 +885,7 @@ impl NodeBuilder {
 	/// unrecoverable, i.e., if they remain unresolved after internal retries are exhausted.
 	///
 	/// [VSS]: https://github.com/lightningdevkit/vss-server/blob/main/README.md
+	#[cfg(feature = "storage-vss")]
 	pub fn build_with_vss_store_and_header_provider(
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		header_provider: Arc<dyn VssHeaderProvider>,
@@ -966,19 +995,29 @@ pub struct ArcedNodeBuilder {
 }
 
 #[cfg(feature = "uniffi")]
-impl ArcedNodeBuilder {
+pub use self::ArcedNodeBuilder as Builder;
+
+#[cfg(feature = "uniffi")]
+#[uniffi::export]
+impl Builder {
 	/// Creates a new builder instance with the default configuration.
+	#[uniffi::constructor]
 	pub fn new() -> Self {
 		let inner = RwLock::new(NodeBuilder::new());
 		Self { inner }
 	}
 
 	/// Creates a new builder instance from an [`Config`].
+	#[uniffi::constructor]
 	pub fn from_config(config: Config) -> Self {
 		let inner = RwLock::new(NodeBuilder::from_config(config));
 		Self { inner }
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "chain-esplora"))]
+#[uniffi::export]
+impl Builder {
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
 	///
 	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
@@ -988,7 +1027,10 @@ impl ArcedNodeBuilder {
 	) {
 		self.inner.write().expect("lock").set_chain_source_esplora(server_url, sync_config);
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "chain-esplora"))]
+impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
 	///
 	/// The given `headers` will be included in all requests to the Esplora server, typically used for
@@ -1006,7 +1048,11 @@ impl ArcedNodeBuilder {
 			sync_config,
 		);
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "chain-electrum"))]
+#[uniffi::export]
+impl Builder {
 	/// Configures the [`Node`] instance to source its chain data from the given Electrum server.
 	///
 	/// If no `sync_config` is given, default values are used. See [`ElectrumSyncConfig`] for more
@@ -1016,7 +1062,11 @@ impl ArcedNodeBuilder {
 	) {
 		self.inner.write().expect("lock").set_chain_source_electrum(server_url, sync_config);
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "chain-bitcoind"))]
+#[uniffi::export]
+impl Builder {
 	/// Configures the [`Node`] instance to connect to a Bitcoin Core node via RPC.
 	///
 	/// This method establishes an RPC connection that enables all essential chain operations including
@@ -1069,7 +1119,11 @@ impl ArcedNodeBuilder {
 			wallet_rescan_from_height,
 		);
 	}
+}
 
+#[cfg(feature = "uniffi")]
+#[uniffi::export]
+impl Builder {
 	/// Configures the [`Node`] instance to source its gossip data from the Lightning peer-to-peer
 	/// network.
 	pub fn set_gossip_source_p2p(&self) {
@@ -1113,7 +1167,10 @@ impl ArcedNodeBuilder {
 			trust_peer_0conf,
 		);
 	}
+}
 
+#[cfg(feature = "uniffi")]
+impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
 	/// channels to clients.
 	///
@@ -1123,7 +1180,11 @@ impl ArcedNodeBuilder {
 	pub fn enable_liquidity_provider(&self, lsps2_service_config: LSPS2ServiceConfig) {
 		self.inner.write().expect("lock").enable_liquidity_provider(lsps2_service_config);
 	}
+}
 
+#[cfg(feature = "uniffi")]
+#[uniffi::export]
+impl Builder {
 	/// Sets the used storage directory path.
 	pub fn set_storage_dir_path(&self, storage_dir_path: String) {
 		self.inner.write().expect("lock").set_storage_dir_path(storage_dir_path);
@@ -1217,13 +1278,21 @@ impl ArcedNodeBuilder {
 	pub fn set_probing_config(&self, config: Arc<ProbingConfig>) {
 		self.inner.write().expect("lock").set_probing_config((*config).clone());
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "storage-sqlite"))]
+#[uniffi::export]
+impl Builder {
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build(*node_entropy).map(Arc::new)
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "storage-postgres"))]
+#[uniffi::export]
+impl Builder {
 	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
 	/// previously configured.
 	///
@@ -1254,7 +1323,6 @@ impl ArcedNodeBuilder {
 	/// will be unencrypted.
 	///
 	/// [PostgreSQL]: https://www.postgresql.org
-	#[cfg(feature = "postgres")]
 	pub fn build_with_postgres_store(
 		&self, node_entropy: Arc<NodeEntropy>, connection_string: String, db_name: Option<String>,
 		kv_table_name: Option<String>, certificate_pem: Option<String>,
@@ -1271,19 +1339,11 @@ impl ArcedNodeBuilder {
 			)
 			.map(Arc::new)
 	}
+}
 
-	/// Builds a [`Node`] instance with a [PostgreSQL] backend and according to the options
-	/// previously configured.
-	///
-	/// This requires the `postgres` crate feature.
-	#[cfg(not(feature = "postgres"))]
-	pub fn build_with_postgres_store(
-		&self, _node_entropy: Arc<NodeEntropy>, _connection_string: String,
-		_db_name: Option<String>, _kv_table_name: Option<String>, _certificate_pem: Option<String>,
-	) -> Result<Arc<Node>, BuildError> {
-		Err(BuildError::KVStoreSetupFailed)
-	}
-
+#[cfg(all(feature = "uniffi", feature = "storage-filesystem"))]
+#[uniffi::export]
+impl Builder {
 	/// Builds a [`Node`] instance with a [`FilesystemStoreV2`] backend and according to the options
 	/// previously configured.
 	pub fn build_with_fs_store(
@@ -1291,7 +1351,11 @@ impl ArcedNodeBuilder {
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build_with_fs_store(*node_entropy).map(Arc::new)
 	}
+}
 
+#[cfg(all(feature = "uniffi", feature = "storage-vss"))]
+#[uniffi::export]
+impl Builder {
 	/// Builds a [`Node`] instance with a [VSS] backend and according to the options
 	/// previously configured.
 	///
@@ -1404,7 +1468,10 @@ impl ArcedNodeBuilder {
 			.build_with_vss_store_and_header_provider(*node_entropy, vss_url, store_id, adapter)
 			.map(Arc::new)
 	}
+}
 
+#[cfg(feature = "uniffi")]
+impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
 	// this so its not needed.
@@ -1510,6 +1577,7 @@ fn build_with_store_internal(
 	};
 
 	let (chain_source, chain_tip_opt) = match chain_data_source_config {
+		#[cfg(feature = "chain-esplora")]
 		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
 			ChainSource::new_esplora(
@@ -1525,6 +1593,7 @@ fn build_with_store_internal(
 			)
 			.map_err(|()| BuildError::ChainSourceSetupFailed)?
 		},
+		#[cfg(feature = "chain-electrum")]
 		Some(ChainDataSourceConfig::Electrum { server_url, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(ElectrumSyncConfig::default());
 			ChainSource::new_electrum(
@@ -1538,6 +1607,7 @@ fn build_with_store_internal(
 				Arc::clone(&node_metrics),
 			)
 		},
+		#[cfg(feature = "chain-bitcoind")]
 		Some(ChainDataSourceConfig::Bitcoind {
 			rpc_host,
 			rpc_port,
@@ -1579,6 +1649,7 @@ fn build_with_store_internal(
 			}),
 		},
 
+		#[cfg(feature = "chain-esplora")]
 		None => {
 			// Default to Esplora client.
 			let server_url = DEFAULT_ESPLORA_SERVER_URL.to_string();
@@ -1596,13 +1667,24 @@ fn build_with_store_internal(
 			)
 			.map_err(|()| BuildError::ChainSourceSetupFailed)?
 		},
+		#[cfg(not(feature = "chain-esplora"))]
+		None => return Err(BuildError::ChainSourceSetupFailed),
 	};
 	let chain_source = Arc::new(chain_source);
-	let wallet_rescan_from_height = match chain_data_source_config {
-		Some(ChainDataSourceConfig::Bitcoind { wallet_rescan_from_height, .. }) => {
-			*wallet_rescan_from_height
-		},
-		_ => None,
+	let wallet_rescan_from_height = {
+		#[cfg(feature = "chain-bitcoind")]
+		{
+			match chain_data_source_config {
+				Some(ChainDataSourceConfig::Bitcoind { wallet_rescan_from_height, .. }) => {
+					*wallet_rescan_from_height
+				},
+				_ => None,
+			}
+		}
+		#[cfg(not(feature = "chain-bitcoind"))]
+		{
+			None::<u32>
+		}
 	};
 
 	// Initialize the on-chain wallet and chain access
@@ -1662,10 +1744,13 @@ fn build_with_store_internal(
 			// Abort cleanly instead so the misconfiguration surfaces on the first startup.
 			// Esplora/Electrum backends currently never return a tip at build time, so they
 			// retain their existing behavior.
-			if wallet_rescan_from_height.is_none()
-				&& chain_tip_opt.is_none()
-				&& matches!(chain_data_source_config, Some(ChainDataSourceConfig::Bitcoind { .. }))
-			{
+			#[cfg(feature = "chain-bitcoind")]
+			let uses_bitcoind =
+				matches!(chain_data_source_config, Some(ChainDataSourceConfig::Bitcoind { .. }));
+			#[cfg(not(feature = "chain-bitcoind"))]
+			let uses_bitcoind = false;
+
+			if wallet_rescan_from_height.is_none() && chain_tip_opt.is_none() && uses_bitcoind {
 				log_error!(
 					logger,
 					"Failed to determine chain tip on first startup. Aborting to avoid pinning the wallet birthday to genesis."
@@ -1690,6 +1775,7 @@ fn build_with_store_internal(
 			// the checkpoint. Otherwise, use the current chain tip to avoid any rescan.
 			let checkpoint_block = match wallet_rescan_from_height {
 				None => chain_tip_opt,
+				#[cfg(feature = "chain-bitcoind")]
 				Some(height) => {
 					if let Some(chain_tip) = chain_tip_opt {
 						if height > chain_tip.height {
@@ -1730,6 +1816,8 @@ fn build_with_store_internal(
 						},
 					}
 				},
+				#[cfg(not(feature = "chain-bitcoind"))]
+				Some(_) => unreachable!("wallet rescans require the chain-bitcoind feature"),
 			};
 
 			if let Some(best_block) = checkpoint_block {
@@ -2043,56 +2131,65 @@ fn build_with_store_internal(
 		})?;
 	}
 
-	let hrn_resolver;
-	let mut blip32_resolver = None;
+	#[cfg(feature = "unified-payments")]
+	let (om_resolver, hrn_resolver, blip32_resolver) = {
+		let hrn_resolver;
+		let mut blip32_resolver = None;
+		let runtime_handle = runtime.handle();
 
-	let runtime_handle = runtime.handle();
+		let om_resolver: Arc<dyn DNSResolverMessageHandler + Send + Sync> = match &config
+			.hrn_config
+			.resolution_config
+		{
+			HRNResolverConfig::Blip32 => {
+				let hrn_res =
+					Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(&network_graph)));
+				hrn_resolver = HRNResolver::Onion(Arc::clone(&hrn_res));
+				blip32_resolver = Some(Arc::clone(&hrn_res));
 
-	let om_resolver: Arc<dyn DNSResolverMessageHandler + Send + Sync> = match &config
-		.hrn_config
-		.resolution_config
-	{
-		HRNResolverConfig::Blip32 => {
-			let hrn_res =
-				Arc::new(LDKOnionMessageDNSSECHrnResolver::new(Arc::clone(&network_graph)));
-			hrn_resolver = HRNResolver::Onion(Arc::clone(&hrn_res));
-			blip32_resolver = Some(Arc::clone(&hrn_res));
+				hrn_res as Arc<dyn DNSResolverMessageHandler + Send + Sync>
+			},
+			HRNResolverConfig::Dns {
+				dns_server_address, enable_hrn_resolution_service, ..
+			} => {
+				let addr = dns_server_address
+					.to_socket_addrs()
+					.map_err(|_| BuildError::DNSResolverSetupFailed)?
+					.next()
+					.ok_or_else(|| {
+						log_error!(logger, "No valid address found for: {}", dns_server_address);
+						BuildError::DNSResolverSetupFailed
+					})?;
+				let hrn_res = Arc::new(DNSHrnResolver(addr));
+				hrn_resolver = HRNResolver::Local(hrn_res);
 
-			hrn_res as Arc<dyn DNSResolverMessageHandler + Send + Sync>
-		},
-		HRNResolverConfig::Dns { dns_server_address, enable_hrn_resolution_service, .. } => {
-			let addr = dns_server_address
-				.to_socket_addrs()
-				.map_err(|_| BuildError::DNSResolverSetupFailed)?
-				.next()
-				.ok_or_else(|| {
-					log_error!(logger, "No valid address found for: {}", dns_server_address);
-					BuildError::DNSResolverSetupFailed
-				})?;
-			let hrn_res = Arc::new(DNSHrnResolver(addr));
-			hrn_resolver = HRNResolver::Local(hrn_res);
+				if *enable_hrn_resolution_service {
+					if let Err(_) = may_announce_channel(&config) {
+						log_error!(
+							logger,
+							"HRN resolution service enabled, but node is not announceable."
+						);
+						return Err(BuildError::DNSResolverSetupFailed);
+					}
 
-			if *enable_hrn_resolution_service {
-				if let Err(_) = may_announce_channel(&config) {
-					log_error!(
-						logger,
-						"HRN resolution service enabled, but node is not announceable."
-					);
-					return Err(BuildError::DNSResolverSetupFailed);
+					Arc::new(OMDomainResolver::<IgnoringMessageHandler>::with_runtime(
+						addr,
+						None,
+						Some(runtime_handle.clone()),
+					)) as Arc<dyn DNSResolverMessageHandler + Send + Sync>
+				} else {
+					// The user wants to use DNS to pay others, but NOT provide a service to others.
+					Arc::new(IgnoringMessageHandler {})
+						as Arc<dyn DNSResolverMessageHandler + Send + Sync>
 				}
+			},
+		};
 
-				Arc::new(OMDomainResolver::<IgnoringMessageHandler>::with_runtime(
-					addr,
-					None,
-					Some(runtime_handle.clone()),
-				)) as Arc<dyn DNSResolverMessageHandler + Send + Sync>
-			} else {
-				// The user wants to use DNS to pay others, but NOT provide a service to others.
-				Arc::new(IgnoringMessageHandler {})
-					as Arc<dyn DNSResolverMessageHandler + Send + Sync>
-			}
-		},
+		(om_resolver, hrn_resolver, blip32_resolver)
 	};
+	#[cfg(not(feature = "unified-payments"))]
+	let om_resolver: Arc<dyn DNSResolverMessageHandler + Send + Sync> =
+		Arc::new(IgnoringMessageHandler {});
 
 	// Initialize the PeerManager
 	let onion_messenger: Arc<OnionMessenger> =
@@ -2225,6 +2322,7 @@ fn build_with_store_internal(
 		Arc::clone(&keys_manager),
 	));
 
+	#[cfg(feature = "unified-payments")]
 	if let Some(res) = blip32_resolver {
 		let pm_weak = Arc::downgrade(&peer_manager);
 		res.register_post_queue_action(Box::new(move || {
@@ -2391,6 +2489,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
+		#[cfg(feature = "unified-payments")]
 		hrn_resolver,
 		prober,
 		#[cfg(cycle_tests)]

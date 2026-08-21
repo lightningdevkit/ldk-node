@@ -32,6 +32,13 @@ jobs:
       - name: Install Rust stable toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable
+      - name: Check all features
+        run: cargo check --all-features --tests --verbose --color always
+      - name: Check sparse feature sets
+        run: |
+          cargo check --no-default-features --features uniffi,chain-bitcoind,storage-postgres --verbose --color always
+          cargo test --lib --no-run --no-default-features --features chain-electrum,storage-postgres --verbose --color always
+          cargo check --test integration_tests_postgres --no-default-features --features chain-electrum,storage-postgres --verbose --color always
       - name: Enable caching for bitcoind
         id: cache-bitcoind
         uses: actions/cache@v4
@@ -58,9 +65,9 @@ jobs:
       - name: Run PostgreSQL store tests
         env:
           TEST_POSTGRES_URL: "host=localhost user=postgres password=postgres"
-        run: cargo test --features postgres io::postgres_store
+        run: cargo test --features storage-postgres io::postgres_store
       - name: Run PostgreSQL integration tests
         env:
           TEST_POSTGRES_URL: "host=localhost user=postgres password=postgres"
         run: |
-          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --features postgres --test integration_tests_postgres
+          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --features storage-postgres --test integration_tests_postgres

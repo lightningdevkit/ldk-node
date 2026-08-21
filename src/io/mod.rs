@@ -7,12 +7,16 @@
 
 //! Objects and traits for data persistence.
 
-#[cfg(feature = "postgres")]
+#[cfg(feature = "storage-filesystem")]
+pub(crate) mod fs_store;
+#[cfg(feature = "storage-postgres")]
 pub mod postgres_store;
+#[cfg(feature = "storage-sqlite")]
 pub mod sqlite_store;
 #[cfg(test)]
 pub(crate) mod test_utils;
 pub(crate) mod utils;
+#[cfg(feature = "storage-vss")]
 pub mod vss_store;
 
 /// The event queue will be persisted under this key.

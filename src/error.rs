@@ -279,6 +279,7 @@ impl From<BdkChainCalculateFeeError> for Error {
 	}
 }
 
+#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 impl From<lightning_transaction_sync::TxSyncError> for Error {
 	fn from(_e: lightning_transaction_sync::TxSyncError) -> Self {
 		Self::TxSyncFailed

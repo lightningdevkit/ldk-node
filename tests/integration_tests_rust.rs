@@ -439,6 +439,7 @@ async fn address_pool_is_reloaded_on_restart() {
 	expect_channel_ready_event!(node_b, node_a.node_id());
 }
 
+#[cfg(feature = "chain-bitcoind")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
@@ -1554,6 +1555,7 @@ async fn do_onchain_wallet_full_scan_stop_gap_recovers_far_funds(
 	);
 }
 
+#[cfg(feature = "chain-bitcoind")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_wallet_recovery_rescans_from_birthday_height() {
 	// End-to-end test for `wallet_rescan_from_height` against a bitcoind chain source. The
@@ -1649,6 +1651,7 @@ async fn onchain_wallet_recovery_rescans_from_birthday_height() {
 	);
 }
 
+#[cfg(feature = "chain-bitcoind")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn build_fails_when_wallet_rescan_height_is_above_tip() {
 	let (bitcoind, _electrsd) = setup_bitcoind_and_electrsd();
@@ -1682,6 +1685,7 @@ async fn build_fails_when_wallet_rescan_height_is_above_tip() {
 	}
 }
 
+#[cfg(feature = "chain-bitcoind")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn build_aborts_on_first_startup_bitcoind_tip_fetch_failure() {
 	// A fresh node pointed at an unreachable bitcoind RPC endpoint must not silently
@@ -1713,11 +1717,13 @@ async fn build_aborts_on_first_startup_bitcoind_tip_fetch_failure() {
 	}
 }
 
+#[cfg(all(feature = "chain-esplora", feature = "chain-electrum", feature = "chain-bitcoind"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_rbf_via_mempool() {
 	run_rbf_test(false).await;
 }
 
+#[cfg(all(feature = "chain-esplora", feature = "chain-electrum", feature = "chain-bitcoind"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_rbf_via_direct_block_insertion() {
 	run_rbf_test(true).await;
@@ -1726,6 +1732,7 @@ async fn test_rbf_via_direct_block_insertion() {
 // `is_insert_block`:
 // - `true`: transaction is mined immediately (no mempool), testing confirmed-Tx handling.
 // - `false`: transaction stays in mempool until confirmation, testing unconfirmed-Tx handling.
+#[cfg(all(feature = "chain-esplora", feature = "chain-electrum", feature = "chain-bitcoind"))]
 async fn run_rbf_test(is_insert_block: bool) {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source_bitcoind = TestChainSource::BitcoindRpcSync(&bitcoind);
@@ -4230,7 +4237,9 @@ async fn build_0_7_0_node(
 	builder_old.set_entropy_seed_bytes(seed_bytes);
 	builder_old.set_chain_source_esplora(esplora_url, None);
 	let node_old = match config.store_type {
+		#[cfg(feature = "storage-filesystem")]
 		TestStoreType::FilesystemStore => builder_old.build_with_fs_store().unwrap(),
+		#[cfg(feature = "storage-sqlite")]
 		TestStoreType::Sqlite => builder_old.build().unwrap(),
 		TestStoreType::TestSyncStore => panic!("TestSyncStore not supported in v0.7.0 builder"),
 	};
@@ -4314,6 +4323,7 @@ async fn persistence_backwards_compatibility() {
 	do_persistence_backwards_compatibility(OldLdkVersion::V0_7_0).await;
 }
 
+#[cfg(feature = "storage-filesystem")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn fs_store_persistence_backwards_compatibility() {
 	let (bitcoind, electrsd) = common::setup_bitcoind_and_electrsd();
