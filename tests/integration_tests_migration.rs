@@ -29,6 +29,7 @@ use rand::seq::SliceRandom;
 async fn drop_tables<'a>(table_names: impl IntoIterator<Item = &'a String>) {
 	for table_name in table_names {
 		drop_table(table_name).await;
+		drop_table(&format!("{table_name}_node_lease")).await;
 	}
 }
 
