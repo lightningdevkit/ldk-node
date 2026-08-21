@@ -13,7 +13,7 @@ use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use lightning::io::ErrorKind;
-use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore};
+use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 use lightning::util::ser::{Readable, Writeable};
 
 use crate::io::utils::process_kv_store_reads;
@@ -64,6 +64,8 @@ pub(crate) enum DataStoreUpdateResult {
 /// How many of a namespace's objects a [`DataStore`] keeps in memory.
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
 pub(crate) enum CacheLimit {
+	/// Do not keep objects in memory.
+	Disabled,
 	/// Keep every object in memory.
 	Unbounded,
 	/// Keep at most this many objects in memory.
@@ -78,6 +80,18 @@ pub(crate) enum CacheLimit {
 /// than a silently incomplete result.
 pub(crate) trait CachePolicy: Send + Sync + 'static {
 	fn cache_limit(&self) -> CacheLimit;
+}
+
+/// Keeps no objects in memory.
+///
+/// Reads always go to the [`KVStore`]. Suitable for namespaces that can grow without bound and do
+/// not need a cached working set.
+pub(crate) struct KeepNoEntries;
+
+impl CachePolicy for KeepNoEntries {
+	fn cache_limit(&self) -> CacheLimit {
+		CacheLimit::Disabled
+	}
 }
 
 /// Keeps every object of the namespace in memory.
@@ -178,6 +192,7 @@ impl<SO: StorableObject> LruCache<SO> {
 
 /// The in-memory part of a [`DataStore`].
 enum ObjectCache<SO: StorableObject> {
+	None,
 	KeepAll(HashMap<SO::Id, SO>),
 	BoundedLru(LruCache<SO>),
 }
@@ -185,6 +200,7 @@ enum ObjectCache<SO: StorableObject> {
 impl<SO: StorableObject> ObjectCache<SO> {
 	fn new(cache_limit: CacheLimit, objects: Vec<SO>) -> Self {
 		match cache_limit {
+			CacheLimit::Disabled => Self::None,
 			CacheLimit::Unbounded => Self::KeepAll(HashMap::from_iter(
 				objects.into_iter().map(|object| (object.id(), object)),
 			)),
@@ -205,6 +221,7 @@ impl<SO: StorableObject> ObjectCache<SO> {
 	/// Returns the cached object for `id`, marking it as most recently used.
 	fn get(&mut self, id: &SO::Id) -> Option<SO> {
 		match self {
+			Self::None => None,
 			Self::KeepAll(objects) => objects.get(id).cloned(),
 			Self::BoundedLru(lru) => lru.get(id),
 		}
@@ -213,6 +230,7 @@ impl<SO: StorableObject> ObjectCache<SO> {
 	/// Returns the cached object for `id`, without marking it as most recently used.
 	fn peek(&self, id: &SO::Id) -> Option<SO> {
 		match self {
+			Self::None => None,
 			Self::KeepAll(objects) => objects.get(id).cloned(),
 			Self::BoundedLru(lru) => lru.entries.get(id).map(|(object, _)| object.clone()),
 		}
@@ -221,6 +239,7 @@ impl<SO: StorableObject> ObjectCache<SO> {
 	/// Returns whether `id` is cached, without marking it as most recently used.
 	fn contains(&self, id: &SO::Id) -> bool {
 		match self {
+			Self::None => false,
 			Self::KeepAll(objects) => objects.contains_key(id),
 			Self::BoundedLru(lru) => lru.entries.contains_key(id),
 		}
@@ -228,6 +247,7 @@ impl<SO: StorableObject> ObjectCache<SO> {
 
 	fn insert(&mut self, id: SO::Id, object: SO) {
 		match self {
+			Self::None => {},
 			Self::KeepAll(objects) => {
 				objects.insert(id, object);
 			},
@@ -237,6 +257,7 @@ impl<SO: StorableObject> ObjectCache<SO> {
 
 	fn remove(&mut self, id: &SO::Id) {
 		match self {
+			Self::None => {},
 			Self::KeepAll(objects) => {
 				objects.remove(id);
 			},
@@ -248,6 +269,7 @@ impl<SO: StorableObject> ObjectCache<SO> {
 	/// namespace if [`Self::is_keep_all`].
 	fn filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
 		match self {
+			Self::None => Vec::new(),
 			Self::KeepAll(objects) => objects.values().filter(f).cloned().collect(),
 			Self::BoundedLru(lru) => {
 				lru.entries.values().map(|(object, _)| object).filter(f).cloned().collect()
@@ -258,6 +280,7 @@ impl<SO: StorableObject> ObjectCache<SO> {
 	#[cfg(test)]
 	fn len(&self) -> usize {
 		match self {
+			Self::None => 0,
 			Self::KeepAll(objects) => objects.len(),
 			Self::BoundedLru(lru) => lru.entries.len(),
 		}
@@ -428,6 +451,11 @@ where
 		self.contains(id).await
 	}
 
+	/// Returns whether this store contains no objects.
+	pub(crate) async fn is_empty(&self) -> Result<bool, Error> {
+		Ok(self.list_keys_page(None).await?.keys.is_empty())
+	}
+
 	/// Returns a page of objects, ordered from most recently created to least recently created.
 	///
 	/// Pass `None` to start at the most recently created object, and the returned
@@ -451,29 +479,7 @@ where
 	pub(crate) async fn list_page(
 		&self, page_token: Option<PageToken>,
 	) -> Result<DataStorePage<SO>, Error> {
-		let response = PaginatedKVStore::list_paginated(
-			&*self.kv_store,
-			&self.primary_namespace,
-			&self.secondary_namespace,
-			page_token,
-		)
-		.await
-		.map_err(|e| {
-			log_error!(
-				self.logger,
-				"Listing objects under {}/{} failed due to: {}",
-				&self.primary_namespace,
-				&self.secondary_namespace,
-				e
-			);
-			// The backend rejects a token it didn't issue, which is the caller's problem rather
-			// than a persistence failure.
-			if e.kind() == ErrorKind::InvalidInput {
-				Error::InvalidPageToken
-			} else {
-				Error::PersistenceFailed
-			}
-		})?;
+		let response = self.list_keys_page(page_token).await?;
 
 		// Serve whatever we already hold, and note the rest to read below. We take the mutation
 		// lock only for this, so that we observe a consistent view of the cache without holding up
@@ -498,6 +504,34 @@ where
 		Ok(DataStorePage {
 			objects: objects.into_iter().flatten().collect(),
 			next_page_token: response.next_page_token,
+		})
+	}
+
+	async fn list_keys_page(
+		&self, page_token: Option<PageToken>,
+	) -> Result<PaginatedListResponse, Error> {
+		PaginatedKVStore::list_paginated(
+			&*self.kv_store,
+			&self.primary_namespace,
+			&self.secondary_namespace,
+			page_token,
+		)
+		.await
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Listing objects under {}/{} failed due to: {}",
+				&self.primary_namespace,
+				&self.secondary_namespace,
+				e
+			);
+			// The backend rejects a token it didn't issue, which is the caller's problem rather
+			// than a persistence failure.
+			if e.kind() == ErrorKind::InvalidInput {
+				Error::InvalidPageToken
+			} else {
+				Error::PersistenceFailed
+			}
 		})
 	}
 
@@ -1476,6 +1510,51 @@ mod tests {
 		// above may go to the store.
 		assert_eq!(0, reads.load(Ordering::Relaxed));
 		assert_eq!(0, lists.load(Ordering::Relaxed));
+	}
+
+	#[tokio::test]
+	async fn keep_no_entries_reads_through_without_caching() {
+		let reads = Arc::new(AtomicUsize::new(0));
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(CountingStore {
+			inner: InMemoryStore::new(),
+			reads: Arc::clone(&reads),
+			writes: Arc::new(AtomicUsize::new(0)),
+			removes: Arc::new(AtomicUsize::new(0)),
+			lists: Arc::new(AtomicUsize::new(0)),
+		}));
+		let data_store = new_data_store(kv_store, KeepNoEntries, Vec::new());
+		let id = test_id(1);
+		let object = TestObject::new(id, [23u8; 3]);
+
+		data_store.insert(object).await.unwrap();
+		assert_eq!(0, data_store.cached_len());
+
+		assert_eq!(Some(object), data_store.get(&id).await.unwrap());
+		assert_eq!(Some(object), data_store.get(&id).await.unwrap());
+		assert!(data_store.contains_key(&id).await.unwrap());
+		assert_eq!(3, reads.load(Ordering::Relaxed));
+		assert_eq!(0, data_store.cached_len());
+	}
+
+	#[tokio::test]
+	async fn is_empty_lists_keys_without_reading_objects() {
+		let reads = Arc::new(AtomicUsize::new(0));
+		let lists = Arc::new(AtomicUsize::new(0));
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(CountingStore {
+			inner: InMemoryStore::new(),
+			reads: Arc::clone(&reads),
+			writes: Arc::new(AtomicUsize::new(0)),
+			removes: Arc::new(AtomicUsize::new(0)),
+			lists: Arc::clone(&lists),
+		}));
+		let data_store = new_data_store(kv_store, KeepNoEntries, Vec::new());
+
+		assert!(data_store.is_empty().await.unwrap());
+		data_store.insert(TestObject::new(test_id(1), [23u8; 3])).await.unwrap();
+		assert!(!data_store.is_empty().await.unwrap());
+
+		assert_eq!(0, reads.load(Ordering::Relaxed));
+		assert_eq!(2, lists.load(Ordering::Relaxed));
 	}
 
 	#[tokio::test]
