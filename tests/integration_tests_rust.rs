@@ -25,12 +25,13 @@ use common::{
 	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
 	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
 	expect_event, expect_payment_claimable_event, expect_payment_received_event,
-	expect_payment_successful_event, expect_splice_negotiated_event, generate_blocks_and_wait,
-	generate_listening_addresses, invalidate_blocks, open_channel, open_channel_no_wait,
-	open_channel_push_amt, open_channel_with_all, premine_and_distribute_funds, premine_blocks,
-	prepare_rbf, random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_builder,
-	setup_node, setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_tx, InMemoryStore,
-	NodePaymentExt, TestChainSource, TestConfig, TestStoreType, TestSyncStore,
+	expect_payment_successful_event, expect_splice_negotiated_event, exponential_backoff_poll,
+	generate_blocks_and_wait, generate_listening_addresses, invalidate_blocks, open_channel,
+	open_channel_no_wait, open_channel_push_amt, open_channel_with_all,
+	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
+	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
+	wait_for_block, wait_for_tx, InMemoryStore, NodePaymentExt, TestChainSource, TestConfig,
+	TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
@@ -3453,7 +3454,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let service_config = random_config();
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.enable_liquidity_provider(lsps2_service_config);
+	service_builder.enable_liquidity_provider(Some(lsps2_service_config), None);
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 
@@ -3781,7 +3782,7 @@ async fn lsps2_client_trusts_lsp() {
 	let service_config = random_config();
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.enable_liquidity_provider(lsps2_service_config);
+	service_builder.enable_liquidity_provider(Some(lsps2_service_config), None);
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 	let service_node_id = service_node.node_id();
@@ -3958,7 +3959,7 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	let service_config = random_config();
 	setup_builder!(service_builder, service_config.node_config);
 	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	service_builder.enable_liquidity_provider(lsps2_service_config);
+	service_builder.enable_liquidity_provider(Some(lsps2_service_config), None);
 	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
 	service_node.start().unwrap();
 
@@ -4864,7 +4865,7 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	let cheap_node_config = random_config();
 	setup_builder!(cheap_builder, cheap_node_config.node_config);
 	cheap_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	cheap_builder.enable_liquidity_provider(cheap_cfg);
+	cheap_builder.enable_liquidity_provider(Some(cheap_cfg), None);
 	let cheap = cheap_builder.build(cheap_node_config.node_entropy.into()).unwrap();
 	cheap.start().unwrap();
 	let cheap_id = cheap.node_id();
@@ -4887,7 +4888,7 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	let expensive_node_config = random_config();
 	setup_builder!(expensive_builder, expensive_node_config.node_config);
 	expensive_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	expensive_builder.enable_liquidity_provider(expensive_cfg);
+	expensive_builder.enable_liquidity_provider(Some(expensive_cfg), None);
 	let expensive = expensive_builder.build(expensive_node_config.node_entropy.into()).unwrap();
 	expensive.start().unwrap();
 	let expensive_id = expensive.node_id();
@@ -4927,4 +4928,303 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	client.stop().unwrap();
 	cheap.stop().unwrap();
 	expensive.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps5_webhook_registration() {
+	use lightning_liquidity::lsps5::service::LSPS5ServiceConfig;
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let sync_config = EsploraSyncConfig::default();
+
+	// Setup LSPS5 service provider node
+	let service_config = random_config();
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let lsps5_service_config = LSPS5ServiceConfig { max_webhooks_per_client: 2 };
+	service_builder.enable_liquidity_provider(None, Some(lsps5_service_config));
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.onchain_payment().new_address().unwrap();
+	let service_socket_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	// Setup LSPS5 client node
+	let client_config = random_config();
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_socket_addr.clone(), None, false);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+	let client_node_id = client_node.node_id();
+	let client_addr = client_node.onchain_payment().new_address().unwrap();
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr, client_addr],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+
+	open_channel(&client_node, &service_node, 5_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+
+	// Test webhook registration
+	let lsps5_client = client_node.liquidity().lsps5();
+	let app_name_1 = "test-app".to_string();
+	let webhook_url_1 = "https://example.com/webhook".to_string();
+
+	// Register first webhook
+	let response = lsps5_client
+		.set_webhook(app_name_1.clone(), webhook_url_1.clone(), service_node_id)
+		.expect("Failed to register webhook");
+	assert_eq!(response.num_webhooks, 1, "Expected 1 webhook after first registration");
+	assert_eq!(response.max_webhooks, 2, "Expected max_webhooks to be 2");
+	assert!(!response.no_change, "Expected no_change to be false for new registration");
+
+	// Register second webhook with different app name
+	let app_name_2 = "test-app-2".to_string();
+	let webhook_url_2 = "https://example.com/webhook-2".to_string();
+	let response = lsps5_client
+		.set_webhook(app_name_2.clone(), webhook_url_2.clone(), service_node_id)
+		.expect("Failed to register second webhook");
+	assert_eq!(response.num_webhooks, 2, "Expected 2 webhooks after second registration");
+	assert_eq!(response.max_webhooks, 2, "Expected max_webhooks to be 2");
+	assert!(!response.no_change, "Expected no_change to be false for new registration");
+
+	// Register the same webhook again - should return no_change=true
+	let response = lsps5_client
+		.set_webhook(app_name_2.clone(), webhook_url_2.clone(), service_node_id)
+		.expect("Failed to re-register webhook");
+	assert_eq!(response.num_webhooks, 2, "Expected 2 webhooks after re-registering same webhook");
+	assert_eq!(response.max_webhooks, 2, "Expected max_webhooks to be 2");
+	assert!(response.no_change, "Expected no_change to be true for duplicate registration");
+
+	// Attempt to register a third webhook - should fail due to max_webhooks_per_client=2
+	let app_name_3 = "test-app-3".to_string();
+	let webhook_url_3 = "https://example.com/webhook-3".to_string();
+	let response =
+		lsps5_client.set_webhook(app_name_3.clone(), webhook_url_3.clone(), service_node_id);
+	assert_eq!(
+		response.err(),
+		Some(NodeError::LiquidityWebhookLimitExceeded),
+		"Expected error when exceeding max webhooks"
+	);
+
+	// List registered webhooks
+	let registered_webhooks =
+		lsps5_client.list_webhooks(service_node_id).expect("Failed to list webhooks");
+	assert_eq!(registered_webhooks.app_names.len(), 2, "Expected 2 registered webhooks");
+	assert!(
+		registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_1),
+		"Expected app_name_1 in registered webhooks"
+	);
+	assert!(
+		registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_2),
+		"Expected app_name_2 in registered webhooks"
+	);
+	assert_eq!(registered_webhooks.max_webhooks, 2, "Expected max_webhooks to be 2");
+
+	// Attempt to delete non-existing webhook - should fail
+	let non_existing_app_name = "non-existing-app".to_string();
+	let response = lsps5_client.remove_webhook(non_existing_app_name.clone(), service_node_id);
+	assert_eq!(
+		response.err(),
+		Some(NodeError::LiquidityWebhookAppNameNotFound),
+		"Expected error when removing non-existing webhook"
+	);
+
+	// Delete a registered webhook
+	lsps5_client
+		.remove_webhook(app_name_1.clone(), service_node_id)
+		.expect("Failed to delete first webhook");
+
+	// Verify webhook was deleted
+	let registered_webhooks = lsps5_client
+		.list_webhooks(service_node_id)
+		.expect("Failed to list webhooks after deletion");
+	assert_eq!(registered_webhooks.app_names.len(), 1, "Expected 1 webhook after deletion");
+	assert!(
+		registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_2),
+		"Expected app_name_2 to remain after deletion"
+	);
+	assert!(
+		!registered_webhooks.app_names.iter().any(|name| name.as_str() == app_name_1),
+		"Expected app_name_1 to be removed"
+	);
+
+	// Requests targeting an LSP we don't know about should fail rather than silently fall back to
+	// another LSP.
+	let unknown_node_id = client_node_id;
+	assert_eq!(
+		lsps5_client.list_webhooks(unknown_node_id).err(),
+		Some(NodeError::LiquiditySourceUnavailable),
+		"Expected an error when targeting a node that is not a configured LSPS5 LSP"
+	);
+	assert_eq!(
+		lsps5_client.set_webhook(app_name_1.clone(), webhook_url_1.clone(), unknown_node_id).err(),
+		Some(NodeError::LiquiditySourceUnavailable),
+		"Expected an error when targeting a node that is not a configured LSPS5 LSP"
+	);
+
+	// Test service-side notifications.
+	let lsps5_service = service_node.liquidity().lsps5();
+
+	lsps5_service
+		.notify_liquidity_management_request(client_node_id)
+		.expect("notify_liquidity_management_request failed");
+
+	// Notifications are rate limited per client, so an immediate second notification is rejected.
+	assert_eq!(
+		lsps5_service.notify_liquidity_management_request(client_node_id).err(),
+		Some(NodeError::LiquidityNotifyWebhookFailed),
+		"Expected the notification to be rate limited"
+	);
+
+	// A node that isn't running the LSPS5 service can't notify anyone.
+	assert_eq!(
+		client_node.liquidity().lsps5().notify_liquidity_management_request(service_node_id).err(),
+		Some(NodeError::LiquiditySourceUnavailable),
+		"Expected an error when notifying without a configured LSPS5 service"
+	);
+
+	service_node.stop().unwrap();
+	client_node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps5_payment_incoming_notification() {
+	use lightning_liquidity::lsps5::service::LSPS5ServiceConfig;
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	// The notification leaves no trace in any store, so observe it through the service's logs.
+	let service_logger = Arc::new(CollectingLogWriter::new());
+	let service_config = random_config();
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.set_custom_logger(service_logger.clone());
+
+	// LSPS2 is enabled so the LSP accepts forwards to the client's unannounced channel.
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm: 0,
+		channel_over_provisioning_ppm: 100_000,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: false,
+		disable_client_reserve: false,
+	};
+
+	service_builder.enable_liquidity_provider(
+		Some(lsps2_service_config),
+		Some(LSPS5ServiceConfig { max_webhooks_per_client: 2 }),
+	);
+
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_listening_addr =
+		service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config();
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_listening_addr, None, false);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+	let client_node_id = client_node.node_id();
+
+	let payer_config = random_config();
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	let service_addr = service_node.onchain_payment().new_address().unwrap();
+	let client_addr = client_node.onchain_payment().new_address().unwrap();
+	let payer_addr = payer_node.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr, client_addr, payer_addr],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
+	// Opened service -> client so the LSP has outbound liquidity towards the client, leaving the
+	// client being offline as the only reason the forward below can fail.
+	open_channel(&service_node, &client_node, 5_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node_id);
+	expect_channel_ready_event!(client_node, service_node_id);
+	expect_channel_ready_events!(service_node, payer_node.node_id(), client_node_id);
+
+	// The LSP only accepts registrations from clients it has prior activity with, which the channel
+	// opened above satisfies.
+	client_node
+		.liquidity()
+		.lsps5()
+		.set_webhook(
+			"test-app".to_string(),
+			"https://127.0.0.1:1/webhook".to_string(),
+			service_node_id,
+		)
+		.expect("Failed to register webhook");
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("lsps5")).unwrap()).into();
+	let invoice = client_node
+		.bolt11_payment()
+		.receive(100_000_000, &invoice_description, 1024)
+		.expect("Failed to create invoice");
+
+	// Stopped rather than just disconnected so that the client cannot reconnect on its own.
+	client_node.stop().unwrap();
+
+	// Wait for the service to observe the disconnect, so the payment does not race against a
+	// channel that still looks live.
+	exponential_backoff_poll(|| {
+		let connected =
+			service_node.list_peers().iter().any(|p| p.node_id == client_node_id && p.is_connected);
+		(!connected).then_some(())
+	})
+	.await;
+
+	// Not waiting on the payment to resolve: the forward failure we trigger on happens on the first
+	// attempt, while the payer keeps retrying in the background.
+	let _ = payer_node.bolt11_payment().send(&invoice, None).unwrap();
+
+	// Matching on the method keeps this distinct from the `lsps5.webhook_registered` notification
+	// the registration above already sent.
+	let notification_sent = service_logger.wait_for("LSPS5PaymentIncoming").await;
+	assert!(
+		notification_sent,
+		"Expected the failed forward to an offline client to trigger a payment_incoming notification"
+	);
+
+	service_node.stop().unwrap();
+	payer_node.stop().unwrap();
 }

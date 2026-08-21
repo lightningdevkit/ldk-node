@@ -6,3 +6,4 @@
 // accordance with one or both of these licenses.
 
 pub(crate) mod lsps2;
+pub(crate) mod lsps5;
