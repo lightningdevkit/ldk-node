@@ -334,6 +334,14 @@ impl UnifiedPayment {
 							log_error!(self.logger, "Failed to send BOLT11 invoice: DuplicatePayment. This is part of a unified payment. Aborting to avoid duplicate payment.");
 							return Err(Error::DuplicatePayment);
 						},
+						// A persistence failure may occur after the Lightning payment has
+						// already been initiated with the ChannelManager. Falling back to
+						// the on-chain method in that case would double-pay, so we abort
+						// instead of proceeding to the next payment method.
+						Err(Error::PersistenceFailed) => {
+							log_error!(self.logger, "Failed to send BOLT11 invoice: PersistenceFailed. This is part of a unified payment. Aborting to avoid a potential duplicate payment.");
+							return Err(Error::PersistenceFailed);
+						},
 						Err(e) => {
 							log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified payment. Falling back to the on-chain transaction.", e);
 						},
