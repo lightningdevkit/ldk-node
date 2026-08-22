@@ -30,7 +30,7 @@ use common::{
 	open_channel_push_amt, open_channel_with_all, premine_and_distribute_funds, premine_blocks,
 	prepare_rbf, random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_builder,
 	setup_node, setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_tx, InMemoryStore,
-	NodePaymentExt, TestChainSource, TestConfig, TestStoreType, TestSyncStore,
+	NodePaymentExt, TestChainSource, TestConfig, TestNode, TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
@@ -3425,6 +3425,225 @@ async fn unified_send_receive_bip21_uri() {
 
 	assert_eq!(node_b.list_balances().total_onchain_balance_sats, 800_000);
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 200_000);
+}
+
+/// Funds `node_a`, opens an announced channel to `node_b`, mines it to `ChannelReady` on both
+/// sides, and syncs both wallets. Shared by the unified-payment fallback regression tests below.
+async fn fund_and_open_ready_channel(
+	node_a: &TestNode, node_b: &TestNode, bitcoind: &BitcoinD, electrsd: &ElectrsD,
+	premined_sats: u64,
+) {
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premined_sats),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	open_channel(node_a, node_b, 4_000_000, true, electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+}
+
+/// Sleeps until `node` has broadcast a node announcement, needed before a unified-payment URI
+/// can carry a resolvable BOLT12 offer.
+async fn wait_for_node_announcement(node: &TestNode) {
+	while node.status().latest_node_announcement_broadcast_timestamp.is_none() {
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+	}
+	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+}
+
+/// Requests a unified-payment URI for `amount_sats` from `node`, then strips the BOLT12 offer so
+/// the returned URI resolves to BOLT11 only (no BOLT12, no on-chain fallback). Used by both
+/// unified-payment fallback regression tests below.
+fn receive_bolt11_only_uri(node: &TestNode, amount_sats: u64, expiry_sec: u32) -> String {
+	let uri_str = node.unified_payment().receive(amount_sats, "asdf", expiry_sec).unwrap();
+	uri_str.split("&lno=").next().unwrap().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn unified_send_bolt11_duplicate_payment_no_onchain_fallback() {
+	// Regression test for https://github.com/lightningdevkit/ldk-node/issues/1033
+	//
+	// Sending a unified BIP21 payment that resolves to BOLT11 should return
+	// Error::DuplicatePayment on retry, not fall back to the on-chain method.
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+	let premined_sats = 5_000_000;
+
+	fund_and_open_ready_channel(&node_a, &node_b, &bitcoind, &electrsd, premined_sats).await;
+	wait_for_node_announcement(&node_b).await;
+
+	let expected_amount_sats = 100_000;
+	let expiry_sec = 4_000;
+
+	let uri_str_bolt11_only = receive_bolt11_only_uri(&node_b, expected_amount_sats, expiry_sec);
+
+	// First send: should succeed via BOLT11.
+	let first_result = node_a.unified_payment().send(&uri_str_bolt11_only, None, None).await;
+	let first_payment_id = match first_result {
+		Ok(UnifiedPaymentResult::Bolt11 { payment_id }) => payment_id,
+		Ok(other) => panic!("Expected Bolt11 result on first send, got: {:?}", other),
+		Err(e) => panic!("Expected Bolt11 result on first send, got error: {:?}", e),
+	};
+	expect_payment_successful_event!(node_a, first_payment_id, None);
+
+	// Second send with the same URI: should return DuplicatePayment, NOT fall back to on-chain.
+	let second_result = node_a.unified_payment().send(&uri_str_bolt11_only, None, None).await;
+	match second_result {
+		Err(NodeError::DuplicatePayment) => {
+			// Expected — this is the fix for #1033.
+		},
+		Ok(UnifiedPaymentResult::Onchain { txid }) => {
+			panic!(
+				"Regression: Duplicate BOLT11 payment fell back to on-chain. txid={}. See #1033",
+				txid
+			);
+		},
+		other => panic!("Expected DuplicatePayment error on retry, got: {:?}", other),
+	}
+}
+
+/// A [`KVStore`] that fails every `write` once `fail_writes` is set, while keeping
+/// reads/list/remove operational so the node can still start and run.
+struct PaymentFailingStore {
+	inner: Arc<InMemoryStore>,
+	fail_writes: Arc<AtomicBool>,
+}
+
+impl KVStore for PaymentFailingStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, lightning::io::Error>> + 'static + Send {
+		KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		let fail_writes = Arc::clone(&self.fail_writes);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			// Only fail payment-store writes. Failing every write (e.g. channel
+			// monitor updates) would crash the background processor and the node
+			// itself, defeating the test of the `PersistenceFailed` handling path.
+			if fail_writes.load(Ordering::Acquire) && primary_namespace == "payments" {
+				return Err(lightning::io::Error::new(
+					lightning::io::ErrorKind::Other,
+					"injected payment persistence failure",
+				));
+			}
+			KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
+		}
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send {
+		KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+	}
+}
+
+impl PaginatedKVStore for PaymentFailingStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, lightning::io::Error>> + 'static + Send
+	{
+		PaginatedKVStore::list_paginated(
+			&*self.inner,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		)
+	}
+}
+
+// Regression test for the unified-payment `PersistenceFailed` double-payment hazard: when the
+// BOLT11 leg initiates the Lightning payment but the subsequent payment-store write fails, the
+// error must be terminal rather than falling through to the on-chain method.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn unified_send_bolt11_persistence_failure_no_onchain_fallback() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	// Node B (receiver) uses the default store.
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+	let premined_sats = 5_000_000;
+
+	fund_and_open_ready_channel(&node_a, &node_b, &bitcoind, &electrsd, premined_sats).await;
+	wait_for_node_announcement(&node_b).await;
+
+	let expected_amount_sats = 100_000;
+	let expiry_sec = 4_000;
+
+	let uri_str_bolt11_only = receive_bolt11_only_uri(&node_b, expected_amount_sats, expiry_sec);
+
+	// Node A (sender) runs on a store that fails writes, so the payment-store insert after
+	// `pay_for_bolt11_invoice` succeeds will surface as `PersistenceFailed`.
+	let config_a = random_config();
+	setup_builder!(builder_a, config_a.node_config);
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+	builder_a.set_chain_source_esplora(esplora_url.clone(), Some(sync_config.clone()));
+	let fail_writes = Arc::new(AtomicBool::new(false));
+	let failing_store = PaymentFailingStore {
+		inner: Arc::new(InMemoryStore::new()),
+		fail_writes: Arc::clone(&fail_writes),
+	};
+	let node_a_failing =
+		builder_a.build_with_store(config_a.node_entropy.into(), failing_store).unwrap();
+	node_a_failing.start().unwrap();
+
+	// Fund and open a channel for the failing-store node too, so it can initiate Lightning.
+	// `open_announced_channel` connects to `node_b` itself, so no explicit `connect` is needed.
+	fund_and_open_ready_channel(&node_a_failing, &node_b, &bitcoind, &electrsd, premined_sats)
+		.await;
+
+	// Arm the failure, then send. The BOLT11 leg will initiate but the store write fails.
+	fail_writes.store(true, Ordering::Release);
+
+	let result = node_a_failing.unified_payment().send(&uri_str_bolt11_only, None, None).await;
+	match result {
+		Err(NodeError::PersistenceFailed) => {
+			// Expected — the unified payment must abort, not fall back to on-chain.
+		},
+		Ok(UnifiedPaymentResult::Onchain { txid }) => {
+			panic!("Regression: PersistenceFailed fell back to on-chain. txid={}", txid);
+		},
+		other => panic!("Expected PersistenceFailed error, got: {:?}", other),
+	}
+
+	// Confirm no on-chain payment was recorded for the unified amount.
+	let onchain_payments = node_a_failing.list_all_payments().into_iter().any(|p| {
+		matches!(p.kind, PaymentKind::Onchain { .. })
+			&& p.amount_msat == Some(expected_amount_sats as u64 * 1000)
+	});
+	assert!(
+		!onchain_payments,
+		"An on-chain payment for the unified amount was broadcast despite PersistenceFailed"
+	);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
