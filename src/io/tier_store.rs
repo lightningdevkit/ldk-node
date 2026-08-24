@@ -941,13 +941,7 @@ impl TierStoreInner {
 		let lock_ref = self.get_lock_ref(locking_key.clone());
 		let result: io::Result<Vec<u8>> = async {
 			let _guard = lock_ref.lock().await;
-			self.recover_key_locked(&primary_namespace, &secondary_namespace, &key).await?;
-			self.reconcile_ephemeral_cache_key_locked(
-				&primary_namespace,
-				&secondary_namespace,
-				&key,
-			)
-			.await?;
+			self.prepare_key_locked(&primary_namespace, &secondary_namespace, &key).await?;
 
 			if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
 				if let Some(eph_store) = self.ephemeral_store.as_ref() {
@@ -980,7 +974,7 @@ impl TierStoreInner {
 			Some(key.as_str()),
 			"write",
 		)?;
-		self.prepare_namespace(&primary_namespace, &secondary_namespace).await?;
+		self.ensure_namespace_indexed(&primary_namespace, &secondary_namespace).await?;
 
 		self.execute_locked_write(lock_ref, locking_key, version, || async move {
 			self.write_locked(&primary_namespace, &secondary_namespace, &key, buf).await
@@ -988,11 +982,11 @@ impl TierStoreInner {
 		.await
 	}
 
-	/// Writes one key after recovering any pending operation while its per-key lock is held.
+	/// Prepares and writes one key while its per-key operation lock is held.
 	async fn write_locked(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, value: Vec<u8>,
 	) -> io::Result<()> {
-		self.recover_key_locked(primary_namespace, secondary_namespace, key).await?;
+		self.prepare_key_locked(primary_namespace, secondary_namespace, key).await?;
 		let tier = self.value_tier(primary_namespace, secondary_namespace, key);
 		let Some(index) = self.index.as_ref() else {
 			return self
@@ -1035,7 +1029,7 @@ impl TierStoreInner {
 			Some(key.as_str()),
 			"remove",
 		)?;
-		self.prepare_namespace(&primary_namespace, &secondary_namespace).await?;
+		self.ensure_namespace_indexed(&primary_namespace, &secondary_namespace).await?;
 
 		self.execute_locked_write(lock_ref, locking_key, version, || async move {
 			self.remove_locked(&primary_namespace, &secondary_namespace, &key, lazy).await
@@ -1043,11 +1037,11 @@ impl TierStoreInner {
 		.await
 	}
 
-	/// Removes one key after recovering any pending operation while its per-key lock is held.
+	/// Prepares and removes one key while its per-key operation lock is held.
 	async fn remove_locked(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> io::Result<()> {
-		self.recover_key_locked(primary_namespace, secondary_namespace, key).await?;
+		self.prepare_key_locked(primary_namespace, secondary_namespace, key).await?;
 		let tier = self.value_tier(primary_namespace, secondary_namespace, key);
 		let Some(index) = self.index.as_ref() else {
 			return self
@@ -1221,7 +1215,7 @@ impl TierStoreInner {
 			"list",
 		)?;
 
-		self.prepare_namespace(&primary_namespace, &secondary_namespace).await?;
+		self.prepare_namespace_for_listing(&primary_namespace, &secondary_namespace).await?;
 		if let Some(index) = self.index.as_ref() {
 			return index.list(&primary_namespace, &secondary_namespace).await;
 		}
@@ -1282,8 +1276,8 @@ impl TierStoreInner {
 		result
 	}
 
-	/// Initializes a namespace, recovers pending membership changes, and reconciles cache placement.
-	async fn prepare_namespace(
+	/// Prepares a complete namespace before exposing its index through a listing.
+	async fn prepare_namespace_for_listing(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> io::Result<()> {
 		self.ensure_namespace_indexed(primary_namespace, secondary_namespace).await?;
@@ -1324,13 +1318,7 @@ impl TierStoreInner {
 			let lock_ref = self.get_lock_ref(locking_key.clone());
 			let result: io::Result<()> = async {
 				let _guard = lock_ref.lock().await;
-				self.recover_key_locked(primary_namespace, secondary_namespace, key).await?;
-				self.reconcile_ephemeral_cache_key_locked(
-					primary_namespace,
-					secondary_namespace,
-					key,
-				)
-				.await
+				self.prepare_key_locked(primary_namespace, secondary_namespace, key).await
 			}
 			.await;
 			self.clean_locks(&lock_ref, locking_key);
@@ -1405,6 +1393,14 @@ impl TierStoreInner {
 		}
 
 		index.mark_cache_ready(primary_namespace, secondary_namespace, key).await
+	}
+
+	/// Recovers and reconciles one key while its per-key operation lock is held by the caller.
+	async fn prepare_key_locked(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> io::Result<()> {
+		self.recover_key_locked(primary_namespace, secondary_namespace, key).await?;
+		self.reconcile_ephemeral_cache_key_locked(primary_namespace, secondary_namespace, key).await
 	}
 
 	/// Completes journaled creates and removals before exposing a namespace.
@@ -1496,7 +1492,7 @@ impl TierStoreInner {
 			"list_paginated",
 		)?;
 
-		self.prepare_namespace(&primary_namespace, &secondary_namespace).await?;
+		self.prepare_namespace_for_listing(&primary_namespace, &secondary_namespace).await?;
 		if let Some(index) = self.index.as_ref() {
 			return index
 				.list_paginated(&primary_namespace, &secondary_namespace, page_token)
@@ -1583,7 +1579,7 @@ mod tests {
 	use std::panic::RefUnwindSafe;
 	use std::path::PathBuf;
 	use std::sync::atomic::{AtomicUsize, Ordering};
-	use std::sync::{Arc, Mutex};
+	use std::sync::Arc;
 
 	use lightning::util::logger::Level;
 	use lightning::util::persist::{
@@ -1594,7 +1590,6 @@ mod tests {
 		NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE, SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
 	use lightning_persister::fs_store::v2::FilesystemStoreV2;
-	use tokio::sync::oneshot;
 
 	use super::*;
 	use crate::io::test_utils::{
@@ -2146,6 +2141,80 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn writing_one_cache_key_only_reconciles_that_key() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let _cleanup = CleanupDir(base_dir);
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		for (key, value) in
+			[(SCORER_PERSISTENCE_KEY, vec![1]), (EXTERNAL_PATHFINDING_SCORES_CACHE_KEY, vec![2])]
+		{
+			primary_store
+				.write(
+					SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+					SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+					key,
+					value,
+				)
+				.await
+				.unwrap();
+		}
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		set_test_index_store(&mut tier);
+		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+
+		tier.write(
+			SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+			SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+			SCORER_PERSISTENCE_KEY,
+			vec![3],
+		)
+		.await
+		.unwrap();
+		assert!(primary_store
+			.read(
+				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				SCORER_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err());
+		assert_eq!(
+			ephemeral_store
+				.read(
+					SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+					SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+					SCORER_PERSISTENCE_KEY,
+				)
+				.await
+				.unwrap(),
+			vec![3]
+		);
+		assert!(ephemeral_store
+			.read(
+				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				EXTERNAL_PATHFINDING_SCORES_CACHE_KEY,
+			)
+			.await
+			.is_err());
+		assert_eq!(
+			primary_store
+				.read(
+					SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+					SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+					EXTERNAL_PATHFINDING_SCORES_CACHE_KEY,
+				)
+				.await
+				.unwrap(),
+			vec![2]
+		);
+	}
+
+	#[tokio::test]
 	async fn namespace_initialization_preserves_existing_primary_order_across_pages() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
@@ -2338,6 +2407,40 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn writes_and_removals_recover_only_the_requested_key() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let _cleanup = CleanupDir(base_dir);
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		for (key, value) in [("stuck", vec![1]), ("writable", vec![2]), ("removable", vec![3])] {
+			primary_store.write("namespace", "", key, value).await.unwrap();
+		}
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		set_test_index_store(&mut tier);
+		tier.inner.ensure_namespace_indexed("namespace", "").await.unwrap();
+		let pending = JournalEntry {
+			primary_namespace: "namespace".to_string(),
+			secondary_namespace: String::new(),
+			key: "stuck".to_string(),
+			tier: ValueTier::Primary,
+			requires_backup: true,
+			operation: JournalOperation::Remove { lazy: false },
+		};
+		let index = tier.inner.index.as_ref().unwrap();
+		index.write_journal_entry(&pending).await.unwrap();
+
+		tier.write("namespace", "", "writable", vec![4]).await.unwrap();
+		tier.remove("namespace", "", "removable", false).await.unwrap();
+
+		assert_eq!(primary_store.read("namespace", "", "writable").await.unwrap(), vec![4]);
+		assert!(primary_store.read("namespace", "", "removable").await.is_err());
+		assert!(index.read_journal_entry("namespace", "", "stuck").await.is_ok());
+		assert!(KVStore::list(&tier, "namespace", "").await.is_err());
+	}
+
+	#[tokio::test]
 	async fn read_recovers_pending_removal_before_returning_value() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
@@ -2479,33 +2582,17 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn queued_write_recovers_pending_create_under_key_lock_before_classifying() {
+	async fn write_recovers_pending_create_under_key_lock_before_classifying() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
 		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
 		let _cleanup = CleanupDir(base_dir);
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let (snapshot_taken_tx, snapshot_taken_rx) = oneshot::channel();
-		let (allow_return_tx, allow_return_rx) = oneshot::channel();
-		let index_store: Arc<DynStore> =
-			Arc::new(DynStoreWrapper(InstrumentedStore::new(StoreBehavior::GateJournalList {
-				snapshot_taken: Mutex::new(Some(snapshot_taken_tx)),
-				allow_return: Mutex::new(Some(allow_return_rx)),
-			})));
+		let index_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
 		tier.set_index_store(TierStoreIndex::from_store(index_store));
 		tier.inner.ensure_namespace_indexed("namespace", "").await.unwrap();
-
-		let tier = Arc::new(tier);
-		let locking_key = tier.inner.build_locking_key("namespace", "", "key");
-		let lock_ref = tier.inner.get_lock_ref(locking_key);
-		let guard = lock_ref.lock().await;
-		let write_task = {
-			let tier = Arc::clone(&tier);
-			tokio::spawn(async move { tier.write("namespace", "", "key", vec![2]).await })
-		};
-		snapshot_taken_rx.await.unwrap();
 
 		let pending = JournalEntry {
 			primary_namespace: "namespace".to_string(),
@@ -2518,11 +2605,8 @@ mod tests {
 		let index = tier.inner.index.as_ref().unwrap();
 		index.write_journal_entry(&pending).await.unwrap();
 		primary_store.write("namespace", "", "key", vec![1]).await.unwrap();
-		allow_return_tx.send(()).unwrap();
-		drop(guard);
-		drop(lock_ref);
 
-		write_task.await.unwrap().unwrap();
+		tier.write("namespace", "", "key", vec![2]).await.unwrap();
 		assert_eq!(primary_store.read("namespace", "", "key").await.unwrap(), vec![2]);
 		assert!(index.contains_entry("namespace", "", "key").await.unwrap());
 		assert!(index.read_journal_entry("namespace", "", "key").await.is_err());
@@ -2579,14 +2663,8 @@ mod tests {
 
 	enum StoreBehavior {
 		FailList,
-		FailWrite {
-			attempts: Arc<AtomicUsize>,
-		},
+		FailWrite { attempts: Arc<AtomicUsize> },
 		FailRemove,
-		GateJournalList {
-			snapshot_taken: Mutex<Option<oneshot::Sender<()>>>,
-			allow_return: Mutex<Option<oneshot::Receiver<()>>>,
-		},
 	}
 
 	/// A store that injects selected failures or synchronization points while delegating other
@@ -2649,9 +2727,7 @@ mod tests {
 		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
 			let list = match &self.behavior {
 				StoreBehavior::FailList => None,
-				StoreBehavior::FailWrite { .. }
-				| StoreBehavior::FailRemove
-				| StoreBehavior::GateJournalList { .. } => {
+				StoreBehavior::FailWrite { .. } | StoreBehavior::FailRemove => {
 					Some(KVStore::list(&self.inner, primary_namespace, secondary_namespace))
 				},
 			};
@@ -2670,23 +2746,6 @@ mod tests {
 			page_token: Option<PageToken>,
 		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
 			let fails = matches!(&self.behavior, StoreBehavior::FailList);
-			let gate = match &self.behavior {
-				StoreBehavior::GateJournalList { snapshot_taken, allow_return } => {
-					if primary_namespace == INDEX_JOURNAL_PRIMARY_NAMESPACE {
-						let snapshot_taken = snapshot_taken.lock().unwrap().take();
-						let allow_return = allow_return.lock().unwrap().take();
-						match (snapshot_taken, allow_return) {
-							(Some(snapshot_taken), Some(allow_return)) => {
-								Some((snapshot_taken, allow_return))
-							},
-							_ => None,
-						}
-					} else {
-						None
-					}
-				},
-				_ => None,
-			};
 			let list = PaginatedKVStore::list_paginated(
 				&self.inner,
 				primary_namespace,
@@ -2697,14 +2756,7 @@ mod tests {
 				if fails {
 					return Err(io::Error::new(io::ErrorKind::Other, "list_paginated failed"));
 				}
-				let response = list.await?;
-				if let Some((snapshot_taken, allow_return)) = gate {
-					let _ = snapshot_taken.send(());
-					allow_return.await.map_err(|_| {
-						io::Error::new(io::ErrorKind::Other, "journal-list gate was dropped")
-					})?;
-				};
-				Ok(response)
+				list.await
 			}
 		}
 	}
