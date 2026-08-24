@@ -16,6 +16,7 @@ use bdk_chain::tx_graph::ChangeSet as BdkTxGraphChangeSet;
 use bdk_chain::DescriptorId;
 use bdk_wallet::descriptor::Descriptor;
 use bdk_wallet::keys::DescriptorPublicKey;
+use bdk_wallet::locked_outpoints::ChangeSet as BdkLockedOutpointsChangeSet;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::p2p::Magic;
 use bitcoin::{BlockHash, Network, OutPoint, Transaction, TxOut, Txid};
@@ -300,6 +301,35 @@ impl Readable for ChangeSetDeserWrapper<BdkIndexerChangeSet> {
 				.expect("required last_revealed TLV field should be present")
 				.0,
 			spk_cache: Default::default(),
+		}))
+	}
+}
+
+impl<'a> Writeable for ChangeSetSerWrapper<'a, BdkLockedOutpointsChangeSet> {
+	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
+		CHANGESET_SERIALIZATION_VERSION.write(writer)?;
+
+		encode_tlv_stream!(writer, {
+			(0, self.0.outpoints, required),
+		});
+		Ok(())
+	}
+}
+
+impl Readable for ChangeSetDeserWrapper<BdkLockedOutpointsChangeSet> {
+	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<Self, DecodeError> {
+		let version: u8 = Readable::read(reader)?;
+		if version != CHANGESET_SERIALIZATION_VERSION {
+			return Err(DecodeError::UnknownVersion);
+		}
+
+		let mut outpoints = RequiredWrapper(None);
+		decode_tlv_stream!(reader, {
+			(0, outpoints, required),
+		});
+
+		Ok(Self(BdkLockedOutpointsChangeSet {
+			outpoints: outpoints.0.expect("required outpoints TLV field should be present"),
 		}))
 	}
 }
