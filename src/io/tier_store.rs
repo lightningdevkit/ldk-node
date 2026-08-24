@@ -212,12 +212,24 @@ impl TierStoreIndex {
 		)
 	}
 
-	/// Derives the metadata key recording that indexed cache values occupy the ephemeral tier.
-	fn cache_ready_key(primary_namespace: &str, secondary_namespace: &str) -> String {
+	/// Derives the internal identity for one logical cache key.
+	fn cache_id(primary_namespace: &str, secondary_namespace: &str, key: &str) -> String {
+		let mut engine = sha256::Hash::engine();
+		engine.input(&(primary_namespace.len() as u64).to_be_bytes());
+		engine.input(primary_namespace.as_bytes());
+		engine.input(&(secondary_namespace.len() as u64).to_be_bytes());
+		engine.input(secondary_namespace.as_bytes());
+		engine.input(&(key.len() as u64).to_be_bytes());
+		engine.input(key.as_bytes());
+		sha256::Hash::from_engine(engine).to_string()
+	}
+
+	/// Derives the metadata key recording that one indexed cache value occupies the ephemeral tier.
+	fn cache_ready_key(primary_namespace: &str, secondary_namespace: &str, key: &str) -> String {
 		format!(
 			"{}{}",
 			INDEX_CACHE_READY_KEY_PREFIX,
-			Self::namespace_id(primary_namespace, secondary_namespace)
+			Self::cache_id(primary_namespace, secondary_namespace, key)
 		)
 	}
 
@@ -235,6 +247,22 @@ impl TierStoreIndex {
 		metadata
 	}
 
+	/// Encodes the original logical cache-key identity for collision detection.
+	fn cache_metadata(primary_namespace: &str, secondary_namespace: &str, key: &str) -> Vec<u8> {
+		// The fixed seven-byte overhead is one format-version byte plus three big-endian u16
+		// component-length prefixes: 1 + 2 + 2 + 2 = 7.
+		let mut metadata =
+			Vec::with_capacity(7 + primary_namespace.len() + secondary_namespace.len() + key.len());
+		metadata.push(1);
+		metadata.extend_from_slice(&(primary_namespace.len() as u16).to_be_bytes());
+		metadata.extend_from_slice(primary_namespace.as_bytes());
+		metadata.extend_from_slice(&(secondary_namespace.len() as u16).to_be_bytes());
+		metadata.extend_from_slice(secondary_namespace.as_bytes());
+		metadata.extend_from_slice(&(key.len() as u16).to_be_bytes());
+		metadata.extend_from_slice(key.as_bytes());
+		metadata
+	}
+
 	/// Returns whether the namespace's index is authoritative for listing.
 	///
 	/// Returns an error if the stored namespace metadata does not match the requested namespace,
@@ -242,41 +270,34 @@ impl TierStoreIndex {
 	async fn is_namespace_ready(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> io::Result<bool> {
-		self.is_namespace_marker_set(
+		self.is_marker_set(
 			&Self::namespace_ready_key(primary_namespace, secondary_namespace),
-			primary_namespace,
-			secondary_namespace,
+			Self::namespace_metadata(primary_namespace, secondary_namespace),
 		)
 		.await
 	}
 
-	/// Returns whether indexed cache values have been reconciled into ephemeral storage.
+	/// Returns whether one indexed cache value has been reconciled into ephemeral storage.
 	async fn is_cache_ready(
-		&self, primary_namespace: &str, secondary_namespace: &str,
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<bool> {
-		self.is_namespace_marker_set(
-			&Self::cache_ready_key(primary_namespace, secondary_namespace),
-			primary_namespace,
-			secondary_namespace,
+		self.is_marker_set(
+			&Self::cache_ready_key(primary_namespace, secondary_namespace, key),
+			Self::cache_metadata(primary_namespace, secondary_namespace, key),
 		)
 		.await
 	}
 
-	async fn is_namespace_marker_set(
-		&self, marker_key: &str, primary_namespace: &str, secondary_namespace: &str,
+	async fn is_marker_set(
+		&self, marker_key: &str, expected_metadata: Vec<u8>,
 	) -> io::Result<bool> {
 		match KVStore::read(self.store.as_ref(), INDEX_METADATA_PRIMARY_NAMESPACE, "", marker_key)
 			.await
 		{
-			Ok(metadata)
-				if metadata == Self::namespace_metadata(primary_namespace, secondary_namespace) =>
-			{
-				Ok(true)
+			Ok(metadata) if metadata == expected_metadata => Ok(true),
+			Ok(_) => {
+				Err(io::Error::new(io::ErrorKind::InvalidData, "Tier-store index marker collision"))
 			},
-			Ok(_) => Err(io::Error::new(
-				io::ErrorKind::InvalidData,
-				"Tier-store index namespace collision",
-			)),
 			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
 			Err(e) => Err(e),
 		}
@@ -286,35 +307,31 @@ impl TierStoreIndex {
 	async fn mark_namespace_ready(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> io::Result<()> {
-		self.set_namespace_marker(
+		self.set_marker(
 			&Self::namespace_ready_key(primary_namespace, secondary_namespace),
-			primary_namespace,
-			secondary_namespace,
+			Self::namespace_metadata(primary_namespace, secondary_namespace),
 		)
 		.await
 	}
 
-	/// Marks indexed cache values as reconciled into ephemeral storage.
+	/// Marks one indexed cache value as reconciled into ephemeral storage.
 	async fn mark_cache_ready(
-		&self, primary_namespace: &str, secondary_namespace: &str,
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<()> {
-		self.set_namespace_marker(
-			&Self::cache_ready_key(primary_namespace, secondary_namespace),
-			primary_namespace,
-			secondary_namespace,
+		self.set_marker(
+			&Self::cache_ready_key(primary_namespace, secondary_namespace, key),
+			Self::cache_metadata(primary_namespace, secondary_namespace, key),
 		)
 		.await
 	}
 
-	async fn set_namespace_marker(
-		&self, marker_key: &str, primary_namespace: &str, secondary_namespace: &str,
-	) -> io::Result<()> {
+	async fn set_marker(&self, marker_key: &str, metadata: Vec<u8>) -> io::Result<()> {
 		KVStore::write(
 			self.store.as_ref(),
 			INDEX_METADATA_PRIMARY_NAMESPACE,
 			"",
 			marker_key,
-			Self::namespace_metadata(primary_namespace, secondary_namespace),
+			metadata,
 		)
 		.await
 	}
@@ -918,23 +935,39 @@ impl TierStoreInner {
 			Some(key.as_str()),
 			"read",
 		)?;
-		self.prepare_namespace(&primary_namespace, &secondary_namespace).await?;
+		self.ensure_namespace_indexed(&primary_namespace, &secondary_namespace).await?;
 
-		if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
-			if let Some(eph_store) = self.ephemeral_store.as_ref() {
-				// We don't retry ephemeral-store reads here. Local failures are treated as
-				// terminal for this access path rather than falling back to another store.
-				return KVStore::read(
-					eph_store.as_ref(),
-					&primary_namespace,
-					&secondary_namespace,
-					&key,
-				)
-				.await;
+		let locking_key = self.build_locking_key(&primary_namespace, &secondary_namespace, &key);
+		let lock_ref = self.get_lock_ref(locking_key.clone());
+		let result: io::Result<Vec<u8>> = async {
+			let _guard = lock_ref.lock().await;
+			self.recover_key_locked(&primary_namespace, &secondary_namespace, &key).await?;
+			self.reconcile_ephemeral_cache_key_locked(
+				&primary_namespace,
+				&secondary_namespace,
+				&key,
+			)
+			.await?;
+
+			if is_ephemeral_cached_key(&primary_namespace, &secondary_namespace, &key) {
+				if let Some(eph_store) = self.ephemeral_store.as_ref() {
+					// We don't retry ephemeral-store reads here. Local failures are treated as
+					// terminal for this access path rather than falling back to another store.
+					return KVStore::read(
+						eph_store.as_ref(),
+						&primary_namespace,
+						&secondary_namespace,
+						&key,
+					)
+					.await;
+				}
 			}
-		}
 
-		self.read_primary(&primary_namespace, &secondary_namespace, &key).await
+			self.read_primary(&primary_namespace, &secondary_namespace, &key).await
+		}
+		.await;
+		self.clean_locks(&lock_ref, locking_key);
+		result
 	}
 
 	async fn write_internal(
@@ -1278,44 +1311,11 @@ impl TierStoreInner {
 		Ok(())
 	}
 
-	/// Reconciles cache placement once and records completion for subsequent namespace accesses.
+	/// Reconciles every cache key before an operation that prepares the complete namespace.
 	async fn ensure_ephemeral_cache_reconciled(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> io::Result<()> {
-		let (Some(index), Some(_)) = (self.index.as_ref(), self.ephemeral_store.as_ref()) else {
-			return Ok(());
-		};
-		if ephemeral_cache_keys(primary_namespace).next().is_none()
-			|| index.is_cache_ready(primary_namespace, secondary_namespace).await?
-		{
-			return Ok(());
-		}
-
-		let lock_ref = self.get_index_initialization_lock(primary_namespace, secondary_namespace);
-		let result: io::Result<()> = async {
-			let _guard = lock_ref.lock().await;
-			if index.is_cache_ready(primary_namespace, secondary_namespace).await? {
-				Ok(())
-			} else {
-				self.reconcile_ephemeral_cache(primary_namespace, secondary_namespace).await?;
-				index.mark_cache_ready(primary_namespace, secondary_namespace).await
-			}
-		}
-		.await;
-		self.clean_index_initialization_locks(&lock_ref, primary_namespace, secondary_namespace);
-		result
-	}
-
-	/// Moves indexed cache values to ephemeral storage without changing their index positions.
-	///
-	/// Destination writes precede source removals. Repeating this after interruption either copies
-	/// the primary value again or removes a stale primary/backup copy after finding the destination.
-	async fn reconcile_ephemeral_cache(
-		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> io::Result<()> {
-		let (Some(index), Some(ephemeral_store)) =
-			(self.index.as_ref(), self.ephemeral_store.as_ref())
-		else {
+		let (Some(_), Some(_)) = (self.index.as_ref(), self.ephemeral_store.as_ref()) else {
 			return Ok(());
 		};
 
@@ -1325,62 +1325,86 @@ impl TierStoreInner {
 			let result: io::Result<()> = async {
 				let _guard = lock_ref.lock().await;
 				self.recover_key_locked(primary_namespace, secondary_namespace, key).await?;
-				if !index.contains_entry(primary_namespace, secondary_namespace, key).await? {
-					return Ok(());
-				}
-
-				match KVStore::read(
-					ephemeral_store.as_ref(),
+				self.reconcile_ephemeral_cache_key_locked(
 					primary_namespace,
 					secondary_namespace,
 					key,
 				)
 				.await
-				{
-					Ok(_) => {},
-					Err(e) if e.kind() == io::ErrorKind::NotFound => {
-						match self.read_primary(primary_namespace, secondary_namespace, key).await {
-							Ok(value) => {
-								KVStore::write(
-									ephemeral_store.as_ref(),
-									primary_namespace,
-									secondary_namespace,
-									key,
-									value,
-								)
-								.await?;
-							},
-							Err(e) if e.kind() == io::ErrorKind::NotFound => {
-								self.remove_primary_backup_async(
-									primary_namespace,
-									secondary_namespace,
-									key,
-									false,
-								)
-								.await?;
-								return index
-									.remove_entry(
-										primary_namespace,
-										secondary_namespace,
-										key,
-										false,
-									)
-									.await;
-							},
-							Err(e) => return Err(e),
-						}
-					},
-					Err(e) => return Err(e),
-				}
-
-				self.remove_primary_backup_async(primary_namespace, secondary_namespace, key, false)
-					.await
 			}
 			.await;
 			self.clean_locks(&lock_ref, locking_key);
 			result?;
 		}
 		Ok(())
+	}
+
+	/// Moves one indexed cache value to ephemeral storage while its per-key lock is held.
+	///
+	/// Destination writes precede source removals. Repeating this after interruption either copies
+	/// the primary value again or removes a stale primary/backup copy after finding the destination.
+	async fn reconcile_ephemeral_cache_key_locked(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> io::Result<()> {
+		let (Some(index), Some(ephemeral_store)) =
+			(self.index.as_ref(), self.ephemeral_store.as_ref())
+		else {
+			return Ok(());
+		};
+		if !is_ephemeral_cached_key(primary_namespace, secondary_namespace, key)
+			|| index.is_cache_ready(primary_namespace, secondary_namespace, key).await?
+		{
+			return Ok(());
+		}
+
+		if index.contains_entry(primary_namespace, secondary_namespace, key).await? {
+			match KVStore::read(
+				ephemeral_store.as_ref(),
+				primary_namespace,
+				secondary_namespace,
+				key,
+			)
+			.await
+			{
+				Ok(_) => {},
+				Err(e) if e.kind() == io::ErrorKind::NotFound => {
+					match self.read_primary(primary_namespace, secondary_namespace, key).await {
+						Ok(value) => {
+							KVStore::write(
+								ephemeral_store.as_ref(),
+								primary_namespace,
+								secondary_namespace,
+								key,
+								value,
+							)
+							.await?;
+						},
+						Err(e) if e.kind() == io::ErrorKind::NotFound => {
+							self.remove_primary_backup_async(
+								primary_namespace,
+								secondary_namespace,
+								key,
+								false,
+							)
+							.await?;
+							index
+								.remove_entry(primary_namespace, secondary_namespace, key, false)
+								.await?;
+							return index
+								.mark_cache_ready(primary_namespace, secondary_namespace, key)
+								.await;
+						},
+						Err(e) => return Err(e),
+					}
+				},
+				Err(e) => return Err(e),
+			}
+
+			self.remove_primary_backup_async(primary_namespace, secondary_namespace, key, false)
+				.await?;
+		}
+
+		index.mark_cache_ready(primary_namespace, secondary_namespace, key).await
 	}
 
 	/// Completes journaled creates and removals before exposing a namespace.
@@ -2039,6 +2063,89 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn reading_one_cache_key_only_reconciles_that_key() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let _cleanup = CleanupDir(base_dir);
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		for (key, value) in
+			[(SCORER_PERSISTENCE_KEY, vec![1]), (EXTERNAL_PATHFINDING_SCORES_CACHE_KEY, vec![2])]
+		{
+			primary_store
+				.write(
+					SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+					SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+					key,
+					value,
+				)
+				.await
+				.unwrap();
+		}
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		set_test_index_store(&mut tier);
+		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+
+		assert_eq!(
+			tier.read(
+				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				SCORER_PERSISTENCE_KEY,
+			)
+			.await
+			.unwrap(),
+			vec![1]
+		);
+		assert!(primary_store
+			.read(
+				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				SCORER_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err());
+		assert!(ephemeral_store
+			.read(
+				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				EXTERNAL_PATHFINDING_SCORES_CACHE_KEY,
+			)
+			.await
+			.is_err());
+		assert_eq!(
+			primary_store
+				.read(
+					SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+					SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+					EXTERNAL_PATHFINDING_SCORES_CACHE_KEY,
+				)
+				.await
+				.unwrap(),
+			vec![2]
+		);
+
+		let index = tier.inner.index.as_ref().unwrap();
+		assert!(index
+			.is_cache_ready(
+				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				SCORER_PERSISTENCE_KEY,
+			)
+			.await
+			.unwrap());
+		assert!(!index
+			.is_cache_ready(
+				SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+				SCORER_PERSISTENCE_SECONDARY_NAMESPACE,
+				EXTERNAL_PATHFINDING_SCORES_CACHE_KEY,
+			)
+			.await
+			.unwrap());
+	}
+
+	#[tokio::test]
 	async fn namespace_initialization_preserves_existing_primary_order_across_pages() {
 		let base_dir = random_storage_path();
 		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
@@ -2198,6 +2305,149 @@ mod tests {
 		assert!(primary_store.read("namespace", "", "key").await.is_err());
 		assert!(backup_store.read("namespace", "", "key").await.is_err());
 		assert!(index.read_journal_entry("namespace", "", "key").await.is_err());
+	}
+
+	#[tokio::test]
+	async fn read_recovers_only_the_requested_key() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let _cleanup = CleanupDir(base_dir);
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		for (key, value) in [("stuck", vec![1]), ("readable", vec![2])] {
+			primary_store.write("namespace", "", key, value).await.unwrap();
+		}
+		let mut tier = setup_tier_store(primary_store, logger);
+		set_test_index_store(&mut tier);
+		tier.inner.ensure_namespace_indexed("namespace", "").await.unwrap();
+		let pending = JournalEntry {
+			primary_namespace: "namespace".to_string(),
+			secondary_namespace: String::new(),
+			key: "stuck".to_string(),
+			tier: ValueTier::Primary,
+			requires_backup: true,
+			operation: JournalOperation::Remove { lazy: false },
+		};
+		let index = tier.inner.index.as_ref().unwrap();
+		index.write_journal_entry(&pending).await.unwrap();
+
+		assert_eq!(tier.read("namespace", "", "readable").await.unwrap(), vec![2]);
+		assert!(index.read_journal_entry("namespace", "", "stuck").await.is_ok());
+		assert!(tier.read("namespace", "", "stuck").await.is_err());
+	}
+
+	#[tokio::test]
+	async fn read_recovers_pending_removal_before_returning_value() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let _cleanup = CleanupDir(base_dir);
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		tier.set_backup_store(Arc::clone(&backup_store));
+		set_test_index_store(&mut tier);
+		tier.write("namespace", "", "key", vec![1]).await.unwrap();
+
+		let pending = JournalEntry {
+			primary_namespace: "namespace".to_string(),
+			secondary_namespace: String::new(),
+			key: "key".to_string(),
+			tier: ValueTier::Primary,
+			requires_backup: true,
+			operation: JournalOperation::Remove { lazy: false },
+		};
+		let index = tier.inner.index.as_ref().unwrap();
+		index.write_journal_entry(&pending).await.unwrap();
+		index.remove_entry("namespace", "", "key", false).await.unwrap();
+
+		let error = tier.read("namespace", "", "key").await.unwrap_err();
+		assert_eq!(error.kind(), io::ErrorKind::NotFound);
+		assert!(primary_store.read("namespace", "", "key").await.is_err());
+		assert!(backup_store.read("namespace", "", "key").await.is_err());
+		assert!(index.read_journal_entry("namespace", "", "key").await.is_err());
+	}
+
+	#[tokio::test]
+	async fn read_recovers_pending_cache_operation_without_relocking_the_key() {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let _cleanup = CleanupDir(base_dir);
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		primary_store
+			.write(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+				vec![1],
+			)
+			.await
+			.unwrap();
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		set_test_index_store(&mut tier);
+		tier.set_ephemeral_store(Arc::clone(&ephemeral_store));
+		tier.inner
+			.ensure_namespace_indexed(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			)
+			.await
+			.unwrap();
+		let pending = JournalEntry {
+			primary_namespace: NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			secondary_namespace: NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			key: NETWORK_GRAPH_PERSISTENCE_KEY.to_string(),
+			tier: ValueTier::Primary,
+			requires_backup: false,
+			operation: JournalOperation::Create { value: vec![2] },
+		};
+		let index = tier.inner.index.as_ref().unwrap();
+		index.write_journal_entry(&pending).await.unwrap();
+
+		let value = tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			tier.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			),
+		)
+		.await
+		.expect("read deadlocked while preparing its cache key")
+		.unwrap();
+		assert_eq!(value, vec![2]);
+		assert!(primary_store
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err());
+		assert_eq!(
+			ephemeral_store
+				.read(
+					NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+					NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+					NETWORK_GRAPH_PERSISTENCE_KEY,
+				)
+				.await
+				.unwrap(),
+			vec![2]
+		);
+		assert!(index
+			.read_journal_entry(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err());
 	}
 
 	#[tokio::test]
