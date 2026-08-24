@@ -78,6 +78,7 @@ LDK Node's optional dependencies are grouped by the functionality they provide:
 | `chain-electrum` | Electrum chain source |
 | `chain-bitcoind` | Bitcoin Core RPC and REST chain source |
 | `storage-sqlite` | SQLite storage |
+| `storage-tier` | Tiered storage with optional ephemeral and backup SQLite stores |
 | `storage-filesystem` | Filesystem storage |
 | `storage-vss` | Versioned Storage Service storage |
 | `storage-postgres` | PostgreSQL storage |
@@ -88,7 +89,8 @@ LDK Node's optional dependencies are grouped by the functionality they provide:
 
 The `default` feature set preserves the native Rust API's previous behavior. It enables all three
 chain sources, SQLite, filesystem and VSS storage, and unified payments. PostgreSQL and UniFFI
-remain opt-in. Every build must enable at least one chain source feature.
+remain opt-in. Tiered storage is also opt-in; enabling `storage-tier` automatically enables
+`storage-sqlite`. Every build must enable at least one chain source feature.
 
 On Linux, `storage-postgres` uses the system OpenSSL installation and requires the OpenSSL
 development headers and `pkg-config`. Enable `storage-postgres-vendored-tls` instead to build

@@ -40,7 +40,7 @@ use ldk_node::config::{
 	DEFAULT_FULL_SCAN_STOP_GAP,
 };
 use ldk_node::entropy::NodeEntropy;
-#[cfg(not(feature = "uniffi"))]
+#[cfg(all(not(feature = "uniffi"), feature = "storage-tier"))]
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
@@ -5242,7 +5242,7 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 }
 
 // Builder backup-store configuration is not yet exposed via FFI (see #871)
-#[cfg(not(feature = "uniffi"))]
+#[cfg(all(not(feature = "uniffi"), feature = "storage-tier"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn builder_configures_sqlite_backup_store() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();

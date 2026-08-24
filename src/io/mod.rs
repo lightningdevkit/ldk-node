@@ -15,6 +15,7 @@ pub mod postgres_store;
 pub mod sqlite_store;
 #[cfg(test)]
 pub(crate) mod test_utils;
+#[cfg(feature = "storage-tier")]
 pub(crate) mod tier_store;
 pub(crate) mod utils;
 #[cfg(feature = "storage-vss")]

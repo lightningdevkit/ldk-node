@@ -34,10 +34,13 @@ mod migrations;
 /// LDK Node's database file name.
 pub const SQLITE_DB_FILE_NAME: &str = "ldk_node_data.sqlite";
 /// LDK Node's internal tier-store index database file name.
+#[cfg(feature = "storage-tier")]
 pub(crate) const SQLITE_TIER_INDEX_DB_FILE_NAME: &str = "ldk_node_tier_index.sqlite";
 /// LDK Node's backup database file name.
+#[cfg(feature = "storage-tier")]
 pub const SQLITE_BACKUP_DB_FILE_NAME: &str = "ldk_node_data_backup.sqlite";
 /// LDK Node's ephemeral database file name.
+#[cfg(feature = "storage-tier")]
 pub const SQLITE_EPHEMERAL_DB_FILE_NAME: &str = "ldk_node_data_ephemeral.sqlite";
 /// LDK Node's table in which we store all data.
 pub const KV_TABLE_NAME: &str = "ldk_node_data";
@@ -92,6 +95,7 @@ impl SqliteStore {
 	}
 
 	/// Constructs a new [`SqliteStore`] which exclusively owns its database for its lifetime.
+	#[cfg(feature = "storage-tier")]
 	pub(crate) fn new_exclusive(
 		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
 	) -> io::Result<Self> {
