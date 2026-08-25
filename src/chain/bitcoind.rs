@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -910,7 +910,7 @@ impl BitcoindClient {
 	}
 
 	/// Retrieves the raw mempool.
-	pub(crate) async fn get_raw_mempool(&self) -> std::io::Result<Vec<Txid>> {
+	pub(crate) async fn get_raw_mempool(&self) -> std::io::Result<HashSet<Txid>> {
 		match self {
 			BitcoindClient::Rpc { rpc_client, .. } => {
 				Self::get_raw_mempool_rpc(Arc::clone(rpc_client)).await
@@ -922,7 +922,7 @@ impl BitcoindClient {
 	}
 
 	/// Retrieves the raw mempool via the RPC interface.
-	async fn get_raw_mempool_rpc(rpc_client: Arc<RpcClient>) -> std::io::Result<Vec<Txid>> {
+	async fn get_raw_mempool_rpc(rpc_client: Arc<RpcClient>) -> std::io::Result<HashSet<Txid>> {
 		let verbose_flag_json = serde_json::json!(false);
 		rpc_client
 			.call_method::<GetRawMempoolResponse>("getrawmempool", &[verbose_flag_json])
@@ -931,7 +931,7 @@ impl BitcoindClient {
 	}
 
 	/// Retrieves the raw mempool via the REST interface.
-	async fn get_raw_mempool_rest(rest_client: Arc<RestClient>) -> std::io::Result<Vec<Txid>> {
+	async fn get_raw_mempool_rest(rest_client: Arc<RestClient>) -> std::io::Result<HashSet<Txid>> {
 		rest_client
 			.request_resource::<JsonResponse, GetRawMempoolResponse>(
 				"mempool/contents.json?verbose=false",
@@ -1300,7 +1300,7 @@ impl TryInto<GetRawTransactionResponse> for JsonResponse {
 	}
 }
 
-pub struct GetRawMempoolResponse(Vec<Txid>);
+pub struct GetRawMempoolResponse(HashSet<Txid>);
 
 impl TryInto<GetRawMempoolResponse> for JsonResponse {
 	type Error = std::io::Error;
@@ -1310,7 +1310,7 @@ impl TryInto<GetRawMempoolResponse> for JsonResponse {
 			"Failed to parse getrawmempool response",
 		))?;
 
-		let mut mempool_transactions = Vec::with_capacity(res.len());
+		let mut mempool_transactions = HashSet::with_capacity(res.len());
 
 		for hex in res {
 			let txid = if let Some(hex_str) = hex.as_str() {
@@ -1330,7 +1330,7 @@ impl TryInto<GetRawMempoolResponse> for JsonResponse {
 				));
 			};
 
-			mempool_transactions.push(txid);
+			mempool_transactions.insert(txid);
 		}
 
 		Ok(GetRawMempoolResponse(mempool_transactions))
@@ -1488,6 +1488,8 @@ impl std::fmt::Display for HttpError {
 
 #[cfg(test)]
 mod tests {
+	use std::collections::HashSet;
+
 	use bitcoin::hashes::Hash;
 	use bitcoin::{FeeRate, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
 	use lightning_block_sync::http::JsonResponse;
@@ -1566,10 +1568,10 @@ mod tests {
 
 		#[test]
 		fn prop_get_raw_mempool_response_roundtrip(txids in vec(any::<[u8;32]>(), 0..10)) {
-			let txid_vec: Vec<Txid> = txids.into_iter().map(Txid::from_byte_array).collect();
-			let original = GetRawMempoolResponse(txid_vec.clone());
+			let txid_set: HashSet<Txid> = txids.into_iter().map(Txid::from_byte_array).collect();
+			let original = GetRawMempoolResponse(txid_set.clone());
 
-			let json_vec: Vec<String> = txid_vec.iter().map(|t| t.to_string()).collect();
+			let json_vec: Vec<String> = txid_set.iter().map(|t| t.to_string()).collect();
 			let json_val = serde_json::Value::Array(json_vec.iter().map(|s| json!(s)).collect());
 
 			let resp = JsonResponse(json_val);
