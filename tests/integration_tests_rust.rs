@@ -3395,6 +3395,22 @@ async fn unified_send_receive_bip21_uri() {
 		};
 	expect_payment_successful_event!(node_a, invoice_payment_id, None);
 
+	// Regression test for https://github.com/lightningdevkit/ldk-node/issues/1033: retrying
+	// the same BOLT11 invoice must return DuplicatePayment, not fall back to on-chain.
+	let duplicate_result = node_a.unified_payment().send(uri_str_without_offer, None, None).await;
+	match duplicate_result {
+		Err(NodeError::DuplicatePayment) => {
+			// Expected — this is the fix for #1033.
+		},
+		Ok(UnifiedPaymentResult::Onchain { txid }) => {
+			panic!(
+				"Regression: duplicate BOLT11 payment fell back to on-chain. txid={}. See #1033",
+				txid
+			);
+		},
+		other => panic!("Expected DuplicatePayment error on retry, got: {:?}", other),
+	}
+
 	let expect_onchain_amount_sats = 800_000;
 	let onchain_uni_payment =
 		node_b.unified_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
