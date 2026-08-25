@@ -165,6 +165,12 @@ impl UnifiedQrPayment {
 			let invoice = maybe_wrap(invoice);
 			match self.bolt11_invoice.send(&invoice, route_parameters) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
+				// A duplicate payment already exists, so falling back to the on-chain method
+				// would pay the same invoice a second time.
+				Err(Error::DuplicatePayment) => {
+					log_error!(self.logger, "Failed to send BOLT11 invoice: DuplicatePayment. This is part of a unified QR code payment. Aborting to avoid duplicate payment.");
+					return Err(Error::DuplicatePayment);
+				},
 				Err(e) => {
 					log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e);
 				},

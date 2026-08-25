@@ -1725,6 +1725,15 @@ async fn unified_qr_send_receive() {
 		};
 	expect_payment_successful_event!(node_a, Some(invoice_payment_id), None);
 
+	// Retrying the same BOLT11 invoice must return DuplicatePayment, not fall back to on-chain.
+	match node_a.unified_qr_payment().send(uri_str_without_offer, None) {
+		Err(NodeError::DuplicatePayment) => {},
+		Ok(QrPaymentResult::Onchain { txid }) => {
+			panic!("Regression: duplicate BOLT11 payment fell back to on-chain. txid={}", txid);
+		},
+		other => panic!("Expected DuplicatePayment error on retry, got: {:?}", other),
+	}
+
 	let expect_onchain_amount_sats = 800_000;
 	let onchain_uqr_payment =
 		node_b.unified_qr_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
