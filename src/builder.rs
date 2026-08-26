@@ -1052,6 +1052,10 @@ impl NodeBuilder {
 					tier_store.set_backup_store(backup_store);
 				}
 			}
+			runtime.block_on(tier_store.initialize_backup_synchronization()).map_err(|e| {
+				log_error!(logger, "Failed to initialize tier-store backup synchronization: {}", e);
+				BuildError::KVStoreSetupFailed
+			})?;
 			Arc::new(DynStoreWrapper(tier_store))
 		};
 		#[cfg(not(feature = "storage-tier"))]

@@ -28,7 +28,6 @@ use crate::logger::{LdkLogger, Logger};
 use crate::types::{DynStore, DynStoreWrapper};
 
 const INDEX_DATABASE_ID_LEN: usize = 16;
-const PAGE_TOKEN_FORMAT_VERSION: u8 = 1;
 const INDEX_ENTRIES_PRIMARY_NAMESPACE: &str = "_tier_store_entries";
 const INDEX_JOURNAL_PRIMARY_NAMESPACE: &str = "_tier_store_journal";
 const INDEX_METADATA_PRIMARY_NAMESPACE: &str = "_tier_store_metadata";
@@ -36,6 +35,22 @@ const INDEX_DATABASE_ID_KEY: &str = "index_database_id";
 const INDEX_NAMESPACE_READY_KEY_PREFIX: &str = "ready_";
 const INDEX_CACHE_READY_KEY_PREFIX: &str = "cache_ready_";
 const INDEX_ENTRY_VALUE: &[u8] = &[1];
+
+const PAGE_TOKEN_FORMAT_VERSION: u8 = 1;
+
+const GENERATION_ID_LEN: usize = 16;
+
+const PRIMARY_SYNC_GENERATION_KEY: &str = "primary_generation";
+
+const BACKUP_SYNC_PRIMARY_NAMESPACE: &str = "_tier_store_backup_sync";
+const BACKUP_SYNC_COMPLETED_GENERATION_KEY: &str = "completed_generation";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BackupSyncStatus {
+	NotConfigured,
+	Synchronized,
+	Required,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ValueTier {
@@ -601,6 +616,26 @@ impl TierStore {
 
 		inner.index = Some(index);
 	}
+
+	/// Initializes the durable metadata used to determine whether the backup matches the primary.
+	///
+	/// This must be called once after the optional backup store has been configured and before the
+	/// `TierStore` is used. If no backup is configured but a primary generation already exists, it
+	/// writes a new generation so any backup completed against the earlier generation will be
+	/// recognized as stale if it returns. If no generation exists, no backup has yet been tracked and
+	/// no metadata is created. If a backup is configured, it reads or creates the primary generation
+	/// and compares it with the backup's completion record without modifying the completion record.
+	///
+	/// Returns [`BackupSyncStatus::NotConfigured`] when no backup is present, whether or not an
+	/// existing primary generation was rotated, [`BackupSyncStatus::Synchronized`] when both records match, or
+	/// [`BackupSyncStatus::Required`] when the backup has no completion record or records another
+	/// generation. A `Required` result only classifies the backup; it does not perform synchronization.
+	///
+	/// Returns an error if generation metadata cannot be read, generated, or persisted, or if a
+	/// stored generation has an invalid length.
+	pub(crate) async fn initialize_backup_synchronization(&self) -> io::Result<BackupSyncStatus> {
+		self.inner.initialize_backup_synchronization().await
+	}
 }
 
 pub(crate) async fn setup_index_store(data_dir: PathBuf) -> io::Result<TierStoreIndex> {
@@ -729,6 +764,139 @@ impl TierStoreInner {
 			next_write_version: AtomicU64::new(1),
 			logger,
 		}
+	}
+
+	/// Rotates or compares the stores' backup-synchronization generations.
+	///
+	/// Without a configured backup, this rotates an existing primary generation so primary-only
+	/// operation invalidates any earlier backup completion. It leaves primary metadata absent when no
+	/// backup has ever established a generation. With a configured backup, this preserves the primary
+	/// generation (creating it if absent) and compares it with the completion generation stored in the
+	/// backup. A missing or different backup completion is classified as requiring synchronization;
+	/// this method does not perform that synchronization.
+	async fn initialize_backup_synchronization(&self) -> io::Result<BackupSyncStatus> {
+		if self.backup_store.is_none() {
+			match Self::read_generation_id(self.primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
+				.await
+			{
+				Ok(_) => {
+					let generation_id = Self::generate_primary_generation_id()?;
+					self.write_primary_generation_id(generation_id).await?;
+				},
+				Err(e) if e.kind() == io::ErrorKind::NotFound => {},
+				Err(e) => return Err(e),
+			}
+			return Ok(BackupSyncStatus::NotConfigured);
+		}
+
+		let primary_generation_id = self.read_or_create_primary_sync_generation_id().await?;
+		match self.read_backup_completed_generation_id().await {
+			Ok(completed_generation_id) if completed_generation_id == primary_generation_id => {
+				Ok(BackupSyncStatus::Synchronized)
+			},
+			Ok(_) => Ok(BackupSyncStatus::Required),
+			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BackupSyncStatus::Required),
+			Err(e) => Err(e),
+		}
+	}
+
+	/// Generates an opaque random identity for one synchronization generation.
+	fn generate_primary_generation_id() -> io::Result<[u8; GENERATION_ID_LEN]> {
+		let mut generation_id = [0; GENERATION_ID_LEN];
+		getrandom::fill(&mut generation_id).map_err(|e| {
+			io::Error::new(
+				io::ErrorKind::Other,
+				format!("Failed to generate tier-store backup synchronization generation: {e}"),
+			)
+		})?;
+		Ok(generation_id)
+	}
+
+	/// Reads the primary's current synchronization generation, creating and persisting one if absent.
+	///
+	/// An existing generation is preserved so a matching backup completion remains valid across
+	/// restarts where the backup stays configured.
+	async fn read_or_create_primary_sync_generation_id(&self) -> io::Result<[u8; GENERATION_ID_LEN]> {
+		match Self::read_generation_id(self.primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY).await {
+			Ok(generation_id) => Ok(generation_id),
+			Err(e) if e.kind() == io::ErrorKind::NotFound => {
+				let generation_id = Self::generate_primary_generation_id()?;
+				self.write_primary_generation_id(generation_id).await?;
+				Ok(generation_id)
+			},
+			Err(e) => Err(e),
+		}
+	}
+
+	/// Persists the current synchronization generation directly in the authoritative primary store.
+	///
+	/// The write intentionally bypasses backup replication: changing this record invalidates an old
+	/// backup, whose completion record must remain unchanged until synchronization actually finishes.
+	async fn write_primary_generation_id(
+		&self, generation_id: [u8; GENERATION_ID_LEN],
+	) -> io::Result<()> {
+		KVStore::write(
+			self.primary_store.as_ref(),
+			BACKUP_SYNC_PRIMARY_NAMESPACE,
+			"",
+			PRIMARY_SYNC_GENERATION_KEY,
+			generation_id.to_vec(),
+		)
+		.await
+	}
+
+	/// Reads the generation for which the configured backup last completed synchronization.
+	///
+	/// The completion record is proof that all durable primary data was copied and stale backup data
+	/// was removed for that generation. Its absence therefore means synchronization is required; it
+	/// must not be inferred from individual values already present in the backup.
+	///
+	/// Returns [`io::ErrorKind::NotFound`] when no backup is configured or the configured backup has
+	/// no completion record. Other storage errors and malformed completion records are propagated so
+	/// callers cannot mistake an unreadable record for proof that the backup is current.
+	async fn read_backup_completed_generation_id(&self) -> io::Result<[u8; GENERATION_ID_LEN]> {
+		let backup_store = self.backup_store.as_ref().ok_or_else(|| {
+			io::Error::new(io::ErrorKind::NotFound, "Backup store is not configured")
+		})?;
+		Self::read_generation_id(backup_store.as_ref(), BACKUP_SYNC_COMPLETED_GENERATION_KEY).await
+	}
+
+	/// Reads and validates a synchronization generation from the given store metadata key.
+	///
+	/// Primary generations and backup completion generations use the same opaque, fixed-width value
+	/// representation but live under different keys. This helper centralizes the shared storage
+	/// location and length validation without assigning ordering semantics to the random bytes.
+	///
+	/// Returns [`io::ErrorKind::NotFound`] when the key is absent and
+	/// [`io::ErrorKind::InvalidData`] when its value is not exactly
+	/// [`GENERATION_ID_LEN`] bytes. All other underlying storage errors are propagated.
+	async fn read_generation_id(
+		store: &DynStore, key: &str,
+	) -> io::Result<[u8; GENERATION_ID_LEN]> {
+		let generation_id = KVStore::read(store, BACKUP_SYNC_PRIMARY_NAMESPACE, "", key).await?;
+		generation_id.try_into().map_err(|_| {
+			io::Error::new(
+				io::ErrorKind::InvalidData,
+				"Invalid tier-store backup synchronization generation",
+			)
+		})
+	}
+
+	#[cfg(test)]
+	async fn write_backup_completed_generation_id(
+		&self, generation_id: [u8; GENERATION_ID_LEN],
+	) -> io::Result<()> {
+		let backup_store = self.backup_store.as_ref().ok_or_else(|| {
+			io::Error::new(io::ErrorKind::NotFound, "Backup store is not configured")
+		})?;
+		KVStore::write(
+			backup_store.as_ref(),
+			BACKUP_SYNC_PRIMARY_NAMESPACE,
+			"",
+			BACKUP_SYNC_COMPLETED_GENERATION_KEY,
+			generation_id.to_vec(),
+		)
+		.await
 	}
 
 	fn get_new_version_and_lock_ref(&self, locking_key: String) -> (Arc<TokioMutex<u64>>, u64) {
@@ -1622,6 +1790,101 @@ mod tests {
 	fn set_test_index_store(tier: &mut TierStore) {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		tier.set_index_store(TierStoreIndex::from_store(store));
+	}
+
+	#[tokio::test]
+	async fn backup_sync_metadata_remains_absent_when_a_backup_has_never_been_configured() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+
+		let tier = setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger));
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::NotConfigured
+		);
+		drop(tier);
+		let restarted_tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		assert_eq!(
+			restarted_tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::NotConfigured
+		);
+		let error =
+			TierStoreInner::read_generation_id(primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
+				.await
+				.unwrap_err();
+		assert_eq!(error.kind(), io::ErrorKind::NotFound);
+	}
+
+	#[tokio::test]
+	async fn backup_sync_generation_rotates_after_backup_is_removed() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger));
+		tier.set_backup_store(backup_store);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+		let configured_generation_id =
+			TierStoreInner::read_generation_id(primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
+				.await
+				.unwrap();
+		drop(tier);
+
+		let restarted_tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		assert_eq!(
+			restarted_tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::NotConfigured
+		);
+		let rotated_generation_id =
+			TierStoreInner::read_generation_id(primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
+				.await
+				.unwrap();
+
+		assert_ne!(rotated_generation_id, configured_generation_id);
+	}
+
+	#[tokio::test]
+	async fn backup_sync_status_tracks_persisted_completion() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger));
+		tier.set_backup_store(Arc::clone(&backup_store));
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+		let generation_id =
+			TierStoreInner::read_generation_id(primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
+				.await
+				.unwrap();
+
+		let mut stale_generation_id = generation_id;
+		stale_generation_id[0] ^= 1;
+		tier.inner.write_backup_completed_generation_id(stale_generation_id).await.unwrap();
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+
+		tier.inner.write_backup_completed_generation_id(generation_id).await.unwrap();
+		drop(tier);
+		let mut restarted_tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		restarted_tier.set_backup_store(backup_store);
+		assert_eq!(
+			restarted_tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Synchronized
+		);
+		assert_eq!(
+			TierStoreInner::read_generation_id(primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
+				.await
+				.unwrap(),
+			generation_id
+		);
 	}
 
 	#[test]
