@@ -1015,15 +1015,27 @@ impl NodeBuilder {
 			let ts_config = self.tier_store_config.as_ref();
 			let primary_store = Arc::new(DynStoreWrapper(kv_store));
 			let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
+			let tier_index_exists = PathBuf::from(&self.config.storage_dir_path)
+				.join(io::sqlite_store::SQLITE_TIER_INDEX_DB_FILE_NAME)
+				.exists();
+			let tier_index_required = ts_config
+				.map(|config| {
+					config.ephemeral_storage_dir_path.is_some()
+						|| config.backup_storage_dir_path.is_some()
+				})
+				.unwrap_or(false);
+			if tier_index_required || tier_index_exists {
+				let index_store = runtime
+					.block_on(setup_index_store(self.config.storage_dir_path.clone().into()))
+					.map_err(|e| {
+						log_error!(logger, "Failed to setup tier-store index: {}", e);
+						BuildError::KVStoreSetupFailed
+					})?;
+				tier_store.set_index_store(index_store);
+			}
 			if let Some(config) = ts_config {
 				if let Some(ephemeral_storage_dir_path) = config.ephemeral_storage_dir_path.as_ref()
 				{
-					let index_store = runtime
-						.block_on(setup_index_store(self.config.storage_dir_path.clone().into()))
-						.map_err(|e| {
-							log_error!(logger, "Failed to setup tier-store index: {}", e);
-							BuildError::KVStoreSetupFailed
-						})?;
 					let ephemeral_store = SqliteStore::new(
 						ephemeral_storage_dir_path.clone(),
 						Some(io::sqlite_store::SQLITE_EPHEMERAL_DB_FILE_NAME.to_string()),
@@ -1034,7 +1046,6 @@ impl NodeBuilder {
 						BuildError::KVStoreSetupFailed
 					})?;
 					let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(ephemeral_store));
-					tier_store.set_index_store(index_store);
 					tier_store.set_ephemeral_store(ephemeral_store);
 				}
 

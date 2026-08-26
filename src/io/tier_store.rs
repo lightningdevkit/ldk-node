@@ -46,6 +46,48 @@ const BACKUP_SYNC_PRIMARY_NAMESPACE: &str = "_tier_store_backup_sync";
 const BACKUP_SYNC_COMPLETED_GENERATION_KEY: &str = "completed_generation";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BackupSyncCompletion {
+	/// The primary generation whose durable values were copied.
+	primary_generation_id: [u8; GENERATION_ID_LEN],
+	/// The index database whose journal had been fully recovered before copying.
+	index_database_id: [u8; INDEX_DATABASE_ID_LEN],
+}
+
+impl BackupSyncCompletion {
+	/// Constructs the completion expected for the currently configured primary and index stores.
+	fn new(
+		primary_generation_id: [u8; GENERATION_ID_LEN],
+		index_database_id: [u8; INDEX_DATABASE_ID_LEN],
+	) -> Self {
+		Self { primary_generation_id, index_database_id }
+	}
+
+	/// Encodes both fixed-width identities into the value persisted in the backup store.
+	#[cfg(test)]
+	fn encode(self) -> Vec<u8> {
+		let mut encoded = Vec::with_capacity(GENERATION_ID_LEN + INDEX_DATABASE_ID_LEN);
+		encoded.extend_from_slice(&self.primary_generation_id);
+		encoded.extend_from_slice(&self.index_database_id);
+		encoded
+	}
+
+	/// Decodes and validates the completion value read from the backup store.
+	fn decode(encoded: Vec<u8>) -> io::Result<Self> {
+		if encoded.len() != GENERATION_ID_LEN + INDEX_DATABASE_ID_LEN {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidData,
+				"Invalid tier-store backup synchronization completion",
+			));
+		}
+		let mut primary_generation_id = [0; GENERATION_ID_LEN];
+		primary_generation_id.copy_from_slice(&encoded[..GENERATION_ID_LEN]);
+		let mut index_database_id = [0; INDEX_DATABASE_ID_LEN];
+		index_database_id.copy_from_slice(&encoded[GENERATION_ID_LEN..]);
+		Ok(Self { primary_generation_id, index_database_id })
+	}
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum BackupSyncStatus {
 	NotConfigured,
 	Synchronized,
@@ -70,6 +112,11 @@ enum JournalOperation {
 		/// or local value-store write completed before interruption.
 		value: Vec<u8>,
 	},
+	Update {
+		/// The complete intended value, retained locally so an interrupted dual-store update can be
+		/// retried against the configured stores or completed against primary-only storage.
+		value: Vec<u8>,
+	},
 	Remove {
 		lazy: bool,
 	},
@@ -81,6 +128,9 @@ impl_writeable_tlv_based_enum!(JournalOperation,
 	},
 	(2, Remove) => {
 		(0, lazy, required),
+	},
+	(4, Update) => {
+		(0, value, required),
 	},
 );
 
@@ -202,6 +252,11 @@ impl TierStoreIndex {
 		store: Arc<DynStore>, database_id: [u8; INDEX_DATABASE_ID_LEN],
 	) -> Self {
 		Self { store, database_id }
+	}
+
+	/// Returns the persistent identity of this index database.
+	fn database_id(&self) -> [u8; INDEX_DATABASE_ID_LEN] {
+		self.database_id
 	}
 
 	/// Derives the internal secondary namespace for a logical namespace pair.
@@ -624,15 +679,17 @@ impl TierStore {
 	/// writes a new generation so any backup completed against the earlier generation will be
 	/// recognized as stale if it returns. If no generation exists, no backup has yet been tracked and
 	/// no metadata is created. If a backup is configured, it reads or creates the primary generation
-	/// and compares it with the backup's completion record without modifying the completion record.
+	/// and compares it and the current index database identity with the backup's completion record
+	/// without modifying that record.
 	///
 	/// Returns [`BackupSyncStatus::NotConfigured`] when no backup is present, whether or not an
-	/// existing primary generation was rotated, [`BackupSyncStatus::Synchronized`] when both records match, or
-	/// [`BackupSyncStatus::Required`] when the backup has no completion record or records another
-	/// generation. A `Required` result only classifies the backup; it does not perform synchronization.
+	/// existing primary generation was rotated, [`BackupSyncStatus::Synchronized`] when the completion
+	/// matches both identities, or [`BackupSyncStatus::Required`] when the backup has no completion
+	/// record or records another generation or index. A `Required` result only classifies the backup;
+	/// it does not perform synchronization.
 	///
-	/// Returns an error if generation metadata cannot be read, generated, or persisted, or if a
-	/// stored generation has an invalid length.
+	/// Returns an error if a configured backup has no index, synchronization metadata cannot be read,
+	/// generated, or persisted, or stored metadata has an invalid length.
 	pub(crate) async fn initialize_backup_synchronization(&self) -> io::Result<BackupSyncStatus> {
 		self.inner.initialize_backup_synchronization().await
 	}
@@ -743,6 +800,8 @@ struct TierStoreInner {
 	backup_store: Option<Arc<DynStore>>,
 	/// The local store used to index the logical contents across tiers.
 	index: Option<TierStoreIndex>,
+	/// The result of durable backup-synchronization initialization for this run.
+	backup_sync_status: Mutex<Option<BackupSyncStatus>>,
 	/// Per-namespace locks for serializing first-use index initialization.
 	index_initialization_locks: Mutex<HashMap<String, Arc<TokioMutex<()>>>>,
 	/// Per-key locks for serializing primary+backup operations and skipping stale writes.
@@ -759,6 +818,7 @@ impl TierStoreInner {
 			ephemeral_store: None,
 			backup_store: None,
 			index: None,
+			backup_sync_status: Mutex::new(None),
 			index_initialization_locks: Mutex::new(HashMap::new()),
 			locks: Mutex::new(HashMap::new()),
 			next_write_version: AtomicU64::new(1),
@@ -766,16 +826,16 @@ impl TierStoreInner {
 		}
 	}
 
-	/// Rotates or compares the stores' backup-synchronization generations.
+	/// Rotates the primary generation or compares the backup's synchronization completion.
 	///
 	/// Without a configured backup, this rotates an existing primary generation so primary-only
 	/// operation invalidates any earlier backup completion. It leaves primary metadata absent when no
-	/// backup has ever established a generation. With a configured backup, this preserves the primary
-	/// generation (creating it if absent) and compares it with the completion generation stored in the
-	/// backup. A missing or different backup completion is classified as requiring synchronization;
-	/// this method does not perform that synchronization.
+	/// backup has ever established a generation. With a configured backup, this compares the stored
+	/// completion with both the primary generation and the current index database identity. A missing
+	/// or different backup completion is classified as requiring synchronization; this method does not
+	/// perform that synchronization.
 	async fn initialize_backup_synchronization(&self) -> io::Result<BackupSyncStatus> {
-		if self.backup_store.is_none() {
+		let status = if self.backup_store.is_none() {
 			match Self::read_generation_id(self.primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
 				.await
 			{
@@ -786,18 +846,20 @@ impl TierStoreInner {
 				Err(e) if e.kind() == io::ErrorKind::NotFound => {},
 				Err(e) => return Err(e),
 			}
-			return Ok(BackupSyncStatus::NotConfigured);
-		}
-
-		let primary_generation_id = self.read_or_create_primary_sync_generation_id().await?;
-		match self.read_backup_completed_generation_id().await {
-			Ok(completed_generation_id) if completed_generation_id == primary_generation_id => {
-				Ok(BackupSyncStatus::Synchronized)
-			},
-			Ok(_) => Ok(BackupSyncStatus::Required),
-			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(BackupSyncStatus::Required),
-			Err(e) => Err(e),
-		}
+			BackupSyncStatus::NotConfigured
+		} else {
+			let expected_completion = self.current_backup_sync_completion().await?;
+			match self.read_backup_sync_completion().await {
+				Ok(completion) if completion == expected_completion => {
+					BackupSyncStatus::Synchronized
+				},
+				Ok(_) => BackupSyncStatus::Required,
+				Err(e) if e.kind() == io::ErrorKind::NotFound => BackupSyncStatus::Required,
+				Err(e) => return Err(e),
+			}
+		};
+		*self.backup_sync_status.lock().expect("lock") = Some(status);
+		Ok(status)
 	}
 
 	/// Generates an opaque random identity for one synchronization generation.
@@ -816,8 +878,12 @@ impl TierStoreInner {
 	///
 	/// An existing generation is preserved so a matching backup completion remains valid across
 	/// restarts where the backup stays configured.
-	async fn read_or_create_primary_sync_generation_id(&self) -> io::Result<[u8; GENERATION_ID_LEN]> {
-		match Self::read_generation_id(self.primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY).await {
+	async fn read_or_create_primary_sync_generation_id(
+		&self,
+	) -> io::Result<[u8; GENERATION_ID_LEN]> {
+		match Self::read_generation_id(self.primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
+			.await
+		{
 			Ok(generation_id) => Ok(generation_id),
 			Err(e) if e.kind() == io::ErrorKind::NotFound => {
 				let generation_id = Self::generate_primary_generation_id()?;
@@ -826,6 +892,22 @@ impl TierStoreInner {
 			},
 			Err(e) => Err(e),
 		}
+	}
+
+	/// Returns the completion record a synchronized backup must contain for the current stores.
+	async fn current_backup_sync_completion(&self) -> io::Result<BackupSyncCompletion> {
+		let index_database_id = self
+			.index
+			.as_ref()
+			.ok_or_else(|| {
+				io::Error::new(
+					io::ErrorKind::Other,
+					"TierStore index is required for backup synchronization",
+				)
+			})?
+			.database_id();
+		let primary_generation_id = self.read_or_create_primary_sync_generation_id().await?;
+		Ok(BackupSyncCompletion::new(primary_generation_id, index_database_id))
 	}
 
 	/// Persists the current synchronization generation directly in the authoritative primary store.
@@ -845,29 +927,32 @@ impl TierStoreInner {
 		.await
 	}
 
-	/// Reads the generation for which the configured backup last completed synchronization.
+	/// Reads the configured backup's synchronization completion record.
 	///
-	/// The completion record is proof that all durable primary data was copied and stale backup data
-	/// was removed for that generation. Its absence therefore means synchronization is required; it
-	/// must not be inferred from individual values already present in the backup.
+	/// The record identifies both the primary generation and index database for which all durable
+	/// primary data was copied and stale backup data was removed. Its absence therefore means
+	/// synchronization is required; it must not be inferred from individual backup values.
 	///
 	/// Returns [`io::ErrorKind::NotFound`] when no backup is configured or the configured backup has
 	/// no completion record. Other storage errors and malformed completion records are propagated so
 	/// callers cannot mistake an unreadable record for proof that the backup is current.
-	async fn read_backup_completed_generation_id(&self) -> io::Result<[u8; GENERATION_ID_LEN]> {
+	async fn read_backup_sync_completion(&self) -> io::Result<BackupSyncCompletion> {
 		let backup_store = self.backup_store.as_ref().ok_or_else(|| {
 			io::Error::new(io::ErrorKind::NotFound, "Backup store is not configured")
 		})?;
-		Self::read_generation_id(backup_store.as_ref(), BACKUP_SYNC_COMPLETED_GENERATION_KEY).await
+		let encoded = KVStore::read(
+			backup_store.as_ref(),
+			BACKUP_SYNC_PRIMARY_NAMESPACE,
+			"",
+			BACKUP_SYNC_COMPLETED_GENERATION_KEY,
+		)
+		.await?;
+		BackupSyncCompletion::decode(encoded)
 	}
 
-	/// Reads and validates a synchronization generation from the given store metadata key.
+	/// Reads and validates the primary store's synchronization generation.
 	///
-	/// Primary generations and backup completion generations use the same opaque, fixed-width value
-	/// representation but live under different keys. This helper centralizes the shared storage
-	/// location and length validation without assigning ordering semantics to the random bytes.
-	///
-	/// Returns [`io::ErrorKind::NotFound`] when the key is absent and
+	/// Returns [`io::ErrorKind::NotFound`] when the generation is absent and
 	/// [`io::ErrorKind::InvalidData`] when its value is not exactly
 	/// [`GENERATION_ID_LEN`] bytes. All other underlying storage errors are propagated.
 	async fn read_generation_id(
@@ -882,9 +967,16 @@ impl TierStoreInner {
 		})
 	}
 
+	/// Records that the configured backup matches the current primary generation and index database.
+	///
+	/// This must be written only after journal recovery, primary-value copying, and stale-value
+	/// removal have all succeeded. Writing it last ensures a failed synchronization leaves the
+	/// previous completion generation unchanged and will be retried on the next startup.
+	///
+	/// Returns an error when no backup is configured or the completion record cannot be persisted.
 	#[cfg(test)]
-	async fn write_backup_completed_generation_id(
-		&self, generation_id: [u8; GENERATION_ID_LEN],
+	async fn write_backup_sync_completion(
+		&self, completion: BackupSyncCompletion,
 	) -> io::Result<()> {
 		let backup_store = self.backup_store.as_ref().ok_or_else(|| {
 			io::Error::new(io::ErrorKind::NotFound, "Backup store is not configured")
@@ -894,7 +986,7 @@ impl TierStoreInner {
 			BACKUP_SYNC_PRIMARY_NAMESPACE,
 			"",
 			BACKUP_SYNC_COMPLETED_GENERATION_KEY,
-			generation_id.to_vec(),
+			completion.encode(),
 		)
 		.await
 	}
@@ -1161,28 +1253,40 @@ impl TierStoreInner {
 				.await;
 		};
 
-		if index.contains_entry(primary_namespace, secondary_namespace, key).await? {
-			return self
-				.write_value(tier, primary_namespace, secondary_namespace, key, value)
-				.await;
-		}
-		if self.value_exists(tier, primary_namespace, secondary_namespace, key).await? {
-			return Err(io::Error::new(
-				io::ErrorKind::InvalidData,
-				"Value exists without a tier-store index entry",
-			));
-		}
-
+		let requires_backup = tier == ValueTier::Primary && self.backup_store.is_some();
+		let operation = if index.contains_entry(primary_namespace, secondary_namespace, key).await?
+		{
+			if !requires_backup {
+				return self
+					.write_value(tier, primary_namespace, secondary_namespace, key, value)
+					.await;
+			}
+			JournalOperation::Update { value }
+		} else {
+			if self.value_exists(tier, primary_namespace, secondary_namespace, key).await? {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidData,
+					"Value exists without a tier-store index entry",
+				));
+			}
+			JournalOperation::Create { value }
+		};
 		let journal_entry = JournalEntry {
 			primary_namespace: primary_namespace.to_string(),
 			secondary_namespace: secondary_namespace.to_string(),
 			key: key.to_string(),
 			tier,
-			requires_backup: tier == ValueTier::Primary && self.backup_store.is_some(),
-			operation: JournalOperation::Create { value },
+			requires_backup,
+			operation,
 		};
 		index.write_journal_entry(&journal_entry).await?;
-		self.apply_pending_create(&journal_entry).await?;
+		match &journal_entry.operation {
+			JournalOperation::Create { .. } => self.apply_pending_create(&journal_entry).await?,
+			JournalOperation::Update { .. } => self.apply_pending_update(&journal_entry).await?,
+			JournalOperation::Remove { .. } => {
+				unreachable!("write created a removal journal entry")
+			},
+		}
 		index.remove_journal_entry(primary_namespace, secondary_namespace, key).await
 	}
 
@@ -1325,12 +1429,7 @@ impl TierStoreInner {
 		let JournalOperation::Create { value } = &entry.operation else {
 			return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected pending create"));
 		};
-		if entry.requires_backup && self.backup_store.is_none() {
-			return Err(io::Error::new(
-				io::ErrorKind::NotFound,
-				"Required backup store is unavailable",
-			));
-		}
+		self.prepare_pending_backup_recovery(entry).await?;
 		self.write_value(
 			entry.tier,
 			&entry.primary_namespace,
@@ -1346,17 +1445,28 @@ impl TierStoreInner {
 			.await
 	}
 
+	/// Completes a journaled update without changing the key's existing index membership or order.
+	async fn apply_pending_update(&self, entry: &JournalEntry) -> io::Result<()> {
+		let JournalOperation::Update { value } = &entry.operation else {
+			return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected pending update"));
+		};
+		self.prepare_pending_backup_recovery(entry).await?;
+		self.write_value(
+			entry.tier,
+			&entry.primary_namespace,
+			&entry.secondary_namespace,
+			&entry.key,
+			value.clone(),
+		)
+		.await
+	}
+
 	/// Completes a journaled removal, hiding the key before deleting its value copies.
 	async fn apply_pending_remove(&self, entry: &JournalEntry) -> io::Result<()> {
 		let JournalOperation::Remove { lazy } = &entry.operation else {
 			return Err(io::Error::new(io::ErrorKind::InvalidData, "Expected pending removal"));
 		};
-		if entry.requires_backup && self.backup_store.is_none() {
-			return Err(io::Error::new(
-				io::ErrorKind::NotFound,
-				"Required backup store is unavailable",
-			));
-		}
+		self.prepare_pending_backup_recovery(entry).await?;
 		self.index
 			.as_ref()
 			.expect("pending operations require an index")
@@ -1370,6 +1480,25 @@ impl TierStoreInner {
 			*lazy,
 		)
 		.await
+	}
+
+	/// Confirms that primary-only recovery has durably invalidated the absent backup.
+	///
+	/// Operations journaled with `requires_backup` normally finish against both durable stores. If
+	/// this run intentionally omitted the backup, initialization must first rotate the primary
+	/// generation. Reading or creating that generation here confirms the invalidation is durable
+	/// before recovery changes primary state; future resilvering then repairs the absent backup.
+	async fn prepare_pending_backup_recovery(&self, entry: &JournalEntry) -> io::Result<()> {
+		if !entry.requires_backup || self.backup_store.is_some() {
+			return Ok(());
+		}
+		if *self.backup_sync_status.lock().expect("lock") != Some(BackupSyncStatus::NotConfigured) {
+			return Err(io::Error::new(
+				io::ErrorKind::NotFound,
+				"Required backup store is unavailable and backup synchronization is not initialized",
+			));
+		}
+		self.read_or_create_primary_sync_generation_id().await.map(|_| ())
 	}
 
 	async fn list_internal(
@@ -1570,7 +1699,7 @@ impl TierStoreInner {
 		self.reconcile_ephemeral_cache_key_locked(primary_namespace, secondary_namespace, key).await
 	}
 
-	/// Completes journaled creates and removals before exposing a namespace.
+	/// Completes journaled creates, updates, and removals before exposing a namespace.
 	async fn recover_namespace(
 		&self, primary_namespace: &str, secondary_namespace: &str,
 	) -> io::Result<()> {
@@ -1606,6 +1735,7 @@ impl TierStoreInner {
 			};
 		match &entry.operation {
 			JournalOperation::Create { .. } => self.apply_pending_create(&entry).await?,
+			JournalOperation::Update { .. } => self.apply_pending_update(&entry).await?,
 			JournalOperation::Remove { .. } => self.apply_pending_remove(&entry).await?,
 		}
 		index.remove_journal_entry(primary_namespace, secondary_namespace, key).await
@@ -1792,6 +1922,17 @@ mod tests {
 		tier.set_index_store(TierStoreIndex::from_store(store));
 	}
 
+	#[test]
+	fn backup_sync_completion_roundtrips_and_rejects_invalid_length() {
+		let completion =
+			BackupSyncCompletion::new([2; GENERATION_ID_LEN], [3; INDEX_DATABASE_ID_LEN]);
+		assert_eq!(BackupSyncCompletion::decode(completion.encode()).unwrap(), completion);
+		assert_eq!(
+			BackupSyncCompletion::decode(vec![0; GENERATION_ID_LEN]).unwrap_err().kind(),
+			io::ErrorKind::InvalidData
+		);
+	}
+
 	#[tokio::test]
 	async fn backup_sync_metadata_remains_absent_when_a_backup_has_never_been_configured() {
 		let (_base_dir, logger, _cleanup) = setup_test_environment();
@@ -1823,6 +1964,7 @@ mod tests {
 
 		let mut tier = setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger));
 		tier.set_backup_store(backup_store);
+		set_test_index_store(&mut tier);
 		assert_eq!(
 			tier.initialize_backup_synchronization().await.unwrap(),
 			BackupSyncStatus::Required
@@ -1854,27 +1996,27 @@ mod tests {
 
 		let mut tier = setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger));
 		tier.set_backup_store(Arc::clone(&backup_store));
+		set_test_index_store(&mut tier);
 		assert_eq!(
 			tier.initialize_backup_synchronization().await.unwrap(),
 			BackupSyncStatus::Required
 		);
-		let generation_id =
-			TierStoreInner::read_generation_id(primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
-				.await
-				.unwrap();
+		let expected_completion = tier.inner.current_backup_sync_completion().await.unwrap();
 
-		let mut stale_generation_id = generation_id;
-		stale_generation_id[0] ^= 1;
-		tier.inner.write_backup_completed_generation_id(stale_generation_id).await.unwrap();
+		let mut stale_completion = tier.inner.current_backup_sync_completion().await.unwrap();
+		stale_completion.primary_generation_id[0] ^= 1;
+		tier.inner.write_backup_sync_completion(stale_completion).await.unwrap();
 		assert_eq!(
 			tier.initialize_backup_synchronization().await.unwrap(),
 			BackupSyncStatus::Required
 		);
 
-		tier.inner.write_backup_completed_generation_id(generation_id).await.unwrap();
+		let completion = tier.inner.current_backup_sync_completion().await.unwrap();
+		tier.inner.write_backup_sync_completion(completion).await.unwrap();
 		drop(tier);
 		let mut restarted_tier = setup_tier_store(Arc::clone(&primary_store), logger);
 		restarted_tier.set_backup_store(backup_store);
+		set_test_index_store(&mut restarted_tier);
 		assert_eq!(
 			restarted_tier.initialize_backup_synchronization().await.unwrap(),
 			BackupSyncStatus::Synchronized
@@ -1883,7 +2025,43 @@ mod tests {
 			TierStoreInner::read_generation_id(primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
 				.await
 				.unwrap(),
-			generation_id
+			expected_completion.primary_generation_id
+		);
+	}
+
+	#[tokio::test]
+	async fn replacing_the_index_requires_backup_synchronization() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger));
+		tier.set_backup_store(Arc::clone(&backup_store));
+		let first_index_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		tier.set_index_store(TierStoreIndex::from_store_with_database_id(
+			first_index_store,
+			[1; INDEX_DATABASE_ID_LEN],
+		));
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+		let completion = tier.inner.current_backup_sync_completion().await.unwrap();
+		tier.inner.write_backup_sync_completion(completion).await.unwrap();
+		drop(tier);
+
+		let mut restarted_tier = setup_tier_store(primary_store, logger);
+		restarted_tier.set_backup_store(backup_store);
+		let replacement_index_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		restarted_tier.set_index_store(TierStoreIndex::from_store_with_database_id(
+			replacement_index_store,
+			[2; INDEX_DATABASE_ID_LEN],
+		));
+
+		assert_eq!(
+			restarted_tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
 		);
 	}
 
@@ -1891,6 +2069,7 @@ mod tests {
 	fn journal_entry_roundtrips() {
 		for operation in [
 			JournalOperation::Create { value: vec![0, 1, 2, 255] },
+			JournalOperation::Update { value: vec![255, 2, 1, 0] },
 			JournalOperation::Remove { lazy: true },
 		] {
 			let entry = JournalEntry {
@@ -2611,6 +2790,116 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn pending_backup_operations_roll_forward_without_the_backup_after_restart() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let index_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		for store in [&primary_store, &backup_store] {
+			store.write("namespace", "", "update", vec![1]).await.unwrap();
+			store.write("namespace", "", "remove", vec![2]).await.unwrap();
+		}
+
+		let mut configured_tier = setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger));
+		configured_tier.set_backup_store(Arc::clone(&backup_store));
+		configured_tier.set_index_store(TierStoreIndex::from_store(Arc::clone(&index_store)));
+		assert_eq!(
+			configured_tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+		configured_tier.inner.ensure_namespace_indexed("namespace", "").await.unwrap();
+		let completion = configured_tier.inner.current_backup_sync_completion().await.unwrap();
+		configured_tier.inner.write_backup_sync_completion(completion).await.unwrap();
+		let entries = [
+			("create", JournalOperation::Create { value: vec![3] }),
+			("update", JournalOperation::Update { value: vec![4] }),
+			("remove", JournalOperation::Remove { lazy: false }),
+		];
+		for (key, operation) in entries {
+			configured_tier
+				.inner
+				.index
+				.as_ref()
+				.unwrap()
+				.write_journal_entry(&JournalEntry {
+					primary_namespace: "namespace".to_string(),
+					secondary_namespace: String::new(),
+					key: key.to_string(),
+					tier: ValueTier::Primary,
+					requires_backup: true,
+					operation,
+				})
+				.await
+				.unwrap();
+		}
+		drop(configured_tier);
+
+		let mut primary_only_tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		primary_only_tier.set_index_store(TierStoreIndex::from_store(index_store));
+		assert_eq!(
+			primary_only_tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::NotConfigured
+		);
+		let keys = KVStore::list(&primary_only_tier, "namespace", "").await.unwrap();
+
+		assert!(keys.contains(&"create".to_string()));
+		assert!(keys.contains(&"update".to_string()));
+		assert!(!keys.contains(&"remove".to_string()));
+		assert_eq!(primary_store.read("namespace", "", "create").await.unwrap(), vec![3]);
+		assert_eq!(primary_store.read("namespace", "", "update").await.unwrap(), vec![4]);
+		assert!(primary_store.read("namespace", "", "remove").await.is_err());
+		assert!(backup_store.read("namespace", "", "create").await.is_err());
+		assert_eq!(backup_store.read("namespace", "", "update").await.unwrap(), vec![1]);
+		assert_eq!(backup_store.read("namespace", "", "remove").await.unwrap(), vec![2]);
+		let index = primary_only_tier.inner.index.as_ref().unwrap();
+		for key in ["create", "update", "remove"] {
+			assert!(index.read_journal_entry("namespace", "", key).await.is_err());
+		}
+		let rotated_generation_id =
+			TierStoreInner::read_generation_id(primary_store.as_ref(), PRIMARY_SYNC_GENERATION_KEY)
+				.await
+				.unwrap();
+		assert_ne!(rotated_generation_id, completion.primary_generation_id);
+		let encoded_completion = backup_store
+			.read(BACKUP_SYNC_PRIMARY_NAMESPACE, "", BACKUP_SYNC_COMPLETED_GENERATION_KEY)
+			.await
+			.unwrap();
+		assert_eq!(BackupSyncCompletion::decode(encoded_completion).unwrap(), completion);
+	}
+
+	#[tokio::test]
+	async fn pending_backup_recovery_requires_synchronization_initialization() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		primary_store.write("namespace", "", "key", vec![1]).await.unwrap();
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		set_test_index_store(&mut tier);
+		tier.inner.ensure_namespace_indexed("namespace", "").await.unwrap();
+		let pending = JournalEntry {
+			primary_namespace: "namespace".to_string(),
+			secondary_namespace: String::new(),
+			key: "key".to_string(),
+			tier: ValueTier::Primary,
+			requires_backup: true,
+			operation: JournalOperation::Update { value: vec![2] },
+		};
+		let index = tier.inner.index.as_ref().unwrap();
+		index.write_journal_entry(&pending).await.unwrap();
+		assert_eq!(*tier.inner.backup_sync_status.lock().unwrap(), None);
+
+		let error = tier.read("namespace", "", "key").await.unwrap_err();
+
+		assert_eq!(error.kind(), io::ErrorKind::NotFound);
+		assert_eq!(primary_store.read("namespace", "", "key").await.unwrap(), vec![1]);
+		assert!(matches!(
+			index.read_journal_entry("namespace", "", "key").await.unwrap().operation,
+			JournalOperation::Update { value } if value == vec![2]
+		));
+	}
+
+	#[tokio::test]
 	async fn read_recovers_only_the_requested_key() {
 		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
@@ -2796,6 +3085,32 @@ mod tests {
 		assert!(matches!(
 			index.read_journal_entry("namespace", "", "key").await.unwrap().operation,
 			JournalOperation::Create { .. }
+		));
+		assert_eq!(attempts.load(Ordering::Relaxed), 1);
+	}
+
+	#[tokio::test]
+	async fn failed_update_retains_journal_without_changing_index_membership() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		set_test_index_store(&mut tier);
+		tier.write("namespace", "", "key", vec![1]).await.unwrap();
+		let attempts = Arc::new(AtomicUsize::new(0));
+		let backup_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(InstrumentedStore::new(StoreBehavior::FailWrite {
+				attempts: Arc::clone(&attempts),
+			})));
+		tier.set_backup_store(backup_store);
+
+		assert!(tier.write("namespace", "", "key", vec![2]).await.is_err());
+		let index = tier.inner.index.as_ref().unwrap();
+		assert_eq!(primary_store.read("namespace", "", "key").await.unwrap(), vec![2]);
+		assert!(index.contains_entry("namespace", "", "key").await.unwrap());
+		assert!(matches!(
+			index.read_journal_entry("namespace", "", "key").await.unwrap().operation,
+			JournalOperation::Update { value } if value == vec![2]
 		));
 		assert_eq!(attempts.load(Ordering::Relaxed), 1);
 	}
