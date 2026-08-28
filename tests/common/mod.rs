@@ -60,6 +60,8 @@ use ldk_node::{
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
+#[cfg(feature = "storage-tier")]
+use lightning::util::persist::MigratableKVStore;
 use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_persister::fs_store::v2::FilesystemStoreV2;
@@ -1950,6 +1952,19 @@ impl PaginatedKVStore for TestSyncStore {
 			inner
 				.list_paginated_internal_async(&primary_namespace, &secondary_namespace, page_token)
 				.await
+		}
+	}
+}
+
+#[cfg(feature = "storage-tier")]
+impl MigratableKVStore for TestSyncStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		async move {
+			let _guard = inner.serializer.read().await;
+			MigratableKVStore::list_all_keys(&inner.test_store).await
 		}
 	}
 }
