@@ -51,6 +51,8 @@ use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+#[cfg(feature = "storage-tier")]
+use lightning::util::persist::MigratableKVStore;
 use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -143,6 +145,16 @@ impl PaginatedKVStore for ContendedStore {
 			secondary_namespace,
 			page_token,
 		)
+	}
+}
+
+#[cfg(feature = "storage-tier")]
+impl MigratableKVStore for ContendedStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, lightning::io::Error>> + 'static + Send
+	{
+		MigratableKVStore::list_all_keys(&*self.inner)
 	}
 }
 
@@ -298,6 +310,16 @@ impl PaginatedKVStore for WalletPersistGatedStore {
 			secondary_namespace,
 			page_token,
 		)
+	}
+}
+
+#[cfg(feature = "storage-tier")]
+impl MigratableKVStore for WalletPersistGatedStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, lightning::io::Error>> + 'static + Send
+	{
+		MigratableKVStore::list_all_keys(&*self.inner)
 	}
 }
 

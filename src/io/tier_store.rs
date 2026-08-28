@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,9 +14,9 @@ use std::sync::{Arc, Mutex};
 use bitcoin::hashes::{sha256, Hash, HashEngine};
 use bitcoin::hex::{DisplayHex, FromHex};
 use lightning::util::persist::{
-	KVStore, PageToken, PaginatedKVStore, PaginatedListResponse, NETWORK_GRAPH_PERSISTENCE_KEY,
-	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, SCORER_PERSISTENCE_KEY,
-	SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
+	KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+	NETWORK_GRAPH_PERSISTENCE_KEY, NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+	SCORER_PERSISTENCE_KEY, SCORER_PERSISTENCE_PRIMARY_NAMESPACE,
 };
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum, io, log_error};
@@ -63,7 +63,6 @@ impl BackupSyncCompletion {
 	}
 
 	/// Encodes both fixed-width identities into the value persisted in the backup store.
-	#[cfg(test)]
 	fn encode(self) -> Vec<u8> {
 		let mut encoded = Vec::with_capacity(GENERATION_ID_LEN + INDEX_DATABASE_ID_LEN);
 		encoded.extend_from_slice(&self.primary_generation_id);
@@ -548,6 +547,33 @@ impl TierStoreIndex {
 		Ok(keys)
 	}
 
+	/// Returns every pending operation stored in the index, validating its encoded location.
+	async fn list_all_journal_entries(&self) -> io::Result<Vec<JournalEntry>> {
+		let mut entries = Vec::new();
+		for (primary_namespace, secondary_namespace, key) in
+			MigratableKVStore::list_all_keys(self.store.as_ref()).await?
+		{
+			if primary_namespace != INDEX_JOURNAL_PRIMARY_NAMESPACE {
+				continue;
+			}
+			let encoded =
+				KVStore::read(self.store.as_ref(), &primary_namespace, &secondary_namespace, &key)
+					.await?;
+			let entry = JournalEntry::deserialize(&encoded)?;
+			if TierStoreIndex::namespace_id(&entry.primary_namespace, &entry.secondary_namespace)
+				!= secondary_namespace
+				|| entry.key != key
+			{
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidData,
+					"Journal entry identity does not match its location",
+				));
+			}
+			entries.push(entry);
+		}
+		Ok(entries)
+	}
+
 	/// Clears a pending operation after all of its intended effects are durable.
 	async fn remove_journal_entry(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
@@ -693,6 +719,21 @@ impl TierStore {
 	pub(crate) async fn initialize_backup_synchronization(&self) -> io::Result<BackupSyncStatus> {
 		self.inner.initialize_backup_synchronization().await
 	}
+
+	/// Makes a configured backup match the primary store before normal node operation begins.
+	///
+	/// Pending journal entries are recovered first. Current primary values are then copied, stale
+	/// backup values are removed, and the backup's completion generation is updated last. The old
+	/// completion generation remains unchanged if any earlier step fails.
+	pub(crate) async fn synchronize_backup(&mut self) -> io::Result<()> {
+		let inner = Arc::get_mut(&mut self.inner).ok_or_else(|| {
+			io::Error::new(
+				io::ErrorKind::Other,
+				"TierStore must be exclusively owned during backup synchronization",
+			)
+		})?;
+		inner.synchronize_backup().await
+	}
 }
 
 pub(crate) async fn setup_index_store(data_dir: PathBuf) -> io::Result<TierStoreIndex> {
@@ -788,6 +829,15 @@ impl PaginatedKVStore for TierStore {
 		async move {
 			inner.list_paginated_internal(primary_namespace, secondary_namespace, page_token).await
 		}
+	}
+}
+
+impl MigratableKVStore for TierStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		async move { inner.list_all_keys_internal().await }
 	}
 }
 
@@ -974,7 +1024,6 @@ impl TierStoreInner {
 	/// previous completion generation unchanged and will be retried on the next startup.
 	///
 	/// Returns an error when no backup is configured or the completion record cannot be persisted.
-	#[cfg(test)]
 	async fn write_backup_sync_completion(
 		&self, completion: BackupSyncCompletion,
 	) -> io::Result<()> {
@@ -989,6 +1038,81 @@ impl TierStoreInner {
 			completion.encode(),
 		)
 		.await
+	}
+
+	/// Copies all durable primary data into a stale backup and removes backup-only data.
+	async fn synchronize_backup(&self) -> io::Result<()> {
+		match *self.backup_sync_status.lock().expect("lock") {
+			Some(BackupSyncStatus::Synchronized) => return Ok(()),
+			Some(BackupSyncStatus::Required) => {},
+			Some(BackupSyncStatus::NotConfigured) | None => {
+				return Err(io::Error::new(
+					io::ErrorKind::Other,
+					"Backup synchronization is not required or has not been initialized",
+				));
+			},
+		}
+		let backup_store = self.backup_store.as_ref().ok_or_else(|| {
+			io::Error::new(io::ErrorKind::NotFound, "Backup store is not configured")
+		})?;
+		self.recover_all_journal_entries().await?;
+		let completion = self.current_backup_sync_completion().await?;
+		let primary_keys: HashSet<_> =
+			MigratableKVStore::list_all_keys(self.primary_store.as_ref())
+				.await?
+				.into_iter()
+				.filter(|(primary_namespace, _, _)| {
+					primary_namespace != BACKUP_SYNC_PRIMARY_NAMESPACE
+				})
+				.filter(|(primary_namespace, secondary_namespace, key)| {
+					self.ephemeral_store.is_none()
+						|| !is_ephemeral_cached_key(primary_namespace, secondary_namespace, key)
+				})
+				.collect();
+
+		for (primary_namespace, secondary_namespace, key) in &primary_keys {
+			let value = KVStore::read(
+				self.primary_store.as_ref(),
+				primary_namespace,
+				secondary_namespace,
+				key,
+			)
+			.await?;
+			KVStore::write(
+				backup_store.as_ref(),
+				primary_namespace,
+				secondary_namespace,
+				key,
+				value,
+			)
+			.await?;
+		}
+
+		for (primary_namespace, secondary_namespace, key) in
+			MigratableKVStore::list_all_keys(backup_store.as_ref()).await?
+		{
+			if primary_namespace == BACKUP_SYNC_PRIMARY_NAMESPACE {
+				continue;
+			}
+			if !primary_keys.contains(&(
+				primary_namespace.clone(),
+				secondary_namespace.clone(),
+				key.clone(),
+			)) {
+				KVStore::remove(
+					backup_store.as_ref(),
+					&primary_namespace,
+					&secondary_namespace,
+					&key,
+					false,
+				)
+				.await?;
+			}
+		}
+
+		self.write_backup_sync_completion(completion).await?;
+		*self.backup_sync_status.lock().expect("lock") = Some(BackupSyncStatus::Synchronized);
+		Ok(())
 	}
 
 	fn get_new_version_and_lock_ref(&self, locking_key: String) -> (Arc<TokioMutex<u64>>, u64) {
@@ -1519,6 +1643,25 @@ impl TierStoreInner {
 		self.list_value_stores(&primary_namespace, &secondary_namespace).await
 	}
 
+	/// Returns every logical TierStore key for data migration.
+	async fn list_all_keys_internal(&self) -> io::Result<Vec<(String, String, String)>> {
+		self.recover_all_journal_entries().await?;
+		let mut keys: HashSet<_> = MigratableKVStore::list_all_keys(self.primary_store.as_ref())
+			.await?
+			.into_iter()
+			.filter(|(primary_namespace, _, _)| primary_namespace != BACKUP_SYNC_PRIMARY_NAMESPACE)
+			.collect();
+
+		if let Some(ephemeral_store) = self.ephemeral_store.as_ref() {
+			for key in MigratableKVStore::list_all_keys(ephemeral_store.as_ref()).await? {
+				if is_ephemeral_cached_key(&key.0, &key.1, &key.2) {
+					keys.insert(key);
+				}
+			}
+		}
+		Ok(keys.into_iter().collect())
+	}
+
 	/// Imports a namespace's existing primary-store keys and makes its index authoritative.
 	///
 	/// Primary pagination returns keys from newest to oldest, so the complete result is reversed
@@ -1712,6 +1855,34 @@ impl TierStoreInner {
 			let result: io::Result<()> = async {
 				let _guard = lock_ref.lock().await;
 				self.recover_key_locked(primary_namespace, secondary_namespace, &key).await
+			}
+			.await;
+			self.clean_locks(&lock_ref, locking_key);
+			result?;
+		}
+		Ok(())
+	}
+
+	/// Recovers every journal entry before taking a complete migration snapshot.
+	async fn recover_all_journal_entries(&self) -> io::Result<()> {
+		let Some(index) = self.index.as_ref() else {
+			return Ok(());
+		};
+		for entry in index.list_all_journal_entries().await? {
+			let locking_key = self.build_locking_key(
+				&entry.primary_namespace,
+				&entry.secondary_namespace,
+				&entry.key,
+			);
+			let lock_ref = self.get_lock_ref(locking_key.clone());
+			let result: io::Result<()> = async {
+				let _guard = lock_ref.lock().await;
+				self.recover_key_locked(
+					&entry.primary_namespace,
+					&entry.secondary_namespace,
+					&entry.key,
+				)
+				.await
 			}
 			.await;
 			self.clean_locks(&lock_ref, locking_key);
@@ -1922,6 +2093,20 @@ mod tests {
 		tier.set_index_store(TierStoreIndex::from_store(store));
 	}
 
+	fn test_backup_sync_completion(
+		primary_generation_id: [u8; GENERATION_ID_LEN],
+	) -> BackupSyncCompletion {
+		BackupSyncCompletion::new(primary_generation_id, [1; INDEX_DATABASE_ID_LEN])
+	}
+
+	async fn read_test_backup_sync_completion(store: &DynStore) -> BackupSyncCompletion {
+		let encoded = store
+			.read(BACKUP_SYNC_PRIMARY_NAMESPACE, "", BACKUP_SYNC_COMPLETED_GENERATION_KEY)
+			.await
+			.unwrap();
+		BackupSyncCompletion::decode(encoded).unwrap()
+	}
+
 	#[test]
 	fn backup_sync_completion_roundtrips_and_rejects_invalid_length() {
 		let completion =
@@ -2062,6 +2247,331 @@ mod tests {
 		assert_eq!(
 			restarted_tier.initialize_backup_synchronization().await.unwrap(),
 			BackupSyncStatus::Required
+		);
+	}
+
+	#[tokio::test]
+	async fn backup_synchronization_copies_current_data_removes_stale_data_and_recovers_journal() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		primary_store.write("namespace", "", "current", vec![2]).await.unwrap();
+		primary_store.write("namespace", "", "new", vec![3]).await.unwrap();
+		backup_store.write("namespace", "", "current", vec![1]).await.unwrap();
+		backup_store.write("namespace", "", "stale", vec![4]).await.unwrap();
+		backup_store
+			.write(BACKUP_SYNC_PRIMARY_NAMESPACE, "", "other_metadata", vec![6])
+			.await
+			.unwrap();
+
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		tier.set_backup_store(Arc::clone(&backup_store));
+		set_test_index_store(&mut tier);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+		let expected_completion = tier.inner.current_backup_sync_completion().await.unwrap();
+		let pending = JournalEntry {
+			primary_namespace: "namespace".to_string(),
+			secondary_namespace: String::new(),
+			key: "pending".to_string(),
+			tier: ValueTier::Primary,
+			requires_backup: true,
+			operation: JournalOperation::Create { value: vec![5] },
+		};
+		tier.inner.index.as_ref().unwrap().write_journal_entry(&pending).await.unwrap();
+
+		tier.synchronize_backup().await.unwrap();
+
+		assert_eq!(backup_store.read("namespace", "", "current").await.unwrap(), vec![2]);
+		assert_eq!(backup_store.read("namespace", "", "new").await.unwrap(), vec![3]);
+		assert_eq!(backup_store.read("namespace", "", "pending").await.unwrap(), vec![5]);
+		assert!(backup_store.read("namespace", "", "stale").await.is_err());
+		assert_eq!(
+			backup_store.read(BACKUP_SYNC_PRIMARY_NAMESPACE, "", "other_metadata").await.unwrap(),
+			vec![6]
+		);
+		assert!(tier
+			.inner
+			.index
+			.as_ref()
+			.unwrap()
+			.read_journal_entry("namespace", "", "pending")
+			.await
+			.is_err());
+		assert_eq!(
+			read_test_backup_sync_completion(backup_store.as_ref()).await,
+			expected_completion
+		);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Synchronized
+		);
+	}
+
+	#[tokio::test]
+	async fn backup_synchronization_excludes_ephemeral_cache_values() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		for store in [&primary_store, &backup_store] {
+			store
+				.write(
+					NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+					NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+					NETWORK_GRAPH_PERSISTENCE_KEY,
+					vec![1],
+				)
+				.await
+				.unwrap();
+		}
+
+		let mut tier = setup_tier_store(primary_store, logger);
+		tier.set_backup_store(Arc::clone(&backup_store));
+		tier.set_ephemeral_store(ephemeral_store);
+		set_test_index_store(&mut tier);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+
+		tier.synchronize_backup().await.unwrap();
+
+		assert!(backup_store
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err());
+	}
+
+	#[tokio::test]
+	async fn failed_stale_cleanup_preserves_backup_completion_generation() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let remove_attempts = Arc::new(AtomicUsize::new(0));
+		let backup_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(InstrumentedStore::new(StoreBehavior::FailRemoveOnce {
+				attempts: Arc::clone(&remove_attempts),
+			})));
+		primary_store.write("namespace", "", "current", vec![2]).await.unwrap();
+		backup_store.write("namespace", "", "stale", vec![1]).await.unwrap();
+		let old_completion = test_backup_sync_completion([7; GENERATION_ID_LEN]);
+		backup_store
+			.write(
+				BACKUP_SYNC_PRIMARY_NAMESPACE,
+				"",
+				BACKUP_SYNC_COMPLETED_GENERATION_KEY,
+				old_completion.encode(),
+			)
+			.await
+			.unwrap();
+
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		tier.set_backup_store(Arc::clone(&backup_store));
+		set_test_index_store(&mut tier);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+		let expected_completion = tier.inner.current_backup_sync_completion().await.unwrap();
+
+		assert!(tier.synchronize_backup().await.is_err());
+
+		assert_eq!(read_test_backup_sync_completion(backup_store.as_ref()).await, old_completion);
+		assert_eq!(remove_attempts.load(Ordering::Relaxed), 1);
+
+		tier.synchronize_backup().await.unwrap();
+
+		assert!(backup_store.read("namespace", "", "stale").await.is_err());
+		assert_eq!(
+			read_test_backup_sync_completion(backup_store.as_ref()).await,
+			expected_completion
+		);
+	}
+
+	#[tokio::test]
+	async fn failed_journal_recovery_preserves_backup_completion_generation_and_can_retry() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let write_attempts = Arc::new(AtomicUsize::new(0));
+		let backup_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(InstrumentedStore::new(StoreBehavior::FailWriteOnce {
+				primary_namespace: "namespace",
+				key: "pending",
+				attempts: Arc::clone(&write_attempts),
+			})));
+		let old_completion = test_backup_sync_completion([7; GENERATION_ID_LEN]);
+		backup_store
+			.write(
+				BACKUP_SYNC_PRIMARY_NAMESPACE,
+				"",
+				BACKUP_SYNC_COMPLETED_GENERATION_KEY,
+				old_completion.encode(),
+			)
+			.await
+			.unwrap();
+
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		tier.set_backup_store(Arc::clone(&backup_store));
+		set_test_index_store(&mut tier);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+		let expected_completion = tier.inner.current_backup_sync_completion().await.unwrap();
+		let pending = JournalEntry {
+			primary_namespace: "namespace".to_string(),
+			secondary_namespace: String::new(),
+			key: "pending".to_string(),
+			tier: ValueTier::Primary,
+			requires_backup: true,
+			operation: JournalOperation::Create { value: vec![1] },
+		};
+		tier.inner.index.as_ref().unwrap().write_journal_entry(&pending).await.unwrap();
+
+		assert!(tier.synchronize_backup().await.is_err());
+
+		assert_eq!(write_attempts.load(Ordering::Relaxed), 1);
+		assert_eq!(primary_store.read("namespace", "", "pending").await.unwrap(), vec![1]);
+		assert_eq!(
+			tier.inner
+				.index
+				.as_ref()
+				.unwrap()
+				.read_journal_entry("namespace", "", "pending")
+				.await
+				.unwrap(),
+			pending
+		);
+		assert_eq!(read_test_backup_sync_completion(backup_store.as_ref()).await, old_completion);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+
+		tier.synchronize_backup().await.unwrap();
+
+		assert_eq!(backup_store.read("namespace", "", "pending").await.unwrap(), vec![1]);
+		assert!(tier
+			.inner
+			.index
+			.as_ref()
+			.unwrap()
+			.read_journal_entry("namespace", "", "pending")
+			.await
+			.is_err());
+		assert_eq!(
+			read_test_backup_sync_completion(backup_store.as_ref()).await,
+			expected_completion
+		);
+	}
+
+	#[tokio::test]
+	async fn failed_primary_copy_preserves_backup_completion_generation_and_can_retry() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		primary_store.write("namespace", "", "current", vec![1]).await.unwrap();
+		let write_attempts = Arc::new(AtomicUsize::new(0));
+		let backup_store: Arc<DynStore> =
+			Arc::new(DynStoreWrapper(InstrumentedStore::new(StoreBehavior::FailWriteOnce {
+				primary_namespace: "namespace",
+				key: "current",
+				attempts: Arc::clone(&write_attempts),
+			})));
+		let old_completion = test_backup_sync_completion([7; GENERATION_ID_LEN]);
+		backup_store
+			.write(
+				BACKUP_SYNC_PRIMARY_NAMESPACE,
+				"",
+				BACKUP_SYNC_COMPLETED_GENERATION_KEY,
+				old_completion.encode(),
+			)
+			.await
+			.unwrap();
+
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		tier.set_backup_store(Arc::clone(&backup_store));
+		set_test_index_store(&mut tier);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+		let expected_completion = tier.inner.current_backup_sync_completion().await.unwrap();
+
+		assert!(tier.synchronize_backup().await.is_err());
+
+		assert_eq!(write_attempts.load(Ordering::Relaxed), 1);
+		assert!(backup_store.read("namespace", "", "current").await.is_err());
+		assert_eq!(read_test_backup_sync_completion(backup_store.as_ref()).await, old_completion);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+
+		tier.synchronize_backup().await.unwrap();
+
+		assert_eq!(backup_store.read("namespace", "", "current").await.unwrap(), vec![1]);
+		assert_eq!(
+			read_test_backup_sync_completion(backup_store.as_ref()).await,
+			expected_completion
+		);
+	}
+
+	#[tokio::test]
+	async fn failed_completion_write_preserves_previous_generation_and_can_retry() {
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
+		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		primary_store.write("namespace", "", "current", vec![1]).await.unwrap();
+		let write_attempts = Arc::new(AtomicUsize::new(0));
+		let backup_store = InstrumentedStore::new(StoreBehavior::FailWriteOnce {
+			primary_namespace: BACKUP_SYNC_PRIMARY_NAMESPACE,
+			key: BACKUP_SYNC_COMPLETED_GENERATION_KEY,
+			attempts: Arc::clone(&write_attempts),
+		});
+		let old_completion = test_backup_sync_completion([7; GENERATION_ID_LEN]);
+		backup_store
+			.inner
+			.write(
+				BACKUP_SYNC_PRIMARY_NAMESPACE,
+				"",
+				BACKUP_SYNC_COMPLETED_GENERATION_KEY,
+				old_completion.encode(),
+			)
+			.await
+			.unwrap();
+		backup_store.inner.write("namespace", "", "stale", vec![2]).await.unwrap();
+		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(backup_store));
+
+		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
+		tier.set_backup_store(Arc::clone(&backup_store));
+		set_test_index_store(&mut tier);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+		let expected_completion = tier.inner.current_backup_sync_completion().await.unwrap();
+
+		assert!(tier.synchronize_backup().await.is_err());
+
+		assert_eq!(write_attempts.load(Ordering::Relaxed), 1);
+		assert_eq!(backup_store.read("namespace", "", "current").await.unwrap(), vec![1]);
+		assert!(backup_store.read("namespace", "", "stale").await.is_err());
+		assert_eq!(read_test_backup_sync_completion(backup_store.as_ref()).await, old_completion);
+		assert_eq!(
+			tier.initialize_backup_synchronization().await.unwrap(),
+			BackupSyncStatus::Required
+		);
+
+		tier.synchronize_backup().await.unwrap();
+
+		assert_eq!(
+			read_test_backup_sync_completion(backup_store.as_ref()).await,
+			expected_completion
 		);
 	}
 
@@ -2861,11 +3371,7 @@ mod tests {
 				.await
 				.unwrap();
 		assert_ne!(rotated_generation_id, completion.primary_generation_id);
-		let encoded_completion = backup_store
-			.read(BACKUP_SYNC_PRIMARY_NAMESPACE, "", BACKUP_SYNC_COMPLETED_GENERATION_KEY)
-			.await
-			.unwrap();
-		assert_eq!(BackupSyncCompletion::decode(encoded_completion).unwrap(), completion);
+		assert_eq!(read_test_backup_sync_completion(backup_store.as_ref()).await, completion);
 	}
 
 	#[tokio::test]
@@ -3188,8 +3694,18 @@ mod tests {
 
 	enum StoreBehavior {
 		FailList,
-		FailWrite { attempts: Arc<AtomicUsize> },
+		FailWrite {
+			attempts: Arc<AtomicUsize>,
+		},
+		FailWriteOnce {
+			primary_namespace: &'static str,
+			key: &'static str,
+			attempts: Arc<AtomicUsize>,
+		},
 		FailRemove,
+		FailRemoveOnce {
+			attempts: Arc<AtomicUsize>,
+		},
 	}
 
 	/// A store that injects selected failures or synchronization points while delegating other
@@ -3214,11 +3730,28 @@ mod tests {
 		fn write(
 			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
-			let write = if let StoreBehavior::FailWrite { attempts } = &self.behavior {
-				attempts.fetch_add(1, Ordering::Relaxed);
-				None
-			} else {
-				Some(KVStore::write(&self.inner, primary_namespace, secondary_namespace, key, buf))
+			let write = match &self.behavior {
+				StoreBehavior::FailWrite { attempts } => {
+					attempts.fetch_add(1, Ordering::Relaxed);
+					None
+				},
+				StoreBehavior::FailWriteOnce {
+					primary_namespace: failed_namespace,
+					key: failed_key,
+					attempts,
+				} if primary_namespace == *failed_namespace
+					&& key == *failed_key
+					&& attempts.fetch_add(1, Ordering::Relaxed) == 0 =>
+				{
+					None
+				},
+				_ => Some(KVStore::write(
+					&self.inner,
+					primary_namespace,
+					secondary_namespace,
+					key,
+					buf,
+				)),
 			};
 			async move {
 				match write {
@@ -3232,6 +3765,11 @@ mod tests {
 		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
 			let remove = match &self.behavior {
 				StoreBehavior::FailRemove => None,
+				StoreBehavior::FailRemoveOnce { attempts }
+					if attempts.fetch_add(1, Ordering::Relaxed) == 0 =>
+				{
+					None
+				},
 				_ => Some(KVStore::remove(
 					&self.inner,
 					primary_namespace,
@@ -3252,7 +3790,10 @@ mod tests {
 		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
 			let list = match &self.behavior {
 				StoreBehavior::FailList => None,
-				StoreBehavior::FailWrite { .. } | StoreBehavior::FailRemove => {
+				StoreBehavior::FailWrite { .. }
+				| StoreBehavior::FailWriteOnce { .. }
+				| StoreBehavior::FailRemove
+				| StoreBehavior::FailRemoveOnce { .. } => {
 					Some(KVStore::list(&self.inner, primary_namespace, secondary_namespace))
 				},
 			};
@@ -3283,6 +3824,15 @@ mod tests {
 				}
 				list.await
 			}
+		}
+	}
+
+	impl MigratableKVStore for InstrumentedStore {
+		fn list_all_keys(
+			&self,
+		) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+		{
+			MigratableKVStore::list_all_keys(&self.inner)
 		}
 	}
 
