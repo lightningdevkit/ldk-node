@@ -1607,6 +1607,14 @@ mod tests {
 		}
 	}
 
+	fn setup_test_environment() -> (PathBuf, Arc<Logger>, CleanupDir) {
+		let base_dir = random_storage_path();
+		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
+		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
+		let cleanup = CleanupDir(base_dir.clone());
+		(base_dir, logger, cleanup)
+	}
+
 	fn setup_tier_store(primary_store: Arc<DynStore>, logger: Arc<Logger>) -> TierStore {
 		TierStore::new(primary_store, logger)
 	}
@@ -1716,10 +1724,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn indexed_listing_orders_keys_across_primary_and_ephemeral_stores() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -1775,10 +1780,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn indexed_listing_preserves_updates_and_reorders_recreated_keys() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let mut tier = setup_tier_store(primary_store, logger);
@@ -1800,10 +1802,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn adopting_ephemeral_storage_migrates_cache_keys_without_reordering_them() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -1876,10 +1875,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn missing_index_discards_ephemeral_only_cache_data_before_reading() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -1924,10 +1920,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn missing_index_rebuilds_cache_from_primary_instead_of_ephemeral() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -1987,10 +1980,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn namespace_preparation_finishes_interrupted_cache_migration() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -2058,10 +2048,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn reading_one_cache_key_only_reconciles_that_key() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -2141,10 +2128,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn writing_one_cache_key_only_reconciles_that_key() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -2215,10 +2199,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn namespace_initialization_preserves_existing_primary_order_across_pages() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		for i in 0..55 {
@@ -2249,10 +2230,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn paginated_listing_rejects_tokens_from_another_namespace_or_index() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let mut tier = setup_tier_store(Arc::clone(&primary_store), Arc::clone(&logger));
@@ -2290,10 +2268,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn pending_creates_roll_forward_to_primary_and_backup_in_journal_order() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -2341,10 +2316,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn pending_removal_hides_index_entry_before_removing_value_copies() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -2377,10 +2349,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn read_recovers_only_the_requested_key() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		for (key, value) in [("stuck", vec![1]), ("readable", vec![2])] {
@@ -2407,10 +2376,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn writes_and_removals_recover_only_the_requested_key() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		for (key, value) in [("stuck", vec![1]), ("writable", vec![2]), ("removable", vec![3])] {
@@ -2441,10 +2407,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn read_recovers_pending_removal_before_returning_value() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -2474,10 +2437,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn read_recovers_pending_cache_operation_without_relocking_the_key() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -2554,10 +2514,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn failed_create_retains_journal_without_exposing_index_entry() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
@@ -2582,10 +2539,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn write_recovers_pending_create_under_key_lock_before_classifying() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let index_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -2613,10 +2567,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn update_rejects_value_without_index_entry() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
@@ -2637,10 +2588,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn failed_removal_retains_journal_and_hides_index_entry() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let backup_store: Arc<DynStore> =
@@ -2762,11 +2710,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn write_read_list_remove() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
@@ -2777,11 +2721,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn ephemeral_routing() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
@@ -2850,11 +2790,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn external_pathfinding_scores_cache_routes_to_ephemeral_store() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
@@ -2913,11 +2849,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn list_exposes_primary_and_routed_ephemeral_keys() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
@@ -3001,11 +2933,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn list_paginated_only_exposes_primary_keys() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
@@ -3084,11 +3012,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn listings_only_consult_ephemeral_store_for_routed_namespaces() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
@@ -3142,11 +3066,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn list_hides_stale_primary_copy_when_ephemeral_key_is_missing() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
@@ -3193,11 +3113,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn primary_backed_writes_preserve_latest_call_order() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
@@ -3236,11 +3152,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn failed_newer_backup_write_still_supersedes_older_write() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir);
+		let (_base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let mut tier = setup_tier_store(Arc::clone(&primary_store), logger);
@@ -3286,11 +3198,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn ephemeral_writes_preserve_latest_call_order() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
@@ -3332,11 +3240,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn ephemeral_removes_preserve_latest_call_order() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
@@ -3377,11 +3281,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn backup_write_is_part_of_success_path() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
@@ -3423,11 +3323,7 @@ mod tests {
 
 	#[tokio::test]
 	async fn backup_remove_is_part_of_success_path() {
-		let base_dir = random_storage_path();
-		let log_path = base_dir.join("tier_store_test.log").to_string_lossy().into_owned();
-		let logger = Arc::new(Logger::new_fs_writer(log_path, Level::Trace).unwrap());
-
-		let _cleanup = CleanupDir(base_dir.clone());
+		let (base_dir, logger, _cleanup) = setup_test_environment();
 
 		let primary_store: Arc<DynStore> =
 			Arc::new(DynStoreWrapper(FilesystemStoreV2::new(base_dir.join("primary")).unwrap()));
