@@ -147,6 +147,29 @@ pub enum Error {
 	ChainSourceNotSupported,
 	/// The provided payer proof is invalid.
 	InvalidPayerProof,
+	/// Failed to set a webhook with the LSP.
+	LiquiditySetWebhookFailed,
+	/// Failed to remove a webhook with the LSP.
+	LiquidityRemoveWebhookFailed,
+	/// Failed to list webhooks with the LSP.
+	LiquidityListWebhooksFailed,
+	/// Failed to send a webhook notification to a client.
+	LiquidityNotifyWebhookFailed,
+	/// The LSP rejected a webhook registration because the client has reached the maximum number
+	/// of webhooks the LSP allows.
+	LiquidityWebhookLimitExceeded,
+	/// The LSP rejected a webhook registration because we have no prior activity with it.
+	///
+	/// LSPs typically require an open channel, or an in-flight LSPS1 or LSPS2 flow, before
+	/// accepting webhook registrations.
+	LiquidityWebhookNoPriorActivity,
+	/// No webhook is registered under the given `app_name` with the LSP.
+	LiquidityWebhookAppNameNotFound,
+	/// The `app_name` or webhook URL is invalid.
+	///
+	/// The `app_name` may exceed 64 bytes, or the URL may exceed 1024 bytes, fail to parse, or
+	/// not use the `https` scheme.
+	LiquidityWebhookInvalid,
 }
 
 impl fmt::Display for Error {
@@ -239,6 +262,33 @@ impl fmt::Display for Error {
 				write!(f, "The configured chain source is not supported.")
 			},
 			Self::InvalidPayerProof => write!(f, "The provided payer proof is invalid."),
+			Self::LiquiditySetWebhookFailed => {
+				write!(f, "Failed to set a webhook with the LSP.")
+			},
+			Self::LiquidityRemoveWebhookFailed => {
+				write!(f, "Failed to remove a webhook with the LSP.")
+			},
+			Self::LiquidityListWebhooksFailed => {
+				write!(f, "Failed to list webhooks with the LSP.")
+			},
+			Self::LiquidityNotifyWebhookFailed => {
+				write!(f, "Failed to send a webhook notification to a client.")
+			},
+			Self::LiquidityWebhookLimitExceeded => {
+				write!(
+					f,
+					"The LSP's maximum number of webhooks for this client is already reached."
+				)
+			},
+			Self::LiquidityWebhookNoPriorActivity => {
+				write!(f, "The LSP rejected the webhook registration due to no prior activity.")
+			},
+			Self::LiquidityWebhookAppNameNotFound => {
+				write!(f, "No webhook is registered under the given app name with this LSP.")
+			},
+			Self::LiquidityWebhookInvalid => {
+				write!(f, "The given app name or webhook URL is invalid.")
+			},
 		}
 	}
 }
