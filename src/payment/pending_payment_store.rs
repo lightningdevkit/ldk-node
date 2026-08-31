@@ -6,7 +6,7 @@
 // accordance with one or both of these licenses.
 
 use bitcoin::Txid;
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
 
 use crate::data_store::{StorableObject, StorableObjectUpdate};
@@ -30,7 +30,7 @@ pub(crate) struct FundingTxCandidate {
 	pub fee_paid_msat: Option<u64>,
 }
 
-impl_writeable_tlv_based!(FundingTxCandidate, {
+impl_ser_tlv_based!(FundingTxCandidate, {
 	(0, txid, required),
 	(2, amount_msat, option),
 	(4, fee_paid_msat, option),
@@ -62,7 +62,7 @@ impl PendingPaymentDetails {
 	}
 }
 
-impl_writeable_tlv_based!(PendingPaymentDetails, {
+impl_ser_tlv_based!(PendingPaymentDetails, {
 	(0, details, required),
 	(2, conflicting_txids, optional_vec),
 	(4, candidates, optional_vec),

@@ -752,7 +752,7 @@ mod tests {
 
 	use lightning::util::persist::{PageToken, PaginatedKVStore, PaginatedListResponse};
 	use lightning::util::test_utils::TestLogger;
-	use lightning::{impl_writeable_tlv_based, io};
+	use lightning::{impl_ser_tlv_based, io};
 	use tokio::sync::Notify;
 
 	use super::*;
@@ -802,7 +802,7 @@ mod tests {
 			hex_utils::to_vec(s)?.try_into().ok().map(|id| Self { id })
 		}
 	}
-	impl_writeable_tlv_based!(TestObjectId, { (0, id, required) });
+	impl_ser_tlv_based!(TestObjectId, { (0, id, required) });
 
 	struct TestObjectUpdate {
 		id: TestObjectId,
@@ -858,7 +858,7 @@ mod tests {
 		}
 	}
 
-	impl_writeable_tlv_based!(TestObject, {
+	impl_ser_tlv_based!(TestObject, {
 		(0, id, required),
 		(2, data, required),
 		(4, extra, option),

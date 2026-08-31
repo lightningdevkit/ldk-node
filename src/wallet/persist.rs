@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use bdk_chain::Merge;
 use bdk_wallet::{AsyncWalletPersister, ChangeSet};
-use lightning::impl_writeable_tlv_based;
+use lightning::impl_ser_tlv_based;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable};
 
@@ -39,7 +39,7 @@ struct AddressPoolRecord {
 	indices: Vec<u32>,
 }
 
-impl_writeable_tlv_based!(AddressPoolRecord, {
+impl_ser_tlv_based!(AddressPoolRecord, {
 	(0, indices, required_vec),
 });
 

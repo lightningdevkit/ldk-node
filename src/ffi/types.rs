@@ -1509,8 +1509,12 @@ impl Bolt11Invoice {
 			.collect()
 	}
 
-	/// Recover the payee's public key (only to be used if none was included in the invoice)
-	pub fn recover_payee_pub_key(&self) -> PublicKey {
+	/// Recover the payee's public key (only to be used if none was included in the invoice).
+	///
+	/// Signature recovery can fail if the invoice does not contain enough information to recover
+	/// the key; `None` indicates that recovery failed. Callers needing the invoice's effective
+	/// payee key should use the appropriate non-recovery accessor when available.
+	pub fn recover_payee_pub_key(&self) -> Option<PublicKey> {
 		self.inner.recover_payee_pub_key()
 	}
 }

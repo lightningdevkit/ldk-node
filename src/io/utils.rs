@@ -779,7 +779,7 @@ mod read_objects_tests {
 	use std::num::NonZeroUsize;
 	use std::sync::Arc;
 
-	use lightning::impl_writeable_tlv_based;
+	use lightning::impl_ser_tlv_based;
 	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 	use lightning::util::ser::Writeable;
 	use lightning::util::test_utils::TestLogger;
@@ -796,7 +796,7 @@ mod read_objects_tests {
 	struct TestObject {
 		id: u32,
 	}
-	impl_writeable_tlv_based!(TestObject, { (0, id, required) });
+	impl_ser_tlv_based!(TestObject, { (0, id, required) });
 
 	/// Writes `num_objects` objects with ascending ids, so that the highest id is the most
 	/// recently created one.
