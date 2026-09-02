@@ -86,6 +86,14 @@ jobs:
         if: "matrix.platform != 'windows-latest'"
         run: |
           RUSTFLAGS="--cfg no_download --cfg cycle_tests --cfg tokio_unstable" cargo test
+      - name: Test tiered storage
+        if: matrix.check-fmt
+        run: |
+          cargo test --lib --features storage-tier io::tier_store
+          RUSTFLAGS="--cfg no_download" cargo test \
+            --features storage-tier \
+            --test integration_tests_rust \
+            builder_configures_sqlite_backup_store
       - name: Test with UniFFI support on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: |

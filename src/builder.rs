@@ -11,7 +11,7 @@ use std::convert::TryInto;
 use std::default::Default;
 #[cfg(feature = "unified-payments")]
 use std::net::ToSocketAddrs;
-#[cfg(feature = "storage-filesystem")]
+#[cfg(any(feature = "storage-filesystem", feature = "storage-tier"))]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
@@ -72,6 +72,8 @@ use crate::gossip::GossipSource;
 use crate::io::fs_store::open_or_migrate_fs_store;
 #[cfg(feature = "storage-sqlite")]
 use crate::io::sqlite_store::SqliteStore;
+#[cfg(feature = "storage-tier")]
+use crate::io::tier_store::{setup_index_store, TierStore};
 use crate::io::utils::{
 	read_all_objects, read_event_queue, read_external_pathfinding_scores_from_cache,
 	read_n_objects, read_network_graph, read_node_metrics, read_output_sweeper, read_peer_info,
@@ -171,6 +173,13 @@ impl std::fmt::Debug for LogWriterConfig {
 			},
 		}
 	}
+}
+
+#[cfg(feature = "storage-tier")]
+#[derive(Default, Debug)]
+struct TierStoreConfig {
+	ephemeral_storage_dir_path: Option<PathBuf>,
+	backup_storage_dir_path: Option<PathBuf>,
 }
 
 /// An error encountered during building a [`Node`].
@@ -326,6 +335,8 @@ pub struct NodeBuilder {
 	liquidity_source_config: Option<LiquiditySourceConfig>,
 	log_writer_config: Option<LogWriterConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	#[cfg(feature = "storage-tier")]
+	tier_store_config: Option<TierStoreConfig>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	probing_config: Option<ProbingConfig>,
@@ -347,6 +358,8 @@ impl NodeBuilder {
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
 		let log_writer_config = None;
+		#[cfg(feature = "storage-tier")]
+		let tier_store_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
 		let probing_config = None;
@@ -356,6 +369,8 @@ impl NodeBuilder {
 			gossip_source_config,
 			liquidity_source_config,
 			log_writer_config,
+			#[cfg(feature = "storage-tier")]
+			tier_store_config,
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
@@ -686,6 +701,41 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Configures a local SQLite backup store for disaster recovery.
+	///
+	/// When building with tiered storage, a SQLite store will be created at the
+	/// given directory path using [`SQLITE_BACKUP_DB_FILE_NAME`] as its database
+	/// file name. It receives a second durable copy of data written to the
+	/// primary store.
+	///
+	/// Writes and removals for primary-backed data only succeed once both the
+	/// primary and backup SQLite stores complete successfully.
+	///
+	/// If not set, durable data will be stored only in the primary store.
+	///
+	/// [`SQLITE_BACKUP_DB_FILE_NAME`]: crate::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME
+	#[cfg(all(not(feature = "uniffi"), feature = "storage-tier"))]
+	pub fn set_backup_storage_dir_path(&mut self, backup_storage_dir_path: String) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.backup_storage_dir_path = Some(backup_storage_dir_path.into());
+		self
+	}
+
+	/// Configures the ephemeral storage directory path for non-critical, frequently-accessed data.
+	///
+	/// When set, a local SQLite store is created at this path for ephemeral data like
+	/// the network graph and scorer. Data stored here can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	#[cfg(all(not(feature = "uniffi"), feature = "storage-tier"))]
+	pub fn set_ephemeral_storage_dir_path(
+		&mut self, ephemeral_storage_dir_path: String,
+	) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.ephemeral_storage_dir_path = Some(ephemeral_storage_dir_path.into());
+		self
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	#[cfg(feature = "storage-sqlite")]
@@ -901,11 +951,18 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
+	///
+	/// The provided `kv_store` will be used as the primary storage backend. Optionally,
+	/// an ephemeral store for frequently-accessed non-critical data (e.g., network graph, scorer)
+	/// and a local SQLite backup store for disaster recovery can be configured via
+	/// [`set_ephemeral_storage_dir_path`] and [`set_backup_storage_dir_path`].
+	///
+	/// [`set_ephemeral_storage_dir_path`]: Self::set_ephemeral_storage_dir_path
+	/// [`set_backup_storage_dir_path`]: Self::set_backup_storage_dir_path
 	pub fn build_with_store<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
-
 		self.build_with_store_and_logger(node_entropy, kv_store, logger)
 	}
 
@@ -930,6 +987,53 @@ impl NodeBuilder {
 	fn build_with_store_runtime_and_logger<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, runtime: Arc<Runtime>, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
+		#[cfg(feature = "storage-tier")]
+		let store: Arc<DynStore> = {
+			let ts_config = self.tier_store_config.as_ref();
+			let primary_store = Arc::new(DynStoreWrapper(kv_store));
+			let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
+			if let Some(config) = ts_config {
+				if let Some(ephemeral_storage_dir_path) = config.ephemeral_storage_dir_path.as_ref()
+				{
+					let index_store = runtime
+						.block_on(setup_index_store(self.config.storage_dir_path.clone().into()))
+						.map_err(|e| {
+							log_error!(logger, "Failed to setup tier-store index: {}", e);
+							BuildError::KVStoreSetupFailed
+						})?;
+					let ephemeral_store = SqliteStore::new(
+						ephemeral_storage_dir_path.clone(),
+						Some(io::sqlite_store::SQLITE_EPHEMERAL_DB_FILE_NAME.to_string()),
+						Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+					)
+					.map_err(|e| {
+						log_error!(logger, "Failed to setup ephemeral SQLite store: {}", e);
+						BuildError::KVStoreSetupFailed
+					})?;
+					let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(ephemeral_store));
+					tier_store.set_index_store(index_store);
+					tier_store.set_ephemeral_store(ephemeral_store);
+				}
+
+				if let Some(backup_storage_dir_path) = config.backup_storage_dir_path.as_ref() {
+					let backup_store = SqliteStore::new(
+						backup_storage_dir_path.clone(),
+						Some(io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME.to_string()),
+						Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+					)
+					.map_err(|e| {
+						log_error!(logger, "Failed to setup backup SQLite store: {}", e);
+						BuildError::KVStoreSetupFailed
+					})?;
+					let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(backup_store));
+					tier_store.set_backup_store(backup_store);
+				}
+			}
+			Arc::new(DynStoreWrapper(tier_store))
+		};
+		#[cfg(not(feature = "storage-tier"))]
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(kv_store));
+
 		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
 
@@ -944,7 +1048,7 @@ impl NodeBuilder {
 			seed_bytes,
 			runtime,
 			logger,
-			Arc::new(DynStoreWrapper(kv_store)),
+			store,
 		)
 	}
 }
