@@ -60,9 +60,11 @@ use ldk_node::{
 use lightning::io;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
+#[cfg(feature = "storage-tier")]
+use lightning::util::persist::MigratableKVStore;
 use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
-use lightning_persister::fs_store::v1::FilesystemStore;
+use lightning_persister::fs_store::v2::FilesystemStoreV2;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use logging::TestLogWriter;
 use rand::distr::Alphanumeric;
@@ -1954,10 +1956,23 @@ impl PaginatedKVStore for TestSyncStore {
 	}
 }
 
+#[cfg(feature = "storage-tier")]
+impl MigratableKVStore for TestSyncStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		async move {
+			let _guard = inner.serializer.read().await;
+			MigratableKVStore::list_all_keys(&inner.test_store).await
+		}
+	}
+}
+
 struct TestSyncStoreInner {
 	serializer: tokio::sync::RwLock<()>,
 	test_store: InMemoryStore,
-	fs_store: FilesystemStore,
+	fs_store: FilesystemStoreV2,
 	#[cfg(feature = "storage-sqlite")]
 	sqlite_store: SqliteStore,
 }
@@ -1967,7 +1982,7 @@ impl TestSyncStoreInner {
 		let serializer = tokio::sync::RwLock::new(());
 		let mut fs_dir = dest_dir.clone();
 		fs_dir.push("fs_store");
-		let fs_store = FilesystemStore::new(fs_dir);
+		let fs_store = FilesystemStoreV2::new(fs_dir).unwrap();
 		#[cfg(feature = "storage-sqlite")]
 		let mut sql_dir = dest_dir.clone();
 		#[cfg(feature = "storage-sqlite")]

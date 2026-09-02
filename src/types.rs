@@ -25,6 +25,8 @@ use lightning::routing::gossip;
 use lightning::routing::router::DefaultRouter;
 use lightning::routing::scoring::{CombinedScorer, ProbabilisticScoringFeeParameters};
 use lightning::sign::InMemorySigner;
+#[cfg(feature = "storage-tier")]
+use lightning::util::persist::MigratableKVStore;
 use lightning::util::persist::{
 	KVStore, MonitorUpdatingPersisterAsync, PageToken, PaginatedKVStore, PaginatedListResponse,
 };
@@ -72,6 +74,16 @@ pub(crate) trait DynStoreTrait: Send + Sync {
 			dyn Future<Output = Result<PaginatedListResponse, bitcoin::io::Error>> + Send + 'static,
 		>,
 	>;
+	#[cfg(feature = "storage-tier")]
+	fn list_all_keys_async(
+		&self,
+	) -> Pin<
+		Box<
+			dyn Future<Output = Result<Vec<(String, String, String)>, bitcoin::io::Error>>
+				+ Send
+				+ 'static,
+		>,
+	>;
 }
 
 impl<'a> KVStore for dyn DynStoreTrait + 'a {
@@ -110,6 +122,16 @@ impl<'a> PaginatedKVStore for dyn DynStoreTrait + 'a {
 			secondary_namespace,
 			page_token,
 		)
+	}
+}
+
+#[cfg(feature = "storage-tier")]
+impl<'a> MigratableKVStore for dyn DynStoreTrait + 'a {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, bitcoin::io::Error>> + Send + 'static
+	{
+		DynStoreTrait::list_all_keys_async(self)
 	}
 }
 
@@ -161,9 +183,34 @@ impl PaginatedKVStore for DynStoreRef {
 	}
 }
 
+#[cfg(feature = "storage-tier")]
+impl MigratableKVStore for DynStoreRef {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, bitcoin::io::Error>> + Send + 'static
+	{
+		DynStoreTrait::list_all_keys_async(&*self.0)
+	}
+}
+
 pub(crate) struct DynStoreWrapper<T: PaginatedKVStore + Send + Sync>(pub(crate) T);
 
-impl<T: PaginatedKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
+// With tiered storage enabled, dynamic stores must support exhaustive key listing so backup
+// synchronization can copy every primary value. Without tiered storage, stores only need to
+// implement `PaginatedKVStore`, preserving compatibility for existing custom stores.
+#[cfg(not(feature = "storage-tier"))]
+trait DynStoreSource: PaginatedKVStore + Send + Sync {}
+
+#[cfg(feature = "storage-tier")]
+trait DynStoreSource: PaginatedKVStore + MigratableKVStore + Send + Sync {}
+
+#[cfg(not(feature = "storage-tier"))]
+impl<T: PaginatedKVStore + Send + Sync> DynStoreSource for T {}
+
+#[cfg(feature = "storage-tier")]
+impl<T: PaginatedKVStore + MigratableKVStore + Send + Sync> DynStoreSource for T {}
+
+impl<T: DynStoreSource> DynStoreTrait for DynStoreWrapper<T> {
 	fn read_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, bitcoin::io::Error>> + Send + 'static>> {
@@ -201,6 +248,19 @@ impl<T: PaginatedKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
 			secondary_namespace,
 			page_token,
 		))
+	}
+
+	#[cfg(feature = "storage-tier")]
+	fn list_all_keys_async(
+		&self,
+	) -> Pin<
+		Box<
+			dyn Future<Output = Result<Vec<(String, String, String)>, bitcoin::io::Error>>
+				+ Send
+				+ 'static,
+		>,
+	> {
+		Box::pin(MigratableKVStore::list_all_keys(&self.0))
 	}
 }
 

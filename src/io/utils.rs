@@ -780,7 +780,9 @@ mod read_objects_tests {
 	use std::sync::Arc;
 
 	use lightning::impl_writeable_tlv_based;
-	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+	use lightning::util::persist::{
+		KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+	};
 	use lightning::util::ser::Writeable;
 	use lightning::util::test_utils::TestLogger;
 
@@ -977,6 +979,18 @@ mod read_objects_tests {
 					if give_up { None } else { Some(PageToken::new("stuck".to_string())) };
 				Ok(response)
 			}
+		}
+	}
+
+	impl MigratableKVStore for StuckTokenStore {
+		fn list_all_keys(
+			&self,
+		) -> impl std::future::Future<
+			Output = Result<Vec<(String, String, String)>, lightning::io::Error>,
+		>
+		       + 'static
+		       + Send {
+			MigratableKVStore::list_all_keys(&self.inner)
 		}
 	}
 

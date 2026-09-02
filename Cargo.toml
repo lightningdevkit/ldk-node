@@ -13,7 +13,7 @@ keywords = ["bitcoin", "lightning", "ldk", "bdk"]
 categories = ["cryptography::cryptocurrencies"]
 
 [package.metadata.docs.rs]
-features = ["storage-postgres-vendored-tls"]
+features = ["storage-postgres-vendored-tls", "storage-tier"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
@@ -53,6 +53,7 @@ chain-electrum = [
 ]
 chain-bitcoind = ["dep:lightning-block-sync"]
 storage-sqlite = ["dep:rusqlite"]
+storage-tier = ["storage-sqlite"]
 storage-filesystem = ["dep:lightning-persister"]
 storage-vss = ["dep:vss-client", "dep:prost"]
 storage-postgres = ["dep:tokio-postgres", "dep:native-tls", "dep:postgres-native-tls"]

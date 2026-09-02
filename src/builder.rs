@@ -11,7 +11,7 @@ use std::convert::TryInto;
 use std::default::Default;
 #[cfg(feature = "unified-payments")]
 use std::net::ToSocketAddrs;
-#[cfg(feature = "storage-filesystem")]
+#[cfg(any(feature = "storage-filesystem", feature = "storage-tier"))]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
@@ -41,6 +41,8 @@ use lightning::routing::scoring::{
 };
 use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::config::HTLCInterceptionFlags;
+#[cfg(feature = "storage-tier")]
+use lightning::util::persist::MigratableKVStore;
 use lightning::util::persist::{
 	KVStore, PaginatedKVStore, CHANNEL_MANAGER_PERSISTENCE_KEY,
 	CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE, CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -72,6 +74,8 @@ use crate::gossip::GossipSource;
 use crate::io::fs_store::open_or_migrate_fs_store;
 #[cfg(feature = "storage-sqlite")]
 use crate::io::sqlite_store::SqliteStore;
+#[cfg(feature = "storage-tier")]
+use crate::io::tier_store::{setup_index_store, BackupSyncStatus, TierStore};
 use crate::io::utils::{
 	read_all_objects, read_event_queue, read_external_pathfinding_scores_from_cache,
 	read_n_objects, read_network_graph, read_node_metrics, read_output_sweeper, read_peer_info,
@@ -171,6 +175,13 @@ impl std::fmt::Debug for LogWriterConfig {
 			},
 		}
 	}
+}
+
+#[cfg(feature = "storage-tier")]
+#[derive(Default, Debug)]
+struct TierStoreConfig {
+	ephemeral_storage_dir_path: Option<PathBuf>,
+	backup_storage_dir_path: Option<PathBuf>,
 }
 
 /// An error encountered during building a [`Node`].
@@ -326,6 +337,8 @@ pub struct NodeBuilder {
 	liquidity_source_config: Option<LiquiditySourceConfig>,
 	log_writer_config: Option<LogWriterConfig>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	#[cfg(feature = "storage-tier")]
+	tier_store_config: Option<TierStoreConfig>,
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	probing_config: Option<ProbingConfig>,
@@ -347,6 +360,8 @@ impl NodeBuilder {
 		let gossip_source_config = None;
 		let liquidity_source_config = None;
 		let log_writer_config = None;
+		#[cfg(feature = "storage-tier")]
+		let tier_store_config = None;
 		let runtime_handle = None;
 		let pathfinding_scores_sync_config = None;
 		let probing_config = None;
@@ -356,6 +371,8 @@ impl NodeBuilder {
 			gossip_source_config,
 			liquidity_source_config,
 			log_writer_config,
+			#[cfg(feature = "storage-tier")]
+			tier_store_config,
 			runtime_handle,
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
@@ -686,6 +703,41 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Configures a local SQLite backup store for disaster recovery.
+	///
+	/// When building with tiered storage, a SQLite store will be created at the
+	/// given directory path using [`SQLITE_BACKUP_DB_FILE_NAME`] as its database
+	/// file name. It receives a second durable copy of data written to the
+	/// primary store.
+	///
+	/// Writes and removals for primary-backed data only succeed once both the
+	/// primary and backup SQLite stores complete successfully.
+	///
+	/// If not set, durable data will be stored only in the primary store.
+	///
+	/// [`SQLITE_BACKUP_DB_FILE_NAME`]: crate::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME
+	#[cfg(all(not(feature = "uniffi"), feature = "storage-tier"))]
+	pub fn set_backup_storage_dir_path(&mut self, backup_storage_dir_path: String) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.backup_storage_dir_path = Some(backup_storage_dir_path.into());
+		self
+	}
+
+	/// Configures the ephemeral storage directory path for non-critical, frequently-accessed data.
+	///
+	/// When set, a local SQLite store is created at this path for ephemeral data like
+	/// the network graph and scorer. Data stored here can be rebuilt if lost.
+	///
+	/// If not set, non-critical data will be stored in the primary store.
+	#[cfg(all(not(feature = "uniffi"), feature = "storage-tier"))]
+	pub fn set_ephemeral_storage_dir_path(
+		&mut self, ephemeral_storage_dir_path: String,
+	) -> &mut Self {
+		let tier_store_config = self.tier_store_config.get_or_insert(TierStoreConfig::default());
+		tier_store_config.ephemeral_storage_dir_path = Some(ephemeral_storage_dir_path.into());
+		self
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	#[cfg(feature = "storage-sqlite")]
@@ -901,11 +953,39 @@ impl NodeBuilder {
 	}
 
 	/// Builds a [`Node`] instance according to the options previously configured.
+	///
+	/// The provided `kv_store` will be used as the primary storage backend. Optionally,
+	/// an ephemeral store for frequently-accessed non-critical data (e.g., network graph, scorer)
+	/// and a local SQLite backup store for disaster recovery can be configured via
+	/// [`set_ephemeral_storage_dir_path`] and [`set_backup_storage_dir_path`].
+	///
+	/// [`set_ephemeral_storage_dir_path`]: Self::set_ephemeral_storage_dir_path
+	/// [`set_backup_storage_dir_path`]: Self::set_backup_storage_dir_path
+	#[cfg(not(feature = "storage-tier"))]
 	pub fn build_with_store<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
+		self.build_with_store_and_logger(node_entropy, kv_store, logger)
+	}
 
+	/// Builds a [`Node`] instance according to the options previously configured.
+	///
+	/// The provided `kv_store` will be used as the primary storage backend. Optionally,
+	/// an ephemeral store for frequently-accessed non-critical data (e.g., network graph, scorer)
+	/// and a local SQLite backup store for disaster recovery can be configured via
+	/// [`set_ephemeral_storage_dir_path`] and [`set_backup_storage_dir_path`].
+	///
+	/// The store must implement [`MigratableKVStore`] so a configured backup can be backfilled or
+	/// resilvered from the complete set of primary-store keys before the node starts.
+	///
+	/// [`set_ephemeral_storage_dir_path`]: Self::set_ephemeral_storage_dir_path
+	/// [`set_backup_storage_dir_path`]: Self::set_backup_storage_dir_path
+	#[cfg(feature = "storage-tier")]
+	pub fn build_with_store<S: PaginatedKVStore + MigratableKVStore + Send + Sync + 'static>(
+		&self, node_entropy: NodeEntropy, kv_store: S,
+	) -> Result<Node, BuildError> {
+		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		self.build_with_store_and_logger(node_entropy, kv_store, logger)
 	}
 
@@ -920,6 +1000,7 @@ impl NodeBuilder {
 		}
 	}
 
+	#[cfg(not(feature = "storage-tier"))]
 	fn build_with_store_and_logger<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
@@ -927,8 +1008,102 @@ impl NodeBuilder {
 		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
 	}
 
+	#[cfg(feature = "storage-tier")]
+	fn build_with_store_and_logger<
+		S: PaginatedKVStore + MigratableKVStore + Send + Sync + 'static,
+	>(
+		&self, node_entropy: NodeEntropy, kv_store: S, logger: Arc<Logger>,
+	) -> Result<Node, BuildError> {
+		let runtime = self.setup_runtime(&logger)?;
+		self.build_with_store_runtime_and_logger(node_entropy, kv_store, runtime, logger)
+	}
+
+	#[cfg(not(feature = "storage-tier"))]
 	fn build_with_store_runtime_and_logger<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S, runtime: Arc<Runtime>, logger: Arc<Logger>,
+	) -> Result<Node, BuildError> {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(kv_store));
+		self.build_with_dyn_store(node_entropy, store, runtime, logger)
+	}
+
+	#[cfg(feature = "storage-tier")]
+	fn build_with_store_runtime_and_logger<
+		S: PaginatedKVStore + MigratableKVStore + Send + Sync + 'static,
+	>(
+		&self, node_entropy: NodeEntropy, kv_store: S, runtime: Arc<Runtime>, logger: Arc<Logger>,
+	) -> Result<Node, BuildError> {
+		let store: Arc<DynStore> = {
+			let ts_config = self.tier_store_config.as_ref();
+			let primary_store = Arc::new(DynStoreWrapper(kv_store));
+			let mut tier_store = TierStore::new(primary_store, Arc::clone(&logger));
+			let tier_index_exists = PathBuf::from(&self.config.storage_dir_path)
+				.join(io::sqlite_store::SQLITE_TIER_INDEX_DB_FILE_NAME)
+				.exists();
+			let tier_index_required = ts_config
+				.map(|config| {
+					config.ephemeral_storage_dir_path.is_some()
+						|| config.backup_storage_dir_path.is_some()
+				})
+				.unwrap_or(false);
+			if tier_index_required || tier_index_exists {
+				let index_store = runtime
+					.block_on(setup_index_store(self.config.storage_dir_path.clone().into()))
+					.map_err(|e| {
+						log_error!(logger, "Failed to setup tier-store index: {}", e);
+						BuildError::KVStoreSetupFailed
+					})?;
+				tier_store.set_index_store(index_store);
+			}
+			if let Some(config) = ts_config {
+				if let Some(ephemeral_storage_dir_path) = config.ephemeral_storage_dir_path.as_ref()
+				{
+					let ephemeral_store = SqliteStore::new(
+						ephemeral_storage_dir_path.clone(),
+						Some(io::sqlite_store::SQLITE_EPHEMERAL_DB_FILE_NAME.to_string()),
+						Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+					)
+					.map_err(|e| {
+						log_error!(logger, "Failed to setup ephemeral SQLite store: {}", e);
+						BuildError::KVStoreSetupFailed
+					})?;
+					let ephemeral_store: Arc<DynStore> = Arc::new(DynStoreWrapper(ephemeral_store));
+					tier_store.set_ephemeral_store(ephemeral_store);
+				}
+
+				if let Some(backup_storage_dir_path) = config.backup_storage_dir_path.as_ref() {
+					let backup_store = SqliteStore::new(
+						backup_storage_dir_path.clone(),
+						Some(io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME.to_string()),
+						Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+					)
+					.map_err(|e| {
+						log_error!(logger, "Failed to setup backup SQLite store: {}", e);
+						BuildError::KVStoreSetupFailed
+					})?;
+					let backup_store: Arc<DynStore> = Arc::new(DynStoreWrapper(backup_store));
+					tier_store.set_backup_store(backup_store);
+				}
+			}
+			runtime
+				.block_on(async {
+					let status = tier_store.initialize_backup_synchronization().await?;
+					if status == BackupSyncStatus::Required {
+						tier_store.synchronize_backup().await?;
+					}
+					Ok::<(), bitcoin::io::Error>(())
+				})
+				.map_err(|e| {
+					log_error!(logger, "Failed to prepare or synchronize tier-store backup: {}", e);
+					BuildError::KVStoreSetupFailed
+				})?;
+			Arc::new(DynStoreWrapper(tier_store))
+		};
+		self.build_with_dyn_store(node_entropy, store, runtime, logger)
+	}
+
+	fn build_with_dyn_store(
+		&self, node_entropy: NodeEntropy, store: Arc<DynStore>, runtime: Arc<Runtime>,
+		logger: Arc<Logger>,
 	) -> Result<Node, BuildError> {
 		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
@@ -944,7 +1119,7 @@ impl NodeBuilder {
 			seed_bytes,
 			runtime,
 			logger,
-			Arc::new(DynStoreWrapper(kv_store)),
+			store,
 		)
 	}
 }
@@ -1475,7 +1650,15 @@ impl ArcedNodeBuilder {
 	/// Builds a [`Node`] instance according to the options previously configured.
 	// Note that the generics here don't actually work for Uniffi, but we don't currently expose
 	// this so its not needed.
+	#[cfg(not(feature = "storage-tier"))]
 	pub fn build_with_store<S: PaginatedKVStore + Send + Sync + 'static>(
+		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
+	) -> Result<Arc<Node>, BuildError> {
+		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)
+	}
+
+	#[cfg(feature = "storage-tier")]
+	pub fn build_with_store<S: PaginatedKVStore + MigratableKVStore + Send + Sync + 'static>(
 		&self, node_entropy: Arc<NodeEntropy>, kv_store: S,
 	) -> Result<Arc<Node>, BuildError> {
 		self.inner.read().expect("lock").build_with_store(*node_entropy, kv_store).map(Arc::new)
@@ -2585,11 +2768,13 @@ pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 #[cfg(test)]
 mod tests {
 	use std::future::Future;
+	#[cfg(all(feature = "storage-tier", not(feature = "uniffi")))]
+	use std::path::PathBuf;
 	use std::sync::Arc;
 
 	use lightning::io;
 	use lightning::util::persist::{
-		KVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+		KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
 		CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
 		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
@@ -2597,18 +2782,52 @@ mod tests {
 	use super::{sanitize_alias, BuildError, NodeAlias, NodeBuilder};
 	use crate::entropy::NodeEntropy;
 	use crate::io::test_utils::InMemoryStore;
+	#[cfg(all(feature = "storage-tier", not(feature = "uniffi")))]
+	use crate::io::{
+		sqlite_store::{SqliteStore, KV_TABLE_NAME, SQLITE_BACKUP_DB_FILE_NAME},
+		test_utils::random_storage_path,
+	};
 	use crate::logger::Logger;
 
-	struct ChannelManagerReadFailingStore(InMemoryStore);
+	#[cfg(all(feature = "storage-tier", not(feature = "uniffi")))]
+	struct CleanupDir(PathBuf);
 
-	impl KVStore for ChannelManagerReadFailingStore {
+	#[cfg(all(feature = "storage-tier", not(feature = "uniffi")))]
+	impl Drop for CleanupDir {
+		fn drop(&mut self) {
+			let _ = std::fs::remove_dir_all(&self.0);
+		}
+	}
+
+	#[derive(Clone, Copy)]
+	enum BuilderStoreBehavior {
+		#[cfg(all(feature = "storage-tier", not(feature = "uniffi")))]
+		Normal,
+		FailChannelManagerRead,
+		#[cfg(all(feature = "storage-tier", not(feature = "uniffi")))]
+		FailListAllKeys,
+	}
+
+	struct BuilderTestStore {
+		inner: InMemoryStore,
+		behavior: BuilderStoreBehavior,
+	}
+
+	impl BuilderTestStore {
+		fn new(behavior: BuilderStoreBehavior) -> Self {
+			Self { inner: InMemoryStore::new(), behavior }
+		}
+	}
+
+	impl KVStore for BuilderTestStore {
 		fn read(
 			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
-			let fail_read = primary_namespace == CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE
+			let fail_read = matches!(self.behavior, BuilderStoreBehavior::FailChannelManagerRead)
+				&& primary_namespace == CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE
 				&& secondary_namespace == CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE
 				&& key == CHANNEL_MANAGER_PERSISTENCE_KEY;
-			let read = KVStore::read(&self.0, primary_namespace, secondary_namespace, key);
+			let read = KVStore::read(&self.inner, primary_namespace, secondary_namespace, key);
 			async move {
 				if fail_read {
 					Err(io::Error::new(io::ErrorKind::Other, "channel manager read failed"))
@@ -2621,33 +2840,53 @@ mod tests {
 		fn write(
 			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
-			KVStore::write(&self.0, primary_namespace, secondary_namespace, key, buf)
+			KVStore::write(&self.inner, primary_namespace, secondary_namespace, key, buf)
 		}
 
 		fn remove(
 			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
-			KVStore::remove(&self.0, primary_namespace, secondary_namespace, key, lazy)
+			KVStore::remove(&self.inner, primary_namespace, secondary_namespace, key, lazy)
 		}
 
 		fn list(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
-			KVStore::list(&self.0, primary_namespace, secondary_namespace)
+			KVStore::list(&self.inner, primary_namespace, secondary_namespace)
 		}
 	}
 
-	impl PaginatedKVStore for ChannelManagerReadFailingStore {
+	impl PaginatedKVStore for BuilderTestStore {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 			page_token: Option<PageToken>,
 		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
 			PaginatedKVStore::list_paginated(
-				&self.0,
+				&self.inner,
 				primary_namespace,
 				secondary_namespace,
 				page_token,
 			)
+		}
+	}
+
+	impl MigratableKVStore for BuilderTestStore {
+		fn list_all_keys(
+			&self,
+		) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+		{
+			#[cfg(all(feature = "storage-tier", not(feature = "uniffi")))]
+			let fail = matches!(self.behavior, BuilderStoreBehavior::FailListAllKeys);
+			#[cfg(any(not(feature = "storage-tier"), feature = "uniffi"))]
+			let fail = false;
+			let list = MigratableKVStore::list_all_keys(&self.inner);
+			async move {
+				if fail {
+					Err(io::Error::new(io::ErrorKind::Other, "list_all_keys failed"))
+				} else {
+					list.await
+				}
+			}
 		}
 	}
 
@@ -2662,11 +2901,78 @@ mod tests {
 
 		let result = builder.build_with_store_and_logger(
 			node_entropy,
-			ChannelManagerReadFailingStore(InMemoryStore::new()),
+			BuilderTestStore::new(BuilderStoreBehavior::FailChannelManagerRead),
 			logger,
 		);
 
 		assert!(matches!(result, Err(BuildError::ReadFailed)));
+	}
+
+	#[cfg(all(feature = "storage-tier", not(feature = "uniffi")))]
+	#[test]
+	fn builder_synchronizes_a_configured_backup_before_returning() {
+		let base_dir = random_storage_path();
+		let _cleanup = CleanupDir(base_dir.clone());
+		let storage_dir = base_dir.join("node");
+		let backup_dir = base_dir.join("backup");
+		let runtime = tokio::runtime::Runtime::new().unwrap();
+		let primary_store = BuilderTestStore::new(BuilderStoreBehavior::Normal);
+		runtime.block_on(primary_store.write("namespace", "", "current", vec![1])).unwrap();
+		let backup_store = SqliteStore::new(
+			backup_dir.clone(),
+			Some(SQLITE_BACKUP_DB_FILE_NAME.to_string()),
+			Some(KV_TABLE_NAME.to_string()),
+		)
+		.unwrap();
+		runtime
+			.block_on(async { backup_store.write("namespace", "", "stale", vec![2]).await })
+			.unwrap();
+		drop(backup_store);
+		drop(runtime);
+
+		let mut builder = NodeBuilder::new();
+		builder
+			.set_storage_dir_path(storage_dir.to_string_lossy().into_owned())
+			.set_backup_storage_dir_path(backup_dir.to_string_lossy().into_owned());
+		let node = builder
+			.build_with_store(NodeEntropy::from_seed_bytes([42; 64]), primary_store)
+			.unwrap();
+
+		let backup_store = SqliteStore::new(
+			backup_dir,
+			Some(SQLITE_BACKUP_DB_FILE_NAME.to_string()),
+			Some(KV_TABLE_NAME.to_string()),
+		)
+		.unwrap();
+		let runtime = tokio::runtime::Runtime::new().unwrap();
+		assert_eq!(
+			runtime
+				.block_on(async { backup_store.read("namespace", "", "current").await })
+				.unwrap(),
+			vec![1]
+		);
+		assert!(runtime
+			.block_on(async { backup_store.read("namespace", "", "stale").await })
+			.is_err());
+		drop(node);
+	}
+
+	#[cfg(all(feature = "storage-tier", not(feature = "uniffi")))]
+	#[test]
+	fn builder_fails_when_backup_synchronization_cannot_list_primary_keys() {
+		let base_dir = random_storage_path();
+		let _cleanup = CleanupDir(base_dir.clone());
+		let mut builder = NodeBuilder::new();
+		builder
+			.set_storage_dir_path(base_dir.join("node").to_string_lossy().into_owned())
+			.set_backup_storage_dir_path(base_dir.join("backup").to_string_lossy().into_owned());
+
+		let result = builder.build_with_store(
+			NodeEntropy::from_seed_bytes([42; 64]),
+			BuilderTestStore::new(BuilderStoreBehavior::FailListAllKeys),
+		);
+
+		assert!(matches!(result, Err(BuildError::KVStoreSetupFailed)));
 	}
 
 	#[test]
