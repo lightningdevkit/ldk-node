@@ -628,6 +628,11 @@ pub(crate) struct FailureSettlement<'a> {
 }
 
 impl FailureSettlement<'_> {
+	/// The parameters of the API call behind the splice the failure identifies, if any.
+	pub(crate) fn originating_kind(&self) -> Option<&SpliceKind> {
+		self.matched.as_ref().map(|(_, intent)| &intent.kind)
+	}
+
 	/// Settles the snapshotted intent, if any. Call only once the user-facing failure event is
 	/// durably queued.
 	pub(crate) async fn settle(self) {
