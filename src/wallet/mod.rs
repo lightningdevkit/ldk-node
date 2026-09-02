@@ -12,6 +12,7 @@ use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
+use bdk_chain::ChainPosition;
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
 #[allow(deprecated)]
@@ -363,9 +364,20 @@ impl Wallet {
 						FundingStatusUpdate::Applied => continue,
 						FundingStatusUpdate::NotFunding => {},
 						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead.
+						// funding outpoint): record it under its own id below instead, unless a
+						// settled funding payment sits there already.
 						FundingStatusUpdate::Foreign => {
-							payment_id = PaymentId(txid.to_byte_array());
+							match self.foreign_transaction_payment_id(payment_id, txid).await? {
+								Some(fallback_id) => payment_id = fallback_id,
+								None => {
+									log_debug!(
+										self.logger,
+										"Skipping wallet event for transaction {} of a settled funding payment",
+										txid,
+									);
+									continue;
+								},
+							}
 						},
 					}
 
@@ -455,8 +467,16 @@ impl Wallet {
 								txid,
 								status: ConfirmationStatus::Unconfirmed,
 								..
-							} if payment.details.direction == PaymentDirection::Outbound => {
-								unconfirmed_outbound_txids.push(txid);
+							} => {
+								if self
+									.fail_funding_payment_lost_to_conflict(&payment, new_tip.height)
+									.await?
+								{
+									continue;
+								}
+								if payment.details.direction == PaymentDirection::Outbound {
+									unconfirmed_outbound_txids.push(txid);
+								}
 							},
 							_ => {},
 						}
@@ -510,9 +530,20 @@ impl Wallet {
 						FundingStatusUpdate::Applied => continue,
 						FundingStatusUpdate::NotFunding => {},
 						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead.
+						// funding outpoint): record it under its own id below instead, unless a
+						// settled funding payment sits there already.
 						FundingStatusUpdate::Foreign => {
-							payment_id = PaymentId(txid.to_byte_array());
+							match self.foreign_transaction_payment_id(payment_id, txid).await? {
+								Some(fallback_id) => payment_id = fallback_id,
+								None => {
+									log_debug!(
+										self.logger,
+										"Skipping wallet event for transaction {} of a settled funding payment",
+										txid,
+									);
+									continue;
+								},
+							}
 						},
 					}
 
@@ -565,6 +596,18 @@ impl Wallet {
 						payment_id,
 					);
 					let payment = stored_payment.ok_or(Error::InvalidPaymentId)?;
+
+					// A terminal record means the entry is the leftover of an interrupted settle
+					// — the record write landed, the entry removal was lost to a crash — and this
+					// event is the restart's replay of the same transition. Re-embedding the
+					// record would stamp the terminal status into the entry and hide it from the
+					// pending listing that repairs such leftovers; finish the interrupted removal
+					// instead.
+					if payment.status != PaymentStatus::Pending {
+						self.pending_payment_store.remove(&payment_id).await?;
+						continue;
+					}
+
 					let pending_payment_details =
 						self.create_pending_payment_from_tx(payment, conflict_txids.clone());
 
@@ -592,9 +635,20 @@ impl Wallet {
 						FundingStatusUpdate::Applied => continue,
 						FundingStatusUpdate::NotFunding => {},
 						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead.
+						// funding outpoint): record it under its own id below instead, unless a
+						// settled funding payment sits there already.
 						FundingStatusUpdate::Foreign => {
-							payment_id = PaymentId(txid.to_byte_array());
+							match self.foreign_transaction_payment_id(payment_id, txid).await? {
+								Some(fallback_id) => payment_id = fallback_id,
+								None => {
+									log_debug!(
+										self.logger,
+										"Skipping wallet event for transaction {} of a settled funding payment",
+										txid,
+									);
+									continue;
+								},
+							}
 						},
 					}
 
@@ -621,6 +675,174 @@ impl Wallet {
 		}
 
 		Ok(())
+	}
+
+	/// The id to record a transaction under that the funding-status check found foreign to the
+	/// funding record resolved for it as `resolved_id`: its own txid-derived id, or `None` when a
+	/// funding record sits there already. A funding record's id is anchored to its first
+	/// candidate's txid, so a wallet event for that transaction falls back to this id whenever the
+	/// pending entry no longer maps it — which only happens once the negotiation settled and the
+	/// entry was removed. The generic event handling must then skip its write: merging a
+	/// wallet-view `Pending` payment into the settled record would resurrect it with figures no
+	/// classification derived. When `resolved_id` is the txid-derived id already, the
+	/// funding-status check has read that record, and finding the transaction foreign to it is
+	/// this very case; only a fallback from a different id needs a read.
+	async fn foreign_transaction_payment_id(
+		&self, resolved_id: PaymentId, txid: Txid,
+	) -> Result<Option<PaymentId>, Error> {
+		let fallback_id = PaymentId(txid.to_byte_array());
+		if resolved_id == fallback_id {
+			return Ok(None);
+		}
+		let has_funding_record =
+			self.payment_store.get(&fallback_id).await?.is_some_and(|payment| {
+				matches!(
+					payment.kind,
+					PaymentKind::Onchain {
+						tx_type: Some(
+							TransactionType::Funding { .. }
+								| TransactionType::InteractiveFunding { .. }
+						),
+						..
+					}
+				)
+			});
+		Ok(if has_funding_record { None } else { Some(fallback_id) })
+	}
+
+	/// Fails a funding payment whose transaction has irrevocably lost a conflict: a transaction
+	/// outside the record's candidate history — e.g. a channel close double-spending a pending
+	/// splice's shared input — has confirmed through [`ANTI_REORG_DELAY`], and a transaction
+	/// confirmed that deep spends an input of the record's transaction and of every candidate.
+	/// Returns whether the payment was failed; failing also removes the pending entry, dropping
+	/// the failed record from the tip-change pass.
+	///
+	/// Only funding-classified records are considered: nothing re-submits a replaced funding
+	/// transaction under the same record (an RBF round is a new candidate), so a foreign conflict
+	/// confirmed to that depth is final for them. Each round is judged by its own inputs because
+	/// the conflict may have double-spent only one round of the negotiation: as long as some
+	/// candidate — any recorded round, or the record's own transaction should wallet sync have
+	/// rotated it to an unrecorded one — can still confirm, the record must stay pending. Whether
+	/// a round is still canonical does not answer that: BDK also drops a round from the canonical
+	/// set when the mempool evicts it, and an evicted round can be rebroadcast and confirm.
+	async fn fail_funding_payment_lost_to_conflict(
+		&self, payment: &PendingPaymentDetails, tip_height: u32,
+	) -> Result<bool, Error> {
+		match payment.details.kind {
+			PaymentKind::Onchain {
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type:
+					Some(
+						TransactionType::Funding { .. }
+						| TransactionType::InteractiveFunding { .. },
+					),
+				..
+			} => {},
+			_ => return Ok(false),
+		}
+		if payment.conflicting_txids.is_empty() {
+			return Ok(false);
+		}
+
+		// Serialize with classification, whose retries extend the candidate history: the
+		// decision below must see that history in its settled form, and holding the lock keeps a
+		// concurrent write from resurrecting the entry removed at the end.
+		let _guard = self.funding_payment_update_lock.lock().await;
+
+		// Re-read the entry under the lock; the listing snapshot may predate a classification.
+		let entry = match self.pending_payment_store.get(&payment.details.id).await? {
+			Some(entry) => entry,
+			None => return Ok(false),
+		};
+		let record_txid = match entry.details.kind {
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type:
+					Some(
+						TransactionType::Funding { .. }
+						| TransactionType::InteractiveFunding { .. },
+					),
+			} => txid,
+			_ => return Ok(false),
+		};
+
+		let foreign_conflicts: Vec<Txid> = entry
+			.conflicting_txids
+			.iter()
+			.copied()
+			.filter(|conflict| *conflict != record_txid && entry.candidate(*conflict).is_none())
+			.collect();
+		if foreign_conflicts.is_empty() {
+			return Ok(false);
+		}
+
+		let lost = {
+			let locked_wallet = self.inner.lock().expect("lock");
+			let confirmed_to_depth =
+				|txid: Txid| match locked_wallet.get_tx(txid).map(|tx| tx.chain_position) {
+					Some(ChainPosition::Confirmed { anchor, .. }) => {
+						tip_height >= anchor.block_id.height + ANTI_REORG_DELAY - 1
+					},
+					_ => false,
+				};
+			// A round can no longer confirm once a transaction confirmed to depth spends one of
+			// its inputs. The graph keeps evicted transactions, so an evicted round is still
+			// judged by its inputs; a round the wallet never saw cannot be rebroadcast and counts
+			// the same.
+			let graph = locked_wallet.tx_graph();
+			let cannot_confirm = |txid: Txid| match graph.get_tx(txid) {
+				Some(tx) => {
+					graph.direct_conflicts(&tx).any(|(_, spender)| confirmed_to_depth(spender))
+				},
+				None => true,
+			};
+			cannot_confirm(record_txid)
+				&& entry.candidates.iter().all(|c| cannot_confirm(c.txid))
+				&& foreign_conflicts.iter().any(|conflict| confirmed_to_depth(*conflict))
+		};
+		if !lost {
+			return Ok(false);
+		}
+
+		// As with graduation, decide from the live record and write only the status. A record
+		// already `Failed` — a prior pass whose entry removal below was lost to a crash — still
+		// matches, no-ops the update, and gets its lingering entry removed.
+		let payment_id = entry.details.id;
+		let mut failed = false;
+		self.payment_store
+			.mutate(&payment_id, |existing| {
+				let current = existing?;
+				match current.kind {
+					PaymentKind::Onchain {
+						txid,
+						status: ConfirmationStatus::Unconfirmed,
+						tx_type:
+							Some(
+								TransactionType::Funding { .. }
+								| TransactionType::InteractiveFunding { .. },
+							),
+					} if txid == record_txid => {
+						failed = true;
+						let mut update = PaymentDetailsUpdate::new(payment_id);
+						update.status = Some(PaymentStatus::Failed);
+						let mut updated = current.clone();
+						updated.update(update).then_some(updated)
+					},
+					_ => None,
+				}
+			})
+			.await?;
+		if failed {
+			self.pending_payment_store.remove(&payment_id).await?;
+			log_info!(
+				self.logger,
+				"Failed funding payment {}: transaction {} lost to a conflicting transaction confirmed beyond the reorg depth",
+				payment_id,
+				record_txid,
+			);
+		}
+		Ok(failed)
 	}
 
 	#[allow(deprecated)]
@@ -2775,6 +2997,71 @@ mod tests {
 	const EXTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/0/*)";
 	const INTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/1/*)";
 
+	/// An in-memory store counting the reads it serves, by primary namespace, so tests can pin
+	/// how many backend reads an operation costs.
+	#[derive(Clone)]
+	struct ReadCountingStore {
+		inner: Arc<InMemoryStore>,
+		reads: Arc<Mutex<Vec<String>>>,
+	}
+
+	impl ReadCountingStore {
+		fn new() -> Self {
+			Self { inner: Arc::new(InMemoryStore::new()), reads: Arc::new(Mutex::new(Vec::new())) }
+		}
+
+		/// The number of reads served from `primary_namespace` so far.
+		fn reads(&self, primary_namespace: &str) -> usize {
+			self.reads
+				.lock()
+				.unwrap()
+				.iter()
+				.filter(|namespace| *namespace == primary_namespace)
+				.count()
+		}
+	}
+
+	impl KVStore for ReadCountingStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			self.reads.lock().unwrap().push(primary_namespace.to_string());
+			KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::write(&*self.inner, primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for ReadCountingStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+			PaginatedKVStore::list_paginated(
+				&*self.inner,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+		}
+	}
+
 	/// An in-memory store whose writes can be made to fail on demand.
 	#[derive(Clone)]
 	struct FailSwitchStore {
@@ -3772,6 +4059,66 @@ mod tests {
 		}
 	}
 
+	/// Inserts `tx` into the BDK wallet as canonically confirmed at `height`, extending the
+	/// local chain to that height.
+	fn insert_confirmed_tx(wallet: &Wallet, tx: Transaction, height: u32) {
+		let txid = tx.compute_txid();
+		let mut locked = wallet.inner.lock().unwrap();
+		let block =
+			BlockId { height, hash: bitcoin::BlockHash::from_byte_array([height as u8; 32]) };
+		let chain = locked.latest_checkpoint().insert(block);
+		let mut tx_update = bdk_chain::TxUpdate::default();
+		tx_update.txs = vec![Arc::new(tx)];
+		tx_update.anchors =
+			[(ConfirmationBlockTime { block_id: block, confirmation_time: 100 }, txid)].into();
+		locked
+			.apply_update(Update { tx_update, chain: Some(chain), ..Default::default() })
+			.unwrap();
+	}
+
+	/// Inserts `tx` into the BDK wallet as canonically unconfirmed (seen in the mempool).
+	fn insert_unconfirmed_tx(wallet: &Wallet, tx: Transaction) {
+		let txid = tx.compute_txid();
+		let mut locked = wallet.inner.lock().unwrap();
+		let mut tx_update = bdk_chain::TxUpdate::default();
+		tx_update.txs = vec![Arc::new(tx)];
+		tx_update.seen_ats = [(txid, 100)].into();
+		locked.apply_update(Update { tx_update, ..Default::default() }).unwrap();
+	}
+
+	/// Marks `txid` as evicted from the mempool after it was seen, so the BDK wallet still holds
+	/// the transaction but no longer considers it canonical.
+	fn evict_tx(wallet: &Wallet, txid: Txid) {
+		let mut locked = wallet.inner.lock().unwrap();
+		let mut tx_update = bdk_chain::TxUpdate::default();
+		tx_update.evicted_ats = [(txid, 101)].into();
+		locked.apply_update(Update { tx_update, ..Default::default() }).unwrap();
+	}
+
+	/// Builds a transaction paying a wallet address, spending an outpoint derived from
+	/// `input_byte` (distinct bytes yield non-conflicting transactions).
+	fn wallet_paying_tx(wallet: &Wallet, input_byte: u8) -> Transaction {
+		let script_pubkey = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::External)
+			.address
+			.script_pubkey();
+		Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: vec![bitcoin::TxIn {
+				previous_output: OutPoint {
+					txid: Txid::from_byte_array([input_byte; 32]),
+					vout: 0,
+				},
+				..Default::default()
+			}],
+			output: vec![TxOut { value: Amount::from_sat(90_000), script_pubkey }],
+		}
+	}
+
 	#[test]
 	fn funding_reclassification_update_substitutes_the_confirmed_candidate() {
 		let confirmed_txid = Txid::from_byte_array([1u8; 32]);
@@ -4185,6 +4532,577 @@ mod tests {
 			},
 			kind => panic!("unexpected kind {:?}", kind),
 		}
+	}
+
+	/// Continues the story above: once the conflicting close confirms through the anti-reorg
+	/// depth, the splice's funding transaction can never confirm — its shared input is spent for
+	/// good. The record must fail rather than stay `Pending` forever, and removing the pending
+	/// entry stops the lost transaction's rebroadcast on every tip change.
+	#[tokio::test]
+	async fn funding_payment_fails_once_a_foreign_conflict_confirms_to_depth() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let close_tx = wallet_paying_tx(&wallet, 3);
+		let close_txid = close_tx.compute_txid();
+
+		let splice_txid = Txid::from_byte_array([2u8; 32]);
+		let payment_id = PaymentId([21u8; 32]);
+		let candidates = vec![FundingTxCandidate {
+			txid: splice_txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let details =
+			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet
+			.pending_payment_store
+			.update(PendingPaymentDetailsUpdate {
+				id: payment_id,
+				payment_update: None,
+				conflicting_txids: Some(vec![close_txid]),
+				candidates: Vec::new(),
+			})
+			.await
+			.unwrap();
+
+		// The close is canonically confirmed; the splice transaction, having lost the conflict,
+		// is no longer canonical (here: never inserted at all).
+		insert_confirmed_tx(&wallet, close_tx, 5);
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged {
+			old_tip: block_id(9),
+			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		match &payment.kind {
+			PaymentKind::Onchain { txid, status, tx_type } => {
+				assert_eq!(*txid, splice_txid, "failing must not adopt the conflict's txid");
+				assert!(matches!(status, ConfirmationStatus::Unconfirmed));
+				assert!(matches!(tx_type, Some(TransactionType::InteractiveFunding { .. })));
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
+		assert_eq!(payment.amount_msat, Some(1_000_000));
+		assert_eq!(payment.fee_paid_msat, Some(500));
+		assert!(
+			wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none(),
+			"the entry must go so the lost transaction stops being rebroadcast"
+		);
+	}
+
+	/// A round that fell out of the mempool has not lost: BDK drops an evicted transaction from
+	/// the canonical set just as it drops one displaced by a confirmed conflict, but an evicted
+	/// round can be rebroadcast and confirm. With one round double-spent by a close confirmed to
+	/// depth and the other merely evicted, the record must stay `Pending`; it is lost only once
+	/// a transaction confirmed to depth spends an input of every round.
+	#[tokio::test]
+	async fn funding_payment_survives_while_an_evicted_candidate_can_still_confirm() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		// Two rounds of one negotiation, both seen in the mempool.
+		let first_round = wallet_paying_tx(&wallet, 1);
+		let first_txid = first_round.compute_txid();
+		let second_round = wallet_paying_tx(&wallet, 2);
+		let second_txid = second_round.compute_txid();
+		insert_unconfirmed_tx(&wallet, first_round);
+		insert_unconfirmed_tx(&wallet, second_round);
+
+		let payment_id = PaymentId([22u8; 32]);
+		let candidates = vec![
+			FundingTxCandidate {
+				txid: first_txid,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+			},
+			FundingTxCandidate {
+				txid: second_txid,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(600),
+			},
+		];
+		let details =
+			interactive_funding_details(payment_id, second_txid, Some(1_000_000), Some(600));
+		wallet.persist_funding_payment(details, candidates).await.unwrap();
+
+		// A close double-spends the first round's input and confirms through the anti-reorg
+		// depth, while the second round merely drops out of the mempool.
+		let close_tx = wallet_paying_tx(&wallet, 1);
+		let close_txid = close_tx.compute_txid();
+		wallet
+			.pending_payment_store
+			.update(PendingPaymentDetailsUpdate {
+				id: payment_id,
+				payment_update: None,
+				conflicting_txids: Some(vec![close_txid]),
+				candidates: Vec::new(),
+			})
+			.await
+			.unwrap();
+		insert_confirmed_tx(&wallet, close_tx, 5);
+		evict_tx(&wallet, second_txid);
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged {
+			old_tip: block_id(9),
+			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Pending, "the evicted round can still confirm");
+		let entry = wallet.pending_payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(entry.candidates.len(), 2, "both rounds stay on record");
+
+		// A second close spends the evicted round's input and confirms to depth too: no round
+		// can confirm now. It never displaced a canonical round, so the conflict list does not
+		// name it; the loss is read from the wallet's transaction graph.
+		let second_close = wallet_paying_tx(&wallet, 2);
+		insert_confirmed_tx(&wallet, second_close, 6);
+		let event = WalletEvent::ChainTipChanged {
+			old_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+			new_tip: block_id(6 + ANTI_REORG_DELAY - 1),
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert!(wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none());
+	}
+
+	/// A confirmed conflict that is one of the record's own candidates is RBF resolution, not a
+	/// loss: classification adopts it into the record, so the failure pass must leave the record
+	/// alone.
+	#[tokio::test]
+	async fn funding_payment_survives_a_confirmed_conflict_that_is_a_candidate() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let bumped_tx = wallet_paying_tx(&wallet, 3);
+		let bumped_txid = bumped_tx.compute_txid();
+
+		let splice_txid = Txid::from_byte_array([2u8; 32]);
+		let payment_id = PaymentId([21u8; 32]);
+		let candidates = vec![
+			FundingTxCandidate {
+				txid: splice_txid,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+			},
+			FundingTxCandidate {
+				txid: bumped_txid,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(600),
+			},
+		];
+		let details =
+			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet
+			.pending_payment_store
+			.update(PendingPaymentDetailsUpdate {
+				id: payment_id,
+				payment_update: None,
+				conflicting_txids: Some(vec![bumped_txid]),
+				candidates: Vec::new(),
+			})
+			.await
+			.unwrap();
+
+		insert_confirmed_tx(&wallet, bumped_tx, 5);
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged {
+			old_tip: block_id(9),
+			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		assert!(
+			wallet.pending_payment_store.get(&payment_id).await.unwrap().is_some(),
+			"the entry must survive for classification to adopt the confirmed candidate"
+		);
+	}
+
+	/// A foreign conflict that has confirmed but not yet through the anti-reorg depth may still
+	/// be reorged out, letting the funding transaction confirm after all; the record must stay
+	/// pending until the conflict's confirmation is final.
+	#[tokio::test]
+	async fn funding_payment_survives_a_foreign_conflict_short_of_depth() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let close_tx = wallet_paying_tx(&wallet, 3);
+		let close_txid = close_tx.compute_txid();
+
+		let splice_txid = Txid::from_byte_array([2u8; 32]);
+		let payment_id = PaymentId([21u8; 32]);
+		let candidates = vec![FundingTxCandidate {
+			txid: splice_txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let details =
+			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet
+			.pending_payment_store
+			.update(PendingPaymentDetailsUpdate {
+				id: payment_id,
+				payment_update: None,
+				conflicting_txids: Some(vec![close_txid]),
+				candidates: Vec::new(),
+			})
+			.await
+			.unwrap();
+
+		insert_confirmed_tx(&wallet, close_tx, 5);
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged {
+			old_tip: block_id(9),
+			new_tip: block_id(5 + ANTI_REORG_DELAY - 2),
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		assert!(wallet.pending_payment_store.get(&payment_id).await.unwrap().is_some());
+	}
+
+	/// A conflict may double-spend only one round of the negotiation — e.g. it shares an input
+	/// with an RBF attempt but not with the original candidate. While any candidate is still
+	/// canonical it can still confirm, so the record must stay pending.
+	#[tokio::test]
+	async fn funding_payment_survives_while_a_candidate_can_still_confirm() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let conflict_tx = wallet_paying_tx(&wallet, 3);
+		let conflict_txid = conflict_tx.compute_txid();
+		// A live candidate: spends a different outpoint, so the conflict didn't kill it.
+		let live_candidate_tx = wallet_paying_tx(&wallet, 4);
+		let live_candidate_txid = live_candidate_tx.compute_txid();
+
+		let splice_txid = Txid::from_byte_array([2u8; 32]);
+		let payment_id = PaymentId([21u8; 32]);
+		let candidates = vec![
+			FundingTxCandidate {
+				txid: splice_txid,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+			},
+			FundingTxCandidate {
+				txid: live_candidate_txid,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(600),
+			},
+		];
+		let details =
+			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet
+			.pending_payment_store
+			.update(PendingPaymentDetailsUpdate {
+				id: payment_id,
+				payment_update: None,
+				conflicting_txids: Some(vec![conflict_txid]),
+				candidates: Vec::new(),
+			})
+			.await
+			.unwrap();
+
+		insert_confirmed_tx(&wallet, conflict_tx, 5);
+		insert_unconfirmed_tx(&wallet, live_candidate_tx);
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged {
+			old_tip: block_id(9),
+			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		assert!(
+			wallet.pending_payment_store.get(&payment_id).await.unwrap().is_some(),
+			"a candidate can still confirm, so the record must stay pending"
+		);
+	}
+
+	/// The failure write pair is record first, entry second: a crash in between leaves a
+	/// `Failed` record with a lingering entry. The next tip pass must finish the job — remove
+	/// the entry without disturbing the record.
+	#[tokio::test]
+	async fn a_failed_funding_payment_with_a_lingering_entry_is_cleaned_up() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let close_tx = wallet_paying_tx(&wallet, 3);
+		let close_txid = close_tx.compute_txid();
+
+		let splice_txid = Txid::from_byte_array([2u8; 32]);
+		let payment_id = PaymentId([21u8; 32]);
+		let mut recorded =
+			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+		recorded.status = PaymentStatus::Failed;
+		recorded.latest_update_timestamp = 7;
+		wallet.payment_store.insert_or_update(recorded).await.unwrap();
+
+		// The entry embeds the pre-failure snapshot, as a crash between the two writes leaves it.
+		let snapshot =
+			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+		let candidates = vec![FundingTxCandidate {
+			txid: splice_txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let entry = PendingPaymentDetails::new(snapshot, vec![close_txid], candidates);
+		wallet.pending_payment_store.insert_or_update(entry).await.unwrap();
+
+		insert_confirmed_tx(&wallet, close_tx, 5);
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged {
+			old_tip: block_id(9),
+			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert_eq!(payment.latest_update_timestamp, 7, "the repair pass must not rewrite");
+		assert!(
+			wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none(),
+			"the lingering entry must be removed"
+		);
+	}
+
+	/// A crash between the failure's record write and its entry removal loses the wallet
+	/// changeset too, so the restart's catch-up sync replays the same events: `TxReplaced` for
+	/// the lost funding transaction resolves through the lingering entry to the already-`Failed`
+	/// record. Re-embedding that record would stamp `Failed` into the entry and hide it from the
+	/// pending listing that repairs it; the replay must instead finish the interrupted removal.
+	#[tokio::test]
+	async fn replayed_replacement_finishes_an_interrupted_failure() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let close_tx = wallet_paying_tx(&wallet, 3);
+		let close_txid = close_tx.compute_txid();
+
+		let splice_txid = Txid::from_byte_array([2u8; 32]);
+		let payment_id = PaymentId([21u8; 32]);
+		let mut recorded =
+			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+		recorded.status = PaymentStatus::Failed;
+		recorded.latest_update_timestamp = 7;
+		wallet.payment_store.insert_or_update(recorded).await.unwrap();
+
+		let snapshot =
+			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+		let candidates = vec![FundingTxCandidate {
+			txid: splice_txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let entry = PendingPaymentDetails::new(snapshot, vec![close_txid], candidates);
+		wallet.pending_payment_store.insert_or_update(entry).await.unwrap();
+
+		insert_confirmed_tx(&wallet, close_tx, 5);
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let events = vec![
+			WalletEvent::TxReplaced {
+				txid: splice_txid,
+				tx: Arc::new(dummy_tx()),
+				conflicts: vec![(0, close_txid)],
+			},
+			WalletEvent::ChainTipChanged {
+				old_tip: block_id(9),
+				new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+			},
+		];
+		wallet.update_payment_store(events).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert_eq!(payment.latest_update_timestamp, 7, "the replay must not rewrite the record");
+		assert!(
+			wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none(),
+			"the replay must finish the interrupted entry removal"
+		);
+	}
+
+	/// Recording a transaction the payment store does not know costs two reads of it: the
+	/// funding-status check looks the resolved id up, and the generic write merges against the
+	/// store. Nothing in between re-reads what the funding-status check has already seen.
+	#[tokio::test]
+	async fn unknown_transaction_is_recorded_after_two_payment_store_reads() {
+		let counting_store = ReadCountingStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(counting_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let tx = wallet_paying_tx(&wallet, 1);
+		let txid = tx.compute_txid();
+		let reads_before = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		let event = WalletEvent::TxUnconfirmed { txid, tx: Arc::new(tx), old_block_time: None };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+		let reads = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE) - reads_before;
+
+		let payment_id = PaymentId(txid.to_byte_array());
+		assert!(wallet.payment_store.get(&payment_id).await.unwrap().is_some());
+		assert_eq!(reads, 2, "recording an unknown transaction re-read the payment store");
+	}
+
+	/// A funding record's id is anchored to its first candidate's txid. Once the payment settles
+	/// and its entry is removed, a wallet event for that candidate no longer resolves through the
+	/// candidate history — the fallback keys it by its own txid, colliding with the record's id.
+	/// Recording the event there would merge a fresh wallet-view `Pending` payment into the
+	/// terminal record; such events must be skipped.
+	#[tokio::test]
+	async fn candidate_event_does_not_resurrect_a_settled_funding_payment() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		// The record's id derives from the first candidate r1; its txid rotated to the RBF round
+		// r2. The payment failed and its pending entry is gone.
+		let r1 = Txid::from_byte_array([2u8; 32]);
+		let r2 = Txid::from_byte_array([4u8; 32]);
+		let payment_id = PaymentId(r1.to_byte_array());
+		let mut recorded = interactive_funding_details(payment_id, r2, Some(1_000_000), Some(600));
+		recorded.status = PaymentStatus::Failed;
+		recorded.latest_update_timestamp = 7;
+		wallet.payment_store.insert_or_update(recorded).await.unwrap();
+
+		// r1 reappears in the mempool after the failure...
+		let event =
+			WalletEvent::TxUnconfirmed { txid: r1, tx: Arc::new(dummy_tx()), old_block_time: None };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed, "the record must not resurrect");
+		assert!(matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == r2));
+		assert_eq!(payment.latest_update_timestamp, 7);
+		assert!(wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none());
+
+		// ...and even confirms: the record settled as `Failed` and must stay that way.
+		let event = WalletEvent::TxConfirmed {
+			txid: r1,
+			tx: Arc::new(dummy_tx()),
+			block_time: confirmed_block_time(5),
+			old_block_time: None,
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed, "the record must not resurrect");
+		assert!(matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == r2));
+		assert_eq!(payment.latest_update_timestamp, 7);
+		assert!(wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none());
+	}
+
+	/// The same collision through a conflict list: a pending entry naming a settled funding
+	/// record's transaction as a conflict of its own round resolves an event for that transaction
+	/// to the entry's record, which finds it foreign, and the fallback to the transaction's own id
+	/// lands on the settled record. That id is read before anything is written under it.
+	#[tokio::test]
+	async fn conflict_listed_event_does_not_resurrect_a_settled_funding_payment() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		// A settled funding record under the txid-derived id of r1, its pending entry gone.
+		let r1 = Txid::from_byte_array([2u8; 32]);
+		let settled_id = PaymentId(r1.to_byte_array());
+		let mut settled = interactive_funding_details(settled_id, r1, Some(1_000_000), Some(600));
+		settled.status = PaymentStatus::Failed;
+		settled.latest_update_timestamp = 7;
+		wallet.payment_store.insert_or_update(settled).await.unwrap();
+
+		// A live funding record whose entry lists r1 as a conflict of its round r2.
+		let r2 = Txid::from_byte_array([4u8; 32]);
+		let live_id = PaymentId(r2.to_byte_array());
+		let live = interactive_funding_details(live_id, r2, Some(2_000_000), Some(700));
+		wallet.payment_store.insert_or_update(live.clone()).await.unwrap();
+		wallet
+			.pending_payment_store
+			.insert_or_update(PendingPaymentDetails::new(live.clone(), vec![r1], Vec::new()))
+			.await
+			.unwrap();
+		assert_eq!(wallet.find_payment_by_txid(r1).await.unwrap(), Some(live_id));
+
+		let event =
+			WalletEvent::TxUnconfirmed { txid: r1, tx: Arc::new(dummy_tx()), old_block_time: None };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&settled_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed, "the settled record must not resurrect");
+		assert_eq!(payment.latest_update_timestamp, 7);
+		assert!(wallet.pending_payment_store.get(&settled_id).await.unwrap().is_none());
+		assert_eq!(wallet.payment_store.get(&live_id).await.unwrap(), Some(live));
+	}
+
+	/// The failure transition must apply regardless of the payment's direction: a splice-out
+	/// records as `Inbound` (funds return to the wallet) and dies to a conflicting close the
+	/// same way an outbound one does.
+	#[tokio::test]
+	async fn inbound_funding_payment_fails_once_a_foreign_conflict_confirms_to_depth() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let close_tx = wallet_paying_tx(&wallet, 3);
+		let close_txid = close_tx.compute_txid();
+
+		let splice_txid = Txid::from_byte_array([2u8; 32]);
+		let payment_id = PaymentId([21u8; 32]);
+		let candidates = vec![FundingTxCandidate {
+			txid: splice_txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+		}];
+		let mut details =
+			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+		details.direction = PaymentDirection::Inbound;
+		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet
+			.pending_payment_store
+			.update(PendingPaymentDetailsUpdate {
+				id: payment_id,
+				payment_update: None,
+				conflicting_txids: Some(vec![close_txid]),
+				candidates: Vec::new(),
+			})
+			.await
+			.unwrap();
+
+		insert_confirmed_tx(&wallet, close_tx, 5);
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged {
+			old_tip: block_id(9),
+			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert!(wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none());
 	}
 
 	/// A funding-typed broadcast that doesn't touch the on-chain wallet must not be recorded.
