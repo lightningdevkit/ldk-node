@@ -31,6 +31,28 @@ interface LogWriter {
 	void log(LogRecord record);
 };
 
+[Trait, WithForeign]
+interface DynStoreTrait {
+	[Throws=IOError, Async]
+	bytes read(string primary_namespace, string secondary_namespace, string key);
+	[Throws=IOError, Async]
+	void write(string primary_namespace, string secondary_namespace, string key, bytes buf);
+	[Throws=IOError, Async]
+	void remove(string primary_namespace, string secondary_namespace, string key, boolean lazy);
+	[Throws=IOError, Async]
+	sequence<string> list(string primary_namespace, string secondary_namespace);
+	[Throws=IOError, Async]
+	PaginatedListResponse list_paginated(string primary_namespace, string secondary_namespace, PageToken? page_token);
+	[Throws=IOError, Async]
+	sequence<KVStoreKey> list_all_keys();
+};
+
+typedef dictionary KVStoreKey;
+
+typedef dictionary PaginatedListResponse;
+
+typedef enum IOError;
+
 interface ProbingConfigBuilder {
 	[Name=high_degree]
 	constructor(u64 top_node_count);

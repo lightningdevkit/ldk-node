@@ -314,7 +314,9 @@ mod tests {
 	use bdk_wallet::{AsyncWalletPersister, ChangeSet, Wallet as BdkWallet};
 	use bitcoin::Network;
 	use lightning::io;
-	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+	use lightning::util::persist::{
+		KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+	};
 
 	use super::KVStoreWalletPersister;
 	use crate::io::test_utils::InMemoryStore;
@@ -375,6 +377,15 @@ mod tests {
 				secondary_namespace,
 				page_token,
 			)
+		}
+	}
+
+	impl MigratableKVStore for GatedStore {
+		fn list_all_keys(
+			&self,
+		) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+		{
+			MigratableKVStore::list_all_keys(&*self.inner)
 		}
 	}
 

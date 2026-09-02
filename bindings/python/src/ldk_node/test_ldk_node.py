@@ -1,3 +1,6 @@
+import asyncio
+import sqlite3
+import threading
 import unittest
 import tempfile
 import time
@@ -8,10 +11,78 @@ import requests
 import socket
 
 from ldk_node import *
+from ldk_node.ldk_node import uniffi_set_event_loop
 
 DEFAULT_ESPLORA_SERVER_URL = "http://127.0.0.1:3002"
 DEFAULT_TEST_NETWORK = Network.REGTEST
 DEFAULT_BITCOIN_CLI_BIN = "bitcoin-cli"
+
+class TestKvStore:
+    """Thread-safe in-memory store implementing the foreign DynStoreTrait."""
+
+    def __init__(self):
+        self._storage = {}
+        self._lock = threading.Lock()
+
+    def put(self, primary_namespace, secondary_namespace, key, value):
+        with self._lock:
+            namespace = self._storage.setdefault(
+                (primary_namespace, secondary_namespace), {}
+            )
+            namespace[key] = bytes(value)
+
+    def get(self, primary_namespace, secondary_namespace, key):
+        with self._lock:
+            namespace = self._storage.get((primary_namespace, secondary_namespace), {})
+            return namespace.get(key)
+
+    def keys(self, primary_namespace, secondary_namespace):
+        with self._lock:
+            namespace = self._storage.get((primary_namespace, secondary_namespace), {})
+            return list(namespace)
+
+    async def read(self, primary_namespace, secondary_namespace, key):
+        value = self.get(primary_namespace, secondary_namespace, key)
+        if value is None:
+            raise IoError.NotFound()
+        return value
+
+    async def write(self, primary_namespace, secondary_namespace, key, buf):
+        self.put(primary_namespace, secondary_namespace, key, buf)
+
+    async def remove(self, primary_namespace, secondary_namespace, key, lazy):
+        with self._lock:
+            namespace_key = (primary_namespace, secondary_namespace)
+            namespace = self._storage.get(namespace_key)
+            if namespace is None:
+                return
+            namespace.pop(key, None)
+            if not namespace:
+                del self._storage[namespace_key]
+
+    async def list(self, primary_namespace, secondary_namespace):
+        return self.keys(primary_namespace, secondary_namespace)
+
+    async def list_paginated(
+        self, primary_namespace, secondary_namespace, page_token
+    ):
+        if page_token is not None:
+            return PaginatedListResponse(keys=[], next_page_token=None)
+
+        keys = list(reversed(self.keys(primary_namespace, secondary_namespace)))
+        return PaginatedListResponse(keys=keys, next_page_token=None)
+
+    async def list_all_keys(self):
+        with self._lock:
+            return [
+                KvStoreKey(
+                    primary_namespace=primary_namespace,
+                    secondary_namespace=secondary_namespace,
+                    key=key,
+                )
+                for (primary_namespace, secondary_namespace), namespace in self._storage.items()
+                for key in namespace
+            ]
 
 def bitcoin_cli(cmd):
     args = []
@@ -107,6 +178,46 @@ def setup_node(tmp_dir, esplora_endpoint, listening_addresses):
     builder.set_network(DEFAULT_TEST_NETWORK)
     builder.set_listening_addresses(listening_addresses)
     return builder.build(node_entropy)
+
+def setup_tiered_node(
+    tmp_dir,
+    backup_dir,
+    ephemeral_dir,
+    esplora_endpoint,
+    listening_addresses,
+    primary_store,
+):
+    mnemonic = Mnemonic.generate(24)
+    node_entropy = NodeEntropy.from_bip39_mnemonic(mnemonic, None)
+    builder = Builder.from_config(default_config())
+    builder.set_storage_dir_path(tmp_dir)
+    builder.set_chain_source_esplora(esplora_endpoint, None)
+    builder.set_network(DEFAULT_TEST_NETWORK)
+    builder.set_listening_addresses(listening_addresses)
+    builder.set_backup_storage_dir_path(backup_dir)
+    builder.set_ephemeral_storage_dir_path(ephemeral_dir)
+    return builder.build_with_store(node_entropy, primary_store)
+
+def read_sqlite_value(store_dir, database_name, primary_namespace, secondary_namespace, key):
+    database_path = os.path.join(store_dir, database_name)
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """SELECT value FROM ldk_node_data
+               WHERE primary_namespace = ? AND secondary_namespace = ? AND key = ?""",
+            (primary_namespace, secondary_namespace, key),
+        ).fetchone()
+    return None if row is None else row[0]
+
+def list_sqlite_keys(store_dir, database_name, primary_namespace, secondary_namespace):
+    database_path = os.path.join(store_dir, database_name)
+    with sqlite3.connect(database_path) as connection:
+        rows = connection.execute(
+            """SELECT key FROM ldk_node_data
+               WHERE primary_namespace = ? AND secondary_namespace = ?
+               ORDER BY key""",
+            (primary_namespace, secondary_namespace),
+        ).fetchall()
+    return [row[0] for row in rows]
 
 def get_esplora_endpoint():
     if os.environ.get('ESPLORA_ENDPOINT'):
@@ -364,6 +475,175 @@ class TestLdkNode(unittest.TestCase):
 
         # Stop nodes
         stop_and_cleanup(node_1, node_2, tmp_dir_1, tmp_dir_2)
+
+    def test_tier_store_with_python_primary(self):
+        loop = asyncio.new_event_loop()
+
+        def run_loop():
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+
+        loop_thread = threading.Thread(target=run_loop, daemon=True)
+        loop_thread.start()
+        uniffi_set_event_loop(loop)
+
+        node_1 = None
+        node_2 = None
+        tmp_dir_1 = tempfile.TemporaryDirectory("_ldk_node_1")
+        tmp_dir_2 = tempfile.TemporaryDirectory("_ldk_node_2")
+        backup_dir = tempfile.TemporaryDirectory("_ldk_node_backup")
+        ephemeral_dir = tempfile.TemporaryDirectory("_ldk_node_ephemeral")
+
+        try:
+            primary_store = TestKvStore()
+            preexisting_value = b"preexisting durable value"
+            primary_store.put("test", "", "preexisting", preexisting_value)
+
+            port_1, port_2 = find_two_free_ports()
+            listening_addresses_1 = [f"127.0.0.1:{port_1}"]
+            listening_addresses_2 = [f"127.0.0.1:{port_2}"]
+            esplora_endpoint = get_esplora_endpoint()
+
+            node_1 = setup_tiered_node(
+                tmp_dir_1.name,
+                backup_dir.name,
+                ephemeral_dir.name,
+                esplora_endpoint,
+                listening_addresses_1,
+                primary_store,
+            )
+            node_2 = setup_node(tmp_dir_2.name, esplora_endpoint, listening_addresses_2)
+            node_1.start()
+            node_2.start()
+
+            fund_nodes(node_1, node_2, esplora_endpoint)
+            _, channel_ready_event_2, _ = open_channel_and_wait_ready(
+                node_1,
+                node_2,
+                node_2.node_id(),
+                listening_addresses_2[0],
+                esplora_endpoint,
+            )
+
+            invoice = node_2.bolt11_payment().receive(
+                2_500_000, Bolt11InvoiceDescription.DIRECT("tiered storage"), 9217
+            )
+            node_1.bolt11_payment().send(invoice, None)
+            expect_event(node_1, Event.PAYMENT_SUCCESSFUL)
+            expect_event(node_2, Event.PAYMENT_RECEIVED)
+
+            node_2.close_channel(channel_ready_event_2.user_channel_id, node_1.node_id())
+            expect_event(node_1, Event.CHANNEL_CLOSED)
+            expect_event(node_2, Event.CHANNEL_CLOSED)
+
+            node_1.stop()
+            node_1 = None
+            node_2.stop()
+            node_2 = None
+
+            backup_database = "ldk_node_data_backup.sqlite"
+            ephemeral_database = "ldk_node_data_ephemeral.sqlite"
+
+            self.assertEqual(
+                read_sqlite_value(
+                    backup_dir.name,
+                    backup_database,
+                    "test",
+                    "",
+                    "preexisting",
+                ),
+                preexisting_value,
+            )
+
+            channel_manager = primary_store.get("", "", "manager")
+            self.assertIsNotNone(channel_manager)
+            self.assertEqual(
+                read_sqlite_value(
+                    backup_dir.name,
+                    backup_database,
+                    "",
+                    "",
+                    "manager",
+                ),
+                channel_manager,
+            )
+            self.assertIsNone(
+                read_sqlite_value(
+                    ephemeral_dir.name,
+                    ephemeral_database,
+                    "",
+                    "",
+                    "manager",
+                )
+            )
+
+            wallet_descriptor = primary_store.get("bdk_wallet", "", "descriptor")
+            self.assertIsNotNone(wallet_descriptor)
+            self.assertEqual(
+                read_sqlite_value(
+                    backup_dir.name,
+                    backup_database,
+                    "bdk_wallet",
+                    "",
+                    "descriptor",
+                ),
+                wallet_descriptor,
+            )
+            self.assertIsNone(
+                read_sqlite_value(
+                    ephemeral_dir.name,
+                    ephemeral_database,
+                    "bdk_wallet",
+                    "",
+                    "descriptor",
+                )
+            )
+
+            primary_payments = sorted(primary_store.keys("payments", ""))
+            self.assertGreater(len(primary_payments), 0)
+            self.assertEqual(
+                list_sqlite_keys(backup_dir.name, backup_database, "payments", ""),
+                primary_payments,
+            )
+            self.assertEqual(
+                list_sqlite_keys(ephemeral_dir.name, ephemeral_database, "payments", ""),
+                [],
+            )
+
+            self.assertIsNone(primary_store.get("", "", "network_graph"))
+            self.assertIsNone(
+                read_sqlite_value(
+                    backup_dir.name,
+                    backup_database,
+                    "",
+                    "",
+                    "network_graph",
+                )
+            )
+            self.assertIsNotNone(
+                read_sqlite_value(
+                    ephemeral_dir.name,
+                    ephemeral_database,
+                    "",
+                    "",
+                    "network_graph",
+                )
+            )
+        finally:
+            for node in (node_1, node_2):
+                if node is not None:
+                    try:
+                        node.stop()
+                    except NodeError:
+                        pass
+            tmp_dir_1.cleanup()
+            tmp_dir_2.cleanup()
+            backup_dir.cleanup()
+            ephemeral_dir.cleanup()
+            loop.call_soon_threadsafe(loop.stop)
+            loop_thread.join(timeout=5)
+            uniffi_set_event_loop(None)
+            loop.close()
 
 if __name__ == '__main__':
     unittest.main()

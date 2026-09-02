@@ -750,7 +750,9 @@ mod tests {
 	use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 	use std::time::Duration;
 
-	use lightning::util::persist::{PageToken, PaginatedKVStore, PaginatedListResponse};
+	use lightning::util::persist::{
+		MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+	};
 	use lightning::util::test_utils::TestLogger;
 	use lightning::{impl_writeable_tlv_based, io};
 	use tokio::sync::Notify;
@@ -902,6 +904,16 @@ mod tests {
 		}
 	}
 
+	impl MigratableKVStore for FailingStore {
+		fn list_all_keys(
+			&self,
+		) -> impl std::future::Future<Output = Result<Vec<(String, String, String)>, io::Error>>
+		       + 'static
+		       + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "list_all_keys failed")) }
+		}
+	}
+
 	fn new_failing_data_store(objects: Vec<TestObject>) -> DataStore<TestObject, Arc<TestLogger>> {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
 		let logger = Arc::new(TestLogger::new());
@@ -965,6 +977,16 @@ mod tests {
 		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
 		{
 			self.inner.list_paginated(primary_namespace, secondary_namespace, page_token)
+		}
+	}
+
+	impl MigratableKVStore for GatedStore {
+		fn list_all_keys(
+			&self,
+		) -> impl std::future::Future<Output = Result<Vec<(String, String, String)>, io::Error>>
+		       + 'static
+		       + Send {
+			MigratableKVStore::list_all_keys(&self.inner)
 		}
 	}
 
@@ -1345,6 +1367,17 @@ mod tests {
 		}
 	}
 
+	impl MigratableKVStore for CountingStore {
+		fn list_all_keys(
+			&self,
+		) -> impl std::future::Future<Output = Result<Vec<(String, String, String)>, io::Error>>
+		       + 'static
+		       + Send {
+			self.lists.fetch_add(1, Ordering::Relaxed);
+			MigratableKVStore::list_all_keys(&self.inner)
+		}
+	}
+
 	/// A store whose writes and removals can be made to fail on demand, while reads keep working.
 	///
 	/// Note a store that fails *reads* would be useless for testing the write paths of a bounded
@@ -1401,6 +1434,16 @@ mod tests {
 		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
 		{
 			self.inner.list_paginated(primary_namespace, secondary_namespace, page_token)
+		}
+	}
+
+	impl MigratableKVStore for WriteFailingStore {
+		fn list_all_keys(
+			&self,
+		) -> impl std::future::Future<Output = Result<Vec<(String, String, String)>, io::Error>>
+		       + 'static
+		       + Send {
+			MigratableKVStore::list_all_keys(&self.inner)
 		}
 	}
 
@@ -1799,6 +1842,16 @@ mod tests {
 				response.keys.insert(0, phantom_key);
 				Ok(response)
 			}
+		}
+	}
+
+	impl MigratableKVStore for PhantomKeyStore {
+		fn list_all_keys(
+			&self,
+		) -> impl std::future::Future<Output = Result<Vec<(String, String, String)>, io::Error>>
+		       + 'static
+		       + Send {
+			MigratableKVStore::list_all_keys(&self.inner)
 		}
 	}
 

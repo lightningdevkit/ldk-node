@@ -26,11 +26,12 @@ use common::{
 	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
 	expect_event, expect_payment_claimable_event, expect_payment_received_event,
 	expect_payment_successful_event, expect_splice_negotiated_event, generate_blocks_and_wait,
-	generate_listening_addresses, invalidate_blocks, open_channel, open_channel_no_wait,
-	open_channel_push_amt, open_channel_with_all, premine_and_distribute_funds, premine_blocks,
-	prepare_rbf, random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_builder,
-	setup_node, setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_tx, InMemoryStore,
-	NodePaymentExt, TestChainSource, TestConfig, TestStoreType, TestSyncStore,
+	generate_listening_addresses, into_builder_store, invalidate_blocks, open_channel,
+	open_channel_no_wait, open_channel_push_amt, open_channel_with_all,
+	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
+	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
+	wait_for_block, wait_for_tx, InMemoryStore, NodePaymentExt, TestChainSource, TestConfig,
+	TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
@@ -38,6 +39,8 @@ use ldk_node::config::{
 	AsyncPaymentsRole, EsploraSyncConfig, ADDRESS_POOL_SIZE, DEFAULT_FULL_SCAN_STOP_GAP,
 };
 use ldk_node::entropy::NodeEntropy;
+#[cfg(feature = "storage-tier")]
+use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::liquidity::LSPS2ServiceConfig;
 use ldk_node::payment::{
 	ConfirmationStatus, PayerProofOptions, PaymentDetails, PaymentDirection, PaymentKind,
@@ -47,7 +50,15 @@ use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
+#[cfg(feature = "storage-tier")]
+use lightning::util::persist::MigratableKVStore;
 use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+#[cfg(feature = "storage-tier")]
+use lightning::util::persist::{
+	CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_KEY,
+	NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE, NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
@@ -142,6 +153,16 @@ impl PaginatedKVStore for ContendedStore {
 	}
 }
 
+#[cfg(feature = "storage-tier")]
+impl MigratableKVStore for ContendedStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, lightning::io::Error>> + 'static + Send
+	{
+		MigratableKVStore::list_all_keys(&*self.inner)
+	}
+}
+
 #[test]
 fn wallet_store_contention_does_not_stall_runtime() {
 	let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
@@ -162,7 +183,10 @@ fn wallet_store_contention_does_not_stall_runtime() {
 				wallet_write_started: Arc::new(tokio::sync::Notify::new()),
 			};
 			let node = builder
-				.build_with_store(test_config.node_entropy.into(), store.clone())
+				.build_with_store(
+					test_config.node_entropy.into(),
+					into_builder_store(store.clone()),
+				)
 				.map_err(|e| format!("failed to build node: {e:?}"))?;
 			#[cfg(not(feature = "uniffi"))]
 			let node = Arc::new(node);
@@ -297,6 +321,16 @@ impl PaginatedKVStore for WalletPersistGatedStore {
 	}
 }
 
+#[cfg(feature = "storage-tier")]
+impl MigratableKVStore for WalletPersistGatedStore {
+	fn list_all_keys(
+		&self,
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, lightning::io::Error>> + 'static + Send
+	{
+		MigratableKVStore::list_all_keys(&*self.inner)
+	}
+}
+
 // LDK invokes the sync `SignerProvider::get_shutdown_scriptpubkey` callback on a runtime worker
 // thread while holding channel locks when a node accepts (or opens) a channel. If deriving the
 // shutdown script waits on wallet persistence, a contended wallet store wedges the event handler
@@ -319,7 +353,9 @@ async fn channel_open_completes_while_wallet_persistence_is_stalled() {
 	sync_config.background_sync_config = None;
 	builder_b.set_chain_source_esplora(esplora_url, Some(sync_config));
 	let store = WalletPersistGatedStore::new();
-	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	let node_b = builder_b
+		.build_with_store(config_b.node_entropy.into(), into_builder_store(store.clone()))
+		.unwrap();
 	node_b.start().unwrap();
 
 	// Fund both nodes so node B passes the anchor reserve check on the accept path.
@@ -403,7 +439,9 @@ async fn address_pool_is_reloaded_on_restart() {
 
 	setup_builder!(builder_b, config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
-	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	let node_b = builder_b
+		.build_with_store(config_b.node_entropy.into(), into_builder_store(store.clone()))
+		.unwrap();
 	node_b.start().unwrap();
 	node_b.stop().unwrap();
 	drop(node_b);
@@ -413,7 +451,9 @@ async fn address_pool_is_reloaded_on_restart() {
 	let wallet_writes_before = store.wallet_writes_completed.load(Ordering::Acquire);
 	setup_builder!(builder_b, config_b.node_config);
 	builder_b.set_chain_source_esplora(esplora_url, Some(sync_config));
-	let node_b = builder_b.build_with_store(config_b.node_entropy.into(), store.clone()).unwrap();
+	let node_b = builder_b
+		.build_with_store(config_b.node_entropy.into(), into_builder_store(store.clone()))
+		.unwrap();
 	assert_eq!(store.wallet_writes_completed.load(Ordering::Acquire), wallet_writes_before);
 	node_b.start().unwrap();
 
@@ -840,8 +880,9 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store.clone()).unwrap();
+	let node = builder
+		.build_with_store(config.node_entropy.into(), into_builder_store(test_sync_store.clone()))
+		.unwrap();
 	node.start().unwrap();
 
 	let expected_node_id = node.node_id();
@@ -879,8 +920,9 @@ async fn start_stop_reinit() {
 	setup_builder!(builder, config.node_config);
 	builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 
-	let reinitialized_node =
-		builder.build_with_store(config.node_entropy.into(), test_sync_store).unwrap();
+	let reinitialized_node = builder
+		.build_with_store(config.node_entropy.into(), into_builder_store(test_sync_store))
+		.unwrap();
 	reinitialized_node.start().unwrap();
 	assert_eq!(reinitialized_node.node_id(), expected_node_id);
 
@@ -4956,4 +4998,165 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	client.stop().unwrap();
 	cheap.stop().unwrap();
 	expensive.stop().unwrap();
+}
+#[cfg(feature = "storage-tier")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn builder_routes_data_across_configured_storage_tiers() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let config_a = random_config();
+	let primary_store = TestSyncStore::new(common::random_storage_path());
+	let preexisting_key = ("test", "", "preexisting");
+	let preexisting_value = vec![42];
+	primary_store
+		.write(preexisting_key.0, preexisting_key.1, preexisting_key.2, preexisting_value.clone())
+		.await
+		.unwrap();
+	let backup_dir = common::random_storage_path();
+	let ephemeral_dir = common::random_storage_path();
+
+	setup_builder!(builder_a, config_a.node_config.clone());
+	builder_a.set_chain_source_esplora(
+		format!("http://{}", electrsd.esplora_url.as_ref().unwrap()),
+		None,
+	);
+	builder_a.set_filesystem_logger(None, None);
+	builder_a.set_backup_storage_dir_path(backup_dir.to_str().unwrap().to_owned());
+	builder_a.set_ephemeral_storage_dir_path(ephemeral_dir.to_str().unwrap().to_owned());
+
+	let node_a = builder_a
+		.build_with_store(config_a.node_entropy.into(), into_builder_store(primary_store.clone()))
+		.unwrap();
+	node_a.start().unwrap();
+	assert!(node_a.status().is_running);
+	assert!(node_a.status().latest_fee_rate_cache_update_timestamp.is_some());
+
+	let mut config_b = random_config();
+	config_b.node_config.manually_handle_unknown_bolt11_payments = true;
+	let node_b = setup_node(&chain_source, config_b);
+
+	do_channel_full_cycle(
+		node_a,
+		node_b,
+		&bitcoind.client,
+		&electrsd.client,
+		false,
+		true,
+		true,
+		false,
+	)
+	.await;
+
+	let backup_store = SqliteStore::new(
+		backup_dir,
+		Some(ldk_node::io::sqlite_store::SQLITE_BACKUP_DB_FILE_NAME.to_string()),
+		Some(ldk_node::io::sqlite_store::KV_TABLE_NAME.to_string()),
+	)
+	.unwrap();
+	let ephemeral_store = SqliteStore::new(
+		ephemeral_dir,
+		Some(ldk_node::io::sqlite_store::SQLITE_EPHEMERAL_DB_FILE_NAME.to_string()),
+		Some(ldk_node::io::sqlite_store::KV_TABLE_NAME.to_string()),
+	)
+	.unwrap();
+
+	assert_eq!(
+		backup_store.read(preexisting_key.0, preexisting_key.1, preexisting_key.2).await.unwrap(),
+		preexisting_value
+	);
+	assert!(
+		ephemeral_store
+			.read(preexisting_key.0, preexisting_key.1, preexisting_key.2)
+			.await
+			.is_err(),
+		"ephemeral store contains pre-existing durable data"
+	);
+
+	for (pn, sn, key) in [
+		("bdk_wallet", "", "descriptor"),
+		("bdk_wallet", "", "change_descriptor"),
+		("bdk_wallet", "", "network"),
+		("", "", "node_metrics"),
+		("", "", "events"),
+		("", "", "peers"),
+	] {
+		let primary = primary_store.read(pn, sn, key).await.unwrap();
+		let backup = backup_store.read(pn, sn, key).await.unwrap();
+
+		assert_eq!(backup, primary, "backup mismatch for {pn}/{sn}/{key}");
+		assert!(
+			ephemeral_store.read(pn, sn, key).await.is_err(),
+			"ephemeral store contains durable value {pn}/{sn}/{key}"
+		);
+	}
+
+	let primary_channel_manager = primary_store
+		.read(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+	let backup_channel_manager = backup_store
+		.read(
+			CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+			CHANNEL_MANAGER_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+	assert_eq!(backup_channel_manager, primary_channel_manager);
+	assert!(
+		ephemeral_store
+			.read(
+				CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_MANAGER_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err(),
+		"ephemeral store contains channel manager data"
+	);
+
+	let mut primary_payments = primary_store.list("payments", "").await.unwrap();
+	let mut backup_payments = backup_store.list("payments", "").await.unwrap();
+	assert!(!primary_payments.is_empty());
+	primary_payments.sort();
+	backup_payments.sort();
+	assert_eq!(backup_payments, primary_payments);
+	assert!(ephemeral_store.list("payments", "").await.unwrap().is_empty());
+
+	let ephemeral_network_graph = ephemeral_store
+		.read(
+			NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+			NETWORK_GRAPH_PERSISTENCE_KEY,
+		)
+		.await
+		.expect("ephemeral store should contain network graph data");
+	assert!(!ephemeral_network_graph.is_empty());
+	assert!(
+		primary_store
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err(),
+		"primary store contains ephemeral network graph data"
+	);
+	assert!(
+		backup_store
+			.read(
+				NETWORK_GRAPH_PERSISTENCE_PRIMARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_SECONDARY_NAMESPACE,
+				NETWORK_GRAPH_PERSISTENCE_KEY,
+			)
+			.await
+			.is_err(),
+		"backup store contains ephemeral network graph data"
+	);
 }
