@@ -36,6 +36,7 @@ use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
+use crate::channel::SpliceTracker;
 use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
@@ -573,6 +574,7 @@ where
 	onion_messenger: Arc<OnionMessenger>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	prober: Option<Arc<Prober>>,
+	splice_tracker: Arc<SpliceTracker>,
 	runtime: Arc<Runtime>,
 	logger: L,
 	config: Arc<Config>,
@@ -591,7 +593,8 @@ where
 		payment_store: Arc<PaymentStore>, peer_store: Arc<PeerStore<L>>,
 		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
 		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
-		prober: Option<Arc<Prober>>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		prober: Option<Arc<Prober>>, splice_tracker: Arc<SpliceTracker>, runtime: Arc<Runtime>,
+		logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -610,6 +613,7 @@ where
 			onion_messenger,
 			om_mailbox,
 			prober,
+			splice_tracker,
 			runtime,
 			logger,
 			config,
@@ -1936,6 +1940,10 @@ where
 					.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
 					.await;
 
+				self.splice_tracker
+					.on_channel_ready(counterparty_node_id, channel_id, funding_txo)
+					.await;
+
 				let event = Event::ChannelReady {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
@@ -1996,6 +2004,8 @@ where
 				// `counterparty_node_id` has been set on every `ChannelClosed` since LDK 0.0.117.
 				let counterparty_node_id = counterparty_node_id
 					.expect("counterparty_node_id is always set since LDK 0.0.117");
+
+				self.splice_tracker.on_channel_closed(counterparty_node_id, channel_id).await;
 
 				// Drop the peer once its last channel with us has reached a terminal state.
 				// For `HolderForceClosed`, retain it through one recovery reconnect so that
@@ -2311,13 +2321,16 @@ where
 					// `funding_transaction_signed` releases them to the counterparty, after which
 					// either party may broadcast — and wallet sync could observe the transaction
 					// before this node has recorded it. The record is written from the channel's
-					// pending splice history, and the round's broadcast adds nothing to it. On a
-					// failed write, replay rather than proceed unrecorded: LDK re-offers the event
-					// in-session and regenerates it across restarts while the transaction is
-					// unsigned.
+					// pending splice history through the splice tracker, whose lock keeps the
+					// channel's intent record from changing hands mid-write, and the round's
+					// broadcast adds nothing to it. On a failed write, replay rather than proceed
+					// unrecorded: LDK re-offers the event in-session and regenerates it across
+					// restarts while the transaction is unsigned.
 					let candidates = self.pending_splice_rounds(counterparty_node_id, channel_id);
-					if let Err(e) =
-						self.wallet.record_signed_funding(&partially_signed_tx, &candidates).await
+					if let Err(e) = self
+						.splice_tracker
+						.on_funding_ready_for_signing(&partially_signed_tx, &candidates)
+						.await
 					{
 						log_error!(
 							self.logger,
@@ -2412,6 +2425,7 @@ where
 				channel_id,
 				user_channel_id,
 				counterparty_node_id,
+				contribution,
 				..
 			} => {
 				log_info!(
@@ -2423,12 +2437,13 @@ where
 
 				// A round this node signed was recorded when signing; if the failed round was
 				// among them, nothing can broadcast it anymore, so take its record back. The
-				// rounds LDK still holds tell which recorded ones it abandoned (a contribution
-				// can fail while an earlier signed round still awaits its signatures). A closed
-				// channel is left to its `ChannelClosed` event: LDK queues one for every channel it
-				// removes — before the failures a force-close reports, after the one a cooperative
-				// close reports — and that event carries the channel's last funding, which this
-				// handler can no longer read from the channel.
+				// splice intent the record carried stays behind as a bare intent for the report
+				// below. The rounds LDK still holds tell which recorded ones it abandoned (a
+				// contribution can fail while an earlier signed round still awaits its
+				// signatures). A closed channel is left to its `ChannelClosed` event: LDK queues
+				// one for every channel it removes — before the failures a force-close reports,
+				// after the one a cooperative close reports — and that event carries the
+				// channel's last funding, which this handler can no longer read from the channel.
 				if let Some(held_rounds) = self.held_splice_rounds(counterparty_node_id, channel_id)
 				{
 					if let Err(e) =
@@ -2445,6 +2460,14 @@ where
 					}
 				}
 
+				// Snapshot the recorded splice this failure concerns; the settlement keeps the
+				// channel's record from changing hands until the report is settled below.
+				let contribution = contribution.map(|c| c.into_contribution());
+				let settlement = self
+					.splice_tracker
+					.on_negotiation_failed(counterparty_node_id, channel_id, contribution.as_ref())
+					.await;
+
 				let event = Event::SpliceNegotiationFailed {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
@@ -2454,10 +2477,17 @@ where
 				match self.event_queue.add_event(event).await {
 					Ok(_) => {},
 					Err(e) => {
+						// Dropping the settlement leaves the intent in place for the replayed
+						// event to settle.
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						return Err(ReplayEvent());
 					},
 				};
+
+				// Settle the failed splice's persisted intent only now that the report is
+				// durably queued: a crash in between replays this event, which must still find
+				// the intent to settle.
+				settlement.settle().await;
 			},
 		}
 		Ok(())
