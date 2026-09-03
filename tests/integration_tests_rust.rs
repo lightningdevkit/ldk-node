@@ -918,6 +918,51 @@ async fn start_stop_with_pathfinding_scores_sync() {
 	node.stop().unwrap();
 }
 
+// A `start` that fails part-way through has to wind down whatever it already spawned. Here we take
+// one of the node's listening addresses before starting, so binding it fails only after the
+// wallet-sync, RGS and pathfinding-scores tasks have been spawned.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn failed_start_winds_down_background_tasks() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let config = random_config();
+
+	let listening_address =
+		config.node_config.listening_addresses.as_ref().unwrap().first().unwrap().to_string();
+	let squatter = std::net::TcpListener::bind(&listening_address).unwrap();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let log_writer = Arc::new(CollectingLogWriter::new());
+	setup_builder!(builder, config.node_config);
+	// Background syncing stays enabled, so the wallet-sync task is still running when binding
+	// fails.
+	builder.set_chain_source_esplora(esplora_url.clone(), None);
+	builder.set_pathfinding_scores_source(esplora_url);
+	// Nothing listens on port 1: the RGS task only needs to be spawned, not to succeed.
+	builder.set_gossip_source_rgs("http://127.0.0.1:1".to_string());
+	builder.set_custom_logger(log_writer.clone());
+
+	let node = builder.build(config.node_entropy.into()).unwrap();
+
+	assert_eq!(node.start(), Err(NodeError::InvalidSocketAddress));
+	assert!(!node.status().is_running);
+	assert_eq!(node.stop(), Err(NodeError::NotRunning));
+
+	// The failed startup ran the full shutdown sequence, rather than leaving the tasks it had
+	// already spawned running behind a node that never came up.
+	assert!(log_writer.contains("Stopped all background tasks"));
+	assert!(log_writer.contains("Disconnected all network peers."));
+	assert!(log_writer.contains("Stopped chain sources."));
+	// The wallet-sync task only exits on the shutdown signal, so this shows a task that was
+	// still running got stopped.
+	assert!(log_writer.contains("Stopping background syncing on-chain wallet."));
+
+	// Having wound everything down, the node comes up cleanly once the address is free again.
+	drop(squatter);
+	node.start().unwrap();
+	node.stop().unwrap();
+}
+
 // The Electrum chain source drops its runtime client - and with it the tx-sync client holding all
 // `Filter` registrations - when stopped. As `ChannelMonitor`s only register their watched
 // transactions and outputs while being loaded in `Builder::build`, nothing would re-register them

@@ -199,9 +199,12 @@ impl Runtime {
 		self.block_on(tasks.wait())
 	}
 
+	/// Waits for all non-cancellable background tasks to finish.
+	///
+	/// Note this may find no tasks at all, as it's also reached when winding down a startup that
+	/// failed before spawning any.
 	pub fn wait_on_background_tasks(&self) {
 		let mut tasks = core::mem::take(&mut *self.background_tasks.lock().expect("lock"));
-		debug_assert!(tasks.len() > 0, "Expected some background_tasks");
 		self.block_on(async {
 			loop {
 				let timeout_fut = tokio::time::timeout(
@@ -231,6 +234,10 @@ impl Runtime {
 		})
 	}
 
+	/// Waits for the background processor task to finish.
+	///
+	/// Note this may find no task at all, as it's also reached when winding down a startup that
+	/// failed before spawning it.
 	pub fn wait_on_background_processor_task(&self) {
 		if let Some(background_processor_task) =
 			self.background_processor_task.lock().expect("lock").take()
@@ -265,9 +272,7 @@ impl Runtime {
 					log_error!(self.logger, "Stopping event handling timed out: {}", e);
 				},
 			}
-		} else {
-			debug_assert!(false, "Expected a background processing task");
-		};
+		}
 	}
 
 	#[cfg(tokio_unstable)]
@@ -458,6 +463,16 @@ mod tests {
 			completed_tasks_are_released,
 			"completed cancellable tasks should be released before shutdown"
 		);
+	}
+
+	#[test]
+	fn winding_down_without_spawned_tasks_is_a_noop() {
+		// A `Node::start` that fails before spawning anything still runs the full shutdown
+		// sequence, so the wind-down has to tolerate finding nothing to wait on.
+		let runtime = test_runtime();
+		runtime.abort_cancellable_background_tasks();
+		runtime.wait_on_background_tasks();
+		runtime.wait_on_background_processor_task();
 	}
 
 	#[test]
