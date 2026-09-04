@@ -13,13 +13,14 @@ use std::sync::{Arc, Mutex};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Amount, OutPoint};
+use bitcoin::{Amount, OutPoint, ScriptBuf};
 use lightning::blinded_path::message::NextMessageHop;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
 use lightning::events::PaidBolt12Invoice;
 use lightning::events::{
 	ClosureReason, Event as LdkEvent, FundingInfo, InboundHTLCLocator as LdkInboundHtlcLocator,
+	NegotiationFailureReason as LdkNegotiationFailureReason,
 	OutboundHTLCLocator as LdkOutboundHtlcLocator, PaymentFailureReason, PaymentPurpose,
 	ReplayEvent,
 };
@@ -31,10 +32,15 @@ use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
-use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
+use lightning::{
+	impl_writeable_tlv_based, impl_writeable_tlv_based_enum,
+	impl_writeable_tlv_based_enum_upgradable,
+};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
+use lightning_types::string::UntrustedString;
 
+use crate::channel::SpliceTracker;
 use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
@@ -49,6 +55,7 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use crate::payment::pending_payment_store::SpliceKind;
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
@@ -113,6 +120,155 @@ impl From<LdkOutboundHtlcLocator> for HTLCLocator {
 		}
 	}
 }
+
+/// The reason a channel splice failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum SpliceFailureReason {
+	/// The reason was not available.
+	Unknown,
+	/// The peer disconnected during negotiation. The splice may be re-initiated once the peer
+	/// reconnects.
+	PeerDisconnected,
+	/// The counterparty explicitly aborted the negotiation. Re-initiating with the same
+	/// parameters is unlikely to succeed — consider adjusting them or waiting for the
+	/// counterparty to initiate.
+	CounterpartyAborted {
+		/// The counterparty's abort message.
+		///
+		/// This is counterparty-provided data. Use `Display` on [`UntrustedString`] for safe
+		/// logging.
+		msg: UntrustedString,
+	},
+	/// An error occurred during interactive transaction negotiation (e.g., the counterparty sent
+	/// an invalid message). The negotiation was aborted.
+	NegotiationError {
+		/// A developer-readable error message.
+		msg: String,
+	},
+	/// The funding contribution was invalid (e.g., insufficient balance for the splice amount).
+	/// The splice may be re-initiated with adjusted parameters.
+	ContributionInvalid,
+	/// The negotiation was locally canceled.
+	LocallyCanceled,
+	/// The channel is closing, so the negotiation cannot continue. See [`Event::ChannelClosed`]
+	/// for the closure reason.
+	ChannelClosing,
+	/// The contribution's feerate was too low to replace the splice's in-flight funding
+	/// transaction. The fee bump may be re-initiated once feerates allow it.
+	FeeRateTooLow,
+	/// A fee bump could not be initiated (e.g., a prior splice funding transaction already
+	/// confirmed). The channel remains operational.
+	CannotInitiateRbf,
+}
+
+impl From<LdkNegotiationFailureReason> for SpliceFailureReason {
+	fn from(reason: LdkNegotiationFailureReason) -> Self {
+		match reason {
+			LdkNegotiationFailureReason::Unknown => Self::Unknown,
+			LdkNegotiationFailureReason::PeerDisconnected => Self::PeerDisconnected,
+			LdkNegotiationFailureReason::CounterpartyAborted { msg } => {
+				Self::CounterpartyAborted { msg }
+			},
+			LdkNegotiationFailureReason::NegotiationError { msg } => Self::NegotiationError { msg },
+			LdkNegotiationFailureReason::ContributionInvalid => Self::ContributionInvalid,
+			LdkNegotiationFailureReason::LocallyCanceled => Self::LocallyCanceled,
+			LdkNegotiationFailureReason::ChannelClosing => Self::ChannelClosing,
+			LdkNegotiationFailureReason::FeeRateTooLow => Self::FeeRateTooLow,
+			LdkNegotiationFailureReason::CannotInitiateRbf => Self::CannotInitiateRbf,
+		}
+	}
+}
+
+impl_writeable_tlv_based_enum_upgradable!(SpliceFailureReason,
+	(1, Unknown) => {},
+	(3, PeerDisconnected) => {},
+	(5, CounterpartyAborted) => {
+		(1, msg, required),
+	},
+	(7, NegotiationError) => {
+		(1, msg, required),
+	},
+	(9, ContributionInvalid) => {},
+	(11, LocallyCanceled) => {},
+	(13, ChannelClosing) => {},
+	(15, FeeRateTooLow) => {},
+	(17, CannotInitiateRbf) => {},
+);
+
+/// An output paid from a channel by a splice-out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct SpliceOutput {
+	/// The amount paid to the output, in satoshis.
+	pub amount_sats: u64,
+	/// The script the output pays to.
+	pub script_pubkey: ScriptBuf,
+}
+
+impl_writeable_tlv_based!(SpliceOutput, {
+	(0, amount_sats, required),
+	(2, script_pubkey, required),
+});
+
+/// The parameters of the [`Node`] API call that initiated a splice.
+///
+/// [`Node`]: crate::Node
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum SpliceParameters {
+	/// Funds were added to the channel via [`Node::splice_in`] or [`Node::splice_in_with_all`].
+	///
+	/// [`Node::splice_in`]: crate::Node::splice_in
+	/// [`Node::splice_in_with_all`]: crate::Node::splice_in_with_all
+	In {
+		/// The amount added to the channel, in satoshis. For [`Node::splice_in_with_all`], the
+		/// amount the available funds resolved to.
+		///
+		/// [`Node::splice_in_with_all`]: crate::Node::splice_in_with_all
+		amount_sats: u64,
+	},
+	/// Funds were removed from the channel via [`Node::splice_out`].
+	///
+	/// [`Node::splice_out`]: crate::Node::splice_out
+	Out {
+		/// The outputs paid from the channel.
+		outputs: Vec<SpliceOutput>,
+	},
+	/// The splice's in-flight funding transaction was fee-bumped via
+	/// [`Node::bump_channel_funding_fee`].
+	///
+	/// [`Node::bump_channel_funding_fee`]: crate::Node::bump_channel_funding_fee
+	FeeBump,
+}
+
+impl From<&SpliceKind> for SpliceParameters {
+	fn from(kind: &SpliceKind) -> Self {
+		match kind {
+			SpliceKind::In { amount_sats } => Self::In { amount_sats: *amount_sats },
+			SpliceKind::Out { outputs } => Self::Out {
+				outputs: outputs
+					.iter()
+					.map(|o| SpliceOutput {
+						amount_sats: o.value.to_sat(),
+						script_pubkey: o.script_pubkey.clone(),
+					})
+					.collect(),
+			},
+			SpliceKind::Rbf {} => Self::FeeBump,
+		}
+	}
+}
+
+impl_writeable_tlv_based_enum_upgradable!(SpliceParameters,
+	(1, In) => {
+		(1, amount_sats, required),
+	},
+	(3, Out) => {
+		(1, outputs, required_vec),
+	},
+	(5, FeeBump) => {},
+);
 
 /// An event emitted by [`Node`], which should be handled by the user.
 ///
@@ -307,7 +463,11 @@ pub enum Event {
 		/// The outpoint of the channel's splice funding transaction.
 		new_funding_txo: OutPoint,
 	},
-	/// A channel splice negotiation round with local inputs or outputs has failed.
+	/// A channel splice negotiation round with local inputs or outputs, or a fee bump of a
+	/// splice's funding transaction, has failed.
+	///
+	/// A failed fee bump leaves the splice it meant to bump unaffected; in particular, the
+	/// splice's in-flight funding transaction may still confirm.
 	///
 	/// This event is not emitted when only the counterparty contributes to a splice.
 	SpliceNegotiationFailed {
@@ -317,6 +477,18 @@ pub enum Event {
 		user_channel_id: UserChannelId,
 		/// The `node_id` of the channel counterparty.
 		counterparty_node_id: PublicKey,
+		/// The reason the splice failed.
+		///
+		/// Will be `None` for events serialized by LDK Node v0.7.
+		reason: Option<SpliceFailureReason>,
+		/// The parameters of the [`Node`] API call that initiated the failed splice or fee bump.
+		///
+		/// Will be `None` when the failure does not identify the channel's last locally-initiated
+		/// splice — e.g. when a fee bump superseded the failed attempt — and for events
+		/// serialized by LDK Node v0.7.
+		///
+		/// [`Node`]: crate::Node
+		parameters: Option<SpliceParameters>,
 	},
 }
 
@@ -401,6 +573,8 @@ impl_writeable_tlv_based_enum!(Event,
 		(3, counterparty_node_id, required),
 		(5, user_channel_id, required),
 		// TLV 7 (abandoned_funding_txo) may be set for LDK Node v0.7.
+		(9, reason, upgradable_option),
+		(11, parameters, upgradable_option),
 	},
 );
 
@@ -569,6 +743,7 @@ where
 	onion_messenger: Arc<OnionMessenger>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	prober: Option<Arc<Prober>>,
+	splice_tracker: Arc<SpliceTracker>,
 	runtime: Arc<Runtime>,
 	logger: L,
 	config: Arc<Config>,
@@ -587,7 +762,7 @@ where
 		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		splice_tracker: Arc<SpliceTracker>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -605,6 +780,7 @@ where
 			onion_messenger,
 			om_mailbox,
 			prober,
+			splice_tracker,
 			runtime,
 			logger,
 			config,
@@ -1873,6 +2049,10 @@ where
 					.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
 					.await;
 
+				self.splice_tracker
+					.on_channel_ready(counterparty_node_id, channel_id, funding_txo)
+					.await;
+
 				let event = Event::ChannelReady {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
@@ -1899,6 +2079,8 @@ where
 				// `counterparty_node_id` has been set on every `ChannelClosed` since LDK 0.0.117.
 				let counterparty_node_id = counterparty_node_id
 					.expect("counterparty_node_id is always set since LDK 0.0.117");
+
+				self.splice_tracker.on_channel_closed(counterparty_node_id, channel_id).await;
 
 				// Drop the peer once its last channel with us has reached a terminal state.
 				// For `HolderForceClosed`, retain it through one recovery reconnect so that
@@ -2143,7 +2325,6 @@ where
 					}
 				}
 			},
-			// TODO(splicing): Revisit error handling once splicing API is settled in LDK 0.3
 			LdkEvent::FundingTransactionReadyForSigning {
 				channel_id,
 				counterparty_node_id,
@@ -2151,6 +2332,32 @@ where
 				..
 			} => match self.wallet.sign_owned_inputs(unsigned_transaction) {
 				Ok(partially_signed_tx) => {
+					// Record the splice's funding payment before handing our signatures to LDK:
+					// `funding_transaction_signed` releases them to the counterparty, after which
+					// either party may broadcast — and wallet sync could observe the transaction
+					// before its broadcast-time classification records it. On a failed write,
+					// replay rather than proceed unrecorded: LDK re-offers the event in-session
+					// and regenerates it across restarts while the transaction is unsigned.
+					let retraction = match self
+						.splice_tracker
+						.on_funding_ready_for_signing(
+							counterparty_node_id,
+							channel_id,
+							&partially_signed_tx,
+						)
+						.await
+					{
+						Ok(retraction) => retraction,
+						Err(e) => {
+							log_error!(
+								self.logger,
+								"Failed to record the splice funding payment for channel {}: {}",
+								channel_id,
+								e,
+							);
+							return Err(ReplayEvent());
+						},
+					};
 					match self.channel_manager.funding_transaction_signed(
 						&channel_id,
 						&counterparty_node_id,
@@ -2165,13 +2372,57 @@ where
 							);
 						},
 						Err(e) => {
-							// TODO(splicing): Abort splice once supported in LDK 0.3
-							debug_assert!(false, "Failed signing funding transaction: {:?}", e);
-							log_error!(self.logger, "Failed signing funding transaction: {:?}", e);
+							// The signed transaction never reached LDK, so nothing can ever
+							// broadcast it: retract the record written above and cancel the
+							// splice. LDK responds with `DiscardFunding` (releasing whatever the
+							// wallet holds for the contribution) and `SpliceNegotiationFailed`
+							// (surfacing the failure and settling the persisted intent).
+							log_error!(
+								self.logger,
+								"LDK refused the signed funding transaction for channel {}, \
+								aborting the splice: {:?}",
+								channel_id,
+								e,
+							);
+							self.splice_tracker.on_funding_signing_failed(retraction).await;
+							if let Err(e) = self
+								.channel_manager
+								.cancel_funding_contributed(&channel_id, &counterparty_node_id)
+							{
+								// Every cancel error means the splice is already beyond canceling
+								// (e.g. the channel is gone); there is nothing further to unwind.
+								log_error!(
+									self.logger,
+									"Failed to cancel the splice on channel {}: {:?}",
+									channel_id,
+									e,
+								);
+							}
 						},
 					}
 				},
-				Err(()) => log_error!(self.logger, "Failed signing funding transaction"),
+				Err(()) => {
+					// No record has been written for this transaction yet, so there is nothing to
+					// unwind: cancel the splice and let LDK's `DiscardFunding` and
+					// `SpliceNegotiationFailed` events release the contribution and settle the
+					// persisted intent.
+					log_error!(
+						self.logger,
+						"Failed signing the funding transaction for channel {}, aborting the splice",
+						channel_id,
+					);
+					if let Err(e) = self
+						.channel_manager
+						.cancel_funding_contributed(&channel_id, &counterparty_node_id)
+					{
+						log_error!(
+							self.logger,
+							"Failed to cancel the splice on channel {}: {:?}",
+							channel_id,
+							e,
+						);
+					}
+				},
 			},
 			LdkEvent::SpliceNegotiated {
 				channel_id,
@@ -2207,7 +2458,8 @@ where
 				channel_id,
 				user_channel_id,
 				counterparty_node_id,
-				..
+				reason,
+				contribution,
 			} => {
 				log_info!(
 					self.logger,
@@ -2216,19 +2468,38 @@ where
 					counterparty_node_id,
 				);
 
+				// Snapshot the recorded splice this failure concerns; the settlement keeps the
+				// channel's record from changing hands until the report is settled below.
+				let contribution = contribution.map(|c| c.into_contribution());
+				let settlement = self
+					.splice_tracker
+					.on_negotiation_failed(counterparty_node_id, channel_id, contribution.as_ref())
+					.await;
+
+				let parameters = settlement.originating_kind().map(SpliceParameters::from);
+
 				let event = Event::SpliceNegotiationFailed {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
 					counterparty_node_id,
+					reason: Some(reason.into()),
+					parameters,
 				};
 
 				match self.event_queue.add_event(event).await {
 					Ok(_) => {},
 					Err(e) => {
+						// Dropping the settlement leaves the intent in place for the replayed
+						// event to settle.
 						log_error!(self.logger, "Failed to push to event queue: {}", e);
 						return Err(ReplayEvent());
 					},
 				};
+
+				// Settle the failed splice's persisted intent only now that the report is
+				// durably queued: a crash in between replays this event, which must still find
+				// the intent to settle.
+				settlement.settle().await;
 			},
 		}
 		Ok(())
@@ -2352,6 +2623,11 @@ mod tests {
 			claim_from_onchain_tx: bool,
 			outbound_amount_forwarded_msat: Option<u64>,
 		},
+		SpliceNegotiationFailed {
+			channel_id: ChannelId,
+			user_channel_id: UserChannelId,
+			counterparty_node_id: PublicKey,
+		},
 	}
 
 	impl_writeable_tlv_based_enum!(LegacyEvent,
@@ -2368,6 +2644,11 @@ mod tests {
 			(14, outbound_amount_forwarded_msat, option),
 			(15, prev_htlcs, (default_value_vec, Vec::new())),
 			(17, next_htlcs, (default_value_vec, Vec::new())),
+		},
+		(9, SpliceNegotiationFailed) => {
+			(1, channel_id, required),
+			(3, counterparty_node_id, required),
+			(5, user_channel_id, required),
 		},
 	);
 
@@ -2428,6 +2709,111 @@ mod tests {
 
 		let res = EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger));
 		assert!(res.is_err());
+	}
+
+	#[test]
+	fn event_queue_reads_legacy_splice_negotiation_failed() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel_id = ChannelId([42u8; 32]);
+		let user_channel_id = UserChannelId(4242);
+		let legacy_event = LegacyEvent::SpliceNegotiationFailed {
+			channel_id,
+			user_channel_id,
+			counterparty_node_id,
+		};
+		let persisted_bytes = encode_legacy_event_queue(legacy_event);
+
+		let event_queue =
+			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
+		assert_eq!(
+			event_queue.next_event(),
+			Some(Event::SpliceNegotiationFailed {
+				channel_id,
+				user_channel_id,
+				counterparty_node_id,
+				reason: None,
+				parameters: None,
+			})
+		);
+	}
+
+	#[tokio::test]
+	async fn splice_negotiation_failed_round_trips_reason_and_parameters() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let event_queue = Arc::new(EventQueue::new(Arc::clone(&store), Arc::clone(&logger)));
+
+		let expected_event = Event::SpliceNegotiationFailed {
+			channel_id: ChannelId([42u8; 32]),
+			user_channel_id: UserChannelId(4242),
+			counterparty_node_id: PublicKey::from_str(
+				"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+			)
+			.unwrap(),
+			reason: Some(SpliceFailureReason::CounterpartyAborted {
+				msg: UntrustedString("no thanks".to_string()),
+			}),
+			parameters: Some(SpliceParameters::Out {
+				outputs: vec![SpliceOutput {
+					amount_sats: 10_000,
+					script_pubkey: ScriptBuf::new(),
+				}],
+			}),
+		};
+		event_queue.add_event(expected_event.clone()).await.unwrap();
+
+		let persisted_bytes = KVStore::read(
+			&*store,
+			EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE,
+			EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE,
+			EVENT_QUEUE_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+		let deser_event_queue =
+			EventQueue::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
+		assert_eq!(deser_event_queue.next_event(), Some(expected_event));
+	}
+
+	#[test]
+	fn legacy_reader_ignores_splice_failure_reason_and_parameters() {
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel_id = ChannelId([42u8; 32]);
+		let user_channel_id = UserChannelId(4242);
+		let event = Event::SpliceNegotiationFailed {
+			channel_id,
+			user_channel_id,
+			counterparty_node_id,
+			reason: Some(SpliceFailureReason::PeerDisconnected),
+			parameters: Some(SpliceParameters::In { amount_sats: 10_000 }),
+		};
+
+		// The new fields use odd TLVs, so a reader without them — LDK Node v0.7 — must
+		// still read the event.
+		let mut bytes = Vec::new();
+		1u16.write(&mut bytes).unwrap();
+		event.write(&mut bytes).unwrap();
+
+		let mut reader = &bytes[..];
+		let num_events: u16 = Readable::read(&mut reader).unwrap();
+		assert_eq!(num_events, 1);
+		let legacy_event: LegacyEvent = Readable::read(&mut reader).unwrap();
+		assert_eq!(
+			legacy_event,
+			LegacyEvent::SpliceNegotiationFailed {
+				channel_id,
+				user_channel_id,
+				counterparty_node_id,
+			}
+		);
 	}
 
 	#[test]

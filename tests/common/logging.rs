@@ -192,17 +192,21 @@ impl CollectingLogWriter {
 		self.logs.lock().unwrap().iter().filter(|message| message.contains(text)).count()
 	}
 
-	/// Waits up to ten seconds for a logged message containing `text`, returning whether one
-	/// arrived. Polling beats a fixed sleep: it returns as soon as the line lands and only pays
-	/// the full timeout when the line never comes.
+	/// Waits up to [`INTEROP_TIMEOUT_SECS`] for a logged message containing `text`, returning
+	/// whether one arrived. Polling beats a fixed sleep: it returns as soon as the line lands and
+	/// only pays the full timeout when the line never comes.
+	///
+	/// [`INTEROP_TIMEOUT_SECS`]: super::INTEROP_TIMEOUT_SECS
 	pub(crate) async fn wait_for(&self, text: &str) -> bool {
 		self.wait_for_count(text, 1).await
 	}
 
-	/// Waits up to ten seconds for `occurrences` logged messages containing `text`, returning
-	/// whether they arrived.
+	/// Waits up to [`INTEROP_TIMEOUT_SECS`] for `occurrences` logged messages containing `text`,
+	/// returning whether they arrived.
+	///
+	/// [`INTEROP_TIMEOUT_SECS`]: super::INTEROP_TIMEOUT_SECS
 	pub(crate) async fn wait_for_count(&self, text: &str, occurrences: usize) -> bool {
-		for _ in 0..100 {
+		for _ in 0..(super::INTEROP_TIMEOUT_SECS * 10) {
 			if self.count(text) >= occurrences {
 				return true;
 			}
@@ -215,5 +219,32 @@ impl CollectingLogWriter {
 impl LogWriter for CollectingLogWriter {
 	fn log(&self, record: LogRecord) {
 		self.logs.lock().unwrap().push(record.args.to_string());
+	}
+}
+
+/// Forwards every record to an inner [`CollectingLogWriter`] and signals `seen` when a record
+/// contains `marker`. The signal fires from inside the logging call, so a test can react within
+/// the emitting code path's timing — where the collector's polling `wait_for` (100ms granularity)
+/// is too coarse.
+pub(crate) struct MarkerLogWriter {
+	inner: Arc<CollectingLogWriter>,
+	marker: &'static str,
+	seen: Arc<tokio::sync::Notify>,
+}
+
+impl MarkerLogWriter {
+	pub(crate) fn new(
+		inner: Arc<CollectingLogWriter>, marker: &'static str, seen: Arc<tokio::sync::Notify>,
+	) -> Self {
+		Self { inner, marker, seen }
+	}
+}
+
+impl LogWriter for MarkerLogWriter {
+	fn log(&self, record: LogRecord) {
+		if record.args.to_string().contains(self.marker) {
+			self.seen.notify_one();
+		}
+		LogWriter::log(&*self.inner, record);
 	}
 }

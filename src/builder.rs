@@ -53,6 +53,7 @@ use lightning_dns_resolver::OMDomainResolver;
 use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
+use crate::channel::SpliceTracker;
 #[cfg(feature = "chain-bitcoind")]
 use crate::config::BitcoindRestClientConfig;
 use crate::config::{
@@ -2451,6 +2452,14 @@ fn build_with_store_internal(
 		})
 	});
 
+	let splice_tracker = Arc::new(SpliceTracker::new(
+		Arc::clone(&channel_manager),
+		Arc::clone(&wallet),
+		Arc::clone(&pending_payment_store),
+		Arc::clone(&payment_store),
+		Arc::clone(&logger),
+	));
+
 	#[cfg(cycle_tests)]
 	let mut _leak_checker = crate::LeakChecker(Vec::new());
 	#[cfg(cycle_tests)]
@@ -2490,6 +2499,7 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		splice_tracker,
 		lnurl_auth,
 		is_running,
 		node_metrics,
