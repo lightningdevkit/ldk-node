@@ -105,9 +105,19 @@ impl StorableObject for PendingPaymentDetails {
 			updated |= self.conflicting_txids.len() != conflicts_len;
 		}
 
-		// Each classify passes the complete candidate history, so a non-empty update replaces the
-		// stored list. An empty update (e.g. a non-funding payment) leaves it untouched.
-		if !update.candidates.is_empty() && self.candidates != update.candidates {
+		// Each classify passes the candidate history as of its own broadcast, so a non-empty
+		// update replaces the stored list. An empty update (e.g. a non-funding payment) leaves it
+		// untouched — as does an update missing a stored candidate: the history only ever grows,
+		// so such an update was built before that candidate existed (a classification retry
+		// running after a newer round classified) and replacing would orphan the newer round's
+		// transactions.
+		let extends_history = |stored: &FundingTxCandidate| {
+			update.candidates.iter().any(|candidate| candidate.txid == stored.txid)
+		};
+		if !update.candidates.is_empty()
+			&& self.candidates != update.candidates
+			&& self.candidates.iter().all(extends_history)
+		{
 			self.candidates = update.candidates;
 			updated = true;
 		}
@@ -241,6 +251,49 @@ mod tests {
 			Vec::<Txid>::new(),
 			"current txid must not remain in its own conflict list"
 		);
+	}
+
+	/// The candidate history only ever grows. An update carrying a shorter history was built
+	/// before the newer candidates existed — a classification retry running after a newer round
+	/// classified — and must not shrink the stored list, or the newer candidates' transactions
+	/// could no longer be mapped back to the record.
+	#[test]
+	fn candidate_history_never_shrinks() {
+		let txid_a = test_txid(1);
+		let txid_b = test_txid(2);
+		let txid_c = test_txid(3);
+		let payment_id = PaymentId(txid_a.to_byte_array());
+		let candidate = |txid, fee| FundingTxCandidate {
+			txid,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(fee),
+		};
+		let history = vec![candidate(txid_a, 400), candidate(txid_b, 500)];
+
+		let mut pending = PendingPaymentDetails::new(
+			pending_onchain_payment(payment_id, txid_b),
+			Vec::new(),
+			history.clone(),
+		);
+		let stale_update = PendingPaymentDetailsUpdate {
+			id: payment_id,
+			payment_update: None,
+			conflicting_txids: None,
+			candidates: vec![candidate(txid_a, 400)],
+		};
+		assert!(!pending.update(stale_update), "a stale history must not shrink the stored one");
+		assert_eq!(pending.candidates, history);
+
+		// A history that extends the stored one still replaces it, refreshed figures included.
+		let extended = vec![candidate(txid_a, 400), candidate(txid_b, 550), candidate(txid_c, 600)];
+		let fresh_update = PendingPaymentDetailsUpdate {
+			id: payment_id,
+			payment_update: None,
+			conflicting_txids: None,
+			candidates: extended.clone(),
+		};
+		assert!(pending.update(fresh_update));
+		assert_eq!(pending.candidates, extended);
 	}
 
 	#[test]
