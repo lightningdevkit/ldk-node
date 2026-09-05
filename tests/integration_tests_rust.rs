@@ -81,6 +81,16 @@ async fn wait_for_classified_funding_payment(node: &Node, funding_txid: Txid) {
 		});
 }
 
+/// Resolves the payment record whose current transaction is `funding_txid`. Funding records are
+/// keyed by a random id generated at creation, so they are found through their transaction history
+/// rather than by deriving an id from a txid.
+fn funding_payment(node: &Node, funding_txid: Txid) -> PaymentDetails {
+	node.list_all_payments()
+		.into_iter()
+		.find(|p| matches!(p.kind, PaymentKind::Onchain { txid, .. } if txid == funding_txid))
+		.expect("funding payment exists")
+}
+
 #[derive(Clone)]
 struct ContendedStore {
 	inner: Arc<InMemoryStore>,
@@ -2093,9 +2103,7 @@ async fn splice_channel() {
 	// them to the channel balance since there may not be a change output.
 	let expected_splice_in_lightning_balance_sat = 4_000_002;
 
-	let payments = node_b.list_all_payments();
-	let payment =
-		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
+	let payment = funding_payment(&node_b, txo.txid);
 	assert_eq!(payment.fee_paid_msat, Some(expected_splice_in_fee_sat * 1_000));
 
 	assert_eq!(
@@ -2146,9 +2154,7 @@ async fn splice_channel() {
 
 	let expected_splice_out_fee_sat = 183;
 
-	let payments = node_a.list_all_payments();
-	let payment =
-		payments.into_iter().find(|p| p.id == PaymentId(txo.txid.to_byte_array())).unwrap();
+	let payment = funding_payment(&node_a, txo.txid);
 	assert_eq!(payment.fee_paid_msat, Some(expected_splice_out_fee_sat * 1_000));
 	// The splice-out graduated to a confirmed interactive-funding payment. Its `direction` is left
 	// unasserted on purpose: the destination is our own address, so it is a self-transfer (channel
@@ -2443,15 +2449,20 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// Node B contributed to this splice; wait for its classification before syncing so the sync
 	// takes the funding short-circuit rather than racing the broadcaster's queue.
 	wait_for_classified_funding_payment(&node_b, original_txo.txid).await;
+	// The record's random id is fixed at creation; capture it while the original candidate is
+	// current so its stability can be asserted across the RBF rounds below.
+	let splice_payment_id = funding_payment(&node_b, original_txo.txid).id;
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
 	// For `confirm_original`, capture the original candidate's fee and raw transaction now, before
 	// the RBF replaces it, so it can be force-confirmed (instead of the RBF) further below.
 	let original_candidate: Option<(Option<u64>, String)> = if confirm_original {
-		let payment_id = PaymentId(original_txo.txid.to_byte_array());
-		let fee =
-			node_b.payment(&payment_id).unwrap().expect("splice payment exists").fee_paid_msat;
+		let fee = node_b
+			.payment(&splice_payment_id)
+			.unwrap()
+			.expect("splice payment exists")
+			.fee_paid_msat;
 		let raw_tx: String = bitcoind
 			.client
 			.call("getrawtransaction", &[json!(original_txo.txid.to_string())])
@@ -2484,12 +2495,11 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	node_b.sync_wallets().unwrap();
 
 	// After RBF but before confirmation, node_b (the initiator) should have a single on-chain
-	// payment covering both candidates: id anchored to the first broadcast, `kind.txid` pointing
-	// at the latest (RBF) candidate, and the durable interactive-funding `tx_type` preserved across
-	// the replacement.
+	// payment covering both candidates: still under the id it was created with, `kind.txid`
+	// pointing at the latest (RBF) candidate, and the durable interactive-funding `tx_type`
+	// preserved across the replacement.
 	let rbf_candidate_fee = {
-		let payment_id = PaymentId(original_txo.txid.to_byte_array());
-		let payment = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+		let payment = node_b.payment(&splice_payment_id).unwrap().expect("splice payment exists");
 		match payment.kind {
 			PaymentKind::Onchain {
 				txid,
@@ -2563,8 +2573,8 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// channel-lifecycle signal, not what drives payment status. Its `kind.txid` reflects the
 	// winning RBF candidate, and `fee_paid_msat` carries this node's `FundingContribution` fee.
 	{
-		let payment_id = PaymentId(original_txo.txid.to_byte_array());
-		let payment = node_b.payment(&payment_id).unwrap().expect("splice payment graduated");
+		let payment =
+			node_b.payment(&splice_payment_id).unwrap().expect("splice payment graduated");
 		assert_eq!(payment.status, PaymentStatus::Succeeded);
 		match payment.kind {
 			PaymentKind::Onchain { txid, status: ConfirmationStatus::Confirmed { .. }, .. } => {
@@ -2624,8 +2634,7 @@ async fn funding_payment_graduates_without_channel_ready() {
 	// The funding payment is `Succeeded` purely from wallet sync reaching `ANTI_REORG_DELAY`
 	// confirmations, asserted before draining any LDK event — so graduation is not driven by the
 	// Lightning `ChannelReady` signal.
-	let payment_id = PaymentId(funding_txo.txid.to_byte_array());
-	let payment = node_a.payment(&payment_id).unwrap().expect("funding payment exists");
+	let payment = funding_payment(&node_a, funding_txo.txid);
 	assert_eq!(payment.status, PaymentStatus::Succeeded);
 	match payment.kind {
 		PaymentKind::Onchain {
@@ -2687,8 +2696,8 @@ async fn splice_payment_reorged_to_unconfirmed() {
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
 	node_b.sync_wallets().unwrap();
 
-	let payment_id = PaymentId(splice_txo.txid.to_byte_array());
-	let payment = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+	let payment = funding_payment(&node_b, splice_txo.txid);
+	let payment_id = payment.id;
 	assert_eq!(payment.status, PaymentStatus::Pending);
 	assert!(matches!(
 		payment.kind,
