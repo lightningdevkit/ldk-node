@@ -28,12 +28,20 @@ pub(crate) struct FundingTxCandidate {
 	/// This node's share of the on-chain fee for this candidate, in millisatoshis, or `None` if
 	/// this node did not contribute to it.
 	pub fee_paid_msat: Option<u64>,
+	/// Whether this node signed the candidate but the signatures have yet to be exchanged. Set
+	/// when the round is recorded at signing time, cleared when LDK reports the splice negotiated
+	/// (`SpliceNegotiated`, emitted as it hands the fully signed round to the broadcaster). Only
+	/// such a round can be abandoned without a trace — the counterparty aborts, or the channel
+	/// closes, before the signatures are exchanged — so only such a round may be dropped from the
+	/// history.
+	pub awaiting_broadcast: bool,
 }
 
 impl_writeable_tlv_based!(FundingTxCandidate, {
 	(0, txid, required),
 	(2, amount_msat, option),
 	(4, fee_paid_msat, option),
+	(6, awaiting_broadcast, required),
 });
 
 /// Represents a pending payment
@@ -105,8 +113,10 @@ impl StorableObject for PendingPaymentDetails {
 			updated |= self.conflicting_txids.len() != conflicts_len;
 		}
 
-		// Each classify passes the complete candidate history, so a non-empty update replaces the
-		// stored list. An empty update (e.g. a non-funding payment) leaves it untouched.
+		// Each funding-record write passes the candidate history as of its own round, so a
+		// non-empty update replaces the stored list. An empty update (e.g. a non-funding payment)
+		// leaves it untouched. Dropping an abandoned round, the only writer that shrinks it, goes
+		// through the store's `mutate` instead.
 		if !update.candidates.is_empty() && self.candidates != update.candidates {
 			self.candidates = update.candidates;
 			updated = true;
@@ -142,6 +152,40 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 	}
 }
 
+/// Builds a [`FundingContribution`] for tests through its `Readable` impl — the only path open
+/// outside `rust-lightning`, which keeps its builder private. The length-prefixed stream holds
+/// the required TLV records (the given estimated fee in satoshis, feerate, max feerate, and the
+/// is-splice flag) plus the given contributed outputs.
+///
+/// [`FundingContribution`]: lightning::ln::funding::FundingContribution
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_with_outputs(
+	estimated_fee_sat: u64, feerate: u64, outputs: &[bitcoin::TxOut],
+) -> lightning::ln::funding::FundingContribution {
+	use lightning::util::ser::Writeable;
+	let mut records = vec![1, 8]; // (1, estimated_fee)
+	records.extend_from_slice(&estimated_fee_sat.to_be_bytes());
+	if !outputs.is_empty() {
+		let mut output_bytes = Vec::new();
+		for output in outputs {
+			output.write(&mut output_bytes).expect("in-memory write must succeed");
+		}
+		records.push(5); // (5, outputs)
+		records.push(u8::try_from(output_bytes.len()).expect("test outputs must stay small"));
+		records.extend_from_slice(&output_bytes);
+	}
+	records.extend_from_slice(&[9, 8]); // (9, feerate)
+	records.extend_from_slice(&feerate.to_be_bytes());
+	records.extend_from_slice(&[11, 8]); // (11, max_feerate)
+	records.extend_from_slice(&feerate.to_be_bytes());
+	records.extend_from_slice(&[13, 1, 1]); // (13, is_splice: true)
+										 // BigSize length prefix over the TLV records above; single-byte as long as they stay short.
+	let mut tlv_bytes = vec![u8::try_from(records.len()).expect("test TLV stream must stay small")];
+	tlv_bytes.extend(records);
+	lightning::util::ser::Readable::read(&mut &tlv_bytes[..])
+		.expect("hand-built TLV stream must decode")
+}
+
 #[cfg(test)]
 mod tests {
 	use bitcoin::hashes::Hash;
@@ -160,16 +204,23 @@ mod tests {
 		// original and RBF candidates.
 		let counterparty_txid = Txid::from_byte_array([4u8; 32]);
 		let candidates = vec![
-			FundingTxCandidate { txid: counterparty_txid, amount_msat: None, fee_paid_msat: None },
+			FundingTxCandidate {
+				txid: counterparty_txid,
+				amount_msat: None,
+				fee_paid_msat: None,
+				awaiting_broadcast: false,
+			},
 			FundingTxCandidate {
 				txid: first_txid,
 				amount_msat: Some(1_000_000),
 				fee_paid_msat: Some(1_000),
+				awaiting_broadcast: false,
 			},
 			FundingTxCandidate {
 				txid: rbf_txid,
 				amount_msat: Some(1_000_000),
 				fee_paid_msat: Some(5_000),
+				awaiting_broadcast: false,
 			},
 		];
 
@@ -279,6 +330,7 @@ mod tests {
 			txid,
 			amount_msat: fresh.amount_msat,
 			fee_paid_msat: fresh.fee_paid_msat,
+			awaiting_broadcast: false,
 		}];
 
 		// The old fresh-insert path merged the full fresh record, downgrading the mirrored

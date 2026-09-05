@@ -571,9 +571,9 @@ impl ChainSource {
 	/// Classifies the package's funding broadcasts into payment records, then broadcasts it.
 	/// Returns the package back on classification failure so the caller can retry it after a
 	/// delay: broadcasting a tx we failed to record would leave it on-chain without a payment,
-	/// while dropping the package would not keep an interactively funded tx off-chain (the
-	/// counterparty broadcasts it regardless), only leave it confirming without a recorded
-	/// candidate.
+	/// while dropping the package would keep a funding transaction off-chain until LDK re-hands
+	/// it when the channel next resumes — no timer re-broadcasts it, and the wallet's tip-change
+	/// re-broadcast covers recorded transactions only.
 	async fn classify_and_broadcast(
 		&self, package: BroadcastPackage,
 	) -> Result<(), BroadcastPackage> {

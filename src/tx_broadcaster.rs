@@ -24,9 +24,10 @@ const BCAST_PACKAGE_QUEUE_SIZE: usize = 256;
 
 /// The most droppable packages [`RetryQueue`] holds. Claims and sweeps re-enter the broadcast
 /// queue on LDK's periodic rebroadcast timers, so one dropped here resurfaces on its own once
-/// the store recovers. Packages nothing re-broadcasts — fundings and cooperative closes —
-/// don't count against the bound: they are finite — one per negotiated funding candidate and
-/// one per closing channel, since a copy of a waiting package is never queued twice.
+/// the store recovers. Packages no timer re-broadcasts — fundings and cooperative closes —
+/// don't count against the bound: they are finite — one per funding LDK hands over under the
+/// `Funding` type (splice rounds have nothing to classify and are never queued) and one per
+/// closing channel, since a copy of a waiting package is never queued twice.
 const MAX_QUEUED_RETRIES: usize = BCAST_PACKAGE_QUEUE_SIZE;
 
 /// A package of transactions that LDK handed to the broadcaster in one `broadcast_transactions`
@@ -68,11 +69,12 @@ impl BroadcastPackage {
 	/// Whether the package may be dropped to keep [`RetryQueue`] within its bound: every
 	/// transaction in it is re-broadcast by its originator, so a dropped package resurfaces on
 	/// its own. LDK re-hands claims, anchor bumps, and force-close commitments to the
-	/// broadcaster periodically, and the sweeper regenerates sweeps once per block. Nothing
-	/// re-broadcasts a funding transaction (a channel open or splice, whose classification
-	/// writes the payment record tracking the funding) or a cooperative close (whose channel is
-	/// gone from the `ChannelManager` by broadcast time), so a package containing either is
-	/// never dropped.
+	/// broadcaster periodically, and the sweeper regenerates sweeps once per block. No timer
+	/// re-broadcasts a funding transaction: LDK re-hands an unconfirmed funding only when its
+	/// channel resumes, and the wallet's tip-change re-broadcast covers recorded transactions
+	/// only, which a funding whose classification failed is not. Nothing re-broadcasts a
+	/// cooperative close, whose channel is gone from the `ChannelManager` by broadcast time. A
+	/// package containing either is never dropped.
 	fn is_droppable(&self) -> bool {
 		self.0.iter().all(|(_, tx_type)| match tx_type {
 			Some(
@@ -141,11 +143,10 @@ impl RetryQueue {
 		let txids = package.sorted_txids();
 		if self.0.iter().any(|(_, waiting, _)| *waiting == txids) {
 			// Same transactions, same classification outcome: keep the waiting entry and its
-			// earlier deadline. The one same-txid package with a *different* type is LDK's
-			// re-typed generic-funding rebroadcast of a promoted 0conf splice, which always
-			// arrives after the interactive-funding original (the zero-conf rebroadcast canary
-			// tests assert that ordering), so the entry kept is the richer of the two — and its
-			// classification declines the downgrade anyway.
+			// earlier deadline. The one same-txid package LDK hands over under a different type,
+			// its re-typed generic-funding rebroadcast of a promoted 0conf splice, never meets
+			// the original here: an interactive-funding broadcast has nothing to classify, so it
+			// is never queued.
 			return ScheduleOutcome::AlreadyQueued(package);
 		}
 
@@ -153,10 +154,9 @@ impl RetryQueue {
 		if package.is_droppable() && self.0.len() >= MAX_QUEUED_RETRIES {
 			// Drop the oldest droppable package: its transactions are re-broadcast
 			// periodically, while the incoming package may carry a fresher fee-bumped variant.
-			// A funding package is never dropped — nothing would re-broadcast it, and losing it
-			// leaves its transaction confirming without a recorded candidate. Neither is a
-			// cooperative close, whose queued package may hold the only copy of the signed
-			// closing transaction.
+			// A funding package is never dropped — no timer would re-broadcast it, and it must
+			// be recorded before it is broadcast. Neither is a cooperative close, whose queued
+			// package may hold the only copy of the signed closing transaction.
 			match self.0.iter().position(|(_, _, waiting)| waiting.is_droppable()) {
 				Some(oldest) => dropped = self.0.remove(oldest).map(|(_, _, package)| package),
 				None => return ScheduleOutcome::Refused(package),
