@@ -22,10 +22,12 @@ use crate::Error;
 
 /// The most packages [`BroadcastQueue`] holds, fresh and awaiting a retry together. Claims and
 /// sweeps re-enter the queue on LDK's periodic rebroadcast timers, so one dropped at the bound
-/// resurfaces on its own once the store recovers. Packages nothing re-broadcasts — fundings and
+/// resurfaces on its own once the store recovers. Packages no timer re-broadcasts — fundings and
 /// cooperative closes — are never dropped or refused for the bound, though they count toward it:
-/// what LDK hands over of them is finite — one per negotiated funding candidate and one per
-/// closing channel — and a copy of a package awaiting a retry is never queued twice.
+/// what LDK hands over of them is finite — one per closing channel, and one per funding under the
+/// `Funding` type each time its channel resumes while it is unconfirmed (splice rounds have
+/// nothing to classify, so none ever awaits a retry) — and a copy of a package awaiting a retry
+/// is never queued twice.
 const MAX_QUEUED_PACKAGES: usize = 256;
 
 /// A package of transactions that LDK handed to the broadcaster in one `broadcast_transactions`
@@ -65,11 +67,12 @@ impl BroadcastPackage {
 	/// Whether the package may be dropped to keep [`BroadcastQueue`] within its bound: every
 	/// transaction in it is re-broadcast by its originator, so a dropped package resurfaces on
 	/// its own. LDK re-hands claims, anchor bumps, and force-close commitments to the
-	/// broadcaster periodically, and the sweeper regenerates sweeps once per block. Nothing
-	/// re-broadcasts a funding transaction (a channel open or splice, whose classification
-	/// writes the payment record tracking the funding) or a cooperative close (whose channel is
-	/// gone from the `ChannelManager` by broadcast time), so a package containing either is
-	/// never dropped.
+	/// broadcaster periodically, and the sweeper regenerates sweeps once per block. No timer
+	/// re-broadcasts a funding transaction: LDK re-hands an unconfirmed funding only when its
+	/// channel resumes, and the wallet's tip-change re-broadcast covers recorded transactions
+	/// only, which a funding whose classification failed is not. Nothing re-broadcasts a
+	/// cooperative close, whose channel is gone from the `ChannelManager` by broadcast time. A
+	/// package containing either is never dropped.
 	fn is_droppable(&self) -> bool {
 		self.0.iter().all(|(_, tx_type)| match tx_type {
 			Some(
@@ -204,11 +207,10 @@ impl QueueState {
 		let txids = package.txids();
 		if self.retries.iter().any(|(_, waiting, _)| *waiting == txids) {
 			// Same transactions, same classification outcome: keep the waiting entry and its
-			// earlier deadline. The one same-txid package with a *different* type is LDK's
-			// re-typed generic-funding rebroadcast of a promoted 0conf splice, which always
-			// arrives after the interactive-funding original (the zero-conf rebroadcast canary
-			// tests assert that ordering), so the entry kept is the richer of the two — and its
-			// classification declines the downgrade anyway.
+			// earlier deadline. The one same-txid package LDK hands over under a different type,
+			// its re-typed generic-funding rebroadcast of a promoted 0conf splice, never meets
+			// the original here: an interactive-funding broadcast has nothing to classify, so it
+			// never awaits a retry.
 			return QueueOutcome::AlreadyQueued(package);
 		}
 
@@ -216,10 +218,10 @@ impl QueueState {
 		if package.is_droppable() && self.fresh.len() + self.retries.len() >= MAX_QUEUED_PACKAGES {
 			// Drop the oldest droppable package, a waiting retry before a fresh package: its
 			// transactions are re-broadcast periodically, while the incoming package may carry
-			// a fresher fee-bumped variant. A funding package is never dropped — nothing would
-			// re-broadcast it, and losing it leaves its transaction confirming without a
-			// recorded candidate. Neither is a cooperative close, whose queued package may hold
-			// the only copy of the signed closing transaction.
+			// a fresher fee-bumped variant. A funding package is never dropped — no timer would
+			// re-broadcast it, and it must be recorded before it is broadcast. Neither is a
+			// cooperative close, whose queued package may hold the only copy of the signed
+			// closing transaction.
 			dropped = self.drop_oldest_droppable();
 			if dropped.is_none() {
 				return QueueOutcome::Refused(package);
