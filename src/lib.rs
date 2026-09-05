@@ -362,6 +362,22 @@ impl Node {
 			)
 		})?;
 
+		// A splice round recorded when this node signed it is taken back once LDK reports the
+		// negotiation failed or the channel closed. LDK reports the loss of a negotiation its last
+		// channel manager write carried mid-way, but a round committed, negotiated and signed
+		// since that write gets no report if the node stopped before the next one, so drop what
+		// LDK's persisted state does not hold before anything runs on the records: no background
+		// task has started yet, so a failure here fails the start cleanly. A channel LDK no
+		// longer lists is left to its `ChannelClosed` event.
+		let channels = self.channel_manager.list_channels();
+		self.runtime.block_on(self.wallet.drop_splice_rounds_lost_across_restart(
+			|channel_id| {
+				channels.iter().find(|channel| channel.channel_id == channel_id).map(|channel| {
+					wallet::held_splice_rounds(channel.splice_details.as_ref(), channel.funding_txo)
+				})
+			},
+		))?;
+
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
@@ -673,6 +689,7 @@ impl Node {
 			Arc::clone(&self.wallet),
 			bump_tx_event_handler,
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.chain_monitor),
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.output_sweeper),
 			Arc::clone(&self.network_graph),
