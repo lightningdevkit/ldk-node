@@ -2309,7 +2309,6 @@ where
 					}
 				}
 			},
-			// TODO(splicing): Revisit error handling once splicing API is settled in LDK 0.3
 			LdkEvent::FundingTransactionReadyForSigning {
 				channel_id,
 				counterparty_node_id,
@@ -2354,22 +2353,59 @@ where
 							);
 						},
 						Err(e) => {
-							// Either the round was reset after its history was read above — LDK
-							// then reports the failure through `SpliceNegotiationFailed`, whose
-							// handling takes the record back — or LDK rejected the witnesses, in
-							// which case the round stays pending in LDK, and the record with it.
-							// TODO(splicing): cancel the contribution here through
-							// `ChannelManager::cancel_funding_contributed`; a follow-up wires it.
+							// The signed transaction never reached LDK, so nothing can ever
+							// broadcast it: cancel the splice. LDK responds with `DiscardFunding`
+							// (releasing whatever the wallet holds for the contribution) and
+							// `SpliceNegotiationFailed` (surfacing the failure, settling the
+							// persisted intent, and — the round now gone from the channel's
+							// history — taking back the record written above). If LDK had already
+							// reset the round when it refused the transaction, that report is on
+							// its way regardless, and the cancel finds nothing left to cancel.
 							log_error!(
 								self.logger,
-								"LDK refused the signed funding transaction for channel {}: {:?}",
+								"LDK refused the signed funding transaction for channel {}, \
+								aborting the splice: {:?}",
 								channel_id,
 								e,
 							);
+							if let Err(e) = self
+								.channel_manager
+								.cancel_funding_contributed(&channel_id, &counterparty_node_id)
+							{
+								// Every cancel error means the splice is already beyond canceling
+								// (e.g. the channel is gone); there is nothing further to unwind.
+								log_error!(
+									self.logger,
+									"Failed to cancel the splice on channel {}: {:?}",
+									channel_id,
+									e,
+								);
+							}
 						},
 					}
 				},
-				Err(()) => log_error!(self.logger, "Failed signing funding transaction"),
+				Err(()) => {
+					// No record has been written for this transaction yet, so there is nothing to
+					// unwind: cancel the splice and let LDK's `DiscardFunding` and
+					// `SpliceNegotiationFailed` events release the contribution and settle the
+					// persisted intent.
+					log_error!(
+						self.logger,
+						"Failed signing the funding transaction for channel {}, aborting the splice",
+						channel_id,
+					);
+					if let Err(e) = self
+						.channel_manager
+						.cancel_funding_contributed(&channel_id, &counterparty_node_id)
+					{
+						log_error!(
+							self.logger,
+							"Failed to cancel the splice on channel {}: {:?}",
+							channel_id,
+							e,
+						);
+					}
+				},
 			},
 			LdkEvent::SpliceNegotiated {
 				channel_id,
