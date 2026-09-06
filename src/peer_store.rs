@@ -42,17 +42,27 @@ where
 		Self { peers, mutation_lock, kv_store, logger }
 	}
 
+	/// Inserts or updates a peer entry.
+	///
+	/// If the peer is already known with the same address, this is a no-op. If the peer is new or
+	/// the stored address changed (e.g. an LSP migrated hosts), the entry is updated and persisted.
+	/// In-memory state is only mutated after a successful store write, matching [`Self::remove_peer`].
 	pub(crate) async fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let data = {
-			let mut locked_peers = self.peers.write().expect("lock");
-			if locked_peers.contains_key(&peer_info.node_id) {
-				return Ok(());
+			let locked_peers = self.peers.read().expect("lock");
+			if let Some(existing) = locked_peers.get(&peer_info.node_id) {
+				if existing.address == peer_info.address {
+					return Ok(());
+				}
 			}
-			locked_peers.insert(peer_info.node_id, peer_info);
-			PeerStoreSerWrapper(&locked_peers).encode()
+			let mut updated_peers = locked_peers.clone();
+			updated_peers.insert(peer_info.node_id, peer_info.clone());
+			PeerStoreSerWrapper(&updated_peers).encode()
 		};
-		self.persist_peers(data).await
+		self.persist_peers(data).await?;
+		self.peers.write().expect("lock").insert(peer_info.node_id, peer_info);
+		Ok(())
 	}
 
 	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
@@ -276,5 +286,94 @@ mod tests {
 
 		assert_eq!(Err(Error::PersistenceFailed), peer_store.remove_peer(&node_id).await);
 		assert_eq!(Some(peer_info), peer_store.get_peer(&node_id));
+	}
+
+	#[tokio::test]
+	async fn peer_address_updated_on_readd() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let old_address = SocketAddress::from_str("127.0.0.1:9738").unwrap();
+		let new_address = SocketAddress::from_str("127.0.0.1:9739").unwrap();
+
+		peer_store.add_peer(PeerInfo { node_id, address: old_address.clone() }).await.unwrap();
+		assert_eq!(peer_store.get_peer(&node_id), Some(PeerInfo { node_id, address: old_address }));
+
+		// Re-adding the same peer with a new socket address must refresh the stored entry
+		// (regression for https://github.com/lightningdevkit/ldk-node/issues/700).
+		let updated = PeerInfo { node_id, address: new_address.clone() };
+		peer_store.add_peer(updated.clone()).await.unwrap();
+		assert_eq!(peer_store.get_peer(&node_id), Some(updated.clone()));
+
+		let persisted_bytes = KVStore::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+		let deser_peer_store =
+			PeerStore::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
+		assert_eq!(deser_peer_store.get_peer(&node_id), Some(updated));
+	}
+
+	#[tokio::test]
+	async fn peer_same_address_skips_persist() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let address = SocketAddress::from_str("127.0.0.1:9738").unwrap();
+		let peer_info = PeerInfo { node_id, address };
+
+		peer_store.add_peer(peer_info.clone()).await.unwrap();
+		let first_bytes = KVStore::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+
+		// Identical re-add is a no-op for the store payload.
+		peer_store.add_peer(peer_info.clone()).await.unwrap();
+		let second_bytes = KVStore::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+		assert_eq!(first_bytes, second_bytes);
+		assert_eq!(peer_store.get_peer(&node_id), Some(peer_info));
+	}
+
+	#[tokio::test]
+	async fn add_peer_does_not_mutate_memory_if_persist_fails() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(store, logger);
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let peer_info =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9738").unwrap() };
+
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(peer_info.clone()).await);
+		assert_eq!(None, peer_store.get_peer(&node_id));
 	}
 }
