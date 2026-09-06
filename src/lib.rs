@@ -201,6 +201,7 @@ use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
+use crate::types::RecurrenceStore;
 use crate::wallet::FundingAmount;
 
 #[cfg(not(feature = "uniffi"))]
@@ -272,6 +273,7 @@ pub struct Node {
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
 	lnurl_auth: Arc<LnurlAuth>,
+	recurrence_store: Arc<RecurrenceStore>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
@@ -678,6 +680,7 @@ impl Node {
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.recurrence_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.keys_manager),
 			static_invoice_store,
@@ -1075,6 +1078,7 @@ impl Node {
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.recurrence_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
@@ -1092,6 +1096,7 @@ impl Node {
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.recurrence_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),

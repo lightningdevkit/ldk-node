@@ -42,6 +42,7 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
+use crate::payment::recurrence::RecurrenceDetails;
 use crate::payment::{PaymentDetails, PendingPaymentDetails};
 use crate::runtime::RuntimeSpawner;
 
@@ -333,6 +334,8 @@ pub(crate) type BumpTransactionEventHandler =
 	>;
 
 pub(crate) type PaymentStore = DataStore<PaymentDetails, Arc<Logger>, KeepLeastRecentlyUsed>;
+
+pub(crate) type RecurrenceStore = DataStore<RecurrenceDetails, Arc<Logger>, KeepAllEntries>;
 
 /// A local, potentially user-provided, identifier of a channel.
 ///

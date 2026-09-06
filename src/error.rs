@@ -87,6 +87,8 @@ pub enum Error {
 	InvalidOfferId,
 	/// The given node id is invalid.
 	InvalidNodeId,
+	/// The given recurrence id is invalid.
+	InvalidRecurrenceId,
 	/// The given payment id is invalid.
 	InvalidPaymentId,
 	/// The given payment hash is invalid.
@@ -193,6 +195,7 @@ impl fmt::Display for Error {
 			Self::InvalidMnemonic => write!(f, "The given BIP 39 mnemonic is invalid."),
 			Self::InvalidOfferId => write!(f, "The given offer id is invalid."),
 			Self::InvalidNodeId => write!(f, "The given node id is invalid."),
+			Self::InvalidRecurrenceId => write!(f, "The given recurrence id is invalid."),
 			Self::InvalidPaymentId => write!(f, "The given payment id is invalid."),
 			Self::InvalidPaymentHash => write!(f, "The given payment hash is invalid."),
 			Self::InvalidPaymentPreimage => write!(f, "The given payment preimage is invalid."),

@@ -14,6 +14,7 @@ mod bolt12;
 mod hrn;
 mod onchain;
 pub(crate) mod pending_payment_store;
+pub(crate) mod recurrence;
 mod spontaneous;
 pub(crate) mod store;
 #[cfg(feature = "unified-payments")]
