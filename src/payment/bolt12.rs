@@ -14,9 +14,10 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lightning::blinded_path::message::BlindedMessagePath;
-use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId};
+use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId, RecurrencePaymentParams};
 use lightning::ln::outbound_payment::Retry;
-use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
+use lightning::offers::invoice_request::RecurrenceId;
+use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity, RecurrenceType};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::offers::payer_proof::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 #[cfg(not(feature = "uniffi"))]
@@ -24,7 +25,8 @@ use lightning::offers::payer_proof::PayerProof as LdkPayerProof;
 use lightning::routing::router::RouteParametersConfig;
 use lightning::sign::{EntropySource, NodeSigner};
 #[cfg(feature = "uniffi")]
-use lightning::util::ser::{Readable, Writeable};
+use lightning::util::ser::Readable;
+use lightning::util::ser::Writeable;
 use lightning_types::payment::PaymentPreimage;
 use lightning_types::string::UntrustedString;
 
@@ -32,6 +34,7 @@ use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
+use crate::payment::recurrence::{RecurrenceDetails, RecurrencePaymentState, RecurrenceStatus};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::runtime::Runtime;
 use crate::types::{ChannelManager, KeysManager, PaymentStore, RecurrenceStore};
@@ -109,9 +112,8 @@ impl Bolt12Payment {
 	pub(crate) fn new(
 		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
 		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore>,
-		recurrence_store: Arc<RecurrenceStore>, config: Arc<Config>,
-		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
-		async_payments_role: Option<AsyncPaymentsRole>,
+		recurrence_store: Arc<RecurrenceStore>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
+		logger: Arc<Logger>, async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
 		Self {
 			runtime,
@@ -124,6 +126,136 @@ impl Bolt12Payment {
 			logger,
 			async_payments_role,
 		}
+	}
+
+	/// Registers and submits the primary invoice request for a recurring offer.
+	///
+	/// The returned [`RecurrenceId`] identifies the complete recurring relationship and must be
+	/// retained for its lifetime. The returned [`PaymentId`] identifies only the initial payment
+	/// attempt. Both identifiers are generated after validation and persisted after the submission
+	/// attempt.
+	pub fn initiate_recurrence(
+		&self, offer: &Offer, amount_msat: Option<u64>, quantity: Option<u64>,
+		payer_note: Option<String>, route_parameters: Option<RouteParametersConfig>,
+		initial_start: Option<u32>,
+	) -> Result<(RecurrenceId, PaymentId), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let offer = maybe_deref(offer);
+		let recurrence = offer.offer_recurrence().ok_or(Error::InvoiceRequestCreationFailed)?;
+		if recurrence.period_index(0, initial_start).is_err() {
+			return Err(Error::InvoiceRequestCreationFailed);
+		}
+
+		let offer_amount_msat = match offer.amount() {
+			Some(Amount::Bitcoin { amount_msats }) => Some(amount_msats),
+			Some(_) => return Err(Error::UnsupportedCurrency),
+			None => None,
+		};
+
+		let amount_msat = amount_msat
+			.or(offer_amount_msat)
+			.filter(|amount| *amount > 0)
+			.ok_or(Error::InvalidAmount)?;
+
+		if quantity == Some(0) {
+			return Err(Error::InvalidQuantity);
+		}
+
+		let recurrence_id = RecurrenceId(self.keys_manager.get_secure_random_bytes());
+		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
+		let retry_policy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+
+		// An offer with an explicit basetime fixes the basetime expected in the first invoice.
+		// Otherwise, the first invoice's creation time establishes it.
+		let offer_basetime = match recurrence.recurrence_type {
+			RecurrenceType::Compulsory(Some(base)) => Some(base.basetime),
+			_ => None,
+		};
+
+		let params = RecurrencePaymentParams {
+			counter: 0,
+			start: initial_start,
+			prev_state: None,
+			quantity,
+			expected_invoice_recurrence_basetime: offer_basetime,
+		};
+		let optional_params = OptionalOfferPaymentParams {
+			payer_note: payer_note.clone(),
+			route_params_config: route_parameters.unwrap_or_default(),
+			retry_strategy: retry_policy,
+		};
+
+		let (payment_status, res) = match self.channel_manager.pay_for_recurrence(
+			&offer,
+			Some(amount_msat),
+			payment_id,
+			recurrence_id,
+			params,
+			optional_params,
+		) {
+			Ok(()) => {
+				(PaymentStatus::Pending, Ok((recurrence_id, payment_id)))
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to send invoice request: {:?}", e);
+				if matches!(e, Bolt12SemanticError::DuplicatePaymentId) {
+					return Err(Error::DuplicatePayment);
+				}
+				(PaymentStatus::Failed, Err(Error::InvoiceRequestCreationFailed))
+			},
+		};
+
+		// Record both submitted requests and non-duplicate submission failures.
+		let details = RecurrenceDetails {
+			id: recurrence_id,
+			status: RecurrenceStatus::Active,
+			payment_state: RecurrencePaymentState::Active(payment_id),
+			original_offer: offer.encode(),
+			amount_msat,
+			quantity,
+			payer_note: payer_note.clone().map(UntrustedString),
+			basetime: offer_basetime,
+			initial_start,
+			paid_count: 0,
+			opaque_state: None,
+			retry_policy,
+			routing_override: route_parameters,
+			last_successful_payment_id: None,
+			pay_next_automatically: false,
+		};
+		self.runtime.block_on(self.recurrence_store.insert(details))?;
+
+		let kind = PaymentKind::Bolt12Offer {
+			hash: None,
+			preimage: None,
+			secret: None,
+			offer_id: offer.id(),
+			payer_note: payer_note.map(UntrustedString),
+			quantity,
+		};
+		let payment = PaymentDetails::new(
+			payment_id,
+			kind,
+			Some(amount_msat),
+			None,
+			PaymentDirection::Outbound,
+			payment_status,
+		);
+		self.runtime.block_on(self.payment_store.insert(payment))?;
+
+		if res.is_ok() {
+			log_info!(
+				self.logger,
+				"Initiated sending {}msat to {:?}",
+				amount_msat,
+				offer.issuer_signing_pubkey()
+			);
+		}
+
+		res
 	}
 
 	pub(crate) fn send_using_amount_inner(
