@@ -176,6 +176,7 @@ enum NodeError {
 	"InvalidMnemonic",
 	"InvalidOfferId",
 	"InvalidNodeId",
+	"InvalidRecurrenceId",
 	"InvalidPaymentId",
 	"InvalidPaymentHash",
 	"InvalidPaymentPreimage",
@@ -354,6 +355,9 @@ typedef string Address;
 
 [Custom]
 typedef string OfferId;
+
+[Custom]
+typedef string RecurrenceId;
 
 [Custom]
 typedef string PaymentId;

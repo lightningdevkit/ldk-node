@@ -176,8 +176,8 @@ use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, PaymentDetailsPage,
-	SpontaneousPayment,
+	Bolt11Payment, Bolt12Payment, OnchainPayment, OutboundRecurrenceDetails, PaymentDetails,
+	PaymentDetailsPage, RecurrenceId, SpontaneousPayment,
 };
 #[cfg(feature = "unified-payments")]
 use payment::{HRNResolver, UnifiedPayment};
@@ -201,6 +201,7 @@ use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
+use crate::types::OutboundRecurrenceStore;
 use crate::wallet::FundingAmount;
 
 #[cfg(not(feature = "uniffi"))]
@@ -272,6 +273,7 @@ pub struct Node {
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
 	lnurl_auth: Arc<LnurlAuth>,
+	outbound_recurrence_store: Arc<OutboundRecurrenceStore>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
@@ -678,6 +680,7 @@ impl Node {
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.outbound_recurrence_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.keys_manager),
 			static_invoice_store,
@@ -1075,6 +1078,7 @@ impl Node {
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.outbound_recurrence_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
@@ -1092,6 +1096,7 @@ impl Node {
 			Arc::clone(&self.channel_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.outbound_recurrence_store),
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
@@ -2156,6 +2161,27 @@ impl Node {
 	/// if the payment could not be retrieved from the store.
 	pub fn payment(&self, payment_id: &PaymentId) -> Result<Option<PaymentDetails>, Error> {
 		self.runtime.block_on(self.payment_store.get(payment_id))
+	}
+
+	/// Retrieves an owned snapshot of the outbound recurrence with the given id.
+	///
+	/// Returns `Ok(None)` for an unknown id, or an error if the record cannot be read. Available
+	/// before the node is started, including after records have been loaded during construction.
+	/// Changing the returned snapshot does not change the stored recurrence.
+	pub fn outbound_recurrence(
+		&self, recurrence_id: &RecurrenceId,
+	) -> Result<Option<OutboundRecurrenceDetails>, Error> {
+		self.runtime.block_on(self.outbound_recurrence_store.get(recurrence_id))
+	}
+
+	/// Lists owned snapshots of all known outbound recurrences, in unspecified order.
+	///
+	/// Includes terminal recurrences and failed attempts so callers can recover persisted records
+	/// after restart or an initiation error, even if the error left them without a recurrence id.
+	/// Records that were not successfully persisted cannot be recovered this way. Available before
+	/// the node is started; changing these snapshots does not update stored state.
+	pub fn list_outbound_recurrences(&self) -> Vec<OutboundRecurrenceDetails> {
+		self.runtime.block_on(self.outbound_recurrence_store.list_filter(|_| true))
 	}
 
 	/// Remove the payment with the given id from the store.

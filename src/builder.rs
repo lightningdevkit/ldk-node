@@ -80,7 +80,9 @@ use crate::io::utils::{
 #[cfg(feature = "storage-vss")]
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
-	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	self, OUTBOUND_RECURRENCE_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+	OUTBOUND_RECURRENCE_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
@@ -100,8 +102,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
-	PendingPaymentStore,
+	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, OutboundRecurrenceStore,
+	PaymentStore, PeerManager, PendingPaymentStore,
 };
 use crate::wallet::persist::{read_address_pool, KVStoreWalletPersister};
 use crate::wallet::Wallet;
@@ -1524,26 +1526,37 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res, address_pool_res) = runtime
-		.block_on(async move {
-			tokio::join!(
-				read_n_objects(
-					&*kv_store_ref,
-					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					PAYMENT_CACHE_WARMUP_COUNT,
-					Arc::clone(&logger_ref),
-				),
-				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_all_objects(
-					&*kv_store_ref,
-					PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					Arc::clone(&logger_ref),
-				),
-				read_address_pool(&*kv_store_ref, &*logger_ref)
-			)
-		});
+	let (
+		payment_store_res,
+		node_metris_res,
+		pending_payment_store_res,
+		outbound_recurrence_res,
+		address_pool_res,
+	) = runtime.block_on(async move {
+		tokio::join!(
+			read_n_objects(
+				&*kv_store_ref,
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				PAYMENT_CACHE_WARMUP_COUNT,
+				Arc::clone(&logger_ref),
+			),
+			read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
+			read_all_objects(
+				&*kv_store_ref,
+				PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+			read_all_objects(
+				&*kv_store_ref,
+				OUTBOUND_RECURRENCE_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				OUTBOUND_RECURRENCE_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+			read_address_pool(&*kv_store_ref, &*logger_ref)
+		)
+	});
 
 	// Initialize the status fields.
 	let node_metrics = match node_metris_res {
@@ -1861,6 +1874,21 @@ fn build_with_store_internal(
 		Ok(indices) => indices,
 		Err(e) => {
 			log_error!(logger, "Failed to read address pool data from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
+	let outbound_recurrence_store = match outbound_recurrence_res {
+		Ok(outbound_recurrences) => Arc::new(OutboundRecurrenceStore::new(
+			outbound_recurrences,
+			KeepAllEntries,
+			OUTBOUND_RECURRENCE_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			OUTBOUND_RECURRENCE_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(e) => {
+			log_error!(logger, "Failed to read outbound recurrence data from store: {}", e);
 			return Err(BuildError::ReadFailed);
 		},
 	};
@@ -2484,6 +2512,7 @@ fn build_with_store_internal(
 		scorer,
 		peer_store,
 		payment_store,
+		outbound_recurrence_store,
 		lnurl_auth,
 		is_running,
 		node_metrics,

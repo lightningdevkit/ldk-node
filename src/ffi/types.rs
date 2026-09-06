@@ -29,6 +29,7 @@ use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 pub use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
+use lightning::offers::invoice_request::RecurrenceId;
 pub use lightning::offers::offer::OfferId;
 use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
 use lightning::offers::payer_proof::{
@@ -1038,6 +1039,22 @@ uniffi::custom_type!(OfferId, String, {
 			}
 		}
 		Err(Error::InvalidOfferId.into())
+	},
+	lower: |obj| {
+		hex_utils::to_string(&obj.0)
+	},
+});
+
+uniffi::custom_type!(RecurrenceId, String, {
+	remote,
+	try_lift: |val| {
+		if let Some(bytes_vec) = hex_utils::to_vec(&val) {
+			let bytes_res = bytes_vec.try_into();
+			if let Ok(bytes) = bytes_res {
+				return Ok(RecurrenceId(bytes));
+			}
+		}
+		Err(Error::InvalidRecurrenceId.into())
 	},
 	lower: |obj| {
 		hex_utils::to_string(&obj.0)
