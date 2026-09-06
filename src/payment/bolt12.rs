@@ -14,9 +14,12 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lightning::blinded_path::message::BlindedMessagePath;
-use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId};
+use lightning::ln::channelmanager::{
+	OptionalOfferPaymentParams, PaymentId, RecurrencePaymentParams,
+};
 use lightning::ln::outbound_payment::Retry;
-use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity};
+use lightning::offers::invoice_request::RecurrenceId;
+use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity, RecurrenceType};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::offers::payer_proof::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 #[cfg(not(feature = "uniffi"))]
@@ -24,15 +27,22 @@ use lightning::offers::payer_proof::PayerProof as LdkPayerProof;
 use lightning::routing::router::RouteParametersConfig;
 use lightning::sign::{EntropySource, NodeSigner};
 #[cfg(feature = "uniffi")]
-use lightning::util::ser::{Readable, Writeable};
+use lightning::util::ser::Readable;
+use lightning::util::ser::Writeable;
 use lightning_types::payment::PaymentPreimage;
 use lightning_types::string::UntrustedString;
 
 use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::data_store::StorableObject;
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
-use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
+use crate::payment::outbound_recurrence::{
+	OutboundRecurrenceDetails, OutboundRecurrencePaymentState, OutboundRecurrenceStatus,
+};
+use crate::payment::store::{
+	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
+};
 use crate::runtime::Runtime;
 use crate::types::{ChannelManager, KeysManager, OutboundRecurrenceStore, PaymentStore};
 
@@ -124,6 +134,231 @@ impl Bolt12Payment {
 			logger,
 			async_payments_role,
 		}
+	}
+
+	/// Registers an outbound recurrence and submits its initial invoice request.
+	///
+	/// The returned [`RecurrenceId`] identifies the complete recurring relationship and must be
+	/// retained for its lifetime. The returned [`PaymentId`] identifies only the initial payment
+	/// attempt. Both records are reserved after validation and persisted before submitting the
+	/// request. A submission failure retains the failed attempt without advancing paid progress.
+	///
+	/// `quantity` must be supplied exactly when the offer expects it and must satisfy its bounds.
+	/// `amount_msat` is the total for one period. When omitted, it defaults to the offer's per-item
+	/// amount multiplied by the quantity (or one when no quantity is expected). Invalid quantities
+	/// return [`Error::InvalidQuantity`]; missing, zero, overflowing, excessive, or insufficient
+	/// amounts return [`Error::InvalidAmount`] before any records are reserved.
+	pub fn initiate_outbound_recurrence(
+		&self, offer: &Offer, amount_msat: Option<u64>, quantity: Option<u64>,
+		payer_note: Option<String>, route_parameters: Option<RouteParametersConfig>,
+		initial_start: Option<u32>,
+	) -> Result<(RecurrenceId, PaymentId), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let offer = maybe_deref(offer);
+		let recurrence = offer.offer_recurrence().ok_or(Error::InvoiceRequestCreationFailed)?;
+		if recurrence.period_index(0, initial_start).is_err() {
+			return Err(Error::InvoiceRequestCreationFailed);
+		}
+
+		// A quantity must be present exactly when the offer requests it. Let the offer enforce
+		// its bounds rather than accepting zero, an omitted quantity, or an unexpected one.
+		match quantity {
+			None if offer.expects_quantity() => return Err(Error::InvalidQuantity),
+			Some(qty) if !offer.expects_quantity() || !offer.is_valid_quantity(qty) => {
+				return Err(Error::InvalidQuantity);
+			},
+			_ => {},
+		}
+
+		// Offer amounts are per item; the caller's amount is the total for this period.
+		// Check multiplication even when the caller supplies a total, so overflow cannot bypass
+		// the minimum required by the offer.
+		let minimum_amount_msat = match offer.amount() {
+			Some(Amount::Bitcoin { amount_msats }) => {
+				Some(amount_msats.checked_mul(quantity.unwrap_or(1)).ok_or(Error::InvalidAmount)?)
+			},
+			Some(_) => return Err(Error::UnsupportedCurrency),
+			None => None,
+		};
+		let amount_msat = amount_msat.or(minimum_amount_msat).ok_or(Error::InvalidAmount)?;
+		if amount_msat == 0
+			|| amount_msat > bitcoin::Amount::MAX_MONEY.to_sat() * 1_000
+			|| minimum_amount_msat.is_some_and(|minimum| amount_msat < minimum)
+		{
+			return Err(Error::InvalidAmount);
+		}
+
+		let recurrence_id = RecurrenceId(self.keys_manager.get_secure_random_bytes());
+		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
+		let retry_policy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
+
+		// An offer with an explicit basetime fixes the basetime expected in the first invoice.
+		// Otherwise, the first invoice's creation time establishes it.
+		let offer_basetime = match recurrence.recurrence_type {
+			RecurrenceType::Compulsory(Some(base)) => Some(base.basetime),
+			_ => None,
+		};
+
+		let details = OutboundRecurrenceDetails {
+			id: recurrence_id,
+			status: OutboundRecurrenceStatus::Active,
+			payment_state: OutboundRecurrencePaymentState::Active(payment_id),
+			original_offer: offer.encode(),
+			amount_msat,
+			quantity,
+			payer_note: payer_note.clone().map(UntrustedString),
+			basetime: offer_basetime,
+			initial_start,
+			paid_count: 0,
+			opaque_state: None,
+			retry_policy,
+			routing_override: route_parameters,
+			last_successful_payment_id: None,
+			pay_next_automatically: false,
+		};
+		let kind = PaymentKind::Bolt12Offer {
+			hash: None,
+			preimage: None,
+			secret: None,
+			offer_id: offer.id(),
+			payer_note: payer_note.map(UntrustedString),
+			quantity,
+		};
+		let payment = PaymentDetails::new(
+			payment_id,
+			kind,
+			Some(amount_msat),
+			None,
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		self.reserve_initial_recurrence(details, payment)?;
+
+		self.runtime
+			.block_on(self.submit_reserved_outbound_recurrence(recurrence_id, payment_id))?;
+		Ok((recurrence_id, payment_id))
+	}
+
+	/// Reserves both initial records without replacing an existing recurrence or payment.
+	///
+	/// Always acquire the recurrence store's mutation lock before the payment store's lock.
+	/// Submission may proceed only after both writes succeed. The stores are not transactional:
+	/// if the recurrence write fails, the payment can remain persisted, but no request is sent.
+	fn reserve_initial_recurrence(
+		&self, details: OutboundRecurrenceDetails, payment: PaymentDetails,
+	) -> Result<(), Error> {
+		let recurrence_id = details.id;
+		self.runtime.block_on(self.outbound_recurrence_store.mutate_async(
+			&recurrence_id,
+			|current| async move {
+				if current.is_some() {
+					return Err(Error::DuplicatePayment);
+				}
+				let payment_id = payment.id;
+				self.payment_store
+					.mutate(&payment_id, |current| current.is_none().then_some(payment))
+					.await?
+					.ok_or(Error::DuplicatePayment)?;
+				Ok(Some(details))
+			},
+		))?;
+		Ok(())
+	}
+
+	/// Submits a persisted attempt only while it still owns an active recurrence.
+	///
+	/// Hold the recurrence mutation lock through LDK's synchronous queueing call. Other
+	/// lifecycle mutations must use this same lock, so a cancellation that wins the lock can
+	/// prevent an unqueued reservation from being submitted. Read parameters from the current
+	/// record rather than the caller's earlier snapshot. Acquire payment-store locks second.
+	async fn submit_reserved_outbound_recurrence(
+		&self, recurrence_id: RecurrenceId, payment_id: PaymentId,
+	) -> Result<PaymentId, Error> {
+		let mut submission_result = Ok(payment_id);
+		let result = &mut submission_result;
+		self.outbound_recurrence_store
+			.mutate_async(&recurrence_id, |current| async move {
+				let mut details = current.ok_or(Error::InvalidRecurrenceId)?;
+				if details.status != OutboundRecurrenceStatus::Active
+					|| details.payment_state != OutboundRecurrencePaymentState::Active(payment_id)
+				{
+					return Err(Error::PaymentSendingFailed);
+				}
+				// Both reservations must still exist. In particular, never submit again after
+				// an outcome has been persisted but its recurrence update is still pending.
+				match self.payment_store.get(&payment_id).await? {
+					Some(payment) if payment.status == PaymentStatus::Pending => {},
+					_ => return Err(Error::PaymentSendingFailed),
+				}
+
+				let offer = LdkOffer::try_from(details.original_offer.clone())
+					.map_err(|_| Error::InvalidOffer)?;
+				let params = RecurrencePaymentParams {
+					counter: details.paid_count,
+					start: details.initial_start,
+					prev_state: details.opaque_state.clone(),
+					quantity: details.quantity,
+					expected_invoice_recurrence_basetime: details.basetime,
+				};
+				let optional_params = OptionalOfferPaymentParams {
+					payer_note: details.payer_note.as_ref().map(|note| note.0.clone()),
+					route_params_config: details.routing_override.unwrap_or_default(),
+					retry_strategy: details.retry_policy,
+				};
+				match self.channel_manager.pay_for_recurrence(
+					&offer,
+					Some(details.amount_msat),
+					payment_id,
+					recurrence_id,
+					params,
+					optional_params,
+				) {
+					Ok(()) => {
+						log_info!(
+							self.logger,
+							"Initiated sending {}msat to {:?}",
+							details.amount_msat,
+							offer.issuer_signing_pubkey()
+						);
+						// Reservation already persisted the active attempt. Avoid another write
+						// after queueing, when the request may already produce an event.
+						Ok(None)
+					},
+					Err(e) => {
+						log_error!(self.logger, "Failed to send invoice request: {:?}", e);
+						*result = Err(match e {
+							Bolt12SemanticError::DuplicatePaymentId => Error::DuplicatePayment,
+							_ => Error::InvoiceRequestCreationFailed,
+						});
+						let payment = self
+							.payment_store
+							.mutate(&payment_id, |current| {
+								let mut payment = match current {
+									Some(payment) if payment.status != PaymentStatus::Succeeded => {
+										payment.clone()
+									},
+									_ => return None,
+								};
+								let mut update = PaymentDetailsUpdate::new(payment_id);
+								update.status = Some(PaymentStatus::Failed);
+								payment.update(update);
+								Some(payment)
+							})
+							.await?;
+						// A success or removal may have raced with submission. Preserve it.
+						if payment.is_none() {
+							return Ok(None);
+						}
+						details.payment_state = OutboundRecurrencePaymentState::Failed(payment_id);
+						Ok(Some(details))
+					},
+				}
+			})
+			.await?;
+		submission_result
 	}
 
 	pub(crate) fn send_using_amount_inner(
