@@ -55,7 +55,8 @@ use crate::payment::PaymentMetadata;
 use crate::probing::Prober;
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, RecurrenceStore, Sweeper, Wallet,
+	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, RecurrenceStore, Sweeper,
+	Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -829,10 +830,7 @@ where
 			LdkEvent::RecurringOfferCancelled { .. } => {
 				// TODO: Mark the corresponding recurrence as cancelled once the
 				// recurrence data store is introduced.
-				debug_assert!(
-					false,
-					"recurrence cancellation handling is not implemented"
-				);
+				debug_assert!(false, "recurrence cancellation handling is not implemented");
 			},
 			LdkEvent::PaymentClaimable {
 				payment_id,
