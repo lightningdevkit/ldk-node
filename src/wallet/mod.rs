@@ -1810,8 +1810,8 @@ impl Wallet {
 		let payment_store = Arc::clone(&self.payment_store);
 		self.pending_payment_store
 			.mutate_async(&id, move |existing| async move {
-				// The record was written above and payment records are never removed, so absence
-				// means the write failed out; fall back to the fresh details.
+				// The record was written above and removal serializes on the cross-store lock held
+				// here, so absence means the write failed out; fall back to the fresh details.
 				let recorded = payment_store.get(&id).await?.unwrap_or(details);
 				Ok(match existing {
 					// The inserted entry embeds the post-write record rather than the fresh
@@ -1908,6 +1908,20 @@ impl Wallet {
 		&self, payment: PaymentDetails, conflicting_txids: Vec<Txid>,
 	) -> PendingPaymentDetails {
 		PendingPaymentDetails::new(payment, conflicting_txids, Vec::new())
+	}
+
+	/// Removes the payment with the given id from the payment store, along with any pending-store
+	/// entry indexing its txids. An orphaned entry would keep resolving those txids to the removed
+	/// record — routing later wallet-sync events to a payment that no longer exists — and nothing
+	/// would ever clean it up, since graduation only removes entries whose record is still live.
+	pub(crate) async fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
+		// Hold the cross-store lock so the two-store removal cannot interleave with a sync arm's
+		// or classification's resolve-then-write sequence. The pending entry goes first: a failure
+		// in between then leaves an unindexed record (benign, and the retry removes it) rather
+		// than an entry indexing a removed record.
+		let _guard = self.funding_payment_update_lock.lock().await;
+		self.pending_payment_store.remove(payment_id).await?;
+		self.payment_store.remove(payment_id).await
 	}
 
 	async fn find_payment_by_txid(&self, target_txid: Txid) -> Result<Option<PaymentId>, Error> {
@@ -3958,6 +3972,82 @@ mod tests {
 		assert_eq!(wallet.find_payment_by_txid(txid1).await.unwrap(), Some(payment_id));
 		assert_eq!(wallet.find_payment_by_txid(txid3).await.unwrap(), Some(payment_id));
 		assert_eq!(wallet.find_payment_by_txid(txid2).await.unwrap(), Some(payment_id));
+	}
+
+	/// Removing a payment must also drop its pending-store entry. The entry indexes the
+	/// payment's txids (current, conflicting, and candidates), so leaving it behind keeps
+	/// resolving those txids to the removed record — routing later wallet events to a payment
+	/// that no longer exists — and nothing else ever cleans it up, since graduation only
+	/// removes entries whose record is still live.
+	#[tokio::test]
+	async fn remove_payment_drops_pending_entry() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let txid = Txid::from_byte_array([1u8; 32]);
+		let conflicting_txid = Txid::from_byte_array([2u8; 32]);
+		let payment_id = PaymentId(txid.to_byte_array());
+
+		// A Pending outbound on-chain payment with a recorded conflict (e.g. an RBF round).
+		let details = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed, tx_type: None },
+			Some(1_000),
+			Some(100),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		wallet.payment_store.insert_or_update(details.clone()).await.unwrap();
+		let entry = PendingPaymentDetails::new(details, vec![conflicting_txid], Vec::new());
+		wallet.pending_payment_store.insert_or_update(entry).await.unwrap();
+
+		wallet.remove_payment(&payment_id).await.unwrap();
+
+		assert!(wallet.payment_store.get(&payment_id).await.unwrap().is_none());
+		assert!(wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none());
+		assert_eq!(wallet.find_payment_by_txid(txid).await.unwrap(), None);
+		assert_eq!(wallet.find_payment_by_txid(conflicting_txid).await.unwrap(), None);
+
+		// A replacement event for the removed transaction must skip rather than resolve to the
+		// removed record: the `TxReplaced` arm asserts the resolved record exists.
+		let event = WalletEvent::TxReplaced {
+			txid,
+			tx: Arc::new(dummy_tx()),
+			conflicts: vec![(0, conflicting_txid)],
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+		assert!(wallet.payment_store.get(&payment_id).await.unwrap().is_none());
+	}
+
+	/// Payments without a pending-store entry — lightning payments, and on-chain payments that
+	/// already graduated — must remove cleanly: the unconditional pending-store removal relies
+	/// on removing a missing key being a no-op.
+	#[tokio::test]
+	async fn remove_payment_without_pending_entry() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let payment_id = PaymentId([9u8; 32]);
+		let details = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Bolt11 {
+				hash: lightning_types::payment::PaymentHash([0u8; 32]),
+				preimage: None,
+				secret: None,
+				counterparty_skimmed_fee_msat: None,
+			},
+			Some(1_000),
+			None,
+			PaymentDirection::Outbound,
+			PaymentStatus::Succeeded,
+		);
+		wallet.payment_store.insert_or_update(details).await.unwrap();
+
+		wallet.remove_payment(&payment_id).await.unwrap();
+		assert!(wallet.payment_store.get(&payment_id).await.unwrap().is_none());
+
+		// Removing an id known to neither store is also a no-op rather than an error.
+		wallet.remove_payment(&PaymentId([8u8; 32])).await.unwrap();
 	}
 
 	/// A funding-typed broadcast that doesn't touch the on-chain wallet must not be recorded.

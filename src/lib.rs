@@ -2160,7 +2160,7 @@ impl Node {
 
 	/// Remove the payment with the given id from the store.
 	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
-		self.runtime.block_on(self.payment_store.remove(&payment_id))
+		self.runtime.block_on(self.wallet.remove_payment(payment_id))
 	}
 
 	/// Retrieves an overview of all known balances.
