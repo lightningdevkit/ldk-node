@@ -2658,7 +2658,9 @@ impl Wallet {
 				// carries outlives the record as a bare intent: the failure LDK reports for the
 				// round is described from it, and its settlement removes it
 				// (`SpliceTracker::on_negotiation_failed`); one left behind by a node that stopped
-				// in between is found and settled by whatever next concerns the channel's splice.
+				// in between is found by `SpliceTracker::reconcile` at the next startup, which
+				// settles it once LDK holds no round of ours, or by whatever next concerns the
+				// channel's splice.
 				// The intent is read from the entry as it stands, not as listed above: a fee bump
 				// submitted since may have replaced it, and that intent must stay just the same.
 				self.payment_store.remove(&payment_id).await?;

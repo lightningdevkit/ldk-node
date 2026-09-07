@@ -490,6 +490,15 @@ pub(crate) fn test_funding_contribution_with_feerate(
 	test_funding_contribution_with_outputs(0, feerate, &[])
 }
 
+/// Like [`test_funding_contribution`], but with the given input-selection feerate in sat/kwu and
+/// an input spending output 0 — which must be P2WPKH — of each given previous transaction.
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_with_inputs(
+	feerate: u64, prevtxs: &[bitcoin::Transaction],
+) -> FundingContribution {
+	test_funding_contribution_with_parts(0, feerate, prevtxs, &[], None)
+}
+
 #[cfg(test)]
 mod tests {
 	use bitcoin::hashes::Hash;
