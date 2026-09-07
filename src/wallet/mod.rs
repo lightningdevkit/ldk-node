@@ -786,11 +786,37 @@ impl Wallet {
 			return Ok(false);
 		}
 
-		// As with graduation, decide from the live record and write only the status. A record
-		// already `Failed` — a prior pass whose entry removal below was lost to a crash — still
-		// matches, no-ops the update, and gets its lingering entry removed.
 		let payment_id = entry.details.id;
-		let mut failed = false;
+		let outcome =
+			self.fail_unconfirmed_funding_payment_locked(&_guard, payment_id, record_txid).await?;
+		match outcome {
+			FundingPaymentFailure::Failed => log_info!(
+				self.logger,
+				"Failed funding payment {}: transaction {} lost to a conflicting transaction confirmed beyond the reorg depth",
+				payment_id,
+				record_txid,
+			),
+			FundingPaymentFailure::EntryRemoved => log_info!(
+				self.logger,
+				"Removed the lingering entry of failed funding payment {}: transaction {} lost to \
+				a conflicting transaction confirmed beyond the reorg depth",
+				payment_id,
+				record_txid,
+			),
+			FundingPaymentFailure::MovedOn => {},
+		}
+		Ok(outcome != FundingPaymentFailure::MovedOn)
+	}
+
+	/// Fails the funding payment `payment_id` while its record still waits on the unconfirmed
+	/// funding transaction `record_txid`, and removes its pending entry, reporting what it did. As
+	/// with graduation, the decision is made from the live record and only the status is written.
+	/// A record already `Failed` — a prior pass whose entry removal was lost to a crash — still
+	/// matches, no-ops the update, and gets its lingering entry removed.
+	async fn fail_unconfirmed_funding_payment_locked(
+		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, payment_id: PaymentId, record_txid: Txid,
+	) -> Result<FundingPaymentFailure, Error> {
+		let mut outcome = FundingPaymentFailure::MovedOn;
 		self.payment_store
 			.mutate(&payment_id, |existing| {
 				let current = existing?;
@@ -804,26 +830,260 @@ impl Wallet {
 								| TransactionType::InteractiveFunding { .. },
 							),
 					} if txid == record_txid => {
-						failed = true;
 						let mut update = PaymentDetailsUpdate::new(payment_id);
 						update.status = Some(PaymentStatus::Failed);
 						let mut updated = current.clone();
-						updated.update(update).then_some(updated)
+						if updated.update(update) {
+							outcome = FundingPaymentFailure::Failed;
+							Some(updated)
+						} else {
+							outcome = FundingPaymentFailure::EntryRemoved;
+							None
+						}
 					},
 					_ => None,
 				}
 			})
 			.await?;
-		if failed {
+		if outcome != FundingPaymentFailure::MovedOn {
 			self.pending_payment_store.remove(&payment_id).await?;
+		}
+		Ok(outcome)
+	}
+
+	/// Resolves the funding payments of the closed channel `channel_id`, whose monitor settled on
+	/// and still watches `held_rounds` (as [`closed_channel_held_rounds`] lists them): a round
+	/// nothing ever broadcast is dropped from its record, as [`Self::drop_abandoned_splice_rounds`]
+	/// does, and every payment left waiting on an unconfirmed splice round with no round of ours
+	/// among `held_rounds`, and none LDK promoted to the channel's funding before, is failed. The
+	/// monitor watches every pending round of ours that can still confirm, and a round that was
+	/// the funding once — a zero-conf splice locks before its transaction confirms — can confirm
+	/// still, every later splice building on it, so such a payment waits for a transaction that
+	/// cannot.
+	///
+	/// In the usual order the monitor still watches every pending round when the channel closes,
+	/// and the `DiscardFunding` events it queues once the close matures find the channel no longer
+	/// listed and resolve the payments the same way, by what the monitor holds then. The order
+	/// flips when one sync delivers the close and its maturity while the background processor is
+	/// between the channel manager's event pass and the chain monitor's: the monitor's events then
+	/// find the channel still listed, and an event for a listed channel resolves no payment — the
+	/// promotion of a sibling round does, when there is one, and here there is none. This settles
+	/// what those events left behind.
+	pub(crate) async fn resolve_closed_channel_splice_rounds(
+		&self, channel_id: ChannelId, held_rounds: &[Txid],
+	) -> Result<(), Error> {
+		// Serialize with the other funding-record writers, which all hold this lock from their
+		// reads through their last write.
+		let guard = self.funding_payment_update_lock.lock().await;
+		self.resolve_closed_channel_splice_rounds_locked(&guard, channel_id, held_rounds).await
+	}
+
+	/// [`Self::resolve_closed_channel_splice_rounds`] for a caller already holding the
+	/// funding-record writers' lock.
+	async fn resolve_closed_channel_splice_rounds_locked(
+		&self, guard: &tokio::sync::MutexGuard<'_, ()>, channel_id: ChannelId, held_rounds: &[Txid],
+	) -> Result<(), Error> {
+		self.drop_abandoned_splice_rounds_locked(guard, channel_id, held_rounds).await?;
+		self.fail_funding_payments_without_held_round_locked(
+			guard,
+			channel_id,
+			held_rounds,
+			FundingResolution::Close,
+		)
+		.await?;
+		// Logged whatever the two passes found: a payment graduated by a sync running alongside
+		// leaves them nothing to log, and the decision should still show.
+		log_debug!(
+			self.logger,
+			"Resolved the funding payments of channel {} after its close by the {} round(s) its \
+			monitor holds",
+			channel_id,
+			held_rounds.len(),
+		);
+		Ok(())
+	}
+
+	/// Fails every funding payment of `channel_id` still waiting on an unconfirmed splice round
+	/// while no round of ours in its record is among `held_rounds` or was promoted to the channel's
+	/// funding (see [`Self::resolve_promoted_splice_round`]), removing its pending entry; a payment
+	/// with such a round is left as it is. The rounds of ours are the candidates recorded with a
+	/// stake and the record's own transaction. A payment that moved on — its round confirmed, or
+	/// it was failed already — is not touched beyond the entry a failure cut short left behind.
+	/// `resolution` names the occasion in what is logged.
+	async fn fail_funding_payments_without_held_round_locked(
+		&self, guard: &tokio::sync::MutexGuard<'_, ()>, channel_id: ChannelId,
+		held_rounds: &[Txid], resolution: FundingResolution,
+	) -> Result<(), Error> {
+		let occasion = match resolution {
+			FundingResolution::Close => format!("of closed channel {}", channel_id),
+			FundingResolution::Promotion(promoted) => {
+				format!("of channel {} once splice round {} locked", channel_id, promoted)
+			},
+		};
+		let entries =
+			self.pending_payment_store.list_filter(|entry| tracks_channel(entry, channel_id)).await;
+		for entry in entries {
+			let payment_id = entry.details.id;
+			let record_txid = match &entry.details.kind {
+				PaymentKind::Onchain {
+					txid,
+					status: ConfirmationStatus::Unconfirmed,
+					tx_type: Some(TransactionType::InteractiveFunding { .. }),
+				} => *txid,
+				_ => {
+					log_debug!(
+						self.logger,
+						"Funding payment {} {} no longer waits on an unconfirmed round",
+						payment_id,
+						occasion,
+					);
+					continue;
+				},
+			};
+			let mut rounds_of_ours = entry
+				.candidates
+				.iter()
+				.filter(|candidate| candidate.amount_msat.is_some())
+				.map(|candidate| candidate.txid)
+				.chain(std::iter::once(record_txid));
+			if let Some(kept) = rounds_of_ours
+				.find(|txid| held_rounds.contains(txid) || entry.locked_rounds.contains(txid))
+			{
+				log_info!(
+					self.logger,
+					"Splice round {} of ours can still confirm: keeping funding payment {} {}",
+					kept,
+					payment_id,
+					occasion,
+				);
+				continue;
+			}
+			match self
+				.fail_unconfirmed_funding_payment_locked(guard, payment_id, record_txid)
+				.await?
+			{
+				FundingPaymentFailure::Failed => log_info!(
+					self.logger,
+					"Failed funding payment {} {}: no round of ours can confirm",
+					payment_id,
+					occasion,
+				),
+				FundingPaymentFailure::EntryRemoved => log_info!(
+					self.logger,
+					"Removed the lingering entry of failed funding payment {} {}",
+					payment_id,
+					occasion,
+				),
+				FundingPaymentFailure::MovedOn => log_warn!(
+					self.logger,
+					"Funding payment {} {} moved on from transaction {}: leaving it as it is",
+					payment_id,
+					occasion,
+					record_txid,
+				),
+			}
+		}
+		Ok(())
+	}
+
+	/// Resolves what LDK's promotion of the splice round `promoted` to the funding of `channel_id`,
+	/// as its `ChannelReady` reports, means for the channel's funding payments. `held_rounds` lists
+	/// the rounds LDK holds for the channel once promoted, as [`held_splice_rounds`] does — the
+	/// promoted round alone, unless a contribution queued behind it was negotiated already — or is
+	/// `None` for a channel the manager no longer lists, whose close settles its payments.
+	///
+	/// The promotion is recorded first, in the funding payment whose record holds the round. A
+	/// zero-conf splice is promoted as soon as `splice_locked` is exchanged, before its transaction
+	/// confirms, and every later splice builds on it, so the round can still confirm once the
+	/// channel's funding has moved on from it and once the channel has closed — when neither the
+	/// channel manager nor the monitor holds it anymore — and its payment is kept then. Nothing is
+	/// recorded for a round no funding payment holds — this node did not contribute to it, or its
+	/// record graduated already — or recorded as promoted already (a replayed event).
+	///
+	/// LDK discards the round's siblings as it promotes the round, queuing a `DiscardFunding` for
+	/// each contribution of ours it returns — one naming the contribution, not the round — so the
+	/// channel's other payments are resolved here, from the rounds LDK holds: a round nothing ever
+	/// broadcast is dropped from its record, as [`Self::drop_abandoned_splice_rounds`] does, and
+	/// every payment left waiting on an unconfirmed round with no round of ours among `held_rounds`
+	/// and none promoted before is failed: no round of ours can confirm anymore, a round this node
+	/// did not contribute to having locked. A replayed event finds the promoted round recorded and
+	/// keeps its payment whatever LDK holds by then.
+	pub(crate) async fn resolve_promoted_splice_round(
+		&self, channel_id: ChannelId, promoted: Txid, held_rounds: Option<&[Txid]>,
+	) -> Result<(), Error> {
+		// Serialize with the other funding-record writers, which all hold this lock from their
+		// reads through their last write.
+		let guard = self.funding_payment_update_lock.lock().await;
+		self.record_locked_splice_round_locked(&guard, channel_id, promoted).await?;
+		let held_rounds = match held_rounds {
+			Some(held_rounds) => held_rounds,
+			None => {
+				log_debug!(
+					self.logger,
+					"Channel {} is no longer listed as splice round {} locks: leaving its funding \
+					payments to its close",
+					channel_id,
+					promoted,
+				);
+				return Ok(());
+			},
+		};
+		// The drop goes first: a round nothing broadcast is taken back rather than failed, and
+		// the payment recorded for it alone goes with it.
+		self.drop_abandoned_splice_rounds_locked(&guard, channel_id, held_rounds).await?;
+		self.fail_funding_payments_without_held_round_locked(
+			&guard,
+			channel_id,
+			held_rounds,
+			FundingResolution::Promotion(promoted),
+		)
+		.await?;
+		log_debug!(
+			self.logger,
+			"Resolved the funding payments of channel {} as splice round {} locked, by the {} \
+			round(s) LDK holds",
+			channel_id,
+			promoted,
+			held_rounds.len(),
+		);
+		Ok(())
+	}
+
+	/// Records that LDK promoted the splice round `txid` to the funding of `channel_id` in the
+	/// funding payment whose record holds the round, for a caller holding the funding-record
+	/// writers' lock (see [`Self::resolve_promoted_splice_round`]).
+	async fn record_locked_splice_round_locked(
+		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, channel_id: ChannelId, txid: Txid,
+	) -> Result<(), Error> {
+		let entries = self
+			.pending_payment_store
+			.list_filter(|entry| {
+				tracks_channel(entry, channel_id)
+					&& entry.candidate(txid).is_some()
+					&& !entry.locked_rounds.contains(&txid)
+			})
+			.await;
+		for entry in entries {
+			let payment_id = entry.details.id;
+			self.pending_payment_store
+				.mutate(&payment_id, |existing| {
+					let mut entry = existing?.clone();
+					if entry.locked_rounds.contains(&txid) {
+						return None;
+					}
+					entry.locked_rounds.push(txid);
+					Some(entry)
+				})
+				.await?;
 			log_info!(
 				self.logger,
-				"Failed funding payment {}: transaction {} lost to a conflicting transaction confirmed beyond the reorg depth",
+				"Splice round {} of funding payment {} locked as the funding of channel {}",
+				txid,
 				payment_id,
-				record_txid,
+				channel_id,
 			);
 		}
-		Ok(failed)
+		Ok(())
 	}
 
 	#[allow(deprecated)]
@@ -2059,14 +2319,7 @@ impl Wallet {
 		let entries = self
 			.pending_payment_store
 			.list_filter(|entry| {
-				let tracks_channel = match &entry.details.kind {
-					PaymentKind::Onchain {
-						tx_type: Some(TransactionType::InteractiveFunding { channels }),
-						..
-					} => channels.iter().any(|channel| channel.channel_id == channel_id),
-					_ => false,
-				};
-				tracks_channel
+				tracks_channel(entry, channel_id)
 					&& entry.candidate(txid).is_some_and(|candidate| candidate.awaiting_broadcast)
 			})
 			.await;
@@ -2111,30 +2364,33 @@ impl Wallet {
 	/// event has cleared the mark, whether wallet sync has seen it yet or not; one whose event is
 	/// still unhandled when the channel closes is listed in `held_rounds` because the channel's
 	/// monitor, which saw the counterparty commit to it, still watches it, and so keeps its place
-	/// as well. Dropping the record's current round hands the record back to the last remaining
-	/// round this node contributed to, figures included; dropping the last such round removes the
-	/// record, as whatever rounds remain are not this node's payment (LDK keeps this node's
-	/// contributions to a suffix of the rounds). A record that no longer waits on the dropped round
-	/// — wallet sync moved it on, or an earlier drop was cut short after moving it — keeps its
-	/// state and only loses the round from its history.
+	/// as well, as does a round LDK promoted to the channel's funding (recorded by
+	/// [`Self::resolve_promoted_splice_round`]), broadcast with its signatures exchanged whether
+	/// or not its `SpliceNegotiated` event has cleared the mark yet. Dropping the record's current
+	/// round hands the record back to the last remaining round this node contributed to, figures
+	/// included; dropping the last such round removes the record, as whatever rounds remain are not
+	/// this node's payment (LDK keeps this node's contributions to a suffix of the rounds). A record
+	/// that no longer waits on the dropped round — wallet sync moved it on, or an earlier drop was
+	/// cut short after moving it — keeps its state and only loses the round from its history.
 	pub(crate) async fn drop_abandoned_splice_rounds(
 		&self, channel_id: ChannelId, held_rounds: &[Txid],
 	) -> Result<(), Error> {
 		// Serialize with the other funding-record writers, which all hold this lock from their
 		// reads through their last write.
-		let _guard = self.funding_payment_update_lock.lock().await;
+		let guard = self.funding_payment_update_lock.lock().await;
+		self.drop_abandoned_splice_rounds_locked(&guard, channel_id, held_rounds).await
+	}
 
+	/// [`Self::drop_abandoned_splice_rounds`] for a caller already holding the funding-record
+	/// writers' lock.
+	async fn drop_abandoned_splice_rounds_locked(
+		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, channel_id: ChannelId,
+		held_rounds: &[Txid],
+	) -> Result<(), Error> {
 		let entries = self
 			.pending_payment_store
 			.list_filter(|entry| {
-				let tracks_channel = match &entry.details.kind {
-					PaymentKind::Onchain {
-						tx_type: Some(TransactionType::InteractiveFunding { channels }),
-						..
-					} => channels.iter().any(|channel| channel.channel_id == channel_id),
-					_ => false,
-				};
-				tracks_channel
+				tracks_channel(entry, channel_id)
 					&& entry.candidates.iter().any(|candidate| candidate.awaiting_broadcast)
 			})
 			.await;
@@ -2152,6 +2408,7 @@ impl Wallet {
 				entry.candidates.iter().cloned().partition(|candidate| {
 					candidate.awaiting_broadcast
 						&& !held_rounds.contains(&candidate.txid)
+						&& !entry.locked_rounds.contains(&candidate.txid)
 						&& locked_wallet.tx_graph().get_tx(candidate.txid).is_none()
 				})
 			};
@@ -2935,6 +3192,17 @@ fn aggregate_local_stakes(candidate: &FundingCandidate) -> LocalStakeAggregate {
 	}
 }
 
+/// Whether `entry` is the funding payment of a splice into `channel_id`.
+fn tracks_channel(entry: &PendingPaymentDetails, channel_id: ChannelId) -> bool {
+	match &entry.details.kind {
+		PaymentKind::Onchain {
+			tx_type: Some(TransactionType::InteractiveFunding { channels }),
+			..
+		} => channels.iter().any(|channel| channel.channel_id == channel_id),
+		_ => false,
+	}
+}
+
 /// Lists a channel's pending splice rounds that have a transaction — the negotiated predecessors
 /// and the round awaiting signatures, in LDK's order, each with this node's contribution to it —
 /// as the [`FundingCandidate`]s LDK hands the broadcaster for the round, for recording the round
@@ -2990,16 +3258,19 @@ pub(crate) fn held_splice_rounds(
 	held
 }
 
-/// The splice rounds a closed channel may still see confirm, as
+/// The splice rounds LDK still holds for a closed channel, as
 /// [`Wallet::drop_abandoned_splice_rounds`] takes them: the channel's last funding — which a
 /// zero-conf splice may have become before its transaction confirmed — and every transaction the
 /// channel's monitor still watches. The channel manager forgets a pending round with the channel
 /// and reports no failed negotiation for one awaiting the counterparty's signatures, but the
-/// monitor keeps watching every round the counterparty's `commitment_signed` reached, and our
-/// signatures cannot have left the node before that message: such a round may yet confirm and is
-/// left to wallet sync or `DiscardFunding` to resolve, while a round the monitor never watched
-/// never had our signatures released. The watched transactions also include the funding and
-/// whatever spent it on chain, which no recorded round is.
+/// monitor keeps watching every pending round the counterparty's `commitment_signed` reached, until
+/// a sibling locks or the close matures, and our signatures cannot have left the node before that
+/// message: such a round may yet confirm and is left to wallet sync or `DiscardFunding` to resolve,
+/// while a round the monitor never watched never had our signatures released. The watched
+/// transactions also include the funding and whatever spent it on chain, which no recorded round
+/// is. A funding the channel moved on from before it confirmed — a zero-conf splice a later splice
+/// built on — is held by neither and can confirm still; the funding payments keep such rounds
+/// themselves (see [`Wallet::resolve_promoted_splice_round`]).
 pub(crate) fn closed_channel_held_rounds(
 	funding_txo: Option<LdkOutPoint>, watched_txids: impl IntoIterator<Item = Txid>,
 ) -> Vec<Txid> {
@@ -3010,6 +3281,28 @@ pub(crate) fn closed_channel_held_rounds(
 		}
 	}
 	held
+}
+
+/// The occasion on which [`Wallet::fail_funding_payments_without_held_round_locked`] resolves a
+/// channel's funding payments by the rounds LDK holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FundingResolution {
+	/// The channel closed.
+	Close,
+	/// LDK promoted the given splice round to the channel's funding.
+	Promotion(Txid),
+}
+
+/// The outcome of [`Wallet::fail_unconfirmed_funding_payment_locked`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FundingPaymentFailure {
+	/// The payment was failed and its pending entry removed.
+	Failed,
+	/// The payment was failed already — by a pass whose entry removal was lost to a crash — and
+	/// only the lingering entry was removed.
+	EntryRemoved,
+	/// The record no longer waits on the transaction; nothing was touched.
+	MovedOn,
 }
 
 /// The outcome of [`Wallet::apply_funding_status_update_locked`].
@@ -3427,7 +3720,9 @@ mod tests {
 		PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
-	use crate::payment::pending_payment_store::test_funding_contribution_with_outputs;
+	use crate::payment::pending_payment_store::{
+		test_funding_contribution_with_outputs, test_funding_contribution_with_parts,
+	};
 	use crate::types::{DynStore, DynStoreWrapper};
 	use crate::{NodeMetrics, PersistedNodeMetrics};
 
@@ -6782,5 +7077,529 @@ mod tests {
 			&payment.kind,
 			PaymentKind::Onchain { tx_type: Some(TransactionType::InteractiveFunding { .. }), .. }
 		));
+	}
+	/// A previous transaction with a P2WPKH output at index 0 for a contribution input to spend;
+	/// `seed` varies the output script, and with it the txid.
+	fn test_prevtx(seed: u8) -> Transaction {
+		Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: vec![bitcoin::TxIn::default()],
+			output: vec![TxOut {
+				value: Amount::from_sat(10_000),
+				script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([seed; 20])),
+			}],
+		}
+	}
+
+	/// Records `rounds` as their signing did — the last round signed, the others negotiated
+	/// before — then marks the signed round as broadcast, as its `SpliceNegotiated` event would.
+	/// Returns the record's id.
+	async fn record_broadcast_rounds(
+		wallet: &Wallet, tx: &Transaction, rounds: &[(Txid, Option<FundingContribution>)],
+	) -> PaymentId {
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let candidates = splice_candidates(counterparty_node_id, channel_id, rounds);
+		wallet.record_signed_funding(tx, &candidates).await.unwrap();
+		wallet.record_broadcast_splice_round(channel_id, tx.compute_txid()).await.unwrap();
+		PaymentId(rounds[0].0.to_byte_array())
+	}
+
+	/// The close finds no round of ours held — the channel closed on a commitment transaction and
+	/// the monitor watches the round no longer — so the only round's payment is failed and its
+	/// entry removed. The record keeps describing the round.
+	#[tokio::test]
+	async fn closing_without_a_round_of_ours_held_fails_the_payment() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let id = record_broadcast_rounds(&wallet, &tx, &[(txid, Some(contribution))]).await;
+
+		wallet.resolve_closed_channel_splice_rounds(channel_id, &[]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Onchain { txid: recorded, status: ConfirmationStatus::Unconfirmed, .. }
+				if recorded == txid
+		));
+		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_none());
+	}
+
+	/// LDK promoted a round of ours and discarded the counterparty's round it replaced with the
+	/// promotion, so the payment stays as it is, the promotion recorded and the discarded round
+	/// still in its history.
+	#[tokio::test]
+	async fn promoting_a_round_of_ours_keeps_its_payment() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let counterparty_txid = Txid::from_byte_array([0xAA; 32]);
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let rounds = [(counterparty_txid, None), (txid, Some(contribution))];
+		let id = record_broadcast_rounds(&wallet, &tx, &rounds).await;
+
+		wallet.resolve_promoted_splice_round(channel_id, txid, Some(&[txid])).await.unwrap();
+
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
+		assert_eq!(entry.candidates.len(), 2);
+		assert_eq!(entry.locked_rounds, vec![txid]);
+	}
+
+	/// LDK promoted a sibling this node did not contribute to — the counterparty's round locked on
+	/// a channel that stays open, and the channel manager holds it as the funding and no pending
+	/// round by the time the event is handled — so no round of ours can confirm anymore and the
+	/// payment is failed, although the channel holds a round of the splice. The channel's monitor,
+	/// updated only later, may still watch our round; it is not consulted. The record keeps
+	/// describing our round.
+	#[tokio::test]
+	async fn promoting_a_round_not_ours_fails_the_payment() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let counterparty_txid = Txid::from_byte_array([0xAA; 32]);
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let rounds = [(counterparty_txid, None), (txid, Some(contribution))];
+		let id = record_broadcast_rounds(&wallet, &tx, &rounds).await;
+
+		wallet
+			.resolve_promoted_splice_round(
+				channel_id,
+				counterparty_txid,
+				Some(&[counterparty_txid]),
+			)
+			.await
+			.unwrap();
+
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Onchain { txid: recorded, status: ConfirmationStatus::Unconfirmed, .. }
+				if recorded == txid
+		));
+		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_none());
+	}
+
+	/// A round of ours nothing had broadcast when the counterparty's round locked — our
+	/// signatures were never exchanged — is dropped with the promotion, and its record with it,
+	/// rather than failed: no transaction of ours ever existed to fail a payment for.
+	#[tokio::test]
+	async fn promoting_a_round_drops_a_round_nothing_broadcast() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let counterparty_txid = Txid::from_byte_array([0xAA; 32]);
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(counterparty_txid, None), (txid, Some(contribution))],
+		);
+		wallet.record_signed_funding(&tx, &candidates).await.unwrap();
+		let id = PaymentId(counterparty_txid.to_byte_array());
+		assert!(wallet.payment_store.get(&id).await.unwrap().is_some(), "the round was recorded");
+
+		wallet
+			.resolve_promoted_splice_round(
+				channel_id,
+				counterparty_txid,
+				Some(&[counterparty_txid]),
+			)
+			.await
+			.unwrap();
+
+		assert!(wallet.payment_store.get(&id).await.unwrap().is_none());
+		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_none());
+	}
+
+	/// Failing the payment writes the record before it removes the entry; a replay after the
+	/// removal was lost finds the record failed already and finishes the removal.
+	#[tokio::test]
+	async fn promoting_a_round_finishes_a_failure_cut_short() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let counterparty_txid = Txid::from_byte_array([0xAA; 32]);
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let rounds = [(counterparty_txid, None), (txid, Some(contribution))];
+		let id = record_broadcast_rounds(&wallet, &tx, &rounds).await;
+		wallet
+			.payment_store
+			.mutate(&id, |existing| {
+				let mut update = PaymentDetailsUpdate::new(id);
+				update.status = Some(PaymentStatus::Failed);
+				let mut updated = existing?.clone();
+				updated.update(update).then_some(updated)
+			})
+			.await
+			.unwrap();
+		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_some());
+
+		wallet
+			.resolve_promoted_splice_round(
+				channel_id,
+				counterparty_txid,
+				Some(&[counterparty_txid]),
+			)
+			.await
+			.unwrap();
+
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_none());
+	}
+
+	/// A promotion reported for a channel the manager no longer lists — the channel closed before
+	/// the event was handled — records the round and leaves the payments to the close, which
+	/// resolves them by what the monitor holds: nothing of ours here, the promoted round being the
+	/// counterparty's, so the payment is failed then. Recording the counterparty's round does not
+	/// keep it.
+	#[tokio::test]
+	async fn promoting_a_round_on_an_unlisted_channel_records_it_alone() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let counterparty_txid = Txid::from_byte_array([0xAA; 32]);
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let rounds = [(counterparty_txid, None), (txid, Some(contribution))];
+		let id = record_broadcast_rounds(&wallet, &tx, &rounds).await;
+
+		wallet.resolve_promoted_splice_round(channel_id, counterparty_txid, None).await.unwrap();
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
+		assert_eq!(entry.locked_rounds, vec![counterparty_txid]);
+
+		wallet
+			.resolve_closed_channel_splice_rounds(channel_id, &[counterparty_txid])
+			.await
+			.unwrap();
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_none());
+	}
+
+	/// A payment whose round LDK promoted before is kept when a later splice's round is promoted
+	/// — the round can still confirm, the later one descending from it — while the later round's
+	/// payment is kept for the round LDK holds. The close after that keeps both as well.
+	#[tokio::test]
+	async fn a_later_promotion_keeps_a_payment_whose_round_locked_before() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let (first_tx, first) = splice_in_round(&wallet, 1);
+		let first_txid = first_tx.compute_txid();
+		let first_id =
+			record_broadcast_rounds(&wallet, &first_tx, &[(first_txid, Some(first))]).await;
+		wallet
+			.resolve_promoted_splice_round(channel_id, first_txid, Some(&[first_txid]))
+			.await
+			.unwrap();
+
+		let (second_tx, second) = splice_in_round(&wallet, 2);
+		let second_txid = second_tx.compute_txid();
+		let second_id =
+			record_broadcast_rounds(&wallet, &second_tx, &[(second_txid, Some(second))]).await;
+		wallet
+			.resolve_promoted_splice_round(channel_id, second_txid, Some(&[second_txid]))
+			.await
+			.unwrap();
+
+		for (id, locked) in [(first_id, first_txid), (second_id, second_txid)] {
+			let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+			assert_eq!(payment.status, PaymentStatus::Pending);
+			let entry =
+				wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
+			assert_eq!(entry.locked_rounds, vec![locked]);
+		}
+
+		wallet.resolve_closed_channel_splice_rounds(channel_id, &[second_txid]).await.unwrap();
+		for id in [first_id, second_id] {
+			let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+			assert_eq!(payment.status, PaymentStatus::Pending);
+			assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_some());
+		}
+	}
+
+	/// A fee bump nothing broadcast is dropped when the round it was to replace is promoted — the
+	/// counterparty's `splice_locked` for the round arrived as the bump was signed — and the
+	/// record is handed back to the promoted round, figures included, with the promotion recorded.
+	#[tokio::test]
+	async fn promoting_a_round_drops_an_abandoned_bump_and_hands_the_record_back() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let (first_tx, first) = splice_out_round(&wallet, 1, 500_000, 300);
+		let (bump_tx, bump) = splice_out_round(&wallet, 2, 500_000, 600);
+		let (first_txid, bump_txid) = (first_tx.compute_txid(), bump_tx.compute_txid());
+		let id =
+			record_broadcast_rounds(&wallet, &first_tx, &[(first_txid, Some(first.clone()))]).await;
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record exists");
+		let first_figures = (payment.amount_msat, payment.fee_paid_msat);
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(first_txid, Some(first)), (bump_txid, Some(bump))],
+		);
+		wallet.record_signed_funding(&bump_tx, &candidates).await.unwrap();
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record exists");
+		assert!(matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == bump_txid));
+		assert_ne!((payment.amount_msat, payment.fee_paid_msat), first_figures);
+
+		wallet
+			.resolve_promoted_splice_round(channel_id, first_txid, Some(&[first_txid]))
+			.await
+			.unwrap();
+
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		assert!(matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == first_txid));
+		assert_eq!((payment.amount_msat, payment.fee_paid_msat), first_figures);
+		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
+		assert_eq!(entry.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![first_txid]);
+		assert_eq!(entry.locked_rounds, vec![first_txid]);
+	}
+
+	/// A zero-conf splice round of ours locked before its transaction confirmed and a later splice
+	/// built on it, so at the close the monitor holds the later round as the funding and watches
+	/// neither. The promotion LDK reported keeps the payment: the round can still confirm, the
+	/// later round descending from it. Reporting the promotion again — a replayed `ChannelReady` —
+	/// records it once and keeps the payment, and reporting one for a round no funding payment
+	/// holds records nothing and keeps the payment for the round recorded before.
+	#[tokio::test]
+	async fn closing_keeps_a_payment_whose_round_locked() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let (tx, contribution) = splice_in_round(&wallet, 1);
+		let txid = tx.compute_txid();
+		let id = record_broadcast_rounds(&wallet, &tx, &[(txid, Some(contribution))]).await;
+		let later_funding_txid = Txid::from_byte_array([0xF1; 32]);
+		for locked in [txid, txid, later_funding_txid] {
+			wallet
+				.resolve_promoted_splice_round(channel_id, locked, Some(&[locked]))
+				.await
+				.unwrap();
+		}
+		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
+		assert_eq!(entry.locked_rounds, vec![txid]);
+
+		wallet
+			.resolve_closed_channel_splice_rounds(channel_id, &[later_funding_txid])
+			.await
+			.unwrap();
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_some(), "the entry stays");
+	}
+
+	/// A promoted round whose `SpliceNegotiated` event is still unhandled when the channel closes
+	/// is not taken back as abandoned: LDK broadcast it as the signatures were exchanged, before it
+	/// locked.
+	#[tokio::test]
+	async fn closing_keeps_a_locked_round_whose_negotiation_event_is_unhandled() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let (tx, contribution) = splice_in_round(&wallet, 1);
+		let txid = tx.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
+		wallet.record_signed_funding(&tx, &candidates).await.unwrap();
+		let id = PaymentId(txid.to_byte_array());
+		wallet.resolve_promoted_splice_round(channel_id, txid, Some(&[txid])).await.unwrap();
+
+		let later_funding_txid = Txid::from_byte_array([0xF1; 32]);
+		wallet
+			.resolve_closed_channel_splice_rounds(channel_id, &[later_funding_txid])
+			.await
+			.unwrap();
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
+		assert!(entry.candidate(txid).is_some_and(|round| round.awaiting_broadcast));
+	}
+
+	/// A splice-in round spending output 0 of `test_prevtx(seed)`: the contribution as LDK would
+	/// negotiate it, its input its only part, and the transaction carrying it, which also pays a
+	/// wallet address so the wallet sees movement. Rounds with distinct seeds have distinct parts,
+	/// as a fee bump that had to select other inputs has.
+	fn splice_in_round(wallet: &Wallet, seed: u8) -> (Transaction, FundingContribution) {
+		let prevtx = test_prevtx(seed);
+		let contribution = test_funding_contribution_with_parts(
+			300,
+			253,
+			std::slice::from_ref(&prevtx),
+			&[],
+			None,
+		);
+		(wallet_paying_tx(wallet, seed), contribution)
+	}
+
+	/// Both broadcast rounds of ours were discarded while the channel manager still listed the
+	/// channel — the monitor's events reached the handler ahead of the channel's close — and an
+	/// event for a listed channel only drops the rounds nothing broadcast, so the payment is left.
+	/// The close that follows finds no round of ours the monitor watches and fails it.
+	#[tokio::test]
+	async fn rounds_discarded_while_the_channel_is_listed_fail_at_close() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let (first_tx, first) = splice_in_round(&wallet, 1);
+		let (bump_tx, bump) = splice_in_round(&wallet, 2);
+		let (first_txid, bump_txid) = (first_tx.compute_txid(), bump_tx.compute_txid());
+		let rounds = [(first_txid, Some(first)), (bump_txid, Some(bump))];
+		let id = record_broadcast_rounds(&wallet, &bump_tx, &rounds).await;
+		let funding_txid = Txid::from_byte_array([0xF0; 32]);
+		// The listed channel's pending rounds and funding, as LDK still reports them.
+		let held = [first_txid, bump_txid, funding_txid];
+		for _ in 0..2 {
+			wallet.drop_abandoned_splice_rounds(channel_id, &held).await.unwrap();
+		}
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
+		assert_eq!(entry.candidates.len(), 2);
+
+		// At the close the monitor has settled on the funding and watches neither round.
+		wallet.resolve_closed_channel_splice_rounds(channel_id, &[funding_txid]).await.unwrap();
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: Some(TransactionType::InteractiveFunding { .. }),
+			} if txid == bump_txid
+		));
+		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_none());
+	}
+
+	/// The close leaves a payment alone while the monitor watches a round of ours in its record:
+	/// the round may yet confirm, and wallet sync or the monitor's `DiscardFunding` resolves it.
+	#[tokio::test]
+	async fn closing_keeps_a_payment_whose_round_the_monitor_watches() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let (first_tx, first) = splice_in_round(&wallet, 1);
+		let (bump_tx, bump) = splice_in_round(&wallet, 2);
+		let (first_txid, bump_txid) = (first_tx.compute_txid(), bump_tx.compute_txid());
+		let rounds = [(first_txid, Some(first)), (bump_txid, Some(bump))];
+		let id = record_broadcast_rounds(&wallet, &bump_tx, &rounds).await;
+		let funding_txid = Txid::from_byte_array([0xF0; 32]);
+		wallet
+			.resolve_closed_channel_splice_rounds(channel_id, &[funding_txid, bump_txid])
+			.await
+			.unwrap();
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		let entry = wallet.pending_payment_store.get(&id).await.unwrap().expect("the entry stays");
+		assert_eq!(entry.candidates.len(), 2);
+	}
+
+	/// The close does not touch a payment that no longer waits on an unconfirmed round: one whose
+	/// round confirmed keeps its state, and the entry a graduation cut short left behind is left
+	/// to the replayed graduation.
+	#[tokio::test]
+	async fn closing_leaves_a_confirmed_payment_alone() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let (tx, contribution) = splice_in_round(&wallet, 1);
+		let txid = tx.compute_txid();
+		let id = record_broadcast_rounds(&wallet, &tx, &[(txid, Some(contribution))]).await;
+		let confirmed = ConfirmationStatus::Confirmed {
+			block_hash: bitcoin::BlockHash::all_zeros(),
+			height: 100,
+			timestamp: 1_700_000_000,
+		};
+		wallet
+			.payment_store
+			.mutate(&id, |existing| {
+				let mut updated = existing?.clone();
+				if let PaymentKind::Onchain { status, .. } = &mut updated.kind {
+					*status = confirmed;
+				}
+				updated.status = PaymentStatus::Succeeded;
+				Some(updated)
+			})
+			.await
+			.unwrap();
+		wallet.resolve_closed_channel_splice_rounds(channel_id, &[]).await.unwrap();
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Succeeded);
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
+		));
+		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_some());
+	}
+
+	/// Failing the payment writes the record before it removes the entry; the close replayed after
+	/// the removal was lost finds the record failed already and finishes the removal.
+	#[tokio::test]
+	async fn closing_finishes_a_failure_cut_short() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let (tx, contribution) = splice_in_round(&wallet, 1);
+		let txid = tx.compute_txid();
+		let id = record_broadcast_rounds(&wallet, &tx, &[(txid, Some(contribution))]).await;
+		wallet
+			.payment_store
+			.mutate(&id, |existing| {
+				let mut update = PaymentDetailsUpdate::new(id);
+				update.status = Some(PaymentStatus::Failed);
+				let mut updated = existing?.clone();
+				updated.update(update).then_some(updated)
+			})
+			.await
+			.unwrap();
+		wallet.resolve_closed_channel_splice_rounds(channel_id, &[]).await.unwrap();
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_none());
+	}
+
+	/// The close resolves every record of the channel — two splices signed under different
+	/// first-candidate ids, as two negotiations from the same coins are — each by the rounds the
+	/// monitor holds: nothing of ours here, so both are failed.
+	#[tokio::test]
+	async fn closing_resolves_every_record_of_the_channel() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_, channel_id) = test_counterparty_and_channel();
+		let (first_tx, contribution) = splice_in_round(&wallet, 1);
+		let (second_tx, _) = splice_in_round(&wallet, 2);
+		let (first_txid, second_txid) = (first_tx.compute_txid(), second_tx.compute_txid());
+		let first_id = record_broadcast_rounds(
+			&wallet,
+			&first_tx,
+			&[(first_txid, Some(contribution.clone()))],
+		)
+		.await;
+		let second_id =
+			record_broadcast_rounds(&wallet, &second_tx, &[(second_txid, Some(contribution))])
+				.await;
+		let funding_txid = Txid::from_byte_array([0xF0; 32]);
+		wallet.resolve_closed_channel_splice_rounds(channel_id, &[funding_txid]).await.unwrap();
+		for id in [first_id, second_id] {
+			let payment = wallet.payment_store.get(&id).await.unwrap().expect("the record stays");
+			assert_eq!(payment.status, PaymentStatus::Failed);
+			assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_none());
+		}
 	}
 }

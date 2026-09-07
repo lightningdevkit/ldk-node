@@ -15,9 +15,10 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use bitcoin::address::NetworkUnchecked;
+use bitcoin::hashes::hex::FromHex;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
-use bitcoin::{Address, Amount, ScriptBuf, Txid};
+use bitcoin::{Address, Amount, ScriptBuf, Transaction, Txid};
 use common::logging::{
 	init_log_logger, validate_log_entry, CollectingLogWriter, MultiNodeLogger, TestLogWriter,
 };
@@ -44,7 +45,8 @@ use ldk_node::payment::{
 	PaymentStatus, TransactionType, UnifiedPaymentResult,
 };
 use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType, UserChannelId};
-use lightning::ln::channelmanager::PaymentId;
+use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
+use lightning::ln::channelmanager::{PaymentId, BREAKDOWN_TIMEOUT};
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
@@ -88,8 +90,26 @@ struct ContendedStore {
 	serializer: Arc<tokio::sync::RwLock<()>>,
 	block_writes: Arc<AtomicBool>,
 	wallet_write_started: Arc<tokio::sync::Notify>,
-	/// When set, only writes to this primary namespace go through `serializer`; the rest bypass it.
-	serialized_namespace: Option<String>,
+	/// When set, only writes to this primary namespace — and, when one is named, to this key — go
+	/// through `serializer`; the rest bypass it.
+	serialized: Option<(String, Option<String>)>,
+	/// The writes going through `serializer` that have not returned yet, those held back included.
+	serialized_in_flight: Arc<AtomicUsize>,
+}
+
+impl ContendedStore {
+	/// Waits for a write going through `serializer` to start — one a test holds back by holding
+	/// the write lock, or one on its way through.
+	async fn wait_for_serialized_write(&self) {
+		let poll = async {
+			while self.serialized_in_flight.load(Ordering::Acquire) == 0 {
+				tokio::time::sleep(Duration::from_millis(50)).await;
+			}
+		};
+		tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), poll)
+			.await
+			.expect("timed out waiting for a serialized write to start");
+	}
 }
 
 impl KVStore for ContendedStore {
@@ -106,8 +126,10 @@ impl KVStore for ContendedStore {
 		let serializer = Arc::clone(&self.serializer);
 		let block_writes = Arc::clone(&self.block_writes);
 		let wallet_write_started = Arc::clone(&self.wallet_write_started);
-		let serialized =
-			self.serialized_namespace.as_deref().map_or(true, |ns| ns == primary_namespace);
+		let serialized_in_flight = Arc::clone(&self.serialized_in_flight);
+		let serialized = self.serialized.as_ref().map_or(true, |(namespace, only_key)| {
+			namespace == primary_namespace && only_key.as_deref().map_or(true, |k| k == key)
+		});
 		let primary_namespace = primary_namespace.to_string();
 		let secondary_namespace = secondary_namespace.to_string();
 		let key = key.to_string();
@@ -115,8 +137,18 @@ impl KVStore for ContendedStore {
 			if block_writes.load(Ordering::Acquire) {
 				wallet_write_started.notify_one();
 			}
-			let _guard = if serialized { Some(serializer.read().await) } else { None };
-			KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
+			let _guard = if serialized {
+				serialized_in_flight.fetch_add(1, Ordering::AcqRel);
+				Some(serializer.read().await)
+			} else {
+				None
+			};
+			let result =
+				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await;
+			if serialized {
+				serialized_in_flight.fetch_sub(1, Ordering::AcqRel);
+			}
+			result
 		}
 	}
 
@@ -165,7 +197,8 @@ fn wallet_store_contention_does_not_stall_runtime() {
 				serializer: Arc::new(tokio::sync::RwLock::new(())),
 				block_writes: Arc::new(AtomicBool::new(false)),
 				wallet_write_started: Arc::new(tokio::sync::Notify::new()),
-				serialized_namespace: None,
+				serialized: None,
+				serialized_in_flight: Arc::new(AtomicUsize::new(0)),
 			};
 			let node = builder
 				.build_with_store(test_config.node_entropy.into(), store.clone())
@@ -2775,10 +2808,11 @@ async fn splice_in_rbf_joins_counterparty_splice() {
 }
 
 /// Builds and starts a node over a [`ContendedStore`], whose writes — all of them, or only those
-/// to `serialized_namespace` — a test holds back by taking the store's `serializer` write lock,
-/// logging into a [`CollectingLogWriter`].
+/// to the primary namespace `serialized` names and, when it names one, its key — a test holds back
+/// by taking the store's `serializer` write lock, logging into a [`CollectingLogWriter`].
 fn setup_contended_node(
-	chain_source: &TestChainSource, mut config: TestConfig, serialized_namespace: Option<&str>,
+	chain_source: &TestChainSource, mut config: TestConfig,
+	serialized: Option<(&str, Option<&str>)>,
 ) -> (TestNode, ContendedStore, Arc<CollectingLogWriter>) {
 	let logs = Arc::new(CollectingLogWriter::new());
 	config.log_writer = TestLogWriter::Custom(logs.clone());
@@ -2787,7 +2821,9 @@ fn setup_contended_node(
 		serializer: Arc::new(tokio::sync::RwLock::new(())),
 		block_writes: Arc::new(AtomicBool::new(false)),
 		wallet_write_started: Arc::new(tokio::sync::Notify::new()),
-		serialized_namespace: serialized_namespace.map(str::to_string),
+		serialized: serialized
+			.map(|(namespace, key)| (namespace.to_string(), key.map(str::to_string))),
+		serialized_in_flight: Arc::new(AtomicUsize::new(0)),
 	};
 	setup_builder!(builder, config.node_config);
 	common::configure_chain_source(chain_source, &mut builder, &config);
@@ -2858,6 +2894,189 @@ fn only_interactive_funding_txid(node: &TestNode) -> Txid {
 	txid
 }
 
+/// `node`'s payment for the funding transaction `funding_txid`, which it must have recorded.
+fn funding_payment(node: &TestNode, funding_txid: Txid) -> PaymentDetails {
+	node.list_all_payments()
+		.into_iter()
+		.find(|p| matches!(p.kind, PaymentKind::Onchain { txid, .. } if txid == funding_txid))
+		.unwrap_or_else(|| panic!("no payment recorded for funding transaction {}", funding_txid))
+}
+
+/// The `what` transaction, matched by `matches`, that a node handed the broadcaster: from the
+/// mempool when bitcoind accepted it, else from the bytes the node logs when the broadcast is
+/// refused — as a commitment transaction is while a splice round spending the same funding sits
+/// in the mempool, or a splice round whose fee falls short of replacing the round it joins.
+async fn wait_for_broadcast(
+	bitcoind: &BitcoinD, logs: &CollectingLogWriter, matches: impl Fn(&Transaction) -> bool,
+	what: &str,
+) -> Transaction {
+	let decode = |hex: &str| {
+		Vec::<u8>::from_hex(hex)
+			.ok()
+			.and_then(|bytes| bitcoin::consensus::encode::deserialize::<Transaction>(&bytes).ok())
+	};
+	let poll = async {
+		loop {
+			let mempool: Vec<String> =
+				bitcoind.client.call("getrawmempool", &[]).expect("failed to list the mempool");
+			for txid in mempool {
+				// The transaction may leave the mempool between the two calls.
+				let hex: Result<String, _> =
+					bitcoind.client.call("getrawtransaction", &[json!(txid)]);
+				if let Some(tx) = hex.ok().and_then(|hex| decode(&hex)).filter(&matches) {
+					return tx;
+				}
+			}
+			if let Some(tx) =
+				logs.lines().iter().find_map(|line| decode(line.trim()).filter(&matches))
+			{
+				return tx;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+	};
+	tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), poll)
+		.await
+		.unwrap_or_else(|_| panic!("timed out waiting for the {} to be broadcast", what))
+}
+
+/// Whether `tx` spends `outpoint`.
+fn spends(tx: &Transaction, outpoint: bitcoin::OutPoint) -> bool {
+	tx.input.iter().any(|input| input.previous_output == outpoint)
+}
+
+/// Whether `tx` is a commitment transaction of the channel funded by `funding_txo`: it spends the
+/// funding, and the upper byte of its locktime is the 0x20 BOLT 3 prescribes, where a splice round
+/// spending the same funding carries a block height.
+fn is_commitment(tx: &Transaction, funding_txo: bitcoin::OutPoint) -> bool {
+	spends(tx, funding_txo) && tx.lock_time.to_consensus_u32() >> 24 == 0x20
+}
+
+/// Mines a block holding `tx`, whatever the mempool holds — a transaction conflicting with it may
+/// sit there, which the block then evicts.
+fn mine_transaction(bitcoind: &BitcoinD, tx: &Transaction) {
+	let address = bitcoind.client.new_address().expect("failed to get new address");
+	let hex = bitcoin::consensus::encode::serialize_hex(tx);
+	let _: serde_json::Value = bitcoind
+		.client
+		.call("generateblock", &[json!(address.to_string()), json!([hex])])
+		.expect("failed to mine the transaction");
+}
+
+/// The raw transaction `txid`, as bitcoind holds it.
+fn raw_transaction_hex(bitcoind: &BitcoinD, txid: Txid) -> String {
+	bitcoind
+		.client
+		.call("getrawtransaction", &[json!(txid.to_string())])
+		.expect("failed to fetch the transaction")
+}
+
+/// Mines a block holding the transactions `hexes` encode and nothing else — an empty block for
+/// none — whatever the mempool holds, and waits for electrs to see it.
+async fn mine_block_with(bitcoind: &BitcoinD, electrsd: &ElectrsD, hexes: &[String]) {
+	let height =
+		bitcoind.client.get_blockchain_info().expect("failed to get blockchain info").blocks
+			as usize;
+	let address = bitcoind.client.new_address().expect("failed to get new address");
+	let _: serde_json::Value = bitcoind
+		.client
+		.call("generateblock", &[json!(address.to_string()), json!(hexes)])
+		.expect("failed to mine the block");
+	wait_for_block(&bitcoind.client, &electrsd.client, height + 1).await;
+}
+
+/// Waits for `node` to have no peer left, connected or known: a peer's leaving is handled after
+/// the connection drops.
+async fn wait_for_no_peers(node: &TestNode) {
+	let poll = async {
+		while !node.list_peers().is_empty() {
+			tokio::time::sleep(Duration::from_millis(50)).await;
+		}
+	};
+	tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), poll)
+		.await
+		.expect("timed out waiting for the node's peers to leave");
+}
+
+/// A channel with two broadcast rounds of one splice, as [`open_and_join_counterparty_splice`]
+/// leaves it.
+struct TwoRoundSplice {
+	user_channel_id_a: UserChannelId,
+	/// The round node B initiated, which node A did not contribute to.
+	first_txid: Txid,
+	first_tx: Transaction,
+	/// The round node A initiated to join the splice, replacing the first.
+	rbf_txid: Txid,
+	rbf_tx: Transaction,
+}
+
+/// Funds both nodes, has `node_a` open a channel to `node_b`, `node_b` splice into it, and `node_a`
+/// join that splice with a fee-bumping round of its own, as
+/// [`splice_in_rbf_joins_counterparty_splice`] does. Both rounds are broadcast, so both are in
+/// `node_a`'s record of the splice, and both are returned in full — the joining round from
+/// `node_a`'s logs when its fee falls short of replacing the first in the mempool — so either can
+/// be mined.
+async fn open_and_join_counterparty_splice(
+	bitcoind: &BitcoinD, electrsd: &ElectrsD, node_a: &TestNode, logs_a: &CollectingLogWriter,
+	node_b: &TestNode,
+) -> TwoRoundSplice {
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(node_a, node_b, 4_000_000, false, electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	let first_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, first_txo.txid).await;
+	let is_first = |tx: &Transaction| tx.compute_txid() == first_txo.txid;
+	let first_tx = wait_for_broadcast(bitcoind, logs_a, is_first, "first round").await;
+	wait_for_classified_funding_payment(node_b, first_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 100_000).unwrap();
+	let rbf_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	expect_splice_negotiated_event!(node_b, node_a.node_id());
+	assert_ne!(first_txo, rbf_txo, "node A's round should replace node B's");
+	let is_rbf = |tx: &Transaction| tx.compute_txid() == rbf_txo.txid;
+	let rbf_tx = wait_for_broadcast(bitcoind, logs_a, is_rbf, "joining round").await;
+	wait_for_classified_funding_payment(node_a, rbf_txo.txid).await;
+	wait_for_classified_funding_payment(node_b, rbf_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	TwoRoundSplice {
+		user_channel_id_a,
+		first_txid: first_txo.txid,
+		first_tx,
+		rbf_txid: rbf_txo.txid,
+		rbf_tx,
+	}
+}
+
+/// Builds and starts a node logging into a [`CollectingLogWriter`].
+fn setup_logged_node(
+	chain_source: &TestChainSource, mut config: TestConfig,
+) -> (TestNode, Arc<CollectingLogWriter>) {
+	let logs = Arc::new(CollectingLogWriter::new());
+	config.log_writer = TestLogWriter::Custom(logs.clone());
+	(setup_node(chain_source, config), logs)
+}
+
 /// Logged by a node once it has signed a splice round of its own.
 const SIGNED_FUNDING: &str = "Signed funding transaction for channel";
 /// Logged by a node once LDK reports a splice round it recorded when signing negotiated, and the
@@ -2869,6 +3088,30 @@ const BROADCAST_FUNDING: &str = "Broadcasting interactively funded transaction w
 const RECEIVED_TX_SIGNATURES: &str = "Received message TxSignatures";
 /// Logged by LDK's peer handler when the counterparty's `commitment_signed` arrives.
 const RECEIVED_COMMITMENT_SIGNED: &str = "Received message CommitmentSigned";
+/// Logged by a node as it leaves a funding payment on a round of its own that can still confirm
+/// while resolving the channel's funding payments, at a promotion or at the close.
+const ROUND_CAN_STILL_CONFIRM: &str = "of ours can still confirm";
+/// Logged by a node as it fails a funding payment none of whose rounds can confirm anymore.
+const NO_ROUND_CAN_CONFIRM: &str = "no round of ours can confirm";
+/// Logged by a node as it drops a signed round nothing ever broadcast.
+const DROPPED_ABANDONED_ROUND: &str = "Dropped abandoned splice round(s)";
+/// Logged by a node as it resolves a funding payment of a closed channel by the rounds the
+/// channel's monitor holds, however it does: at `ChannelClosed`, and for a round LDK discards after
+/// the close.
+const CLOSED_CHANNEL_PAYMENT_RESOLVED: &str = "of closed channel";
+/// Logged by a node as it resolves a funding payment of an open channel by the rounds LDK holds
+/// once it promoted a splice round to the channel's funding, however it does.
+const PROMOTED_ROUND_PAYMENT_RESOLVED: &str = "once splice round";
+/// Logged by a node as it returns the addresses of a contribution LDK discarded to the wallet.
+const RECLAIMED_ADDRESSES: &str = "Reclaiming unused addresses from channel";
+/// Logged by a node once it has decided the funding payments of a closed channel by the rounds the
+/// channel's monitor holds, at `ChannelClosed` and for a round LDK discards after the close. Unlike
+/// [`CLOSED_CHANNEL_PAYMENT_RESOLVED`], logged whatever was found, so also when no payment of the
+/// channel is left to resolve.
+const CLOSED_CHANNEL_ROUNDS_RESOLVED: &str = "round(s) its monitor holds";
+/// Logged by a node as it records that LDK promoted a splice round of ours to the channel's
+/// funding.
+const ROUND_LOCKED: &str = "locked as the funding of channel";
 
 /// A splice round this node signed stays recorded when the channel closes before the
 /// counterparty's `tx_signatures` arrive, if the channel's monitor watches the round. The monitor
@@ -2885,13 +3128,18 @@ const RECEIVED_COMMITMENT_SIGNED: &str = "Received message CommitmentSigned";
 /// `tx_signatures` on receiving node A's. Node A sends its `tx_signatures` first, see
 /// [`open_and_splice_from_counterparty`]. Pinned to Esplora so node A's wallet syncs only on
 /// demand.
+///
+/// The kept record is resolved once the close settles: node A's commitment transaction confirms
+/// and its `to_self_delay` passes, the monitor stops watching the round and reports it discarded,
+/// and the record of a round node A never saw broadcast goes rather than fail a payment for a
+/// transaction that never existed.
 #[cfg(feature = "chain-esplora")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let (node_a, store_a, logs_a) =
-		setup_contended_node(&chain_source, random_config(), Some("payments"));
+		setup_contended_node(&chain_source, random_config(), Some(("payments", None)));
 	let (node_b, store_b, logs_b) = setup_contended_node(&chain_source, random_config(), None);
 	let user_channel_id_a =
 		open_and_splice_from_counterparty(&bitcoind, &electrsd, &node_a, &node_b).await;
@@ -2923,6 +3171,12 @@ async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
 		"node B did not withhold its signatures"
 	);
 	let rbf_txid = only_interactive_funding_txid(&node_a);
+	let funding_txo = node_a
+		.list_channels()
+		.into_iter()
+		.find(|channel| channel.user_channel_id == user_channel_id_a)
+		.and_then(|channel| channel.funding_txo)
+		.expect("the channel has a funding");
 
 	node_a.disconnect(node_b.node_id()).unwrap();
 	node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
@@ -2943,13 +3197,214 @@ async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
 		}
 	));
 
-	// With its monitor update through, node B holds both signature sets and broadcasts the round
-	// on its own: the kept record describes a transaction that may yet confirm.
+	// The close settles first. Node A's commitment transaction is refused by the mempool while
+	// node B's first round, which spends the same funding, sits there, so it is mined directly.
+	// The monitor settles a close by node A's own commitment only once the `to_self_delay` on its
+	// balance has passed, not after the six blocks that settle a counterparty's; it then reports
+	// the rounds it watched as discarded, and node A never saw its round broadcast, so the record
+	// goes.
+	let commitment =
+		wait_for_broadcast(&bitcoind, &logs_a, |tx| is_commitment(tx, funding_txo), "commitment")
+			.await;
+	mine_transaction(&bitcoind, &commitment);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, BREAKDOWN_TIMEOUT as usize).await;
+	node_a.sync_wallets().unwrap();
+	assert!(
+		logs_a.wait_for(DROPPED_ABANDONED_ROUND).await,
+		"the discarded round's record was not taken back"
+	);
+	assert!(
+		!node_a
+			.list_all_payments()
+			.iter()
+			.any(|p| matches!(p.kind, PaymentKind::Onchain { txid, .. } if txid == rbf_txid)),
+		"the record of a round nothing broadcast outlived the close"
+	);
+	assert!(!logs_a.contains(NO_ROUND_CAN_CONFIRM), "a round nothing broadcast was failed");
+
+	// With its monitor update through, node B holds both signature sets and hands the round to its
+	// broadcaster on its own — too late to confirm, the commitment having spent the funding — so
+	// the kept record described a round the counterparty could release without this node.
 	drop(hold_b);
 	assert!(
 		logs_b.wait_for_count(BROADCAST_FUNDING, broadcast_b + 1).await,
 		"node B never broadcast the round it held both signature sets for"
 	);
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// A splice round this node broadcast dies with the channel when the close confirms instead: once
+/// the close settles — for a commitment of the node's own, when its `to_self_delay` has passed —
+/// the channel's monitor reports the round discarded, and its funding payment is failed: a
+/// transaction that existed and lost, unlike a round nothing ever broadcast, whose record is
+/// dropped. Pinned to Esplora so the wallet syncs only on demand.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn broadcast_splice_round_lost_to_a_close_fails_its_payment() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, logs_a) = setup_logged_node(&chain_source, random_config());
+	let node_b = setup_node(&chain_source, random_config());
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	let funding_txo = node_a
+		.list_channels()
+		.into_iter()
+		.find(|channel| channel.user_channel_id == user_channel_id_a)
+		.and_then(|channel| channel.funding_txo)
+		.expect("the channel has a funding");
+
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 500_000).unwrap();
+	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	wait_for_tx(&electrsd.client, splice_txo.txid).await;
+	wait_for_classified_funding_payment(&node_a, splice_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	assert_eq!(funding_payment(&node_a, splice_txo.txid).status, PaymentStatus::Pending);
+
+	node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
+	expect_event!(node_a, ChannelClosed);
+	// The splice round spends the funding too and sits in the mempool, so the commitment is refused
+	// and mined directly; the close settles once the `to_self_delay` on node A's balance passes.
+	let commitment =
+		wait_for_broadcast(&bitcoind, &logs_a, |tx| is_commitment(tx, funding_txo), "commitment")
+			.await;
+	mine_transaction(&bitcoind, &commitment);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, BREAKDOWN_TIMEOUT as usize).await;
+	node_a.sync_wallets().unwrap();
+
+	assert!(logs_a.wait_for(NO_ROUND_CAN_CONFIRM).await, "the lost round's payment was not failed");
+	let payment = funding_payment(&node_a, splice_txo.txid);
+	assert_eq!(payment.status, PaymentStatus::Failed);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain {
+			status: ConfirmationStatus::Unconfirmed,
+			tx_type: Some(TransactionType::InteractiveFunding { .. }),
+			..
+		}
+	));
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// A splice round of ours that confirms after the channel closed keeps its payment when the
+/// monitor discards the splice's other rounds: the confirmed round became the closed channel's
+/// funding, and the payment reports it. Node A joined node B's splice with a fee-bumping round,
+/// then force-closed; its round is mined ahead of the commitment transaction. Pinned to Esplora so
+/// the wallet syncs only on demand.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_round_confirmed_after_a_close_keeps_its_payment() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, logs_a) = setup_logged_node(&chain_source, random_config());
+	let node_b = setup_node(&chain_source, random_config());
+	let splice =
+		open_and_join_counterparty_splice(&bitcoind, &electrsd, &node_a, &logs_a, &node_b).await;
+	assert_eq!(funding_payment(&node_a, splice.rbf_txid).status, PaymentStatus::Pending);
+
+	node_a.force_close_channel(&splice.user_channel_id_a, node_b.node_id(), None).unwrap();
+	expect_event!(node_a, ChannelClosed);
+	mine_transaction(&bitcoind, &splice.rbf_tx);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 5).await;
+	node_a.sync_wallets().unwrap();
+
+	// The close kept the payment, its round watched; the other round's discard, which the monitor
+	// queues as the round of ours settles, is handled while the sync graduates the payment: before
+	// the sync records the confirmation, between that and the graduation, or once the graduation
+	// has removed the pending entry, when the handler finds no payment to leave a line for. The
+	// decision is logged in every case, once at the close and once for the discard.
+	assert!(
+		logs_a.wait_for_count(CLOSED_CHANNEL_ROUNDS_RESOLVED, 2).await,
+		"the other round's discard was not handled"
+	);
+	assert!(!logs_a.contains(NO_ROUND_CAN_CONFIRM), "the confirmed round's payment was failed");
+	let payment = funding_payment(&node_a, splice.rbf_txid);
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
+	));
+	assert!(
+		!node_a.list_all_payments().iter().any(
+			|p| matches!(p.kind, PaymentKind::Onchain { txid, .. } if txid == splice.first_txid)
+		),
+		"a round node A did not contribute to got a payment of its own"
+	);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// A splice round of ours that loses to a sibling round on a channel that stays open has its
+/// payment failed as the sibling's lock is handled: LDK holds the sibling alone by then, so no
+/// round we contributed to can confirm anymore, and the discard LDK queues with the lock returns
+/// what our round reserved. Node A joined node B's splice with a fee-bumping round; node B's round
+/// is mined instead. Node B, which contributed to both rounds, keeps its payment, which reports the
+/// round that confirmed. Pinned to Esplora so the wallets sync only on demand.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_round_superseded_on_an_open_channel_fails_its_payment() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, logs_a) = setup_logged_node(&chain_source, random_config());
+	let node_b = setup_node(&chain_source, random_config());
+	let splice =
+		open_and_join_counterparty_splice(&bitcoind, &electrsd, &node_a, &logs_a, &node_b).await;
+
+	mine_transaction(&bitcoind, &splice.first_tx);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 5).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	assert!(logs_a.wait_for(NO_ROUND_CAN_CONFIRM).await, "the superseded round was not failed");
+	assert!(
+		logs_a.lines().iter().any(|line| line.contains(NO_ROUND_CAN_CONFIRM)
+			&& line.contains(PROMOTED_ROUND_PAYMENT_RESOLVED)),
+		"the promotion did not fail the payment"
+	);
+	assert!(
+		logs_a.wait_for(RECLAIMED_ADDRESSES).await,
+		"the discarded round's addresses were not reclaimed"
+	);
+	let payment = funding_payment(&node_a, splice.rbf_txid);
+	assert_eq!(payment.status, PaymentStatus::Failed);
+	assert!(matches!(
+		payment.kind,
+		PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
+	));
+	let channel = node_a
+		.list_channels()
+		.into_iter()
+		.find(|channel| channel.user_channel_id == splice.user_channel_id_a)
+		.expect("the channel stays open");
+	assert_eq!(channel.funding_txo.map(|txo| txo.txid), Some(splice.first_txid));
+
+	let payment_b = funding_payment(&node_b, splice.first_txid);
+	assert_eq!(payment_b.status, PaymentStatus::Succeeded);
+	assert!(matches!(
+		payment_b.kind,
+		PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
+	));
+
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
 }
@@ -3001,6 +3456,248 @@ async fn signed_splice_round_the_monitor_does_not_watch_is_dropped_at_close() {
 	drop(hold_b);
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
+}
+
+/// A zero-conf splice round of ours stays recorded when the channel closes after a later splice
+/// built on it. LDK promoted the round to the funding as `splice_locked` was exchanged, before its
+/// transaction confirmed, and moved on again as the later splice locked, so at the close neither
+/// the channel manager nor the monitor holds the round — although it can still confirm, the later
+/// round and the commitment transaction both descending from it. Node A splices into its zero-conf
+/// channel with node B, then splices out of it, and force-closes before either round confirms; the
+/// first round's payment is kept, and both graduate once the rounds confirm. Pinned to Esplora so
+/// the wallet syncs only on demand.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn superseded_zero_conf_splice_round_keeps_its_payment_at_close() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_a, logs_a) = setup_logged_node(&chain_source, random_config());
+	let mut config_b = random_config();
+	config_b.node_config.trusted_peers_0conf.push(node_a.node_id());
+	let node_b = setup_node(&chain_source, config_b);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 2_000_000, false, &electrsd).await;
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	// Confirm the original funding so the splices below are the only unconfirmed rounds and node
+	// A's change from the open is spendable for the splice-in.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 1_000_000).unwrap();
+	let first = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	wait_for_classified_funding_payment(&node_a, first.txid).await;
+	// The zero-conf splice locks without confirmations, re-signaled as `ChannelReady`, and node A
+	// records the promotion as it handles it.
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	assert_eq!(logs_a.count(ROUND_LOCKED), 1, "the promotion of the first round was not recorded");
+
+	let address = node_a.onchain_payment().new_address().unwrap();
+	node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, 500_000).unwrap();
+	let second = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	wait_for_classified_funding_payment(&node_a, second.txid).await;
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	assert_eq!(logs_a.count(ROUND_LOCKED), 2, "the promotion of the second round was not recorded");
+	assert_eq!(funding_payment(&node_a, first.txid).status, PaymentStatus::Pending);
+	assert_eq!(funding_payment(&node_a, second.txid).status, PaymentStatus::Pending);
+
+	node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
+	expect_event!(node_a, ChannelClosed);
+	assert!(
+		logs_a.wait_for_count(CLOSED_CHANNEL_PAYMENT_RESOLVED, 2).await,
+		"the close did not resolve both funding payments"
+	);
+	assert!(!logs_a.contains(NO_ROUND_CAN_CONFIRM), "the superseded round's payment was failed");
+	assert_eq!(funding_payment(&node_a, first.txid).status, PaymentStatus::Pending);
+	assert_eq!(funding_payment(&node_a, second.txid).status, PaymentStatus::Pending);
+
+	// Both rounds confirm, the second spending the first, and the payments graduate. Six blocks are
+	// the exact minimum, so wait for the rounds to reach the chain source before mining them.
+	wait_for_tx(&electrsd.client, second.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	for txid in [first.txid, second.txid] {
+		let payment = funding_payment(&node_a, txid);
+		assert_eq!(payment.status, PaymentStatus::Succeeded, "round {} did not graduate", txid);
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
+		));
+	}
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// The monitor's `DiscardFunding` events for the rounds of a closed channel's splice reach the
+/// handler ahead of the channel's `ChannelClosed` when one sync delivers the close and its
+/// maturity: the channel manager polls the monitor's report of the close at the start of each event
+/// pass and on peer traffic, and the monitor's own events are handled right after the manager's.
+/// Each event then finds the channel listed and, both rounds having been broadcast, only returns
+/// the round's contribution, leaving the payment to the `ChannelClosed` that follows, which fails
+/// it, no round of ours being watched anymore. Node A splices into its channel with node B and
+/// bumps the round's fee from another coin, so the two rounds are contributions of their own; node
+/// B closes while node A's event handler sits in a held event-queue write — for a channel node C
+/// opened to it — until the close and its maturity are synced. Pinned to Esplora so the wallet
+/// syncs only on demand.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let (node_b, logs_b) = setup_logged_node(&chain_source, random_config());
+	// Keeping no anchor reserve back from node B, node A's splice-in takes its whole balance and
+	// leaves no change for a fee bump to draw on.
+	let mut config_a = random_config();
+	config_a.node_config.anchor_channels_config.trusted_peers_no_reserve.push(node_b.node_id());
+	let (node_a, store_a, logs_a) =
+		setup_contended_node(&chain_source, config_a, Some(("", Some("events"))));
+	let node_c = setup_node(&chain_source, random_config());
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let address_c = node_c.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b, address_c],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	node_c.sync_wallets().unwrap();
+	let funding_txo = open_channel(&node_a, &node_b, 600_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Node B contributes nothing to either round, so only node A hears of them.
+	node_a.splice_in_with_all(&user_channel_id_a, node_b.node_id()).unwrap();
+	let first_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	wait_for_tx(&electrsd.client, first_txo.txid).await;
+	wait_for_classified_funding_payment(&node_a, first_txo.txid).await;
+	let first_round =
+		wait_for_broadcast(&bitcoind, &logs_a, |tx| tx.compute_txid() == first_txo.txid, "round")
+			.await;
+	assert_eq!(first_round.output.len(), 1, "the splice-in left change");
+	// The wallet learns the round from the sync and gets a fresh coin for the bump, which then
+	// spends nothing of the first round's but the funding.
+	node_a.sync_wallets().unwrap();
+	let coin_address = node_a.onchain_payment().new_address().unwrap();
+	let coin_txid = distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![coin_address],
+		Amount::from_sat(3_000_000),
+	)
+	.await;
+	mine_block_with(&bitcoind, &electrsd, &[raw_transaction_hex(&bitcoind, coin_txid)]).await;
+	node_a.sync_wallets().unwrap();
+
+	node_a.bump_channel_funding_fee(&user_channel_id_a, node_b.node_id()).unwrap();
+	let bump_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	assert_ne!(first_txo, bump_txo, "the bump produced the same funding");
+	// The mempool may refuse the bump, which pays little more than the first round; the round
+	// counts either way.
+	wait_for_classified_funding_payment(&node_a, bump_txo.txid).await;
+	let bump_round =
+		wait_for_broadcast(&bitcoind, &logs_a, |tx| tx.compute_txid() == bump_txo.txid, "bump")
+			.await;
+	let shared: Vec<_> = bump_round
+		.input
+		.iter()
+		.map(|input| input.previous_output)
+		.filter(|outpoint| spends(&first_round, *outpoint))
+		.collect();
+	assert_eq!(shared, vec![funding_txo], "the bump reused an input of the first round");
+	let payment_id = PaymentId(first_txo.txid.to_byte_array());
+	let payment = node_a.payment(&payment_id).unwrap().expect("the splice has a payment");
+	assert_eq!(payment.status, PaymentStatus::Pending);
+
+	// Neither node reconnects to the other: node B closes on its own and node A learns of the
+	// close from the chain alone. The commitment conflicts with the round in the mempool, so it is
+	// refused and mined directly, below.
+	node_a.disconnect(node_b.node_id()).unwrap();
+	node_b.disconnect(node_a.node_id()).unwrap();
+	node_b.force_close_channel(&user_channel_id_b, node_a.node_id(), None).unwrap();
+	expect_event!(node_b, ChannelClosed);
+	let commitment =
+		wait_for_broadcast(&bitcoind, &logs_b, |tx| is_commitment(tx, funding_txo), "commitment")
+			.await;
+	node_b.stop().unwrap();
+
+	// Node A's event handler is held in the write queueing node C's channel for the user, so
+	// nothing polls the monitor's report of the close until it is released. Node C leaves before
+	// the close is mined: a peer's messages, or its leaving, would have node A poll too.
+	let hold_a = Arc::clone(&store_a.serializer).write_owned().await;
+	let listening_address = node_a.listening_addresses().unwrap().first().unwrap().clone();
+	node_c.open_channel(node_a.node_id(), listening_address, 500_000, None, None).unwrap();
+	expect_channel_pending_event!(node_c, node_a.node_id());
+	store_a.wait_for_serialized_write().await;
+	node_c.stop().unwrap();
+	wait_for_no_peers(&node_a).await;
+	let kept_before = logs_a.count(ROUND_CAN_STILL_CONFIRM);
+	let commitment_hex = bitcoin::consensus::encode::serialize_hex(&commitment);
+	mine_block_with(&bitcoind, &electrsd, &[commitment_hex]).await;
+	for _ in 1..ANTI_REORG_DELAY {
+		mine_block_with(&bitcoind, &electrsd, &[]).await;
+	}
+	node_a.sync_wallets().unwrap();
+	drop(hold_a);
+
+	expect_channel_pending_event!(node_a, node_c.node_id());
+	expect_event!(node_a, ChannelClosed);
+	assert!(logs_a.wait_for(NO_ROUND_CAN_CONFIRM).await, "the payment was not failed");
+	assert!(
+		logs_a.lines().iter().any(|line| line.contains(NO_ROUND_CAN_CONFIRM)
+			&& line.contains(CLOSED_CHANNEL_PAYMENT_RESOLVED)),
+		"the close did not fail the payment"
+	);
+	assert_eq!(
+		logs_a.count(ROUND_CAN_STILL_CONFIRM),
+		kept_before,
+		"a discard while the channel was listed resolved the payment"
+	);
+	assert_eq!(
+		logs_a.count(RECLAIMED_ADDRESSES),
+		2,
+		"the monitor's events did not each return the round's contribution"
+	);
+	// The record names the round the wallet last heard of: the sync that delivered the close
+	// saw the mempool drop the first round, and moved the record from the bump to it.
+	let payment = node_a.payment(&payment_id).unwrap().expect("the splice has a payment");
+	assert_eq!(payment.status, PaymentStatus::Failed);
+	assert!(
+		matches!(
+			payment.kind,
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: Some(TransactionType::InteractiveFunding { .. }),
+			} if txid == first_txo.txid || txid == bump_txo.txid
+		),
+		"unexpected kind {:?} for rounds {} and {}",
+		payment.kind,
+		first_txo.txid,
+		bump_txo.txid
+	);
+	node_a.stop().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
