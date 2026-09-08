@@ -86,6 +86,7 @@ where
 			.find(|balance| matches_balance(balance))
 	})
 	.await
+	.expect("reached max tries")
 }
 
 proptest! {
