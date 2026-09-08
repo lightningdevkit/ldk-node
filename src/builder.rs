@@ -1609,6 +1609,8 @@ fn build_with_store_internal(
 				Arc::clone(&node_metrics),
 			)
 		},
+		//TODO add here an arm
+		// Some(ChainDataSoucrConfig::Cbf)
 		#[cfg(feature = "chain-bitcoind")]
 		Some(ChainDataSourceConfig::Bitcoind {
 			rpc_host,
