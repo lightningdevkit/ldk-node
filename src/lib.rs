@@ -325,11 +325,19 @@ impl Node {
 
 		self.runtime.allow_cancellable_background_task_spawns();
 
-		// Start up any runtime-dependant chain sources (e.g. Electrum)
-		self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
-			log_error!(self.logger, "Failed to start chain syncing: {}", e);
-			e
-		})?;
+		// Start up any runtime-dependant chain sources (e.g. Electrum, CBF)
+		self.chain_source
+			.start(
+				Arc::clone(&self.runtime),
+				Arc::clone(&self.wallet),
+				Arc::clone(&self.channel_manager),
+				Arc::clone(&self.chain_monitor),
+				Arc::clone(&self.output_sweeper),
+			)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to start chain syncing: {}", e);
+				e
+			})?;
 
 		let manager_owns_any_0fc_channels =
 			self.channel_manager.list_channels().into_iter().any(|channel| {
@@ -899,12 +907,14 @@ impl Node {
 		self.peer_manager.disconnect_all_peers();
 		log_debug!(self.logger, "Disconnected all network peers.");
 
-		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
-		self.runtime.wait_on_background_tasks();
-
-		// Stop any runtime-dependant chain sources.
+		// Stop any runtime-dependant chain sources before waiting on non-cancellable
+		// background tasks. Some chain sources own background tasks that only exit
+		// after their client/requester is shut down.
 		self.chain_source.stop();
 		log_debug!(self.logger, "Stopped chain sources.");
+
+		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
+		self.runtime.wait_on_background_tasks();
 
 		// Stop the background processor.
 		match self.background_processor_stop_sender.send(()) {

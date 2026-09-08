@@ -564,7 +564,7 @@ async fn channel_full_cycle_0conf() {
 	.await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn channel_full_cycle_0reserve() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
@@ -1233,6 +1233,11 @@ async fn electrum_registrations_survive_chain_source_restart() {
 async fn onchain_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	#[cfg(feature = "chain-cbf")]
+	if matches!(chain_source, TestChainSource::Cbf(_)) {
+		println!("Skipping: not CBF-compatible (asserts live-mempool state CBF cannot observe)");
+		return;
+	}
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
 
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
@@ -2673,6 +2678,11 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	electrsd_conf.network = "regtest";
 	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	#[cfg(feature = "chain-cbf")]
+	if matches!(chain_source, TestChainSource::Cbf(_)) {
+		println!("Skipping: not CBF-compatible (asserts live-mempool state CBF cannot observe)");
+		return;
+	}
 
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
 
@@ -4896,6 +4906,11 @@ async fn fs_store_persistence_backwards_compatibility() {
 async fn onchain_fee_bump_rbf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	#[cfg(feature = "chain-cbf")]
+	if matches!(chain_source, TestChainSource::Cbf(_)) {
+		println!("Skipping: not CBF-compatible (asserts live-mempool state CBF cannot observe)");
+		return;
+	}
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
 
 	// Fund both nodes
