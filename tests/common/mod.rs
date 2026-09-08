@@ -538,9 +538,9 @@ fn has_onchain_tx_type<F: Fn(&TransactionType) -> bool>(node: &TestNode, predica
 
 fn assert_any_node_has_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>(
 	nodes: &[(&str, &TestNode)], tx_type_name: &str, predicate: F,
-) {
+) -> Result<(), String> {
 	if nodes.iter().any(|(_, node)| has_onchain_tx_type(node, predicate)) {
-		return;
+		return Ok(());
 	}
 
 	let observed: Vec<String> = nodes
@@ -552,14 +552,14 @@ fn assert_any_node_has_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>(
 			})
 		})
 		.collect();
-	panic!("Expected on-chain payment with tx_type {}; observed {:?}", tx_type_name, observed);
+	Err(format!("Expected on-chain payment with tx_type {}; observed {:?}", tx_type_name, observed))
 }
 
 fn assert_all_nodes_have_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>(
 	nodes: &[(&str, &TestNode)], panic_msg: &str, tx_type_name: &str, predicate: F,
-) {
+) -> Result<(), String> {
 	if nodes.iter().all(|(_, node)| has_onchain_tx_type(node, predicate)) {
-		return;
+		return Ok(());
 	}
 
 	let observed: Vec<String> = nodes
@@ -571,10 +571,10 @@ fn assert_all_nodes_have_onchain_tx_type<F: Fn(&TransactionType) -> bool + Copy>
 			})
 		})
 		.collect();
-	panic!(
+	return Err(format!(
 		"Expected {}nodes to have on-chain payment with tx_type {}; observed {:?}",
 		panic_msg, tx_type_name, observed
-	);
+	));
 }
 
 async fn settle_force_close_balance<E: ElectrumApi>(
@@ -592,7 +592,9 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 				assert_eq!(actual_counterparty_node_id, counterparty_node_id);
 				let cur_height = node.status().current_best_block.height;
 				let blocks_to_go = confirmation_height - cur_height;
-				generate_blocks_and_wait(bitcoind, electrsd, blocks_to_go as usize).await;
+				let new_height = generate_blocks_and_wait(bitcoind, electrsd, blocks_to_go as usize).await;
+				wait_for_node_tip(node, new_height).await.expect("node hasn't synced to the tip");
+				wait_for_node_tip(peer_node, new_height) .await .expect("node hasn't synced to the tip");
 				node.sync_wallets().unwrap();
 				peer_node.sync_wallets().unwrap();
 			},
@@ -607,7 +609,9 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 		if node.list_balances().lightning_balances.is_empty() {
 			break;
 		}
-		generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+		let new_height = generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+		wait_for_node_tip(node, new_height).await.expect("node hasn't synced to the tip");
+		wait_for_node_tip(peer_node, new_height).await.expect("node hasn't synced to the tip");
 		node.sync_wallets().unwrap();
 		peer_node.sync_wallets().unwrap();
 	}
@@ -616,8 +620,14 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 	assert!(balances.lightning_balances.is_empty(), "Unexpected balance state: {:?}", balances);
 	assert_eq!(balances.pending_balances_from_channel_closures.len(), 1);
 	match balances.pending_balances_from_channel_closures[0] {
-		PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {
-			generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+		PendingSweepBalance::BroadcastAwaitingConfirmation { latest_spending_txid, .. } => {
+			// The balance flips as soon as the sweeper generates the transaction, before it has
+			// been relayed to bitcoind. Make sure it is in the mempool so the next block
+			// includes it.
+			wait_for_tx(electrsd, latest_spending_txid).await;
+			let new_height = generate_blocks_and_wait(bitcoind, electrsd, 1).await;
+			wait_for_node_tip(node, new_height).await.expect("node hasn't synced to the tip");
+			wait_for_node_tip(peer_node, new_height).await.expect("node hasn't synced to the tip");
 			node.sync_wallets().unwrap();
 			peer_node.sync_wallets().unwrap();
 
@@ -632,7 +642,9 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 		_ => panic!("Unexpected balance state!"),
 	}
 
-	generate_blocks_and_wait(bitcoind, electrsd, 5).await;
+	let new_height = generate_blocks_and_wait(bitcoind, electrsd, 5).await;
+	wait_for_node_tip(node, new_height).await.expect("node hasn't synced to the tip");
+	wait_for_node_tip(peer_node, new_height).await.expect("node hasn't synced to the tip");
 	node.sync_wallets().unwrap();
 	peer_node.sync_wallets().unwrap();
 }
@@ -878,7 +890,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 
 pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, num: usize,
-) {
+) -> usize {
 	let _ = bitcoind.create_wallet("ldk_node_test");
 	let _ = bitcoind.load_wallet("ldk_node_test");
 	print!("Generating {} blocks...", num);
@@ -887,9 +899,11 @@ pub(crate) async fn generate_blocks_and_wait<E: ElectrumApi>(
 	let address = bitcoind.new_address().expect("failed to get new address");
 	// TODO: expect this Result once the WouldBlock issue is resolved upstream.
 	let _block_hashes_res = bitcoind.generate_to_address(num, &address);
-	wait_for_block(bitcoind, electrs, cur_height as usize + num).await;
+	let new_height = cur_height as usize + num;
+	wait_for_block(bitcoind, electrs, new_height).await;
 	print!(" Done!");
 	println!("\n");
+	return new_height;
 }
 
 pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
@@ -918,14 +932,16 @@ pub(crate) async fn wait_for_block<E: ElectrumApi>(
 		}
 		bitcoind.get_block_hash(min_height as u64).ok()?.block_hash().ok()
 	})
-	.await;
+	.await
+	.expect("reached max tries");
 	// A height-only wait can return the old header during a same-height reorg. Require the
 	// replacement hash so callers cannot sync against the stale chain by mistake.
 	exponential_backoff_poll(|| {
 		let header = electrs.block_header(min_height).ok()?;
 		(header.block_hash() == expected_block_hash).then_some(())
 	})
-	.await;
+	.await
+	.expect("reached max tries");
 }
 
 pub(crate) async fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
@@ -937,7 +953,8 @@ pub(crate) async fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 		electrs.ping().unwrap();
 		electrs.transaction_get(&txid).ok()
 	})
-	.await;
+	.await
+	.expect("reached max tries");
 }
 
 pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoint: OutPoint) {
@@ -954,7 +971,8 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 		});
 		is_spent.then_some(())
 	})
-	.await;
+	.await
+	.expect("reached max tries");
 }
 
 /// Polls the channel from `source_node` to `counterparty_node` until it reports `is_usable`
@@ -988,7 +1006,15 @@ pub(crate) async fn wait_for_channel_ready_to_send(
 	);
 }
 
-pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> T
+pub(crate) async fn wait_for_node_tip(node: &Node, height: usize) -> Option<()> {
+	return exponential_backoff_poll(|| {
+		(node.status().current_best_block.height as usize >= height).then_some(())
+	})
+	.await;
+	// .expect("reached max tries");
+}
+
+pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> Option<T>
 where
 	F: FnMut() -> Option<T>,
 {
@@ -996,14 +1022,16 @@ where
 	let mut tries = 0;
 	loop {
 		match poll() {
-			Some(data) => break data,
+			Some(data) => return Some(data),
 			None if delay.as_millis() < 512 => {
 				delay = delay.mul_f32(2.0);
 			},
 
 			None => {},
 		}
-		assert!(tries < 20, "Reached max tries.");
+		if tries >= 20 {
+			return None;
+		}
 		tries += 1;
 		tokio::time::sleep(delay).await;
 	}
@@ -1011,11 +1039,11 @@ where
 
 pub(crate) async fn premine_and_distribute_funds<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, addrs: Vec<Address>, amount: Amount,
-) {
+) -> usize {
 	premine_blocks(bitcoind, electrs).await;
 
 	distribute_funds_unconfirmed(bitcoind, electrs, addrs, amount).await;
-	generate_blocks_and_wait(bitcoind, electrs, 1).await;
+	generate_blocks_and_wait(bitcoind, electrs, 1).await
 }
 
 pub(crate) async fn premine_blocks<E: ElectrumApi>(bitcoind: &BitcoindClient, electrs: &E) {
@@ -1216,13 +1244,15 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	let premine_amount_sat = if expect_anchor_channel { 2_125_000 } else { 2_100_000 };
 
-	premine_and_distribute_funds(
+	let new_height = premine_and_distribute_funds(
 		&bitcoind,
 		electrsd,
 		vec![addr_a, addr_b],
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;
+	wait_for_node_tip(&node_a, new_height).await.expect("node hasn't synced to the tip");
+	wait_for_node_tip(&node_b, new_height).await.expect("node hasn't synced to the tip");
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, premine_amount_sat);
@@ -1296,7 +1326,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	wait_for_tx(electrsd, funding_txo_a.txid).await;
 
 	if !allow_0conf {
-		generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+		let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+		wait_for_node_tip(&node_a, new_height).await.expect("node hasn't synced to the tip");
+		wait_for_node_tip(&node_b, new_height).await.expect("node hasn't synced to the tip");
 	}
 
 	node_a.sync_wallets().unwrap();
@@ -1637,7 +1669,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	);
 
 	// Mine a block to give time for the HTLC to resolve
-	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	wait_for_node_tip(&node_a, new_height).await.expect("node hasn't synced to the tip");
+	wait_for_node_tip(&node_b, new_height).await.expect("node hasn't synced to the tip");
 
 	println!("\nB splices out to pay A");
 	let addr_a = node_a.onchain_payment().new_address().unwrap();
@@ -1649,7 +1683,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_out_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(electrsd, splice_out_txo.txid).await;
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	wait_for_node_tip(&node_a, new_height).await.expect("node hasn't synced to the tip");
+	wait_for_node_tip(&node_b, new_height).await.expect("node hasn't synced to the tip");
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1671,7 +1707,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let splice_in_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	wait_for_tx(electrsd, splice_in_txo.txid).await;
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 6).await;
+	wait_for_node_tip(&node_a, new_height).await.expect("node hasn't synced to the tip");
+	wait_for_node_tip(&node_b, new_height).await.expect("node hasn't synced to the tip");
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1747,7 +1785,9 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	wait_for_outpoint_spend(electrsd, splice_in_txo).await;
 
-	generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	let new_height = generate_blocks_and_wait(&bitcoind, electrsd, 1).await;
+	wait_for_node_tip(&node_a, new_height).await.expect("node hasn't synced to the tip");
+	wait_for_node_tip(&node_b, new_height).await.expect("node hasn't synced to the tip");
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
@@ -1792,7 +1832,10 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 		assert_eq!(node_a_blocks_to_go, node_b_blocks_to_go);
 
-		generate_blocks_and_wait(&bitcoind, electrsd, node_a_blocks_to_go as usize).await;
+		let new_height =
+			generate_blocks_and_wait(&bitcoind, electrsd, node_a_blocks_to_go as usize).await;
+		wait_for_node_tip(&node_a, new_height).await.expect("node hasn't synced to the tip");
+		wait_for_node_tip(&node_b, new_height).await.expect("node hasn't synced to the tip");
 		node_a.sync_wallets().unwrap();
 		node_b.sync_wallets().unwrap();
 
@@ -1814,19 +1857,22 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			"no ",
 			"UnilateralClose",
 			|tx_type| !matches!(tx_type, TransactionType::UnilateralClose { .. }),
-		);
+		)
+		.unwrap();
 		assert_any_node_has_onchain_tx_type(
 			&[("node_a", &node_a), ("node_b", &node_b)],
 			"Sweep",
 			|tx_type| matches!(tx_type, TransactionType::Sweep { .. }),
-		);
+		)
+		.unwrap();
 	} else {
 		assert_all_nodes_have_onchain_tx_type(
 			&[("node_a", &node_a), ("node_b", &node_b)],
 			"all ",
 			"CooperativeClose",
 			|tx_type| matches!(tx_type, TransactionType::CooperativeClose { .. }),
-		);
+		)
+		.unwrap();
 		// Peer removed after cooperative close — no further reason to reconnect.
 		assert!(
 			!node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
