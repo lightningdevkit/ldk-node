@@ -40,6 +40,7 @@ interface ProbingConfigBuilder {
 	void set_max_locked_msat(u64 max_msat);
 	void set_diversity_penalty_msat(u64 penalty_msat);
 	void set_cooldown(u64 secs);
+	void set_amount_range_msat(u64 min_msat, u64 max_msat);
 	ProbingConfig build();
 };
 

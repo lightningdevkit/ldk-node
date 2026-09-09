@@ -79,8 +79,8 @@ use lightning_invoice::DEFAULT_MIN_FINAL_CLTV_EXPIRY_DELTA;
 use lightning_types::features::{ChannelFeatures, NodeFeatures};
 
 use crate::config::{
-	DEFAULT_MAX_PROBE_LOCKED_MSAT, DEFAULT_PROBED_NODE_COOLDOWN_SECS,
-	DEFAULT_PROBING_INTERVAL_SECS, MIN_PROBING_INTERVAL,
+	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MAX_PROBE_LOCKED_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT,
+	DEFAULT_PROBED_NODE_COOLDOWN_SECS, DEFAULT_PROBING_INTERVAL_SECS, MIN_PROBING_INTERVAL,
 };
 use crate::logger::{log_debug, LdkLogger, Logger};
 use crate::types::{ChannelManager, Graph, Router};
@@ -165,6 +165,8 @@ pub struct ProbingConfig {
 	pub(crate) max_locked_msat: u64,
 	pub(crate) diversity_penalty_msat: Option<u64>,
 	pub(crate) cooldown: Duration,
+	pub(crate) min_amount_msat: u64,
+	pub(crate) max_amount_msat: u64,
 }
 
 /// Builder for [`ProbingConfig`].
@@ -183,6 +185,8 @@ pub struct ProbingConfigBuilder {
 	max_locked_msat: u64,
 	diversity_penalty_msat: Option<u64>,
 	cooldown: Duration,
+	min_amount_msat: u64,
+	max_amount_msat: u64,
 }
 
 impl ProbingConfigBuilder {
@@ -193,6 +197,8 @@ impl ProbingConfigBuilder {
 			max_locked_msat: DEFAULT_MAX_PROBE_LOCKED_MSAT,
 			diversity_penalty_msat: None,
 			cooldown: Duration::from_secs(DEFAULT_PROBED_NODE_COOLDOWN_SECS),
+			min_amount_msat: DEFAULT_MIN_PROBE_AMOUNT_MSAT,
+			max_amount_msat: DEFAULT_MAX_PROBE_AMOUNT_MSAT,
 		}
 	}
 
@@ -256,6 +262,21 @@ impl ProbingConfigBuilder {
 		self
 	}
 
+	/// Overrides the bounds each probe's amount is uniformly drawn from.
+	///
+	/// Only applies to the built-in strategies; custom strategies choose their
+	/// own probe amounts when building paths. Larger amounts teach the scorer
+	/// about liquidity in the range of larger payments, at the cost of locking
+	/// more liquidity per in-flight probe — size `max_locked_msat` accordingly.
+	///
+	/// Defaults to 1 000 000 - 10 000 000 msat (1k - 10k sats).
+	pub fn amount_range_msat(&mut self, min_msat: u64, max_msat: u64) -> &mut Self {
+		debug_assert!(min_msat <= max_msat, "min_msat must not exceed max_msat");
+		self.min_amount_msat = min_msat;
+		self.max_amount_msat = max_msat;
+		self
+	}
+
 	/// Builds the [`ProbingConfig`].
 	pub fn build(&self) -> ProbingConfig {
 		ProbingConfig {
@@ -264,6 +285,8 @@ impl ProbingConfigBuilder {
 			max_locked_msat: self.max_locked_msat,
 			diversity_penalty_msat: self.diversity_penalty_msat,
 			cooldown: self.cooldown,
+			min_amount_msat: self.min_amount_msat,
+			max_amount_msat: self.max_amount_msat,
 		}
 	}
 }
@@ -333,6 +356,16 @@ impl ArcedProbingConfigBuilder {
 	/// Only applies to [`HighDegreeStrategy`]. Defaults to 1 hour.
 	pub fn set_cooldown(&self, secs: u64) {
 		self.inner.write().expect("lock").cooldown(Duration::from_secs(secs));
+	}
+
+	/// Overrides the bounds each probe's amount is uniformly drawn from.
+	///
+	/// Only applies to the built-in strategies; custom strategies choose their
+	/// own probe amounts when building paths.
+	///
+	/// Defaults to 1 000 000 - 10 000 000 msat (1k - 10k sats).
+	pub fn set_amount_range_msat(&self, min_msat: u64, max_msat: u64) {
+		self.inner.write().expect("lock").amount_range_msat(min_msat, max_msat);
 	}
 
 	/// Builds the [`ProbingConfig`].
