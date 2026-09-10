@@ -29,28 +29,37 @@ async fn setup_clients() -> (BitcoindClient, ElectrumClient, TestLndNode) {
 	(bitcoind, electrs, lnd)
 }
 
+async fn do_test_basic_channel_cycle(v2_closing: bool) {
+	run_interop_scenario(setup_clients(), basic_channel_cycle_scenario, v2_closing).await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_basic_channel_cycle() {
-	run_interop_scenario(setup_clients(), basic_channel_cycle_scenario).await;
+	do_test_basic_channel_cycle(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn test_basic_channel_cycle_with_simple_close() {
+	do_test_basic_channel_cycle(true).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_keysend() {
-	run_interop_scenario(setup_clients(), keysend_scenario).await;
+	run_interop_scenario(setup_clients(), keysend_scenario, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_force_close_after_payment() {
-	run_interop_scenario(setup_clients(), force_close_after_payment_scenario).await;
+	run_interop_scenario(setup_clients(), force_close_after_payment_scenario, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn test_disconnect_during_payment() {
-	run_interop_scenario(setup_clients(), disconnect_during_payment_scenario).await;
+	run_interop_scenario(setup_clients(), disconnect_during_payment_scenario, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "LND does not implement BOLT splicing"]
 async fn test_splice_in() {
-	run_interop_scenario(setup_clients(), splice_in_scenario).await;
+	run_interop_scenario(setup_clients(), splice_in_scenario, false).await;
 }
