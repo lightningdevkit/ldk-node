@@ -369,10 +369,18 @@ impl NodeBuilder {
 	///
 	/// If not provided, the node will spawn its own runtime or reuse any outer runtime context it
 	/// can detect.
+	///
+	/// Note we require the given runtime to be of the `multithreaded` flavor.
 	#[cfg_attr(feature = "uniffi", allow(dead_code))]
-	pub fn set_runtime(&mut self, runtime_handle: tokio::runtime::Handle) -> &mut Self {
+	pub fn set_runtime(
+		&mut self, runtime_handle: tokio::runtime::Handle,
+	) -> Result<&mut Self, BuildError> {
+		if runtime_handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+			return Err(BuildError::RuntimeSetupFailed);
+		}
+
 		self.runtime_handle = Some(runtime_handle);
-		self
+		Ok(self)
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
@@ -912,14 +920,24 @@ impl NodeBuilder {
 	}
 
 	fn setup_runtime(&self, logger: &Arc<Logger>) -> Result<Arc<Runtime>, BuildError> {
-		if let Some(handle) = self.runtime_handle.as_ref() {
-			Ok(Arc::new(Runtime::with_handle(handle.clone(), Arc::clone(logger))))
+		let runtime = if let Some(handle) = self.runtime_handle.as_ref() {
+			Arc::new(Runtime::with_handle(handle.clone(), Arc::clone(logger)))
 		} else {
-			Ok(Arc::new(Runtime::new(Arc::clone(logger)).map_err(|e| {
+			Arc::new(Runtime::new(Arc::clone(logger)).map_err(|e| {
 				log_error!(logger, "Failed to setup tokio runtime: {}", e);
 				BuildError::RuntimeSetupFailed
-			})?))
+			})?)
+		};
+
+		if runtime.handle().runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+			log_error!(
+				logger,
+				"Failed to setup tokio runtime: we require a multithreaded runtime."
+			);
+			return Err(BuildError::RuntimeSetupFailed);
 		}
+
+		Ok(runtime)
 	}
 
 	fn build_with_store_and_logger<S: PaginatedKVStore + Send + Sync + 'static>(
@@ -2705,5 +2723,33 @@ mod tests {
 		let alias = "This is a string longer than thirty-two bytes!"; // 46 bytes
 		let node = sanitize_alias(alias);
 		assert_eq!(node.err().unwrap(), BuildError::InvalidNodeAlias);
+	}
+
+	#[test]
+	fn rejects_non_multithreaded_runtimes() {
+		let logger = Arc::new(Logger::new_log_facade());
+		let current_thread_runtime =
+			tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+		let mut builder = NodeBuilder::new();
+		assert_eq!(
+			builder.set_runtime(current_thread_runtime.handle().clone()).err(),
+			Some(BuildError::RuntimeSetupFailed),
+			"a current-thread runtime given via `set_runtime` should be rejected"
+		);
+
+		current_thread_runtime.block_on(async {
+			assert_eq!(
+				NodeBuilder::new().setup_runtime(&logger).err(),
+				Some(BuildError::RuntimeSetupFailed),
+				"a detected outer current-thread runtime context should be rejected"
+			);
+		});
+
+		let multi_thread_runtime =
+			tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+		let mut builder = NodeBuilder::new();
+		builder.set_runtime(multi_thread_runtime.handle().clone()).unwrap();
+		assert!(builder.setup_runtime(&logger).is_ok(), "a multi-threaded runtime should be used");
 	}
 }
