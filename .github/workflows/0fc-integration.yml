@@ -8,7 +8,6 @@ concurrency:
 
 jobs:
   build-and-test:
-    timeout-minutes: 120
     runs-on: self-hosted
     steps:
       - name: Checkout source code

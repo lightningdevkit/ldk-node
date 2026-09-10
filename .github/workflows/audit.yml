@@ -6,7 +6,6 @@ on:
 
 jobs:
   audit:
-    timeout-minutes: 120
     permissions:
       issues: write
       checks: write
