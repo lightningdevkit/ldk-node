@@ -457,7 +457,7 @@ pub struct ChannelDetails {
 	/// state until the splice transaction reaches sufficient confirmations to be locked (and we
 	/// exchange `splice_locked` messages with our peer).
 	pub funding_txo: Option<OutPoint>,
-	/// The witness script that is used to lock the channel's funding output to commitment transactions.
+	/// The output script (`scriptPubKey`) of the channel's funding output.
 	///
 	/// This field will be `None` if we have not negotiated the funding transaction with our
 	/// counterparty already.
@@ -465,7 +465,7 @@ pub struct ChannelDetails {
 	/// When a channel is spliced, this continues to refer to the original pre-splice channel
 	/// state until the splice transaction reaches sufficient confirmations to be locked (and we
 	/// exchange `splice_locked` messages with our peer).
-	pub funding_redeem_script: Option<ScriptBuf>,
+	pub funding_output_script: Option<ScriptBuf>,
 	/// The position of the funding transaction in the chain. None if the funding transaction has
 	/// not yet been confirmed and the channel fully opened.
 	///
@@ -629,6 +629,8 @@ impl ChannelDetails {
 			}
 		});
 
+		let funding_output_script = value.get_funding_output().map(|o| o.script_pubkey);
+
 		ChannelDetails {
 			channel_id: value.channel_id,
 			counterparty: ChannelCounterparty {
@@ -640,7 +642,7 @@ impl ChannelDetails {
 				outbound_htlc_maximum_msat: value.counterparty.outbound_htlc_maximum_msat,
 			},
 			funding_txo: value.funding_txo.map(|o| o.into_bitcoin_outpoint()),
-			funding_redeem_script: value.funding_redeem_script,
+			funding_output_script,
 			short_channel_id: value.short_channel_id,
 			outbound_scid_alias: value.outbound_scid_alias,
 			inbound_scid_alias: value.inbound_scid_alias,
