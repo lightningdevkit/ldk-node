@@ -692,13 +692,18 @@ where
 		}
 	}
 
-	fn lsps2_max_total_opening_fee_msat(payment_metadata: &[u8], amount_msat: u64) -> Option<u64> {
+	fn lsps2_max_total_opening_fee_msat(
+		payment_metadata: &[u8], amount_msat: u64, counterparty_skimmed_fee_msat: u64,
+	) -> Option<u64> {
 		let metadata = PaymentMetadata::read(&mut &payment_metadata[..]).ok()?;
 		let lsps2_parameters = metadata.lsps2_parameters?;
 		lsps2_parameters.max_total_opening_fee_msat.or_else(|| {
 			lsps2_parameters.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
-				// If it's a variable amount payment, compute the actual fee.
-				compute_opening_fee(amount_msat, 0, max_prop_fee)
+				// If it's a variable amount payment, compute the actual fee. Per bLIP-52 the
+				// opening fee is proportional to what the *payer* sent, which is what we were
+				// forwarded plus what the LSP skimmed off the top.
+				let payment_size_msat = amount_msat.saturating_add(counterparty_skimmed_fee_msat);
+				compute_opening_fee(payment_size_msat, 0, max_prop_fee)
 			})
 		})
 	}
@@ -920,7 +925,11 @@ where
 							.as_ref()
 							.and_then(|fields| fields.payment_metadata.as_ref())
 							.and_then(|metadata| {
-								Self::lsps2_max_total_opening_fee_msat(metadata, amount_msat)
+								Self::lsps2_max_total_opening_fee_msat(
+									metadata,
+									amount_msat,
+									counterparty_skimmed_fee_msat,
+								)
 							}),
 						_ => None,
 					};
@@ -2261,7 +2270,8 @@ mod tests {
 		assert_eq!(
 			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
 				&metadata.encode(),
-				100_000
+				100_000,
+				0
 			),
 			Some(42_000)
 		);
@@ -2281,21 +2291,134 @@ mod tests {
 		assert_eq!(
 			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
 				&empty_metadata,
-				100_000
+				100_000,
+				0
 			),
 			None
 		);
 		assert_eq!(
-			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(&[0xff], 100_000),
+			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(&[0xff], 100_000, 0),
 			None
 		);
 		assert_eq!(
 			EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
 				&metadata_without_fee_limit,
-				100_000
+				100_000,
+				0
 			),
 			None
 		);
+	}
+
+	/// The variable-amount JIT flow stores only a proportional (ppm) limit, so the ceiling has
+	/// to be recomputed from the payment at claim time. bLIP-52 defines the opening fee over the
+	/// amount the *payer* sent, while `PaymentClaimable::amount_msat` is what is left after the
+	/// LSP skimmed that fee -- so the ceiling must be computed over `amount + skimmed`.
+	#[test]
+	fn lsps2_proportional_fee_limit_admits_the_agreed_fee() {
+		// What the client agreed to in `lsps2_receive_variable_amount_to_jit_channel`.
+		const AGREED_PPM: u64 = 10_000; // 1%
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: None,
+				max_proportional_opening_fee_ppm_msat: Some(AGREED_PPM),
+			}),
+		}
+		.encode();
+
+		for payment_size_msat in [100_000u64, 1_000_000, 50_000_000, 1_000_000_000] {
+			// The LSP computes its fee over the amount the payer sent, exactly as bLIP-52
+			// specifies, and forwards the remainder.
+			let lsp_fee_msat = compute_opening_fee(payment_size_msat, 0, AGREED_PPM).unwrap();
+			let amount_msat = payment_size_msat - lsp_fee_msat;
+
+			// This is what `PaymentClaimable` hands the event handler.
+			let ceiling = EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+				&metadata,
+				amount_msat,
+				lsp_fee_msat,
+			)
+			.expect("metadata carries a proportional limit");
+
+			assert!(
+				lsp_fee_msat <= ceiling,
+				"payment of {}msat: LSP skimmed the agreed {}msat but our ceiling is {}msat, \
+				 so the HTLC is failed back",
+				payment_size_msat,
+				lsp_fee_msat,
+				ceiling,
+			);
+			// Reconstructing the payment size from `amount_msat + counterparty_skimmed_fee_msat`
+			// loses nothing (both are exact integers), so the recomputed ceiling matches the
+			// LSP's fee exactly, not just as an upper bound.
+			assert_eq!(ceiling, lsp_fee_msat);
+		}
+	}
+
+	/// A zero proportional fee must yield a zero ceiling, and a zero skimmed fee must be
+	/// admitted by it -- the ordinary "no fee was withheld" case must keep working.
+	#[test]
+	fn lsps2_proportional_fee_limit_of_zero_admits_no_skimmed_fee() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: None,
+				max_proportional_opening_fee_ppm_msat: Some(0),
+			}),
+		}
+		.encode();
+
+		let ceiling = EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+			&metadata, 100_000, 0,
+		);
+		assert_eq!(ceiling, Some(0));
+	}
+
+	/// `max_total_opening_fee_msat`, when present, is an absolute cap that does not depend on
+	/// the payment size at all, so it must take precedence and stay unaffected by whatever is
+	/// passed as `counterparty_skimmed_fee_msat` -- guards against a future change accidentally
+	/// threading the skimmed fee into that branch too.
+	#[test]
+	fn lsps2_absolute_fee_limit_ignores_skimmed_fee_argument() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: Some(42_000),
+				max_proportional_opening_fee_ppm_msat: Some(999_999),
+			}),
+		}
+		.encode();
+
+		for skimmed in [0u64, 1, 1_000_000, u64::MAX] {
+			assert_eq!(
+				EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+					&metadata, 100_000, skimmed,
+				),
+				Some(42_000),
+			);
+		}
+	}
+
+	/// An adversarial or corrupted `counterparty_skimmed_fee_msat` near `u64::MAX` must not
+	/// panic (`saturating_add` rather than a bare `+`), and an internal overflow inside
+	/// `compute_opening_fee` must fail closed -- `None`, i.e. the payment gets refused -- rather
+	/// than panicking or silently wrapping into an admissible-looking ceiling.
+	#[test]
+	fn lsps2_proportional_fee_limit_saturates_instead_of_panicking_on_overflow() {
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: None,
+				max_proportional_opening_fee_ppm_msat: Some(10_000),
+			}),
+		}
+		.encode();
+
+		let ceiling = EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+			&metadata,
+			u64::MAX - 10,
+			u64::MAX, // saturating_add(amount_msat, this) clamps to u64::MAX
+		);
+		// `compute_opening_fee` internally does `payment_size_msat.checked_mul(proportional)`,
+		// which overflows for a payment size this large; fails closed rather than panicking.
+		assert_eq!(ceiling, None);
 	}
 
 	#[tokio::test]
