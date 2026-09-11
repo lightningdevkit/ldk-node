@@ -43,7 +43,7 @@ use ldk_node::payment::{
 	ConfirmationStatus, PayerProofOptions, PaymentDetails, PaymentDirection, PaymentKind,
 	PaymentStatus, TransactionType, UnifiedPaymentResult,
 };
-use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType};
+use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType, UserChannelId};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
@@ -541,6 +541,47 @@ async fn peer_removed_when_counterparty_force_closes_last_channel() {
 	assert!(
 		!node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
 		"node_a should drop node_b from its peer store after node_b force-closed the last channel"
+	);
+}
+
+/// Regression test for issue #1084: `Node::close_channel` and
+/// `Node::force_close_channel` returned `Ok(())` when the supplied
+/// `UserChannelId` did not match any channel for the counterparty, silently
+/// succeeding without initiating a close.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn close_unknown_user_channel_id_errors() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let _user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+	let unknown_user_channel_id = UserChannelId(user_channel_id_a.0 ^ 1);
+
+	assert_eq!(
+		node_a.close_channel(&unknown_user_channel_id, node_b.node_id()),
+		Err(NodeError::ChannelClosingFailed)
+	);
+
+	// force_close_channel shares close_channel_internal and should also error.
+	assert_eq!(
+		node_a.force_close_channel(&unknown_user_channel_id, node_b.node_id(), None),
+		Err(NodeError::ChannelClosingFailed)
 	);
 }
 
