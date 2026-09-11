@@ -302,7 +302,10 @@ impl Node {
 		match self.start_inner(&mut is_running_lock) {
 			Ok(()) => Ok(()),
 			Err(e) => {
-				self.chain_source.stop();
+				// Startup spawns background tasks before it can fail, e.g., when binding our
+				// listening addresses. Wind them all back down rather than leaving them running
+				// behind a node that never came up.
+				self.shutdown();
 				Err(e)
 			},
 		}
@@ -852,24 +855,29 @@ impl Node {
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
 
+		self.shutdown();
+
+		log_info!(self.logger, "Shutdown complete.");
+		*is_running_lock = false;
+		Ok(())
+	}
+
+	/// Winds down everything [`Node::start_inner`] may have brought up.
+	///
+	/// Unlike [`Node::stop`], this makes no assumption about how far startup progressed: it is
+	/// also used to clean up after a [`Node::start`] that failed part-way through, in which case
+	/// some of the background tasks below were never spawned and the shutdown signals accordingly
+	/// find no receivers.
+	fn shutdown(&self) {
 		// Prevent blocking Electrum syncs from making any further callbacks before persistence
 		// tasks stop accepting work.
 		self.chain_source.begin_shutdown();
 
 		// Stop background tasks.
-		self.stop_sender
-			.send(())
-			.map(|_| {
-				log_trace!(self.logger, "Sent shutdown signal to background tasks.");
-			})
-			.unwrap_or_else(|e| {
-				log_error!(
-					self.logger,
-					"Failed to send shutdown signal. This should never happen: {}",
-					e
-				);
-				debug_assert!(false);
-			});
+		match self.stop_sender.send(()) {
+			Ok(()) => log_trace!(self.logger, "Sent shutdown signal to background tasks."),
+			Err(_) => log_trace!(self.logger, "No background tasks to signal shutdown to."),
+		}
 
 		// Cancel cancellable background tasks
 		self.runtime.abort_cancellable_background_tasks();
@@ -886,29 +894,16 @@ impl Node {
 		log_debug!(self.logger, "Stopped chain sources.");
 
 		// Stop the background processor.
-		self.background_processor_stop_sender
-			.send(())
-			.map(|_| {
-				log_trace!(self.logger, "Sent shutdown signal to background processor.");
-			})
-			.unwrap_or_else(|e| {
-				log_error!(
-					self.logger,
-					"Failed to send shutdown signal. This should never happen: {}",
-					e
-				);
-				debug_assert!(false);
-			});
+		match self.background_processor_stop_sender.send(()) {
+			Ok(()) => log_trace!(self.logger, "Sent shutdown signal to background processor."),
+			Err(_) => log_trace!(self.logger, "No background processor to signal shutdown to."),
+		}
 
 		// Finally, wait until background processing stopped, at least until a timeout is reached.
 		self.runtime.wait_on_background_processor_task();
 
 		#[cfg(tokio_unstable)]
 		self.runtime.log_metrics();
-
-		log_info!(self.logger, "Shutdown complete.");
-		*is_running_lock = false;
-		Ok(())
 	}
 
 	/// Returns the status of the [`Node`].
