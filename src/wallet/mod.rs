@@ -956,7 +956,10 @@ impl Wallet {
 	/// Builds a temporary drain transaction and returns the maximum amount that would be sent to
 	/// the drain output, along with the PSBT for further inspection.
 	///
-	/// The caller is responsible for cancelling the PSBT via `locked_wallet.cancel_tx()`.
+	/// The returned PSBT needs no cleanup. Draining to a fixed script means BDK neither reserves a
+	/// change address nor locks inputs for it. Cancelling it via `cancel_tx_inner` would instead
+	/// clear the usage mark on the anchor reserve placeholder address, which a pending transaction
+	/// may have reserved as its change address.
 	fn get_max_drain_amount(
 		&self, locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>,
 		drain_script: ScriptBuf, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
@@ -1020,15 +1023,13 @@ impl Wallet {
 		// Use a dummy P2WSH script (34 bytes) to match the size of a real funding output.
 		let dummy_p2wsh_script = ScriptBuf::new().to_p2wsh();
 
-		let (max_amount, tmp_psbt) = self.get_max_drain_amount(
+		let (max_amount, _) = self.get_max_drain_amount(
 			&mut locked_wallet,
 			dummy_p2wsh_script,
 			cur_anchor_reserve_sats,
 			fee_rate,
 			None,
 		)?;
-
-		Self::cancel_tx_inner(&mut locked_wallet, tmp_psbt.unsigned_tx);
 
 		Ok(max_amount)
 	}
@@ -1050,15 +1051,13 @@ impl Wallet {
 			ExtendedDescriptor::Wpkh(_)
 		));
 
-		let (splice_amount, tmp_psbt) = self.get_max_drain_amount(
+		let (splice_amount, _) = self.get_max_drain_amount(
 			&mut locked_wallet,
 			shared_output_script,
 			cur_anchor_reserve_sats,
 			fee_rate,
 			Some(&shared_input),
 		)?;
-
-		Self::cancel_tx_inner(&mut locked_wallet, tmp_psbt.unsigned_tx);
 
 		Ok(splice_amount)
 	}
@@ -1114,8 +1113,6 @@ impl Wallet {
 							);
 							e
 						})?;
-
-					Self::cancel_tx_inner(&mut locked_wallet, tmp_psbt.unsigned_tx);
 
 					let mut tx_builder = locked_wallet.build_tx();
 					tx_builder
@@ -2704,7 +2701,7 @@ mod tests {
 	use std::sync::atomic::{AtomicBool, Ordering};
 	use std::time::Duration;
 
-	use bdk_chain::{BlockId, ConfirmationBlockTime};
+	use bdk_chain::{BlockId, CheckPoint, ConfirmationBlockTime, TxUpdate};
 	use bdk_wallet::Wallet as BdkWallet;
 	use bitcoin::hashes::Hash;
 	use bitcoin::Network;
@@ -4353,5 +4350,67 @@ mod tests {
 			&payment.kind,
 			PaymentKind::Onchain { tx_type: Some(TransactionType::InteractiveFunding { .. }), .. }
 		));
+	}
+
+	#[tokio::test]
+	async fn max_funding_estimate_keeps_reserved_change_address_used() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let (funding_tx, block_id) = {
+			let mut locked_wallet = wallet.inner.lock().unwrap();
+			let outputs = vec![TxOut {
+				value: Amount::from_sat(200_000),
+				script_pubkey: locked_wallet
+					.reveal_next_address(KeychainKind::External)
+					.address
+					.script_pubkey(),
+			}];
+			let funding_tx = Transaction {
+				version: bitcoin::transaction::Version::TWO,
+				lock_time: LockTime::ZERO,
+				input: Vec::new(),
+				output: outputs,
+			};
+			let block_id = BlockId {
+				height: locked_wallet.latest_checkpoint().height() + 1,
+				hash: bitcoin::BlockHash::from_byte_array([42; 32]),
+			};
+			(funding_tx, block_id)
+		};
+		let funding_txid = funding_tx.compute_txid();
+		let mut tx_update = TxUpdate::default();
+		tx_update.txs = vec![Arc::new(funding_tx)];
+		tx_update.anchors =
+			[(ConfirmationBlockTime { block_id, confirmation_time: 1 }, funding_txid)].into();
+		let chain = CheckPoint::from_block_ids([
+			wallet.inner.lock().unwrap().latest_checkpoint().block_id(),
+			block_id,
+		])
+		.unwrap();
+		wallet
+			.apply_update(Update { tx_update, chain: Some(chain), ..Default::default() })
+			.await
+			.unwrap();
+
+		// Reserve the first change address the way BDK does for a pending transaction whose
+		// change output the wallet has not indexed yet.
+		{
+			let mut locked_wallet = wallet.inner.lock().unwrap();
+			assert_eq!(locked_wallet.reveal_next_address(KeychainKind::Internal).index, 0);
+			assert!(locked_wallet.mark_used(KeychainKind::Internal, 0));
+		}
+
+		// The reserve must exceed the dust limit so the estimate includes the anchor reserve
+		// output, which is what pays to the reserved change address.
+		let anchor_reserve_sats = 25_000;
+		assert!(anchor_reserve_sats > DUST_LIMIT_SATS);
+		wallet.get_max_funding_amount(anchor_reserve_sats, FeeRate::from_sat_per_kwu(250)).unwrap();
+
+		let mut locked_wallet = wallet.inner.lock().unwrap();
+		assert!(
+			locked_wallet.spk_index().is_used(KeychainKind::Internal, 0),
+			"estimating the max funding amount must not free a reserved change address",
+		);
+		assert_ne!(locked_wallet.next_unused_address(KeychainKind::Internal).index, 0);
 	}
 }
