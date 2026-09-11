@@ -1928,13 +1928,15 @@ where
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
 
 				// A splice round this node signed dies with the channel unless LDK had already
-				// handed it to the broadcaster. LDK reports no failed negotiation for a round still
-				// awaiting the counterparty's signatures when the channel closes, so its record is
-				// taken back here. The channel manager holds only the closed channel's last funding,
-				// but the channel's monitor still watches every round the counterparty committed
-				// to, and our signatures may have left the node for such a round, so it is kept
-				// (see `closed_channel_held_rounds`). The monitor's guard is not `Send`, so its
-				// watched transactions are collected before anything is awaited.
+				// handed it to the broadcaster. Whatever the channel manager reports for a round
+				// still awaiting the counterparty's signatures when the channel closes is queued
+				// after this event, so its record is taken back here; nothing is reported before
+				// https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967 is fixed.
+				// The channel manager holds only the closed channel's last funding, but the
+				// channel's monitor still watches every round the counterparty committed to, and
+				// our signatures may have left the node for such a round, so it is kept (see
+				// `closed_channel_held_rounds`). The monitor's guard is not `Send`, so its watched
+				// transactions are collected before anything is awaited.
 				let watched_txids: Vec<Txid> = self
 					.chain_monitor
 					.get_monitor(channel_id)
@@ -2277,11 +2279,11 @@ where
 					new_funding_txo,
 				);
 
-				// LDK emits this event as it hands the fully signed round to the broadcaster: the
-				// counterparty holds our signatures now and may broadcast on its own, so the
-				// round's funding payment, recorded when the round was signed, no longer awaits
-				// broadcast. On a failed write, replay: LDK re-offers the event in-session and
-				// persists it across restarts.
+				// LDK emits this event only once our `tx_signatures` for the round are ready to
+				// send, so the counterparty may already hold them and may broadcast the round
+				// without us. The round's funding payment, recorded when the round was signed,
+				// therefore no longer awaits broadcast. On a failed write, replay: LDK re-offers
+				// the event in-session and persists it across restarts.
 				if let Err(e) = self
 					.wallet
 					.record_broadcast_splice_round(channel_id, new_funding_txo.txid)

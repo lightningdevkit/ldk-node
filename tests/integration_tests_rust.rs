@@ -2961,6 +2961,12 @@ async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
 /// it. Node B's writes are held from before the join: recording a round precedes signing it, so
 /// node B never signs, never sends its `commitment_signed`, and node A's monitor never learns of
 /// the round.
+///
+/// Once <https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967> is fixed, LDK
+/// reports the round itself after `ChannelClosed`: a `DiscardFunding` for node A's contribution,
+/// whose handling reclaims its addresses, and a `SpliceNegotiationFailed` the node reports with
+/// reason `ChannelClosing` and no parameters, its intent having been cleared at the close. Assert
+/// both once the pinned LDK carries the fix; the assertion below holds either way.
 #[cfg(feature = "chain-esplora")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn signed_splice_round_the_monitor_does_not_watch_is_dropped_at_close() {
