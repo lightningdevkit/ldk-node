@@ -1966,15 +1966,15 @@ where
 				// after this event, so its record is taken back here; nothing is reported before
 				// https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967 is fixed.
 				// The channel manager holds only the closed channel's last funding, but the
-				// channel's monitor still watches every pending round the counterparty committed
-				// to, and our signatures may have left the node for such a round, so it is kept
-				// (see `closed_channel_held_rounds`). A payment left with no round of ours the
-				// monitor watches, and none LDK promoted to the funding before, is failed: the
-				// monitor's `DiscardFunding` events settle such payments once the close matures,
-				// but reach the handler ahead of this event when one sync delivers the close and
-				// its maturity, and then find the channel still listed with every round held. The
-				// monitor's guard is not `Send`, so its watched transactions are collected before
-				// anything is awaited.
+				// channel's monitor still watches every pending round the counterparty committed to
+				// and the background processor has flushed to it, and our signatures may have left
+				// the node for such a round, so it is kept (see `closed_channel_held_rounds`). A
+				// payment left with no round of ours the monitor watches, and none LDK promoted to
+				// the funding before, is failed: the monitor's `DiscardFunding` events settle such
+				// payments once the close matures, but reach the handler ahead of this event when
+				// one sync delivers the close and its maturity, and then find the channel still
+				// listed with every round held. The monitor's guard is not `Send`, so its watched
+				// transactions are collected before anything is awaited.
 				let watched_txids: Vec<Txid> = self
 					.chain_monitor
 					.get_monitor(channel_id)

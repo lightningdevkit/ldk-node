@@ -3133,6 +3133,14 @@ const ROUND_LOCKED: &str = "locked as the funding of channel";
 /// and its `to_self_delay` passes, the monitor stops watching the round and reports it discarded,
 /// and the record of a round node A never saw broadcast goes rather than fail a payment for a
 /// transaction that never existed.
+///
+/// Once <https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967> is fixed, LDK
+/// reports `SpliceNegotiated` for this round after `ChannelClosed`, node A having sent its
+/// `tx_signatures`, so the node clears the round's awaiting-broadcast mark and the record is kept:
+/// at maturity the payment ends `Failed` with `NO_ROUND_CAN_CONFIRM` logged instead of being
+/// removed with `DROPPED_ABANDONED_ROUND`. The test's own tail shows node B does broadcast the
+/// round, which is why that is the right end state. The maturity assertions and the two comments
+/// describing the removal must change at that pin move, not before.
 #[cfg(feature = "chain-esplora")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
