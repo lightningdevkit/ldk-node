@@ -116,8 +116,13 @@ impl SpliceTracker {
 	/// contribution and no other round claims ([`Self::release_contribution`]): a fee bump built
 	/// by adjusting the fee of the round it replaces — `prior`, the contribution it was built
 	/// from — reuses that round's inputs and change address, which a refusal must leave to the
-	/// round that has locked meanwhile. A synchronous rejection leaves the release to the
-	/// `DiscardFunding` event LDK queues.
+	/// round that has locked meanwhile. A synchronous rejection leaves the release to LDK, which
+	/// queues a `DiscardFunding` for the parts of the contribution no pending splice attempt still
+	/// uses — a negotiated round, one still under negotiation, or a contribution queued behind them
+	/// — and nothing when there are none. Before
+	/// <https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4986> is fixed, a
+	/// refusal for a channel or peer LDK no longer knows names the whole contribution; the handler
+	/// only unmarks the addresses that names today, as it ignores the event's inputs.
 	///
 	/// [`ChannelManager::funding_contributed`]: lightning::ln::channelmanager::ChannelManager::funding_contributed
 	pub(crate) async fn submit(
@@ -223,10 +228,15 @@ impl SpliceTracker {
 				counterparty_node_id,
 				e,
 			);
-			// LDK returns the contribution through a `DiscardFunding` event, whose handling frees
-			// the addresses the wallet marked for it.
+			// LDK returns what the contribution reserved and no pending splice attempt still uses
+			// through a `DiscardFunding` event, or nothing when every part is still in use — before
+			// https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4986 is fixed, a
+			// refusal for a channel or peer LDK no longer knows names the whole contribution — and
+			// the event's handling frees the addresses the wallet marked for it.
 			// TODO(#1037): the handler ignores the event's inputs; once inputs are locked at coin
-			// selection, it must unlock them as well.
+			// selection, it must unlock them as well. Unlocking them trusts the event to name only
+			// inputs no pending splice attempt still spends, which holds once the pinned LDK
+			// carries that fix.
 			self.discard_persisted_intent(&payment_id, restore).await;
 			return Err(Error::ChannelSplicingFailed);
 		}
@@ -577,10 +587,15 @@ impl SpliceTracker {
 	/// Nothing the wallet holds for the intents is released here: a round the channel's monitor
 	/// watches may still confirm, and what LDK reserved for the others it returns through
 	/// `DiscardFunding` once the close matures. A signed round the monitor never watched — the
-	/// counterparty's `commitment_signed` never arrived — is released by neither.
-	// TODO(#1037): once inputs are locked at coin selection, such a round's inputs stay locked
-	// with no record to release them from after its intent is cleared here. Release the parts of
-	// the contribution no watched round uses before clearing.
+	/// counterparty's `commitment_signed` never arrived — is released only by the `DiscardFunding`
+	/// LDK reports for it at the force-close once
+	/// <https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967> is fixed, which
+	/// arrives after `ChannelClosed` and names what no other round of the channel uses; nothing
+	/// releases it before that fix.
+	// TODO(#1037): once inputs are locked at coin selection, such a round's inputs stay locked with
+	// no record to release them from after its intent is cleared here, until the pinned LDK carries
+	// that fix, which reports a `DiscardFunding` after `ChannelClosed` for what of the round no
+	// other round of the channel uses. Remove this note at that pin move.
 	pub(crate) async fn on_channel_closed(
 		&self, counterparty_node_id: PublicKey, channel_id: ChannelId,
 	) {
