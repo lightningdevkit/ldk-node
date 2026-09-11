@@ -2123,9 +2123,11 @@ impl Node {
 			// dropping it. This lets `channel_reestablish` drive the recovery flow, which is
 			// especially important against LND peers that don't always handle force-closure
 			// error messages correctly.
-		}
 
-		Ok(())
+			Ok(())
+		} else {
+			Err(Error::ChannelClosingFailed)
+		}
 	}
 
 	/// Update the config for a previously opened channel.
