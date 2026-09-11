@@ -28,12 +28,12 @@ pub(crate) struct FundingTxCandidate {
 	/// This node's share of the on-chain fee for this candidate, in millisatoshis, or `None` if
 	/// this node did not contribute to it.
 	pub fee_paid_msat: Option<u64>,
-	/// Whether this node signed the candidate but the signatures have yet to be exchanged. Set
+	/// Whether this node signed the candidate but LDK has yet to report the round negotiated. Set
 	/// when the round is recorded at signing time, cleared when LDK reports the splice negotiated
-	/// (`SpliceNegotiated`, emitted as it hands the fully signed round to the broadcaster). Only
-	/// such a round can be abandoned without a trace — the counterparty aborts, or the channel
+	/// (`SpliceNegotiated`, emitted only once our `tx_signatures` for the round are ready to send).
+	/// Such a round may be abandoned without a trace — the counterparty aborts, or the channel
 	/// closes, before the signatures are exchanged — so only such a round may be dropped from the
-	/// history.
+	/// history, and only once LDK no longer holds it.
 	pub awaiting_broadcast: bool,
 }
 

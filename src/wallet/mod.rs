@@ -2053,11 +2053,11 @@ impl Wallet {
 	}
 
 	/// Marks a splice round recorded when signing ([`Self::record_signed_funding`]) as broadcast
-	/// once LDK reports the splice negotiated: `SpliceNegotiated` is emitted as LDK hands the fully
-	/// signed round to the broadcaster, so the counterparty holds our signatures by then and the
-	/// round can no longer be abandoned without a trace. Nothing is written for a round no funding
-	/// payment of `channel_id` tracks (no local contribution, or no wallet-level activity) or one
-	/// already marked (a replayed event).
+	/// once LDK reports the splice negotiated: `SpliceNegotiated` is emitted only once our
+	/// `tx_signatures` for the round are ready to send, so the counterparty may hold them by then
+	/// and may broadcast the round, which is therefore no longer dropped as abandoned. Nothing is
+	/// written for a round no funding payment of `channel_id` tracks (no local contribution, or no
+	/// wallet-level activity) or one already marked (a replayed event).
 	pub(crate) async fn record_broadcast_splice_round(
 		&self, channel_id: ChannelId, txid: Txid,
 	) -> Result<(), Error> {
@@ -3015,13 +3015,14 @@ pub(crate) fn held_splice_rounds(
 /// The splice rounds a closed channel may still see confirm, as
 /// [`Wallet::drop_abandoned_splice_rounds`] takes them: the channel's last funding — which a
 /// zero-conf splice may have become before its transaction confirmed — and every transaction the
-/// channel's monitor still watches. The channel manager forgets a pending round with the channel
-/// and reports no failed negotiation for one awaiting the counterparty's signatures, but the
-/// monitor keeps watching every round the counterparty's `commitment_signed` reached, and our
-/// signatures cannot have left the node before that message: such a round may yet confirm and is
-/// left to wallet sync or `DiscardFunding` to resolve, while a round the monitor never watched
-/// never had our signatures released. The watched transactions also include the funding and
-/// whatever spent it on chain, which no recorded round is.
+/// channel's monitor still watches. The channel manager forgets a pending round with the channel,
+/// and what it reports for one awaiting the counterparty's signatures — nothing before
+/// <https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967> is fixed — is queued
+/// after `ChannelClosed`, but the monitor keeps watching every round the counterparty's
+/// `commitment_signed` reached, and our signatures cannot have left the node before that message:
+/// such a round may yet confirm and is left to wallet sync or `DiscardFunding` to resolve, while a
+/// round the monitor never watched never had our signatures released. The watched transactions also
+/// include the funding and whatever spent it on chain, which no recorded round is.
 pub(crate) fn closed_channel_held_rounds(
 	funding_txo: Option<LdkOutPoint>, watched_txids: impl IntoIterator<Item = Txid>,
 ) -> Vec<Txid> {
