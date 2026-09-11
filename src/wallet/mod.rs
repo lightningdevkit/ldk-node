@@ -3312,13 +3312,20 @@ pub(crate) fn held_splice_rounds(
 /// channel's monitor still watches. The channel manager forgets a pending round with the channel,
 /// and what it reports for one awaiting the counterparty's signatures is queued after
 /// `ChannelClosed`, but the monitor keeps watching every pending round the counterparty's
-/// `commitment_signed` reached, until a sibling locks or the close matures, and our signatures
-/// cannot have left the node before that message: such a round may yet confirm and is left to
-/// wallet sync or `DiscardFunding` to resolve, while a round the monitor never watched never had
-/// our signatures released. The watched transactions also include the funding and whatever spent it
-/// on chain, which no recorded round is. A funding the channel moved on from before it confirmed —
-/// a zero-conf splice a later splice built on — is held by neither and can confirm still; the
-/// funding payments keep such rounds themselves (see [`Wallet::resolve_promoted_splice_round`]).
+/// `commitment_signed` reached and the background processor has flushed to it — the monitor's
+/// updates land after the manager's, deferred to that flush — until a sibling locks or the close
+/// matures, and our signatures cannot have left the node before that update was persisted: such a
+/// round may yet confirm and is left to wallet sync or `DiscardFunding` to resolve, while a round
+/// the monitor never watched never had our signatures released. A round whose `commitment_signed`
+/// the manager processed since the last flush therefore still looks unwatched here, and is dropped
+/// from its record as one nothing broadcast. That is the right outcome for the record: our
+/// `tx_signatures` for a splice round are released only once the monitor update its
+/// `commitment_signed` produced has been persisted, whichever side sends first, so the counterparty
+/// holds nothing it could broadcast. The watched transactions also include the funding and whatever
+/// spent it on chain, which no recorded round is. A funding the channel moved on from before it
+/// confirmed — a zero-conf splice a later splice built on — is held by neither and can confirm
+/// still; the funding payments keep such rounds themselves (see
+/// [`Wallet::resolve_promoted_splice_round`]).
 pub(crate) fn closed_channel_held_rounds(
 	funding_txo: Option<LdkOutPoint>, watched_txids: impl IntoIterator<Item = Txid>,
 ) -> Vec<Txid> {
