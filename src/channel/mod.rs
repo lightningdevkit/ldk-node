@@ -103,9 +103,9 @@ impl SpliceTracker {
 	/// release. LDK only persists a splice once its negotiation reaches `AwaitingSignatures`, so a
 	/// splice lost earlier leaves no trace in LDK's channel state — the intent record is what
 	/// recognizes the loss. A round LDK did write is another matter: LDK either still holds it, or
-	/// failed it as it was last written — the failure is replayed at startup — and returns what it
-	/// reserved through `DiscardFunding`; a round of a channel that closed meanwhile is watched by
-	/// the channel's monitor until the close matures. Such rounds are left to those events. Run
+	/// reports its failure at startup and returns what it reserved and no other round of the
+	/// channel uses through `DiscardFunding`; a round of a channel that closed meanwhile is watched
+	/// by the channel's monitor until the close matures. Such rounds are left to those events. Run
 	/// once at startup, before background chain syncing and event processing start, so nothing can
 	/// act on the stale reservations first. Holds the submit lock throughout, as the event handlers
 	/// do.
@@ -134,9 +134,11 @@ impl SpliceTracker {
 				// closed channel's monitor watches is either spent by the close or returned through
 				// the `DiscardFunding` event the monitor queues once the close matures, and a
 				// recorded round the monitor never watched — the counterparty's `commitment_signed`
-				// never arrived before the node stopped — is released by neither, as at
-				// `ChannelClosed`. A bare intent has no such round — LDK never wrote the splice —
-				// so nothing else would release it.
+				// never arrived before the node stopped — is released only by the `DiscardFunding`
+				// LDK reports for it at a force-close once
+				// https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967 is fixed,
+				// as at `ChannelClosed`; nothing releases it before that fix. A bare intent has no
+				// such round — LDK never wrote the splice — so nothing else would release it.
 				log_info!(
 					self.logger,
 					"Dropping the recorded splice of closed channel {} with counterparty {}",
@@ -151,9 +153,15 @@ impl SpliceTracker {
 				// contribution no recorded round uses stay locked with no record to release them
 				// from after the intent is cleared here: release them before clearing. And
 				// `release_contribution` swallows a failed release, which then leaves locks no
-				// record names either: keep the intent when the release fails. The same holds for a
-				// recorded round the monitor never watched: nothing releases its inputs once the
-				// intent is cleared here.
+				// record names either: keep the intent when the release fails. A recorded round the
+				// monitor never watched is released only by the `DiscardFunding` LDK reports for it
+				// at a force-close once the fix above is in the pinned LDK; nothing releases its
+				// inputs before that. One case stays after the fix: a hand-off LDK never wrote —
+				// the node stopped before the manager's next write — whose channel is force-closed
+				// as stale at this start and whose round the monitor never watched. LDK knows
+				// nothing of that round and reports no event for it; release its contribution here,
+				// which takes the monitor's watched transactions to tell such a round from a
+				// watched one, as `closed_channel_held_rounds` does at `ChannelClosed`.
 				self.clear_persisted_intent(payment_id, |i| *i == intent).await;
 				continue;
 			};
