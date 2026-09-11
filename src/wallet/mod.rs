@@ -420,8 +420,11 @@ impl Wallet {
 						e
 					})?;
 
-					// 'cancel' the transaction to free up any used change addresses
-					locked_wallet.cancel_tx(&tmp_tx);
+					// Note we intentionally don't `cancel_tx` the temporary transaction: draining
+					// to a fixed script means BDK neither reserves a change address nor locks
+					// inputs for it. Cancelling it would instead clear the usage mark on the
+					// anchor reserve placeholder address, which a pending transaction may have
+					// reserved as its change address, leading to address reuse.
 
 					let estimated_spendable_amount = Amount::from_sat(
 						spendable_amount_sats.saturating_sub(estimated_tx_fee.to_sat()),
