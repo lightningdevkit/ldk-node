@@ -57,7 +57,7 @@ use crate::chain::ChainSource;
 use crate::config::BitcoindRestClientConfig;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole, Config,
-	ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig, TorConfig,
+	ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig, PayjoinConfig, TorConfig,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT, PAYMENT_CACHE_CAPACITY,
 	PAYMENT_CACHE_WARMUP_COUNT,
@@ -82,7 +82,8 @@ use crate::io::utils::{
 #[cfg(feature = "storage-vss")]
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
-	self, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	self, PAYJOIN_SESSION_STORE_PRIMARY_NAMESPACE, PAYJOIN_SESSION_STORE_SECONDARY_NAMESPACE,
+	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
@@ -91,6 +92,7 @@ use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
+use crate::payment::payjoin::manager::PayjoinManager;
 #[cfg(feature = "unified-payments")]
 use crate::payment::HRNResolver;
 use crate::peer_store::PeerStore;
@@ -102,8 +104,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
-	PendingPaymentStore,
+	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PayjoinSessionStore,
+	PaymentStore, PeerManager, PendingPaymentStore,
 };
 use crate::wallet::persist::{read_address_pool, KVStoreWalletPersister};
 use crate::wallet::Wallet;
@@ -230,6 +232,8 @@ pub enum BuildError {
 	ChainTipFetchFailed,
 	/// The configured wallet rescan height is above the current chain tip.
 	WalletRescanHeightTooHigh,
+	/// The payjoin configuration requires a Bitcoin Core backend, but a different chain source was configured.
+	PayjoinConfigMismatch,
 }
 
 impl fmt::Display for BuildError {
@@ -275,6 +279,9 @@ impl fmt::Display for BuildError {
 			},
 			Self::WalletRescanHeightTooHigh => {
 				write!(f, "Wallet rescan height is above the current chain tip.")
+			},
+			Self::PayjoinConfigMismatch => {
+				write!(f, "Payjoin requires a Bitcoin Core chain source, but a different one was configured.")
 			},
 		}
 	}
@@ -662,6 +669,15 @@ impl NodeBuilder {
 
 		self.async_payments_role = role;
 		Ok(self)
+	}
+
+	/// Configures the [`Node`] instance to enable payjoin payments.
+	///
+	/// The `payjoin_config` specifies the PayJoin directory and OHTTP relay URLs required
+	/// for payjoin V2 protocol.
+	pub fn set_payjoin_config(&mut self, payjoin_config: PayjoinConfig) -> &mut Self {
+		self.config.payjoin_config = Some(payjoin_config);
+		self
 	}
 
 	/// Sets background probing config.
@@ -1272,6 +1288,14 @@ impl Builder {
 		self.inner.write().expect("lock").set_async_payments_role(role).map(|_| ())
 	}
 
+	/// Configures the [`Node`] instance to enable payjoin payments.
+	///
+	/// The `payjoin_config` specifies the PayJoin directory and OHTTP relay URLs required
+	/// for payjoin V2 protocol.
+	pub fn set_payjoin_config(&self, payjoin_config: PayjoinConfig) {
+		self.inner.write().expect("lock").set_payjoin_config(payjoin_config);
+	}
+
 	/// Configures background probing.
 	///
 	/// Use [`ProbingConfigBuilder`] to build the configuration.
@@ -1526,26 +1550,37 @@ fn build_with_store_internal(
 
 	let kv_store_ref = Arc::clone(&kv_store);
 	let logger_ref = Arc::clone(&logger);
-	let (payment_store_res, node_metris_res, pending_payment_store_res, address_pool_res) = runtime
-		.block_on(async move {
-			tokio::join!(
-				read_n_objects(
-					&*kv_store_ref,
-					PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					PAYMENT_CACHE_WARMUP_COUNT,
-					Arc::clone(&logger_ref),
-				),
-				read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
-				read_all_objects(
-					&*kv_store_ref,
-					PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-					PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-					Arc::clone(&logger_ref),
-				),
-				read_address_pool(&*kv_store_ref, &*logger_ref)
-			)
-		});
+	let (
+		payment_store_res,
+		node_metris_res,
+		pending_payment_store_res,
+		address_pool_res,
+		payjoin_session_store_res,
+	) = runtime.block_on(async move {
+		tokio::join!(
+			read_n_objects(
+				&*kv_store_ref,
+				PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				PAYMENT_CACHE_WARMUP_COUNT,
+				Arc::clone(&logger_ref),
+			),
+			read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
+			read_all_objects(
+				&*kv_store_ref,
+				PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+				PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+			read_address_pool(&*kv_store_ref, &*logger_ref),
+			read_all_objects(
+				&*kv_store_ref,
+				PAYJOIN_SESSION_STORE_PRIMARY_NAMESPACE,
+				PAYJOIN_SESSION_STORE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+		)
+	});
 
 	// Initialize the status fields.
 	let node_metrics = match node_metris_res {
@@ -2408,6 +2443,43 @@ fn build_with_store_internal(
 
 	let pathfinding_scores_sync_url = pathfinding_scores_sync_config.map(|c| c.url.clone());
 
+	let payjoin_manager = if config.payjoin_config.is_some() {
+		if !matches!(chain_data_source_config, Some(ChainDataSourceConfig::Bitcoind { .. })) {
+			return Err(BuildError::PayjoinConfigMismatch);
+		}
+
+		let payjoin_session_store = match payjoin_session_store_res {
+			Ok(payjoin_sessions) => Arc::new(PayjoinSessionStore::new(
+				payjoin_sessions,
+				KeepAllEntries,
+				PAYJOIN_SESSION_STORE_PRIMARY_NAMESPACE.to_string(),
+				PAYJOIN_SESSION_STORE_SECONDARY_NAMESPACE.to_string(),
+				Arc::clone(&kv_store),
+				Arc::clone(&logger),
+			)),
+			Err(e) => {
+				log_error!(logger, "Failed to read payjoin session data from store: {}", e);
+				return Err(BuildError::ReadFailed);
+			},
+		};
+
+		Some(Arc::new(PayjoinManager::new(
+			Arc::clone(&payjoin_session_store),
+			Arc::clone(&logger),
+			Arc::clone(&config),
+			Arc::clone(&wallet),
+			Arc::clone(&fee_estimator),
+			Arc::clone(&chain_source),
+			Arc::clone(&channel_manager),
+			stop_sender.subscribe(),
+			Arc::clone(&payment_store),
+			Arc::clone(&pending_payment_store),
+			Arc::clone(&tx_broadcaster),
+		)))
+	} else {
+		None
+	};
+
 	let prober = probing_config.map(|probing_cfg| {
 		let strategy: Arc<dyn ProbingStrategy> = match &probing_cfg.kind {
 			ProbingStrategyKind::HighDegree { top_node_count } => {
@@ -2502,6 +2574,7 @@ fn build_with_store_internal(
 		prober,
 		#[cfg(cycle_tests)]
 		_leak_checker,
+		payjoin_manager,
 	})
 }
 

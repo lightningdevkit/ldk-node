@@ -2281,6 +2281,46 @@ impl Wallet {
 
 		Ok(new_txid)
 	}
+
+	/// Check if a script belongs to this wallet
+	pub(crate) fn is_mine(&self, script: ScriptBuf) -> Result<bool, Error> {
+		let locked_wallet = self.inner.lock().expect("lock");
+		Ok(locked_wallet.is_mine(script))
+	}
+
+	/// Check if an outpoint belongs to this wallet.
+	pub(crate) fn is_my_outpoint(&self, outpoint: &OutPoint) -> Result<bool, Error> {
+		let locked_wallet = self.inner.lock().expect("lock");
+
+		let tx = match locked_wallet.tx_details(outpoint.txid) {
+			Some(details) => details.tx.deref().clone(),
+			None => return Ok(false),
+		};
+
+		match tx.output.get(outpoint.vout as usize) {
+			Some(txout) => self.is_mine(txout.script_pubkey.clone()),
+			None => Ok(false),
+		}
+	}
+
+	#[allow(deprecated)]
+	pub(crate) fn process_psbt(&self, mut psbt: Psbt) -> Result<Psbt, Error> {
+		let locked_wallet = self.inner.lock().expect("lock");
+
+		let sign_options = SignOptions { trust_witness_utxo: true, ..Default::default() };
+
+		locked_wallet.sign(&mut psbt, sign_options).map_err(|e| {
+			log_error!(self.logger, "Failed to sign PSBT: {}", e);
+			Error::WalletOperationFailed
+		})?;
+
+		// Return the signed PSBT (not extracted transaction)
+		Ok(psbt)
+	}
+
+	pub(crate) fn list_unspent_confirmed_utxos(&self) -> Result<Vec<Utxo>, Error> {
+		self.list_confirmed_utxos_inner().map_err(|()| Error::WalletOperationFailed)
+	}
 }
 
 struct LocalStakeAggregate {
