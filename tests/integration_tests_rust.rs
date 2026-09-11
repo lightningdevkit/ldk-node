@@ -3684,6 +3684,125 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	);
 }
 
+/// Regression test for the variable-amount LSPS2 JIT-channel fee ceiling: with the LSP charging
+/// a non-zero proportional opening fee, `lsps2_max_total_opening_fee_msat` used to compute the
+/// admissible-fee ceiling over the *post-skim* `PaymentClaimable::amount_msat` instead of the
+/// amount the payer actually sent, so the ceiling always ended up below the LSP's real fee and
+/// every such payment was refused after the LSP had already opened and funded the channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_variable_amount_jit_channel_with_proportional_fee_succeeds() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	// A non-zero proportional fee and no per-payment cap is exactly the configuration the buggy
+	// ceiling calculation always rejected, regardless of how small the fee actually is.
+	let channel_opening_fee_ppm = 10_000; // 1%
+	let channel_over_provisioning_ppm = 100_000;
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm,
+		channel_over_provisioning_ppm,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: true,
+		disable_client_reserve: false,
+	};
+
+	let service_config = random_config();
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(lsps2_service_config);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config();
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	let payer_config = random_config();
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	let service_addr = service_node.onchain_payment().new_address().unwrap();
+	let client_addr = client_node.onchain_payment().new_address().unwrap();
+	let payer_addr = payer_node.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 10_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr, client_addr, payer_addr],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+
+	// Open a channel payer -> service that will allow paying the JIT invoice.
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	// A *variable-amount* JIT invoice: this is the zero-amount-invoice path that always failed
+	// once the LSP took a non-zero proportional cut, because the fee ceiling was computed over
+	// the wrong base amount.
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let jit_invoice = client_node
+		.bolt11_payment()
+		.receive_variable_amount_via_jit_channel(&invoice_description.into(), 1024, None)
+		.unwrap();
+	assert_eq!(jit_invoice.amount_milli_satoshis(), None, "invoice must be zero-amount");
+
+	let jit_amount_msat = 100_000_000;
+	println!("Paying variable-amount JIT invoice!");
+	let payer_payment_id =
+		payer_node.bolt11_payment().send_using_amount(&jit_invoice, jit_amount_msat, None).unwrap();
+
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_event!(service_node, PaymentForwarded);
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+
+	// Before the fix, this event never arrives: the client instead sees the HTLC failed back and
+	// `payer_node` gets `PaymentFailed`, because the client's own fee-ceiling check rejected the
+	// LSP's (correctly computed) skimmed fee.
+	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
+	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
+	expect_payment_successful_event!(payer_node, payer_payment_id, None);
+	let client_payment_id =
+		expect_payment_received_event!(client_node, expected_received_amount_msat);
+
+	let client_payment = client_node.payment(&client_payment_id).unwrap().unwrap();
+	match client_payment.kind {
+		PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
+			assert_eq!(counterparty_skimmed_fee_msat, Some(service_fee_msat));
+		},
+		_ => panic!("Unexpected payment kind"),
+	}
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn facade_logging() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
