@@ -19,7 +19,7 @@ use lightning::events::{
 	ClosureReason, Event as LdkEvent, PaymentFailureReason, PaymentPurpose, ReplayEvent,
 };
 use lightning::impl_writeable_tlv_based_enum;
-use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::channelmanager::{FailureCode, PaymentId};
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
 use lightning::util::config::{
@@ -644,6 +644,22 @@ where
 				..
 			} => {
 				let payment_id = PaymentId(payment_hash.0);
+
+				if let Some((tlv_type, _)) = onion_fields
+					.as_ref()
+					.and_then(|fields| fields.custom_tlvs().iter().find(|(id, _)| id % 2 == 0))
+				{
+					log_info!(
+						self.logger,
+						"Refusing inbound payment with hash {} as the sender included unknown required TLVs (incl {})",
+						hex_utils::to_string(&payment_hash.0),
+						tlv_type,
+					);
+					let error_code = FailureCode::InvalidOnionPayload(Some((*tlv_type, 0)));
+					self.channel_manager.fail_htlc_backwards_with_reason(&payment_hash, error_code);
+					return Ok(());
+				}
+
 				if let Some(info) = self.payment_store.get(&payment_id) {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
