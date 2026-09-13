@@ -22,15 +22,16 @@ use common::logging::{
 	init_log_logger, validate_log_entry, CollectingLogWriter, MultiNodeLogger, TestLogWriter,
 };
 use common::{
-	bump_fee_and_broadcast, distribute_funds_unconfirmed, do_channel_full_cycle,
-	expect_channel_pending_event, expect_channel_ready_event, expect_channel_ready_events,
-	expect_event, expect_payment_claimable_event, expect_payment_received_event,
-	expect_payment_successful_event, expect_splice_negotiated_event, generate_blocks_and_wait,
-	generate_listening_addresses, invalidate_blocks, open_channel, open_channel_no_wait,
-	open_channel_push_amt, open_channel_with_all, premine_and_distribute_funds, premine_blocks,
-	prepare_rbf, random_chain_source, random_config, setup_bitcoind_and_electrsd, setup_builder,
-	setup_node, setup_two_nodes, splice_in_with_all, wait_for_block, wait_for_tx, InMemoryStore,
-	NodePaymentExt, TestChainSource, TestConfig, TestStoreType, TestSyncStore,
+	bump_fee_and_broadcast, configure_chain_source, distribute_funds_unconfirmed,
+	do_channel_full_cycle, expect_channel_pending_event, expect_channel_ready_event,
+	expect_channel_ready_events, expect_event, expect_payment_claimable_event,
+	expect_payment_received_event, expect_payment_successful_event, expect_splice_negotiated_event,
+	generate_blocks_and_wait, generate_listening_addresses, invalidate_blocks, open_channel,
+	open_channel_no_wait, open_channel_push_amt, open_channel_with_all,
+	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
+	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
+	wait_for_block, wait_for_tx, InMemoryStore, NodePaymentExt, TestChainSource, TestConfig,
+	TestNode, TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
@@ -295,6 +296,91 @@ impl PaginatedKVStore for WalletPersistGatedStore {
 			page_token,
 		)
 	}
+}
+
+/// A [`KVStore`] that fails every `write` to the payments namespace once `fail_writes` is set,
+/// while keeping everything else operational. Used to arm a `PersistenceFailed` regression case
+/// on top of an otherwise-normal node, without needing a dedicated node/channel fixture.
+struct PaymentFailingStore {
+	inner: Arc<InMemoryStore>,
+	fail_writes: Arc<AtomicBool>,
+}
+
+impl KVStore for PaymentFailingStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, lightning::io::Error>> + 'static + Send {
+		KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		let fail_writes = Arc::clone(&self.fail_writes);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			// Only fail payment-store writes. Failing every write (e.g. channel monitor
+			// updates) would crash the background processor, defeating the test.
+			if fail_writes.load(Ordering::Acquire) && primary_namespace == "payments" {
+				return Err(lightning::io::Error::new(
+					lightning::io::ErrorKind::Other,
+					"injected payment persistence failure",
+				));
+			}
+			KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
+		}
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send {
+		KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+	}
+}
+
+impl PaginatedKVStore for PaymentFailingStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, lightning::io::Error>> + 'static + Send
+	{
+		PaginatedKVStore::list_paginated(
+			&*self.inner,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		)
+	}
+}
+
+/// Builds `node_a` on a [`PaymentFailingStore`] the caller can arm later via `fail_writes`, and
+/// `node_b` on the default store — otherwise identical to `setup_two_nodes`. Lets a single test
+/// flow cover the `PersistenceFailed` fallback hazard on top of the fixture it already needs for
+/// the normal unified-payment paths, instead of duplicating that fixture in a standalone test.
+fn setup_two_nodes_with_failing_store_a(
+	chain_source: &TestChainSource, fail_writes: Arc<AtomicBool>,
+) -> (TestNode, TestNode) {
+	let config_a = random_config();
+	setup_builder!(builder_a, config_a.node_config);
+	configure_chain_source(chain_source, &mut builder_a, &config_a);
+	builder_a.set_async_payments_role(config_a.async_payments_role).unwrap();
+	let failing_store = PaymentFailingStore { inner: Arc::new(InMemoryStore::new()), fail_writes };
+	let node_a = builder_a.build_with_store(config_a.node_entropy.into(), failing_store).unwrap();
+	node_a.start().unwrap();
+
+	let mut config_b = random_config();
+	config_b.node_config.manually_handle_unknown_bolt11_payments = true;
+	let node_b = setup_node(chain_source, config_b);
+
+	(node_a, node_b)
 }
 
 // LDK invokes the sync `SignerProvider::get_shutdown_scriptpubkey` callback on a runtime worker
