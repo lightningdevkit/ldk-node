@@ -652,18 +652,7 @@ where
 							payment_id
 						);
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
-
-						let update = PaymentDetailsUpdate {
-							status: Some(PaymentStatus::Failed),
-							..PaymentDetailsUpdate::new(payment_id)
-						};
-						match self.payment_store.update(&update) {
-							Ok(_) => return Ok(()),
-							Err(e) => {
-								log_error!(self.logger, "Failed to access payment store: {}", e);
-								return Err(ReplayEvent());
-							},
-						};
+						return Ok(());
 					}
 
 					if info.status == PaymentStatus::Succeeded
