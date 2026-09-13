@@ -309,14 +309,29 @@ impl UnifiedPayment {
 						)
 					} else {
 						self.bolt12_payment.send(&offer, None, None, route_parameters)
-					}
-					.map_err(|e| {
-						log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
-						e
-					});
+					};
 
-					if let Ok(payment_id) = payment_result {
-						return Ok(UnifiedPaymentResult::Bolt12 { payment_id });
+					match payment_result {
+						Ok(payment_id) => {
+							return Ok(UnifiedPaymentResult::Bolt12 { payment_id });
+						},
+						// A duplicate payment already exists, so falling back to the
+						// BOLT11 invoice would pay the same offer a second time.
+						Err(Error::DuplicatePayment) => {
+							log_error!(self.logger, "Failed to send BOLT12 offer: DuplicatePayment. This is part of a unified payment. Aborting to avoid duplicate payment.");
+							return Err(Error::DuplicatePayment);
+						},
+						// A persistence failure may occur after the Lightning payment has
+						// already been initiated with the ChannelManager. Falling back to
+						// the BOLT11 invoice in that case would double-pay, so we abort
+						// instead of proceeding to the next payment method.
+						Err(Error::PersistenceFailed) => {
+							log_error!(self.logger, "Failed to send BOLT12 offer: PersistenceFailed. This is part of a unified payment. Aborting to avoid a potential duplicate payment.");
+							return Err(Error::PersistenceFailed);
+						},
+						Err(e) => {
+							log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified payment. Falling back to the BOLT11 invoice.", e);
+						},
 					}
 				},
 				PaymentMethod::LightningBolt11(invoice) => {
