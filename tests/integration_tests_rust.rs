@@ -4063,7 +4063,7 @@ async fn bolt12_lsps2_client_service_integration() {
 	let fixed_received_msat = fixed_amount_msat - fixed_fee_msat;
 	let fixed_receiver_payment_id =
 		expect_payment_received_event!(client_node, fixed_received_msat);
-	match client_node.payment(&fixed_receiver_payment_id).unwrap().kind {
+	match client_node.payment(&fixed_receiver_payment_id).unwrap().unwrap().kind {
 		PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, Some(fixed_fee_msat));
 		},
@@ -4087,7 +4087,7 @@ async fn bolt12_lsps2_client_service_integration() {
 	expect_payment_successful_event!(payer_node, ordinary_payment_id, None);
 	let ordinary_receiver_payment_id =
 		expect_payment_received_event!(client_node, ordinary_amount_msat);
-	match client_node.payment(&ordinary_receiver_payment_id).unwrap().kind {
+	match client_node.payment(&ordinary_receiver_payment_id).unwrap().unwrap().kind {
 		PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, None);
 		},
@@ -4116,7 +4116,7 @@ async fn bolt12_lsps2_client_service_integration() {
 	let variable_received_msat = variable_amount_msat - variable_fee_msat;
 	let variable_receiver_payment_id =
 		expect_payment_received_event!(client_node, variable_received_msat);
-	match client_node.payment(&variable_receiver_payment_id).unwrap().kind {
+	match client_node.payment(&variable_receiver_payment_id).unwrap().unwrap().kind {
 		PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, Some(variable_fee_msat));
 		},
