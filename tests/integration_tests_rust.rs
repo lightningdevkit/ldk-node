@@ -4174,7 +4174,7 @@ async fn bolt12_lsps2_client_service_integration() {
 	expect_payment_successful_event!(payer_node, restored_payment_id, None);
 	let restored_receiver_payment_id =
 		expect_payment_received_event!(client_node, fixed_received_msat);
-	match client_node.payment(&restored_receiver_payment_id).unwrap().kind {
+	match client_node.payment(&restored_receiver_payment_id).unwrap().unwrap().kind {
 		PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, Some(fixed_fee_msat));
 		},
