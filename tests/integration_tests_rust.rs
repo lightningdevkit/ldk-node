@@ -5426,7 +5426,7 @@ async fn do_lsps2_multi_lsp_picks_cheapest(
 		let offer = client.bolt12_payment().receive(100_000_000, "multi LSP", None, None).unwrap();
 		let payment_id = payer.bolt12_payment().send(&offer, None, None, None).unwrap();
 		expect_event!(payer, PaymentFailed);
-		assert_eq!(payer.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
+		assert_eq!(payer.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Failed);
 		assert!(client.list_channels().is_empty());
 		payer.stop().unwrap();
 		client.stop().unwrap();
@@ -5462,7 +5462,7 @@ async fn do_lsps2_multi_lsp_picks_cheapest(
 	let fee_msat = payment_amount_msat * cheap_opening_fee_ppm as u64 / 1_000_000;
 	let receiver_payment_id =
 		expect_payment_received_event!(client, payment_amount_msat - fee_msat);
-	match client.payment(&receiver_payment_id).unwrap().kind {
+	match client.payment(&receiver_payment_id).unwrap().unwrap().kind {
 		PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
 			assert_eq!(counterparty_skimmed_fee_msat, Some(fee_msat));
 		},
