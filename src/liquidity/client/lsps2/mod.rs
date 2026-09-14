@@ -64,6 +64,7 @@ where
 		let stale_ids = self
 			.lease_store
 			.list_filter(|lease| !state::is_lease_usable(lease))
+			.await
 			.into_iter()
 			.map(|lease| lease.id)
 			.collect::<Vec<_>>();
