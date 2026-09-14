@@ -5,7 +5,9 @@ use bitcoin::secp256k1::PublicKey;
 use lightning::impl_writeable_tlv_based;
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
 
-use crate::data_store::{DataStore, StorableObject, StorableObjectId, StorableObjectUpdate};
+use crate::data_store::{
+	DataStore, StorableObject, StorableObjectId, StorableObjectUpdate, UpdatableObject,
+};
 use crate::hex_utils;
 
 pub(crate) const MIN_LEASE_REMAINING_SECS: u64 = 24 * 60 * 60;
@@ -30,6 +32,16 @@ impl StorableObjectId for PaymentLeaseId {
 			hex_utils::to_string(&self.lsp_node_id.serialize()),
 			self.intercept_scid
 		)
+	}
+
+	fn decode_from_hex_str(s: &str) -> Option<Self> {
+		let bytes = hex_utils::to_vec(s)?;
+		if bytes.len() != 41 {
+			return None;
+		}
+		let lsp_node_id = PublicKey::from_slice(&bytes[..33]).ok()?;
+		let intercept_scid = u64::from_be_bytes(bytes[33..].try_into().ok()?);
+		Some(Self { lsp_node_id, intercept_scid })
 	}
 }
 
@@ -61,11 +73,14 @@ impl StorableObjectUpdate<PaymentLease> for PaymentLeaseUpdate {
 
 impl StorableObject for PaymentLease {
 	type Id = PaymentLeaseId;
-	type Update = PaymentLeaseUpdate;
 
 	fn id(&self) -> Self::Id {
 		self.id
 	}
+}
+
+impl UpdatableObject for PaymentLease {
+	type Update = PaymentLeaseUpdate;
 
 	fn update(&mut self, update: Self::Update) -> bool {
 		if *self == update.0 {

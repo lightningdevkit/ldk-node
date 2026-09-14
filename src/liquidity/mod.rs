@@ -31,6 +31,7 @@ use tokio::sync::oneshot;
 
 use crate::builder::BuildError;
 use crate::connection::ConnectionManager;
+use crate::data_store::KeepAllEntries;
 use crate::io::utils::read_all_objects;
 use crate::io::{
 	LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE, LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -301,6 +302,7 @@ where
 		.map_err(|_| BuildError::ReadFailed)?;
 		let lease_store = Arc::new(PaymentLeaseStore::new(
 			leases.clone(),
+			KeepAllEntries,
 			LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
 			LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&self.kv_store),
