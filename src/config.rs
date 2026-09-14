@@ -169,6 +169,30 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY: Duration = Duration::f
 // thereafter until every configured LSP has been discovered.
 pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_secs(60 * 60);
 
+/// The mode used for tracking forwarded payments.
+///
+/// In either mode, a forward is tracked only when it has exactly one incoming HTLC and one outgoing
+/// HTLC, and LDK reports both the outbound amount and total fee.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
+pub enum ForwardedPaymentTrackingMode {
+	/// Track eligible new forwarded payments only as per-channel aggregate statistics.
+	///
+	/// Any detailed records left by a previous configuration are aggregated and removed after their
+	/// current one-hour bucket closes.
+	Stats,
+	/// Store eligible individual forwarded payments for the current and previous one-hour buckets.
+	///
+	/// Payments from older buckets are aggregated into channel-pair statistics and removed.
+	Detailed,
+}
+
+impl Default for ForwardedPaymentTrackingMode {
+	fn default() -> Self {
+		Self::Stats
+	}
+}
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 /// Represents the configuration of an [`Node`] instance.
@@ -192,9 +216,10 @@ pub(crate) const LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY: Duration = Duration::from_
 	doc = "| `hrn_config`                           | HumanReadableNamesConfig::default()  |"
 )]
 /// | `manually_handle_unknown_bolt11_payments` | false                              |
+/// | `forwarded_payment_tracking_mode`      | Stats                               |
 ///
-/// See [`AnchorChannelsConfig`] and [`RouteParametersConfig`] for more information regarding their
-/// respective default values.
+/// See [`AnchorChannelsConfig`], [`RouteParametersConfig`], and
+/// [`ForwardedPaymentTrackingMode`] for more information regarding their respective default values.
 ///
 /// [`Node`]: crate::Node
 pub struct Config {
@@ -268,6 +293,8 @@ pub struct Config {
 	///
 	/// [`Event::PaymentClaimable`]: crate::Event::PaymentClaimable
 	pub manually_handle_unknown_bolt11_payments: bool,
+	/// The mode used for tracking forwarded payments.
+	pub forwarded_payment_tracking_mode: ForwardedPaymentTrackingMode,
 }
 
 impl Default for Config {
@@ -286,6 +313,7 @@ impl Default for Config {
 			#[cfg(feature = "unified-payments")]
 			hrn_config: HumanReadableNamesConfig::default(),
 			manually_handle_unknown_bolt11_payments: false,
+			forwarded_payment_tracking_mode: ForwardedPaymentTrackingMode::default(),
 		}
 	}
 }
