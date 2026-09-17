@@ -350,9 +350,7 @@ pub(crate) use expect_payment_successful_event;
 pub async fn wait_for_payment_success(node: &Node, expected_payment_id: PaymentId) {
 	loop {
 		match node.next_event_async().await {
-			Event::PaymentSuccessful { payment_id: Some(payment_id), .. }
-				if payment_id == expected_payment_id =>
-			{
+			Event::PaymentSuccessful { payment_id, .. } if payment_id == expected_payment_id => {
 				node.event_handled().unwrap();
 				break;
 			},
@@ -679,7 +677,7 @@ pub(crate) enum TestStoreType {
 	Sqlite,
 	#[cfg(feature = "storage-filesystem")]
 	FilesystemStore,
-	#[cfg(feature = "postgres")]
+	#[cfg(feature = "storage-postgres")]
 	Postgres,
 }
 
@@ -690,22 +688,14 @@ pub(crate) struct StoreBenchConfig {
 }
 
 pub(crate) fn store_bench_configs() -> Vec<StoreBenchConfig> {
-	#[cfg(not(feature = "postgres"))]
-	{
-		vec![
-			StoreBenchConfig { name: "sqlite", store_type: TestStoreType::Sqlite },
-			StoreBenchConfig { name: "filesystem", store_type: TestStoreType::FilesystemStore },
-		]
-	}
-
-	#[cfg(feature = "postgres")]
-	{
-		vec![
-			StoreBenchConfig { name: "sqlite", store_type: TestStoreType::Sqlite },
-			StoreBenchConfig { name: "filesystem", store_type: TestStoreType::FilesystemStore },
-			StoreBenchConfig { name: "postgres", store_type: TestStoreType::Postgres },
-		]
-	}
+	vec![
+		#[cfg(feature = "storage-sqlite")]
+		StoreBenchConfig { name: "sqlite", store_type: TestStoreType::Sqlite },
+		#[cfg(feature = "storage-filesystem")]
+		StoreBenchConfig { name: "filesystem", store_type: TestStoreType::FilesystemStore },
+		#[cfg(feature = "storage-postgres")]
+		StoreBenchConfig { name: "postgres", store_type: TestStoreType::Postgres },
+	]
 }
 
 impl Default for TestStoreType {
@@ -918,7 +908,7 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		TestStoreType::FilesystemStore => {
 			builder.build_with_fs_store(config.node_entropy.into()).unwrap()
 		},
-		#[cfg(feature = "postgres")]
+		#[cfg(feature = "storage-postgres")]
 		TestStoreType::Postgres => {
 			use ldk_node::io::postgres_store::POSTGRES_TEST_URL_ENV_VAR;
 

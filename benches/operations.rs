@@ -31,7 +31,7 @@ use crate::common::{
 	open_channel_push_amt, StoreBenchConfig, TestChainSource, TestConfig, TestStoreType,
 };
 
-#[cfg(feature = "postgres")]
+#[cfg(feature = "storage-postgres")]
 use ldk_node::io::postgres_store::{PostgresStore, POSTGRES_TEST_URL_ENV_VAR};
 
 const STARTUP_SEED_SCENARIOS: [StartupSeedScenario; 6] = [
@@ -380,7 +380,7 @@ fn migrate_startup_seed_store(
 				let destination_store = FilesystemStoreV2::new(destination_store_path).unwrap();
 				migrate_kv_store_data_async(source_store, &destination_store).await.unwrap();
 			},
-			#[cfg(feature = "postgres")]
+			#[cfg(feature = "storage-postgres")]
 			TestStoreType::Postgres => {
 				let connection_string = postgres_connection_string();
 				let table_name = postgres_table_name(destination_config);
@@ -397,13 +397,13 @@ fn migrate_startup_seed_store(
 	});
 }
 
-#[cfg(feature = "postgres")]
+#[cfg(feature = "storage-postgres")]
 fn postgres_connection_string() -> String {
 	std::env::var(POSTGRES_TEST_URL_ENV_VAR)
 		.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string())
 }
 
-#[cfg(feature = "postgres")]
+#[cfg(feature = "storage-postgres")]
 fn postgres_table_name(config: &TestConfig) -> String {
 	format!(
 		"test_{}",
@@ -545,7 +545,7 @@ async fn wait_for_forwarded_payment(
 		tokio::select! {
 			event = nodes[0].next_event_async(), if !payment_successful => {
 				match event {
-					Event::PaymentSuccessful { payment_id: Some(payment_id), .. }
+					Event::PaymentSuccessful { payment_id, .. }
 						if payment_id == expected_payment_id =>
 					{
 						payment_successful = true;
