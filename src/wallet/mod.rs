@@ -681,14 +681,14 @@ impl Wallet {
 
 	/// The id to record a transaction under that the funding-status check found foreign to the
 	/// funding record resolved for it as `resolved_id`: its own txid-derived id, or `None` when a
-	/// funding record sits there already. A funding record's id is anchored to its first
-	/// candidate's txid, so a wallet event for that transaction falls back to this id whenever the
-	/// pending entry no longer maps it — which only happens once the negotiation settled and the
-	/// entry was removed. The generic event handling must then skip its write: merging a
-	/// wallet-view `Pending` payment into the settled record would resurrect it with figures no
-	/// classification derived. When `resolved_id` is the txid-derived id already, the
-	/// funding-status check has read that record, and finding the transaction foreign to it is
-	/// this very case; only a fallback from a different id needs a read.
+	/// funding record sits there already. A funding record wallet sync created before
+	/// classification keeps the txid-derived id of that transaction, so a wallet event for it
+	/// falls back to this id whenever the pending entry no longer maps it — which only happens
+	/// once the negotiation settled and the entry was removed. The generic event handling must
+	/// then skip its write: merging a wallet-view `Pending` payment into the settled record would
+	/// resurrect it with figures no classification derived. When `resolved_id` is the txid-derived
+	/// id already, the funding-status check has read that record, and finding the transaction
+	/// foreign to it is this very case; only a fallback from a different id needs a read.
 	async fn foreign_transaction_payment_id(
 		&self, resolved_id: PaymentId, txid: Txid,
 	) -> Result<Option<PaymentId>, Error> {
@@ -6276,8 +6276,8 @@ mod tests {
 	}
 
 	/// A middle RBF candidate must map back to the funding record: it is neither the record's
-	/// id (derived from the first candidate), nor its current txid (the active candidate), nor
-	/// in `conflicting_txids` (it never got a `TxReplaced` event of its own).
+	/// id (here the txid-derived id of the first candidate), nor its current txid (the active
+	/// candidate), nor in `conflicting_txids` (it never got a `TxReplaced` event of its own).
 	#[tokio::test]
 	async fn find_payment_by_txid_maps_candidate_txids() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -6799,18 +6799,19 @@ mod tests {
 		assert_eq!(reads, 2, "recording an unknown transaction re-read the payment store");
 	}
 
-	/// A funding record's id is anchored to its first candidate's txid. Once the payment settles
-	/// and its entry is removed, a wallet event for that candidate no longer resolves through the
-	/// candidate history — the fallback keys it by its own txid, colliding with the record's id.
-	/// Recording the event there would merge a fresh wallet-view `Pending` payment into the
-	/// terminal record; such events must be skipped.
+	/// A funding record wallet sync created before classification keeps the txid-derived id of
+	/// its first candidate. Once the payment settles and its entry is removed, a wallet event for
+	/// that candidate no longer resolves through the candidate history — the fallback keys it by
+	/// its own txid, colliding with the record's id. Recording the event there would merge a fresh
+	/// wallet-view `Pending` payment into the terminal record; such events must be skipped.
 	#[tokio::test]
 	async fn candidate_event_does_not_resurrect_a_settled_funding_payment() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let wallet = new_test_wallet(store, false).await;
 
-		// The record's id derives from the first candidate r1; its txid rotated to the RBF round
-		// r2. The payment failed and its pending entry is gone.
+		// The record keeps the txid-derived id of its first candidate r1, as one wallet sync
+		// created first does; its txid rotated to the RBF round r2. The payment failed and its
+		// pending entry is gone.
 		let r1 = Txid::from_byte_array([2u8; 32]);
 		let r2 = Txid::from_byte_array([4u8; 32]);
 		let payment_id = PaymentId(r1.to_byte_array());
