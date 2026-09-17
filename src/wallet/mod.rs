@@ -3175,14 +3175,17 @@ mod tests {
 	}
 
 	/// An in-memory store whose writes can be made to park until aborted or released,
-	/// signalling when a write has entered the gate, and whose writes can be made to fail.
+	/// signalling when a write has entered the gate, and whose writes can be made to fail,
+	/// counting the failures. Records the keys it wrote, in order.
 	#[derive(Clone)]
 	struct GatedStore {
 		inner: Arc<InMemoryStore>,
 		gate_writes: Arc<AtomicBool>,
 		fail_writes: Arc<AtomicBool>,
+		failed_writes: Arc<AtomicUsize>,
 		write_entered: Arc<tokio::sync::Notify>,
 		release: Arc<tokio::sync::Notify>,
+		writes: Arc<Mutex<Vec<(String, String)>>>,
 	}
 
 	impl GatedStore {
@@ -3191,9 +3194,22 @@ mod tests {
 				inner: Arc::new(InMemoryStore::new()),
 				gate_writes: Arc::new(AtomicBool::new(false)),
 				fail_writes: Arc::new(AtomicBool::new(false)),
+				failed_writes: Arc::new(AtomicUsize::new(0)),
 				write_entered: Arc::new(tokio::sync::Notify::new()),
 				release: Arc::new(tokio::sync::Notify::new()),
+				writes: Arc::new(Mutex::new(Vec::new())),
 			}
+		}
+
+		/// The keys written to `primary_namespace`, in write order.
+		fn written_keys(&self, primary_namespace: &str) -> Vec<String> {
+			self.writes
+				.lock()
+				.unwrap()
+				.iter()
+				.filter(|(namespace, _)| namespace == primary_namespace)
+				.map(|(_, key)| key.clone())
+				.collect()
 		}
 	}
 
@@ -3210,8 +3226,10 @@ mod tests {
 			let inner = Arc::clone(&self.inner);
 			let gate_writes = Arc::clone(&self.gate_writes);
 			let fail_writes = Arc::clone(&self.fail_writes);
+			let failed_writes = Arc::clone(&self.failed_writes);
 			let write_entered = Arc::clone(&self.write_entered);
 			let release = Arc::clone(&self.release);
+			let writes = Arc::clone(&self.writes);
 			let primary_namespace = primary_namespace.to_string();
 			let secondary_namespace = secondary_namespace.to_string();
 			let key = key.to_string();
@@ -3221,9 +3239,13 @@ mod tests {
 					release.notified().await;
 				}
 				if fail_writes.load(Ordering::Acquire) {
+					failed_writes.fetch_add(1, Ordering::AcqRel);
 					return Err(io::Error::new(io::ErrorKind::Other, "write failed"));
 				}
-				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
+				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf)
+					.await?;
+				writes.lock().unwrap().push((primary_namespace, key));
+				Ok(())
 			}
 		}
 
@@ -4502,6 +4524,117 @@ mod tests {
 				"a package from before stop() resurfaced after restart"
 			);
 		}
+
+		stop_sender.send(()).unwrap();
+		loop_task.await.unwrap();
+	}
+
+	/// Fresh packages go before a due retry. Both are ready at once when the loop returns from a
+	/// slow classification with packages waiting in the channel and a retry past its deadline;
+	/// the channel is polled first until it is empty, so broadcasts arriving during a store outage
+	/// are never held back by the outage's retries.
+	#[tokio::test]
+	async fn fresh_package_is_classified_before_a_due_retry() {
+		use lightning::chain::chaininterface::BroadcasterInterface;
+
+		use crate::data_store::StorableObjectId;
+
+		let gated_store = GatedStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(gated_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		wallet.broadcaster.set_wallet(Arc::downgrade(&wallet));
+
+		let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
+		let chain_source = Arc::clone(&wallet.chain_source);
+		let loop_task = tokio::spawn(async move {
+			chain_source.continuously_process_broadcast_queue(stop_receiver).await
+		});
+
+		// Three funding transactions paying the wallet, so each classification reaches the
+		// payment-store write.
+		let funding_tx = |input_byte: u8| {
+			let script_pubkey = wallet
+				.inner
+				.lock()
+				.unwrap()
+				.reveal_next_address(KeychainKind::External)
+				.address
+				.script_pubkey();
+			Transaction {
+				version: bitcoin::transaction::Version::TWO,
+				lock_time: LockTime::ZERO,
+				input: vec![bitcoin::TxIn {
+					previous_output: bitcoin::OutPoint {
+						txid: Txid::from_byte_array([input_byte; 32]),
+						vout: 0,
+					},
+					..Default::default()
+				}],
+				output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
+			}
+		};
+		let retried_tx = funding_tx(1);
+		let parked_tx = funding_tx(2);
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let funding_type = LdkTransactionType::Funding {
+			channels: vec![(counterparty_node_id, ChannelId([7u8; 32]))],
+		};
+
+		// The first package fails classification and is scheduled to retry after the delay.
+		gated_store.fail_writes.store(true, Ordering::Release);
+		wallet.broadcaster.broadcast_transactions(&[(&retried_tx, funding_type.clone())]);
+		let mut failed_writes = 0;
+		for _ in 0..100 {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			failed_writes = gated_store.failed_writes.load(Ordering::Acquire);
+			if failed_writes > 0 {
+				break;
+			}
+		}
+		assert!(failed_writes > 0, "classification never attempted a payment-store write");
+
+		// The second package parks in its payment-store write, holding the loop past the retry's
+		// deadline.
+		gated_store.fail_writes.store(false, Ordering::Release);
+		gated_store.gate_writes.store(true, Ordering::Release);
+		wallet.broadcaster.broadcast_transactions(&[(&parked_tx, funding_type.clone())]);
+		gated_store.write_entered.notified().await;
+
+		// Fresh packages queue while the retry falls due: eight, so that a select polling its arms
+		// in random order passes the assertion below by chance about one run in twenty-five.
+		let fresh_txs: Vec<Transaction> =
+			(3..11).map(|input_byte| funding_tx(input_byte)).collect();
+		for fresh_tx in &fresh_txs {
+			wallet.broadcaster.broadcast_transactions(&[(fresh_tx, funding_type.clone())]);
+		}
+		tokio::time::sleep(crate::chain::FAILED_CLASSIFY_RETRY_DELAY + Duration::from_millis(500))
+			.await;
+
+		// Once the parked package completes, the fresh packages and the due retry are all ready.
+		gated_store.gate_writes.store(false, Ordering::Release);
+		gated_store.release.notify_one();
+		let expected_writes = fresh_txs.len() + 2;
+		let mut payment_writes = Vec::new();
+		for _ in 0..100 {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			payment_writes = gated_store.written_keys(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+			if payment_writes.len() >= expected_writes {
+				break;
+			}
+		}
+		assert_eq!(payment_writes.len(), expected_writes, "not every package was classified");
+		let position = |tx: &Transaction| {
+			let key = PaymentId(tx.compute_txid().to_byte_array()).encode_to_hex_str();
+			payment_writes.iter().position(|written| *written == key).expect("classified")
+		};
+		let retried_position = position(&retried_tx);
+		assert!(
+			fresh_txs.iter().all(|fresh_tx| position(fresh_tx) < retried_position),
+			"the due retry was classified before a fresh package"
+		);
 
 		stop_sender.send(()).unwrap();
 		loop_task.await.unwrap();

@@ -44,7 +44,7 @@ use crate::{Error, PersistedNodeMetrics};
 /// How long to wait before re-classifying a package whose classification failed. Long enough to
 /// give a struggling store room to recover, short against the ~minutes until the transaction
 /// could confirm.
-const FAILED_CLASSIFY_RETRY_DELAY: Duration = Duration::from_secs(2);
+pub(crate) const FAILED_CLASSIFY_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// We use this parent-child TRUC package to make sure the configured chain source supports
 /// broadcasting packages via the `submitpackage` Bitcoin Core RPC.
@@ -614,6 +614,12 @@ impl ChainSource {
 		loop {
 			let next_retry_at = retries.next_retry_at();
 			let package = tokio::select! {
+				// Polled in order: a stop request first, then a fresh package, and a due retry
+				// only when neither is ready, so retries never hold back the broadcasts that
+				// keep arriving during a store outage. The retry keeps its delay regardless:
+				// without it, an empty channel would retry a fast-failing store back to back,
+				// logging an error each time.
+				biased;
 				_ = stop_tx_bcast_receiver.changed() => {
 					log_debug!(
 						self.logger,
