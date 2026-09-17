@@ -24,7 +24,10 @@ use bitcoin::secp256k1::PublicKey;
 pub use bitcoin::{Address, BlockHash, Network, OutPoint, ScriptBuf, Txid};
 pub use lightning::chain::channelmonitor::BalanceSource;
 pub use lightning::events::{ClosureReason, PaymentFailureReason};
-use lightning::ln::channel_state::{ChannelShutdownState, CounterpartyForwardingInfo};
+use lightning::ln::channel_state::{
+	ChannelShutdownState, CounterpartyForwardingInfo, InboundHTLCDetails, InboundHTLCStateDetails,
+	OutboundHTLCDetails, OutboundHTLCStateDetails,
+};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::DecodeError;
 pub use lightning::ln::types::ChannelId;
@@ -1698,6 +1701,139 @@ pub enum ChannelShutdownState {
 	/// We've successfully negotiated a closing_signed dance. At this point `ChannelManager` is about
 	/// to drop the channel.
 	ShutdownComplete,
+}
+
+/// Exposes the state of pending inbound HTLCs.
+///
+/// This can be used to inspect what next message an HTLC is waiting for to advance its state.
+#[uniffi::remote(Enum)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum InboundHTLCStateDetails {
+	/// We have added this HTLC in our commitment transaction by receiving commitment_signed and
+	/// returning revoke_and_ack. We are awaiting the appropriate revoke_and_ack's from the remote
+	/// before this HTLC is included on the remote commitment transaction.
+	AwaitingRemoteRevokeToAdd,
+	/// This HTLC has been included in the commitment_signed and revoke_and_ack messages on both sides
+	/// and is included in both commitment transactions.
+	///
+	/// This HTLC is now safe to either forward or be claimed as a payment by us. The HTLC will
+	/// remain in this state until the forwarded upstream HTLC has been resolved and we resolve this
+	/// HTLC correspondingly, or until we claim it as a payment. If it is part of a multipart
+	/// payment, it will only be claimed together with other required parts.
+	Committed,
+	/// We have received the preimage for this HTLC and it is being removed by fulfilling it with
+	/// update_fulfill_htlc. This HTLC is still on both commitment transactions, but we are awaiting
+	/// the appropriate revoke_and_ack's from the remote before this HTLC is removed from the remote
+	/// commitment transaction after update_fulfill_htlc.
+	AwaitingRemoteRevokeToRemoveFulfill,
+	/// The HTLC is being removed by failing it with update_fail_htlc or update_fail_malformed_htlc.
+	/// This HTLC is still on both commitment transactions, but we are awaiting the appropriate
+	/// revoke_and_ack's from the remote before this HTLC is removed from the remote commitment
+	/// transaction.
+	AwaitingRemoteRevokeToRemoveFail,
+}
+
+/// Exposes details around pending inbound HTLCs.
+#[uniffi::remote(Record)]
+pub struct InboundHTLCDetails {
+	/// The HTLC ID.
+	/// The IDs are incremented by 1 starting from 0 for each offered HTLC.
+	/// They are unique per channel and inbound/outbound direction, unless an HTLC was only announced
+	/// and not part of any commitment transaction.
+	pub htlc_id: u64,
+	/// The amount in msat.
+	pub amount_msat: u64,
+	/// The block height at which this HTLC expires.
+	pub cltv_expiry: u32,
+	/// The payment hash.
+	pub payment_hash: PaymentHash,
+	/// The state of the HTLC in the state machine.
+	///
+	/// Determines on which commitment transactions the HTLC is included and what message the HTLC is
+	/// waiting for to advance to the next state.
+	///
+	/// LDK will always fill this field in, but when downgrading to prior versions of LDK, new
+	/// states may result in `None` here.
+	pub state: Option<InboundHTLCStateDetails>,
+	/// Whether the HTLC has an output below the local dust limit. If so, the output will be trimmed
+	/// from the local commitment transaction and added to the commitment transaction fee.
+	/// For non-anchor channels, this takes into account the cost of the second-stage HTLC
+	/// transactions as well.
+	///
+	/// When the local commitment transaction is broadcasted as part of a unilateral closure,
+	/// the value of this HTLC will therefore not be claimable but instead burned as a transaction
+	/// fee.
+	///
+	/// Note that dust limits are specific to each party. An HTLC can be dust for the local
+	/// commitment transaction but not for the counterparty's commitment transaction and vice versa.
+	pub is_dust: bool,
+}
+
+/// Exposes the state of pending outbound HTLCs.
+///
+/// This can be used to inspect what next message an HTLC is waiting for to advance its state.
+#[uniffi::remote(Enum)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum OutboundHTLCStateDetails {
+	/// We are awaiting the appropriate revoke_and_ack's from the remote before the HTLC is added
+	/// on the remote's commitment transaction after update_add_htlc.
+	AwaitingRemoteRevokeToAdd,
+	/// The HTLC has been added to the remote's commitment transaction by sending commitment_signed
+	/// and receiving revoke_and_ack in return.
+	///
+	/// The HTLC will remain in this state until the remote node resolves the HTLC, or until we
+	/// unilaterally close the channel due to a timeout with an uncooperative remote node.
+	Committed,
+	/// The HTLC has been fulfilled successfully by the remote with a preimage in update_fulfill_htlc,
+	/// and we removed the HTLC from our commitment transaction by receiving commitment_signed and
+	/// returning revoke_and_ack. We are awaiting the appropriate revoke_and_ack's from the remote
+	/// for the removal from its commitment transaction.
+	AwaitingRemoteRevokeToRemoveSuccess,
+	/// The HTLC has been failed by the remote with update_fail_htlc or update_fail_malformed_htlc,
+	/// and we removed the HTLC from our commitment transaction by receiving commitment_signed and
+	/// returning revoke_and_ack. We are awaiting the appropriate revoke_and_ack's from the remote
+	/// for the removal from its commitment transaction.
+	AwaitingRemoteRevokeToRemoveFailure,
+}
+
+/// Exposes details around pending outbound HTLCs.
+#[uniffi::remote(Record)]
+pub struct OutboundHTLCDetails {
+	/// The HTLC ID.
+	/// The IDs are incremented by 1 starting from 0 for each offered HTLC.
+	/// They are unique per channel and inbound/outbound direction, unless an HTLC was only announced
+	/// and not part of any commitment transaction.
+	///
+	/// Not present when we are awaiting a remote revocation and the HTLC is not added yet.
+	pub htlc_id: Option<u64>,
+	/// The amount in msat.
+	pub amount_msat: u64,
+	/// The block height at which this HTLC expires.
+	pub cltv_expiry: u32,
+	/// The payment hash.
+	pub payment_hash: PaymentHash,
+	/// The state of the HTLC in the state machine.
+	///
+	/// Determines on which commitment transactions the HTLC is included and what message the HTLC is
+	/// waiting for to advance to the next state.
+	///
+	/// LDK will always fill this field in, but when downgrading to prior versions of LDK, new
+	/// states may result in `None` here.
+	pub state: Option<OutboundHTLCStateDetails>,
+	/// The extra fee being skimmed off the top of this HTLC.
+	pub skimmed_fee_msat: Option<u64>,
+	/// Whether the HTLC has an output below the local dust limit. If so, the output will be trimmed
+	/// from the local commitment transaction and added to the commitment transaction fee.
+	/// For non-anchor channels, this takes into account the cost of the second-stage HTLC
+	/// transactions as well.
+	///
+	/// When the local commitment transaction is broadcasted as part of a unilateral closure,
+	/// the value of this HTLC will therefore not be claimable but instead burned as a transaction
+	/// fee.
+	///
+	/// Note that dust limits are specific to each party. An HTLC can be dust for the local
+	/// commitment transaction but not for the counterparty's commitment transaction and vice versa.
+	pub is_dust: bool,
 }
 
 /// The reason the channel was closed. See individual variants for more details.
