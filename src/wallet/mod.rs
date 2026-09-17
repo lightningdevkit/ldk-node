@@ -7871,16 +7871,27 @@ mod tests {
 		gated_store.release.notify_one();
 		let expected_writes = fresh_txs.len() + 2;
 		let mut payment_writes = Vec::new();
+		let mut payments = Vec::new();
 		for _ in 0..100 {
 			tokio::time::sleep(Duration::from_millis(100)).await;
 			payment_writes = gated_store.written_keys(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
-			if payment_writes.len() >= expected_writes {
+			payments = wallet.payment_store.list_page(None).await.unwrap().objects;
+			if payment_writes.len() >= expected_writes && payments.len() >= expected_writes {
 				break;
 			}
 		}
 		assert_eq!(payment_writes.len(), expected_writes, "not every package was classified");
+		// A funding record's id is its own, so find each transaction's record to learn the key
+		// its write went under.
 		let position = |tx: &Transaction| {
-			let key = PaymentId(tx.compute_txid().to_byte_array()).encode_to_hex_str();
+			let txid = tx.compute_txid();
+			let record = payments
+				.iter()
+				.find(|payment| {
+					matches!(payment.kind, PaymentKind::Onchain { txid: recorded, .. } if recorded == txid)
+				})
+				.expect("classified");
+			let key = record.id.encode_to_hex_str();
 			payment_writes.iter().position(|written| *written == key).expect("classified")
 		};
 		let retried_position = position(&retried_tx);
