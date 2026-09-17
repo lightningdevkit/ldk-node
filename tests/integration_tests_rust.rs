@@ -632,6 +632,7 @@ async fn channel_open_fails_when_funds_insufficient() {
 			120000,
 			None,
 			None,
+			None,
 		)
 	);
 }
@@ -916,6 +917,7 @@ async fn split_underpaid_bolt11_payment() {
 				payer.listening_addresses().unwrap().first().unwrap().clone(),
 				channel_amount_sat,
 				push_amount_msat,
+				None,
 				None,
 			)
 			.unwrap();
@@ -4940,23 +4942,30 @@ fn open_channel_variant(
 	let address = node_b.listening_addresses().unwrap().first().unwrap().clone();
 	match variant {
 		OpenChannelVariant::Standard => node_a
-			.open_channel(node_b.node_id(), address, channel_amount_sats, None, None)
+			.open_channel(node_b.node_id(), address, channel_amount_sats, None, None, None)
 			.map(|_| ()),
 		OpenChannelVariant::Announced => node_a
-			.open_announced_channel(node_b.node_id(), address, channel_amount_sats, None, None)
+			.open_announced_channel(
+				node_b.node_id(),
+				address,
+				channel_amount_sats,
+				None,
+				None,
+				None,
+			)
 			.map(|_| ()),
 		OpenChannelVariant::ZeroReserve => node_a
-			.open_0reserve_channel(node_b.node_id(), address, channel_amount_sats, None, None)
+			.open_0reserve_channel(node_b.node_id(), address, channel_amount_sats, None, None, None)
 			.map(|_| ()),
 		OpenChannelVariant::StandardWithAll => {
-			node_a.open_channel_with_all(node_b.node_id(), address, None, None).map(|_| ())
+			node_a.open_channel_with_all(node_b.node_id(), address, None, None, None).map(|_| ())
 		},
 		OpenChannelVariant::AnnouncedWithAll => node_a
-			.open_announced_channel_with_all(node_b.node_id(), address, None, None)
+			.open_announced_channel_with_all(node_b.node_id(), address, None, None, None)
 			.map(|_| ()),
-		OpenChannelVariant::ZeroReserveWithAll => {
-			node_a.open_0reserve_channel_with_all(node_b.node_id(), address, None, None).map(|_| ())
-		},
+		OpenChannelVariant::ZeroReserveWithAll => node_a
+			.open_0reserve_channel_with_all(node_b.node_id(), address, None, None, None)
+			.map(|_| ()),
 	}
 }
 

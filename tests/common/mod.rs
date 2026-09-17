@@ -1134,6 +1134,7 @@ pub async fn open_channel_no_wait(
 				funding_amount_sat,
 				push_amount_msat,
 				None,
+				None,
 			)
 			.unwrap();
 	} else {
@@ -1143,6 +1144,7 @@ pub async fn open_channel_no_wait(
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
 				push_amount_msat,
+				None,
 				None,
 			)
 			.unwrap();
@@ -1176,6 +1178,7 @@ pub async fn open_channel_with_all(
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				None,
 				None,
+				None,
 			)
 			.unwrap();
 	} else {
@@ -1183,6 +1186,7 @@ pub async fn open_channel_with_all(
 			.open_channel_with_all(
 				node_b.node_id(),
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				None,
 				None,
 				None,
 			)
@@ -1273,6 +1277,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 				funding_amount_sat,
 				Some(push_msat),
 				None,
+				None,
 			)
 			.unwrap();
 	} else {
@@ -1282,6 +1287,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
 				Some(push_msat),
+				None,
 				None,
 			)
 			.unwrap();
