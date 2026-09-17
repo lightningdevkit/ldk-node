@@ -364,21 +364,21 @@ impl Wallet {
 						FundingStatusUpdate::Applied => continue,
 						FundingStatusUpdate::NotFunding => {},
 						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead.
+						// funding outpoint): record it under its own id below instead, unless a
+						// settled funding payment sits there already.
 						FundingStatusUpdate::Foreign => {
-							payment_id = PaymentId(txid.to_byte_array());
+							match self.foreign_transaction_payment_id(payment_id, txid).await? {
+								Some(fallback_id) => payment_id = fallback_id,
+								None => {
+									log_debug!(
+										self.logger,
+										"Skipping wallet event for transaction {} of a settled funding payment",
+										txid,
+									);
+									continue;
+								},
+							}
 						},
-					}
-
-					// The fallback id belongs to a settled funding payment whose entry is gone:
-					// skip rather than resurrect it (see `has_funding_record`).
-					if self.has_funding_record(&payment_id).await? {
-						log_debug!(
-							self.logger,
-							"Skipping wallet event for transaction {} of a settled funding payment",
-							txid,
-						);
-						continue;
 					}
 
 					let payment = {
@@ -530,21 +530,21 @@ impl Wallet {
 						FundingStatusUpdate::Applied => continue,
 						FundingStatusUpdate::NotFunding => {},
 						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead.
+						// funding outpoint): record it under its own id below instead, unless a
+						// settled funding payment sits there already.
 						FundingStatusUpdate::Foreign => {
-							payment_id = PaymentId(txid.to_byte_array());
+							match self.foreign_transaction_payment_id(payment_id, txid).await? {
+								Some(fallback_id) => payment_id = fallback_id,
+								None => {
+									log_debug!(
+										self.logger,
+										"Skipping wallet event for transaction {} of a settled funding payment",
+										txid,
+									);
+									continue;
+								},
+							}
 						},
-					}
-
-					// The fallback id belongs to a settled funding payment whose entry is gone:
-					// skip rather than resurrect it (see `has_funding_record`).
-					if self.has_funding_record(&payment_id).await? {
-						log_debug!(
-							self.logger,
-							"Skipping wallet event for transaction {} of a settled funding payment",
-							txid,
-						);
-						continue;
 					}
 
 					let payment = {
@@ -635,21 +635,21 @@ impl Wallet {
 						FundingStatusUpdate::Applied => continue,
 						FundingStatusUpdate::NotFunding => {},
 						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead.
+						// funding outpoint): record it under its own id below instead, unless a
+						// settled funding payment sits there already.
 						FundingStatusUpdate::Foreign => {
-							payment_id = PaymentId(txid.to_byte_array());
+							match self.foreign_transaction_payment_id(payment_id, txid).await? {
+								Some(fallback_id) => payment_id = fallback_id,
+								None => {
+									log_debug!(
+										self.logger,
+										"Skipping wallet event for transaction {} of a settled funding payment",
+										txid,
+									);
+									continue;
+								},
+							}
 						},
-					}
-
-					// The fallback id belongs to a settled funding payment whose entry is gone:
-					// skip rather than resurrect it (see `has_funding_record`).
-					if self.has_funding_record(&payment_id).await? {
-						log_debug!(
-							self.logger,
-							"Skipping wallet event for transaction {} of a settled funding payment",
-							txid,
-						);
-						continue;
 					}
 
 					let payment = {
@@ -677,25 +677,37 @@ impl Wallet {
 		Ok(())
 	}
 
-	/// Whether a funding-classified record exists under the given id. A funding record's id is
-	/// anchored to its first candidate's txid, so a wallet event for that transaction falls back
-	/// to this id whenever the pending entry no longer maps it — which only happens once the
-	/// negotiation settled and the entry was removed. The generic event handling must then skip
-	/// its write: merging a wallet-view `Pending` payment into the settled record would resurrect
-	/// it with figures no classification derived.
-	async fn has_funding_record(&self, payment_id: &PaymentId) -> Result<bool, Error> {
-		Ok(self.payment_store.get(payment_id).await?.is_some_and(|payment| {
-			matches!(
-				payment.kind,
-				PaymentKind::Onchain {
-					tx_type: Some(
-						TransactionType::Funding { .. }
-							| TransactionType::InteractiveFunding { .. }
-					),
-					..
-				}
-			)
-		}))
+	/// The id to record a transaction under that the funding-status check found foreign to the
+	/// funding record resolved for it as `resolved_id`: its own txid-derived id, or `None` when a
+	/// funding record sits there already. A funding record's id is anchored to its first
+	/// candidate's txid, so a wallet event for that transaction falls back to this id whenever the
+	/// pending entry no longer maps it — which only happens once the negotiation settled and the
+	/// entry was removed. The generic event handling must then skip its write: merging a
+	/// wallet-view `Pending` payment into the settled record would resurrect it with figures no
+	/// classification derived. When `resolved_id` is the txid-derived id already, the
+	/// funding-status check has read that record, and finding the transaction foreign to it is
+	/// this very case; only a fallback from a different id needs a read.
+	async fn foreign_transaction_payment_id(
+		&self, resolved_id: PaymentId, txid: Txid,
+	) -> Result<Option<PaymentId>, Error> {
+		let fallback_id = PaymentId(txid.to_byte_array());
+		if resolved_id == fallback_id {
+			return Ok(None);
+		}
+		let has_funding_record =
+			self.payment_store.get(&fallback_id).await?.is_some_and(|payment| {
+				matches!(
+					payment.kind,
+					PaymentKind::Onchain {
+						tx_type: Some(
+							TransactionType::Funding { .. }
+								| TransactionType::InteractiveFunding { .. }
+						),
+						..
+					}
+				)
+			});
+		Ok(if has_funding_record { None } else { Some(fallback_id) })
 	}
 
 	/// Fails a funding payment whose transaction has irrevocably lost a conflict: a transaction
@@ -2975,6 +2987,71 @@ mod tests {
 	const EXTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/0/*)";
 	const INTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/1/*)";
 
+	/// An in-memory store counting the reads it serves, by primary namespace, so tests can pin
+	/// how many backend reads an operation costs.
+	#[derive(Clone)]
+	struct ReadCountingStore {
+		inner: Arc<InMemoryStore>,
+		reads: Arc<Mutex<Vec<String>>>,
+	}
+
+	impl ReadCountingStore {
+		fn new() -> Self {
+			Self { inner: Arc::new(InMemoryStore::new()), reads: Arc::new(Mutex::new(Vec::new())) }
+		}
+
+		/// The number of reads served from `primary_namespace` so far.
+		fn reads(&self, primary_namespace: &str) -> usize {
+			self.reads
+				.lock()
+				.unwrap()
+				.iter()
+				.filter(|namespace| *namespace == primary_namespace)
+				.count()
+		}
+	}
+
+	impl KVStore for ReadCountingStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			self.reads.lock().unwrap().push(primary_namespace.to_string());
+			KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::write(&*self.inner, primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for ReadCountingStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+			PaginatedKVStore::list_paginated(
+				&*self.inner,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+		}
+	}
+
 	/// An in-memory store whose writes can be made to fail on demand, counting the failures so
 	/// tests can wait for a write to have actually failed rather than guessing with a sleep.
 	#[derive(Clone)]
@@ -4799,6 +4876,27 @@ mod tests {
 		);
 	}
 
+	/// Recording a transaction the payment store does not know costs two reads of it: the
+	/// funding-status check looks the resolved id up, and the generic write merges against the
+	/// store. Nothing in between re-reads what the funding-status check has already seen.
+	#[tokio::test]
+	async fn unknown_transaction_is_recorded_after_two_payment_store_reads() {
+		let counting_store = ReadCountingStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(counting_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let tx = wallet_paying_tx(&wallet, 1);
+		let txid = tx.compute_txid();
+		let reads_before = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		let event = WalletEvent::TxUnconfirmed { txid, tx: Arc::new(tx), old_block_time: None };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+		let reads = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE) - reads_before;
+
+		let payment_id = PaymentId(txid.to_byte_array());
+		assert!(wallet.payment_store.get(&payment_id).await.unwrap().is_some());
+		assert_eq!(reads, 2, "recording an unknown transaction re-read the payment store");
+	}
+
 	/// A funding record's id is anchored to its first candidate's txid. Once the payment settles
 	/// and its entry is removed, a wallet event for that candidate no longer resolves through the
 	/// candidate history — the fallback keys it by its own txid, colliding with the record's id.
@@ -4844,6 +4942,46 @@ mod tests {
 		assert!(matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == r2));
 		assert_eq!(payment.latest_update_timestamp, 7);
 		assert!(wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none());
+	}
+
+	/// The same collision through a conflict list: a pending entry naming a settled funding
+	/// record's transaction as a conflict of its own round resolves an event for that transaction
+	/// to the entry's record, which finds it foreign, and the fallback to the transaction's own id
+	/// lands on the settled record. That id is read before anything is written under it.
+	#[tokio::test]
+	async fn conflict_listed_event_does_not_resurrect_a_settled_funding_payment() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		// A settled funding record under the txid-derived id of r1, its pending entry gone.
+		let r1 = Txid::from_byte_array([2u8; 32]);
+		let settled_id = PaymentId(r1.to_byte_array());
+		let mut settled = interactive_funding_details(settled_id, r1, Some(1_000_000), Some(600));
+		settled.status = PaymentStatus::Failed;
+		settled.latest_update_timestamp = 7;
+		wallet.payment_store.insert_or_update(settled).await.unwrap();
+
+		// A live funding record whose entry lists r1 as a conflict of its round r2.
+		let r2 = Txid::from_byte_array([4u8; 32]);
+		let live_id = PaymentId(r2.to_byte_array());
+		let live = interactive_funding_details(live_id, r2, Some(2_000_000), Some(700));
+		wallet.payment_store.insert_or_update(live.clone()).await.unwrap();
+		wallet
+			.pending_payment_store
+			.insert_or_update(PendingPaymentDetails::new(live.clone(), vec![r1], Vec::new()))
+			.await
+			.unwrap();
+		assert_eq!(wallet.find_payment_by_txid(r1).await.unwrap(), Some(live_id));
+
+		let event =
+			WalletEvent::TxUnconfirmed { txid: r1, tx: Arc::new(dummy_tx()), old_block_time: None };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&settled_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed, "the settled record must not resurrect");
+		assert_eq!(payment.latest_update_timestamp, 7);
+		assert!(wallet.pending_payment_store.get(&settled_id).await.unwrap().is_none());
+		assert_eq!(wallet.payment_store.get(&live_id).await.unwrap(), Some(live));
 	}
 
 	/// The failure transition must apply regardless of the payment's direction: a splice-out
