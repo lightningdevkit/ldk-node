@@ -642,21 +642,21 @@ impl ChainSource {
 						log_error!(
 							self.logger,
 							"Dropped the oldest package awaiting a classification retry; LDK re-broadcasts its transactions periodically: {:?}",
-							dropped.sorted_txids(),
+							dropped.txids(),
 						);
 					},
 					ScheduleOutcome::AlreadyQueued(duplicate) => {
 						log_debug!(
 							self.logger,
 							"Dropped a re-broadcast package; an identical one already awaits a classification retry: {:?}",
-							duplicate.sorted_txids(),
+							duplicate.txids(),
 						);
 					},
 					ScheduleOutcome::Refused(package) => {
 						log_error!(
 							self.logger,
 							"Dropped a package failing classification; too many await retries: {:?}",
-							package.sorted_txids(),
+							package.txids(),
 						);
 					},
 				}

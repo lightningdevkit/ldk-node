@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::ops::Deref;
 use std::sync::{Mutex as StdMutex, Weak};
 
@@ -57,12 +57,10 @@ impl BroadcastPackage {
 		SortedTransactions::sort_parents_child_package_topologically(txs)
 	}
 
-	/// The packaged transactions' txids in sorted order, identifying the package's effect on
-	/// chain: two packages with the same txids broadcast the same transactions.
-	pub(crate) fn sorted_txids(&self) -> Vec<Txid> {
-		let mut txids: Vec<Txid> = self.0.iter().map(|(tx, _)| tx.compute_txid()).collect();
-		txids.sort_unstable();
-		txids
+	/// The txids of the packaged transactions, identifying the package's effect on chain: two
+	/// packages with the same txids broadcast the same transactions.
+	pub(crate) fn txids(&self) -> BTreeSet<Txid> {
+		self.0.iter().map(|(tx, _)| tx.compute_txid()).collect()
 	}
 
 	/// Whether the package may be dropped to keep [`RetryQueue`] within its bound: every
@@ -114,7 +112,7 @@ pub(crate) enum ScheduleOutcome {
 /// accumulate without bound and replay as a burst on recovery. An identical copy is never queued
 /// twice — the waiting entry and its deadline stand; fee-bumped rebroadcast variants carry new
 /// txids, so the bound — not the dedup — is what limits their accumulation.
-pub(crate) struct RetryQueue(VecDeque<(Instant, Vec<Txid>, BroadcastPackage)>);
+pub(crate) struct RetryQueue(VecDeque<(Instant, BTreeSet<Txid>, BroadcastPackage)>);
 
 impl RetryQueue {
 	pub(crate) fn new() -> Self {
@@ -138,7 +136,7 @@ impl RetryQueue {
 	pub(crate) fn schedule(
 		&mut self, package: BroadcastPackage, retry_at: Instant,
 	) -> ScheduleOutcome {
-		let txids = package.sorted_txids();
+		let txids = package.txids();
 		if self.0.iter().any(|(_, waiting, _)| *waiting == txids) {
 			// Same transactions, same classification outcome: keep the waiting entry and its
 			// earlier deadline. The one same-txid package with a *different* type is LDK's
@@ -286,6 +284,8 @@ where
 
 #[cfg(test)]
 mod tests {
+	use std::collections::BTreeSet;
+
 	use bitcoin::hashes::Hash;
 	use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 
@@ -512,9 +512,9 @@ mod tests {
 		));
 
 		let popped = retries.pop_next().expect("first package");
-		assert_eq!(popped.sorted_txids(), vec![tx_a.compute_txid()]);
+		assert_eq!(popped.txids(), BTreeSet::from([tx_a.compute_txid()]));
 		let popped = retries.pop_next().expect("second package");
-		assert_eq!(popped.sorted_txids(), vec![tx_b.compute_txid()]);
+		assert_eq!(popped.txids(), BTreeSet::from([tx_b.compute_txid()]));
 	}
 
 	/// Distinct transactions (e.g. fee-bumped claim variants during a store outage) are held to
@@ -550,7 +550,7 @@ mod tests {
 		let new_claim = numbered_tx(MAX_QUEUED_RETRIES as u32);
 		match retries.schedule(BroadcastPackage::unclassified(new_claim.clone()), deadline(2)) {
 			ScheduleOutcome::Scheduled { dropped: Some(dropped) } => {
-				assert_eq!(dropped.sorted_txids(), vec![oldest_claim.compute_txid()]);
+				assert_eq!(dropped.txids(), BTreeSet::from([oldest_claim.compute_txid()]));
 			},
 			_ => panic!("the incoming claim must be scheduled by dropping the oldest one"),
 		}
@@ -564,7 +564,7 @@ mod tests {
 
 		let mut remaining = Vec::new();
 		while let Some(package) = retries.pop_next() {
-			remaining.extend(package.sorted_txids());
+			remaining.extend(package.txids());
 		}
 		assert!(remaining.contains(&funding_tx.compute_txid()), "funding is never dropped");
 		assert!(remaining.contains(&new_claim.compute_txid()));
@@ -632,7 +632,7 @@ mod tests {
 		let new_claim = numbered_tx(MAX_QUEUED_RETRIES as u32);
 		match retries.schedule(claim_package(&new_claim), deadline(2)) {
 			ScheduleOutcome::Scheduled { dropped: Some(dropped) } => {
-				assert_eq!(dropped.sorted_txids(), vec![oldest_claim.compute_txid()]);
+				assert_eq!(dropped.txids(), BTreeSet::from([oldest_claim.compute_txid()]));
 			},
 			_ => panic!("the incoming claim must be scheduled by dropping the oldest one"),
 		}
@@ -646,7 +646,7 @@ mod tests {
 
 		let mut remaining = Vec::new();
 		while let Some(package) = retries.pop_next() {
-			remaining.extend(package.sorted_txids());
+			remaining.extend(package.txids());
 		}
 		assert!(
 			remaining.contains(&coop_close_tx.compute_txid()),
