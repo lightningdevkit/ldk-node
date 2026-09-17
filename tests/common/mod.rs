@@ -38,7 +38,7 @@ use bitcoin::{
 use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::electrum_client::ElectrumApi;
 use electrsd::{corepc_node, ElectrsD};
-use ldk_node::bip39::Mnemonic;
+use ldk_node::bip39::{Mnemonic, WordCount};
 #[cfg(feature = "chain-electrum")]
 use ldk_node::config::ElectrumSyncConfig;
 #[cfg(feature = "chain-esplora")]
@@ -683,7 +683,7 @@ impl Default for TestConfig {
 		let log_writer = Default::default();
 		let store_type = Default::default();
 
-		let mnemonic = Mnemonic::generate(24).unwrap();
+		let mnemonic = Mnemonic::generate(WordCount::Words24).unwrap();
 		#[cfg(not(feature = "uniffi"))]
 		let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 		#[cfg(feature = "uniffi")]

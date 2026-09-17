@@ -388,6 +388,15 @@ typedef string UserChannelId;
 
 typedef interface Mnemonic;
 
+[Remote]
+enum WordCount {
+	"Words12",
+	"Words15",
+	"Words18",
+	"Words21",
+	"Words24",
+};
+
 [Custom]
 typedef string UntrustedString;
 

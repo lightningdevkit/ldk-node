@@ -9,6 +9,8 @@
 
 use std::fmt;
 
+pub use bip39::WordCount;
+
 use crate::config::WALLET_KEYS_SEED_LEN;
 use crate::ffi::maybe_deref;
 use crate::io;
