@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bip39::Mnemonic as Bip39Mnemonic;
+pub use bip39::WordCount;
 use bitcoin::hashes::sha256::Hash as Sha256;
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
@@ -1201,10 +1202,8 @@ impl Mnemonic {
 
 	/// Generates a random English mnemonic with the specified word count.
 	#[uniffi::constructor]
-	pub fn generate(word_count: u8) -> Result<Self, Error> {
-		Bip39Mnemonic::generate(word_count.into())
-			.map(Self::from)
-			.map_err(|_| Error::InvalidMnemonic)
+	pub fn generate(word_count: WordCount) -> Result<Self, Error> {
+		Bip39Mnemonic::generate(word_count).map(Self::from).map_err(|_| Error::InvalidMnemonic)
 	}
 
 	/// Returns the words in the mnemonic.
@@ -3031,8 +3030,7 @@ mod tests {
 		assert_eq!(mnemonic.to_entropy(), entropy);
 		assert_eq!(mnemonic.checksum(), 3);
 		assert_eq!(mnemonic.to_seed("TREZOR").len(), 64);
-		assert_eq!(Mnemonic::generate(12).unwrap().word_count(), 12);
-		assert_eq!(Mnemonic::generate(13), Err(Error::InvalidMnemonic));
+		assert_eq!(Mnemonic::generate(WordCount::Words12).unwrap().word_count(), 12);
 		assert_eq!(Mnemonic::from_entropy(&[0; 15]), Err(Error::InvalidMnemonic));
 	}
 }

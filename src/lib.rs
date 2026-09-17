@@ -27,7 +27,7 @@
 //! # {
 //! use std::str::FromStr;
 //!
-//! use ldk_node::bip39::Mnemonic;
+//! use ldk_node::bip39::{Mnemonic, WordCount};
 //! use ldk_node::bitcoin::secp256k1::PublicKey;
 //! use ldk_node::bitcoin::Network;
 //! use ldk_node::entropy::NodeEntropy;
@@ -43,7 +43,7 @@
 //! 		"https://rapidsync.lightningdevkit.org/testnet/v2/snapshot".to_string(),
 //! 	);
 //!
-//! 	let mnemonic = Mnemonic::generate(24).unwrap();
+//! 	let mnemonic = Mnemonic::generate(WordCount::Words24).unwrap();
 //! 	let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 //! 	let node = builder.build(node_entropy).unwrap();
 //!
@@ -2267,7 +2267,7 @@ impl Node {
 	/// # use ldk_node::config::Config;
 	/// # use ldk_node::payment::{PaymentDetails, PaymentDirection};
 	/// # use ldk_node::bitcoin::Network;
-	/// # use ldk_node::bip39::Mnemonic;
+	/// # use ldk_node::bip39::{Mnemonic, WordCount};
 	/// # use ldk_node::entropy::NodeEntropy;
 	/// # use rand::distr::Alphanumeric;
 	/// # use rand::{rng, Rng};
@@ -2278,7 +2278,7 @@ impl Node {
 	/// # temp_path.push(rand_dir);
 	/// # config.storage_dir_path = temp_path.display().to_string();
 	/// # let builder = Builder::from_config(config);
-	/// # let mnemonic = Mnemonic::generate(24).unwrap();
+	/// # let mnemonic = Mnemonic::generate(WordCount::Words24).unwrap();
 	/// # let node_entropy = NodeEntropy::from_bip39_mnemonic(mnemonic, None);
 	/// # let node = builder.build(node_entropy.into()).unwrap();
 	/// let mut outbound = Vec::new();

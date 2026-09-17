@@ -6,7 +6,8 @@
   `NodeError::InvalidMnemonic` for invalid input; generated mnemonics can be converted back to a
   string through their language's standard string conversion.
 - `generate_entropy_mnemonic` has been removed. Use `bip39::Mnemonic::generate` in Rust and
-  `Mnemonic::generate` in the language bindings instead.
+  `Mnemonic::generate` in the language bindings instead, passing a `WordCount` variant.
+  `WordCount` is now re-exported from bip39 rather than defined by LDK Node.
 - Migrating between storage backends does not preserve the relative creation order of
   pre-existing payments, as the generic KV store migration copies entries in an unspecified
   order. Expect the order in which `Node::list_payments` returns pre-existing payments to

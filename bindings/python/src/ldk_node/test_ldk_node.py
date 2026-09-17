@@ -98,7 +98,7 @@ def send_to_address(address, amount_sats):
 
 
 def setup_node(tmp_dir, esplora_endpoint, listening_addresses):
-    mnemonic = Mnemonic.generate(24)
+    mnemonic = Mnemonic.generate(WordCount.WORDS24)
     node_entropy = NodeEntropy.from_bip39_mnemonic(mnemonic, None)
     config = default_config()
     builder = Builder.from_config(config)
@@ -206,6 +206,25 @@ def init_features_exposed(test_case, init_features):
 
 
 class TestMnemonic(unittest.TestCase):
+    def test_mnemonic_word_counts(self):
+        word_count_type = globals().get("WordCount")
+        self.assertIsNotNone(word_count_type, "Mnemonic generation must expose WordCount")
+
+        for word_count, expected_words, expected_entropy_bytes in [
+            (word_count_type.WORDS12, 12, 16),
+            (word_count_type.WORDS15, 15, 20),
+            (word_count_type.WORDS18, 18, 24),
+            (word_count_type.WORDS21, 21, 28),
+            (word_count_type.WORDS24, 24, 32),
+        ]:
+            with self.subTest(word_count=word_count):
+                mnemonic = Mnemonic.generate(word_count)
+                self.assertEqual(mnemonic.word_count(), expected_words)
+                self.assertEqual(len(mnemonic.words()), expected_words)
+                self.assertEqual(len(mnemonic.to_entropy()), expected_entropy_bytes)
+                self.assertEqual(Mnemonic.from_entropy(mnemonic.to_entropy()), mnemonic)
+                self.assertEqual(Mnemonic.from_str(str(mnemonic)), mnemonic)
+
     def test_invalid_mnemonic_returns_node_error(self):
         invalid_mnemonic = "abandon " * 11 + "abandon"
         mnemonic_constructor = getattr(Mnemonic, "from_str", Mnemonic)
@@ -216,7 +235,7 @@ class TestMnemonic(unittest.TestCase):
         self.assertIsInstance(error.exception, NodeError.InvalidMnemonic)
 
     def test_mnemonic_round_trip(self):
-        mnemonic = Mnemonic.generate(24)
+        mnemonic = Mnemonic.generate(WordCount.WORDS24)
         parsed_mnemonic = Mnemonic.from_str(str(mnemonic))
 
         self.assertIsInstance(mnemonic, Mnemonic)
@@ -237,12 +256,7 @@ class TestMnemonic(unittest.TestCase):
             "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e5349553"
             "1f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04",
         )
-        self.assertEqual(Mnemonic.generate(12).word_count(), 12)
-
-        with self.assertRaises(NodeError) as error:
-            Mnemonic.generate(13)
-
-        self.assertIsInstance(error.exception, NodeError.InvalidMnemonic)
+        self.assertEqual(Mnemonic.generate(WordCount.WORDS12).word_count(), 12)
 
         with self.assertRaises(NodeError) as error:
             Mnemonic.from_entropy(bytes(15))
