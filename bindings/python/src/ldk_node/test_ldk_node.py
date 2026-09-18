@@ -159,7 +159,7 @@ def fund_nodes(node_1, node_2, esplora_endpoint, amount_sats=100000):
     node_2.sync_wallets()
 
 def open_channel_and_wait_ready(node_1, node_2, node_id_2, listening_address_2, esplora_endpoint, channel_amount_sats=50000):
-    node_1.open_channel(node_id_2, listening_address_2, channel_amount_sats, None, None)
+    node_1.open_channel(node_id_2, listening_address_2, channel_amount_sats, None, None, None)
 
     channel_pending_event_1 = expect_event(node_1, Event.CHANNEL_PENDING)
     expect_event(node_2, Event.CHANNEL_PENDING)
