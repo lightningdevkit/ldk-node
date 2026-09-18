@@ -37,7 +37,7 @@ use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
 use crate::connection::ConnectionManager;
-use crate::data_store::DataStoreUpdateResult;
+use crate::data_store::{DataStoreUpdateResult, UpdatableObject};
 use crate::fee_estimator::ConfirmationTarget;
 #[cfg(feature = "uniffi")]
 use crate::ffi::PaidBolt12Invoice;
@@ -1472,26 +1472,50 @@ where
 				};
 			},
 			LdkEvent::PaymentFailed { payment_id, payment_hash, reason, .. } => {
+				let mut ignore_late_failure = false;
+				self.payment_store
+					.mutate(&payment_id, |current| {
+						let current = current?;
+						// LDK may emit PaymentFailed after PaymentSent. Ignore the entire late
+						// failure so it cannot alter payment metadata or emit a contradictory event.
+						if current.direction == PaymentDirection::Outbound
+							&& !matches!(current.kind, PaymentKind::Onchain { .. })
+							&& current.status == PaymentStatus::Succeeded
+						{
+							ignore_late_failure = true;
+							return None;
+						}
+						let mut updated = current.clone();
+						let update = PaymentDetailsUpdate {
+							hash: Some(payment_hash),
+							status: Some(PaymentStatus::Failed),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						updated.update(update).then_some(updated)
+					})
+					.await
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to access payment store: {}", e);
+						ReplayEvent()
+					})?;
+
+				if ignore_late_failure {
+					log_info!(
+						self.logger,
+						"Ignoring late payment failure for already-succeeded payment with ID {}.",
+						payment_id
+					);
+					return Ok(());
+				}
+
+				// An unchanged or absent record must still emit the event, including on replay
+				// after the payment update succeeded but event-queue persistence failed.
 				log_info!(
 					self.logger,
 					"Failed to send payment with ID {} due to {:?}.",
 					payment_id,
 					reason
 				);
-
-				let update = PaymentDetailsUpdate {
-					hash: Some(payment_hash),
-					status: Some(PaymentStatus::Failed),
-					..PaymentDetailsUpdate::new(payment_id)
-				};
-				match self.payment_store.update(update).await {
-					Ok(_) => {},
-					Err(e) => {
-						log_error!(self.logger, "Failed to access payment store: {}", e);
-						return Err(ReplayEvent());
-					},
-				};
-
 				let event = Event::PaymentFailed { payment_id, payment_hash, reason };
 				match self.event_queue.add_event(event).await {
 					Ok(_) => return Ok(()),
