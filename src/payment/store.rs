@@ -1617,10 +1617,6 @@ mod bounded_cache_tests {
 		let data_store = new_bounded_payment_store(1);
 
 		let mut stored = bolt11_payment(1);
-		stored.status = PaymentStatus::Pending;
-		if let PaymentKind::Bolt11 { ref mut preimage, .. } = stored.kind {
-			*preimage = None;
-		}
 		stored.fee_paid_msat = Some(4_242);
 		data_store.insert(stored.clone()).await.unwrap();
 

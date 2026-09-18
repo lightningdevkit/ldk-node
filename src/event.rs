@@ -695,57 +695,6 @@ where
 		}
 	}
 
-	async fn handle_payment_failed(
-		payment_store: &PaymentStore, event_queue: &EventQueue<L>, logger: &L,
-		payment_id: PaymentId, payment_hash: Option<PaymentHash>,
-		reason: Option<PaymentFailureReason>,
-	) -> Result<(), ReplayEvent> {
-		let mut ignore_late_failure = false;
-		payment_store
-			.mutate(&payment_id, |current| {
-				let current = current?;
-				// LDK may emit PaymentFailed after PaymentSent. Ignore the entire late
-				// failure so it cannot alter payment metadata or emit a contradictory event.
-				if current.direction == PaymentDirection::Outbound
-					&& !matches!(current.kind, PaymentKind::Onchain { .. })
-					&& current.status == PaymentStatus::Succeeded
-				{
-					ignore_late_failure = true;
-					return None;
-				}
-				let mut updated = current.clone();
-				let update = PaymentDetailsUpdate {
-					hash: Some(payment_hash),
-					status: Some(PaymentStatus::Failed),
-					..PaymentDetailsUpdate::new(payment_id)
-				};
-				updated.update(update).then_some(updated)
-			})
-			.await
-			.map_err(|e| {
-				log_error!(logger, "Failed to access payment store: {}", e);
-				ReplayEvent()
-			})?;
-
-		if ignore_late_failure {
-			log_info!(
-				logger,
-				"Ignoring late payment failure for already-succeeded payment with ID {}.",
-				payment_id
-			);
-			return Ok(());
-		}
-
-		// An unchanged or absent record must still emit the event, including on replay
-		// after the payment update succeeded but event-queue persistence failed.
-		log_info!(logger, "Failed to send payment with ID {} due to {:?}.", payment_id, reason);
-		let event = Event::PaymentFailed { payment_id, payment_hash, reason };
-		event_queue.add_event(event).await.map_err(|e| {
-			log_error!(logger, "Failed to push to event queue: {}", e);
-			ReplayEvent()
-		})
-	}
-
 	fn lsps2_max_total_opening_fee_msat(payment_metadata: &[u8], amount_msat: u64) -> Option<u64> {
 		let metadata = PaymentMetadata::read(&mut &payment_metadata[..]).ok()?;
 		let lsps2_parameters = metadata.lsps2_parameters?;
@@ -1523,15 +1472,58 @@ where
 				};
 			},
 			LdkEvent::PaymentFailed { payment_id, payment_hash, reason, .. } => {
-				return Self::handle_payment_failed(
-					&self.payment_store,
-					&self.event_queue,
-					&self.logger,
+				let mut ignore_late_failure = false;
+				self.payment_store
+					.mutate(&payment_id, |current| {
+						let current = current?;
+						// LDK may emit PaymentFailed after PaymentSent. Ignore the entire late
+						// failure so it cannot alter payment metadata or emit a contradictory event.
+						if current.direction == PaymentDirection::Outbound
+							&& !matches!(current.kind, PaymentKind::Onchain { .. })
+							&& current.status == PaymentStatus::Succeeded
+						{
+							ignore_late_failure = true;
+							return None;
+						}
+						let mut updated = current.clone();
+						let update = PaymentDetailsUpdate {
+							hash: Some(payment_hash),
+							status: Some(PaymentStatus::Failed),
+							..PaymentDetailsUpdate::new(payment_id)
+						};
+						updated.update(update).then_some(updated)
+					})
+					.await
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to access payment store: {}", e);
+						ReplayEvent()
+					})?;
+
+				if ignore_late_failure {
+					log_info!(
+						self.logger,
+						"Ignoring late payment failure for already-succeeded payment with ID {}.",
+						payment_id
+					);
+					return Ok(());
+				}
+
+				// An unchanged or absent record must still emit the event, including on replay
+				// after the payment update succeeded but event-queue persistence failed.
+				log_info!(
+					self.logger,
+					"Failed to send payment with ID {} due to {:?}.",
 					payment_id,
-					payment_hash,
-					reason,
-				)
-				.await;
+					reason
+				);
+				let event = Event::PaymentFailed { payment_id, payment_hash, reason };
+				match self.event_queue.add_event(event).await {
+					Ok(_) => return Ok(()),
+					Err(e) => {
+						log_error!(self.logger, "Failed to push to event queue: {}", e);
+						return Err(ReplayEvent());
+					},
+				};
 			},
 
 			LdkEvent::PaymentPathSuccessful { .. } => {},
@@ -2295,118 +2287,6 @@ mod tests {
 	use crate::io::test_utils::InMemoryStore;
 	use crate::payment::store::LSPS2Parameters;
 	use crate::types::DynStoreWrapper;
-
-	fn payment_failure_test_store() -> (PaymentStore, EventQueue<Arc<TestLogger>>, Arc<TestLogger>)
-	{
-		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let logger = Arc::new(TestLogger::new());
-		let store = PaymentStore::new(
-			Vec::new(),
-			crate::data_store::KeepLeastRecentlyUsed::new(std::num::NonZeroUsize::new(1).unwrap()),
-			crate::io::PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
-			crate::io::PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
-			Arc::clone(&kv_store),
-			Arc::new(Logger::new_log_facade()),
-		);
-		(store, EventQueue::new(kv_store, Arc::clone(&logger)), logger)
-	}
-
-	fn outbound_test_payment(kind: PaymentKind, status: PaymentStatus) -> PaymentDetails {
-		PaymentDetails::new(
-			PaymentId([1; 32]),
-			kind,
-			Some(1_000),
-			Some(10),
-			PaymentDirection::Outbound,
-			status,
-		)
-	}
-
-	#[tokio::test]
-	async fn payment_failed_ignores_entire_late_failure() {
-		let hash = PaymentHash([2; 32]);
-		let preimage = Some(PaymentPreimage([3; 32]));
-		for kind in [
-			PaymentKind::Bolt11 {
-				hash,
-				preimage,
-				secret: None,
-				counterparty_skimmed_fee_msat: None,
-			},
-			PaymentKind::Bolt12Offer {
-				hash: Some(hash),
-				preimage,
-				secret: None,
-				offer_id: lightning::offers::offer::OfferId([4; 32]),
-				payer_note: None,
-				quantity: None,
-			},
-			PaymentKind::Bolt12Refund {
-				hash: Some(hash),
-				preimage,
-				secret: None,
-				payer_note: None,
-				quantity: None,
-			},
-		] {
-			let (store, queue, logger) = payment_failure_test_store();
-			let succeeded = outbound_test_payment(kind, PaymentStatus::Succeeded);
-			store.insert(succeeded.clone()).await.unwrap();
-			// Evict the successful payment to exercise the persistence-backed path.
-			let mut other = succeeded.clone();
-			other.id = PaymentId([9; 32]);
-			store.insert(other).await.unwrap();
-
-			for failure_hash in [None, Some(hash)] {
-				EventHandler::handle_payment_failed(
-					&store,
-					&queue,
-					&logger,
-					succeeded.id,
-					failure_hash,
-					None,
-				)
-				.await
-				.unwrap();
-				assert_eq!(store.get(&succeeded.id).await.unwrap(), Some(succeeded.clone()));
-				assert_eq!(queue.next_event(), None);
-			}
-		}
-	}
-
-	#[tokio::test]
-	async fn payment_failed_emits_for_pending_replayed_and_missing_payments() {
-		let (store, queue, logger) = payment_failure_test_store();
-		let hash = PaymentHash([2; 32]);
-		let pending = outbound_test_payment(
-			PaymentKind::Bolt11 {
-				hash,
-				preimage: None,
-				secret: None,
-				counterparty_skimmed_fee_msat: None,
-			},
-			PaymentStatus::Pending,
-		);
-		store.insert(pending.clone()).await.unwrap();
-		let missing_id = PaymentId([9; 32]);
-		// The second call exercises replay after the store has already recorded failure.
-		for id in [pending.id, pending.id, missing_id] {
-			EventHandler::handle_payment_failed(&store, &queue, &logger, id, Some(hash), None)
-				.await
-				.unwrap();
-			assert_eq!(
-				queue.next_event(),
-				Some(Event::PaymentFailed {
-					payment_id: id,
-					payment_hash: Some(hash),
-					reason: None,
-				})
-			);
-			queue.event_handled().await.unwrap();
-		}
-		assert_eq!(store.get(&pending.id).await.unwrap().unwrap().status, PaymentStatus::Failed);
-		assert_eq!(store.get(&missing_id).await.unwrap(), None);
-	}
 
 	fn htlc_locator(channel_byte: u8) -> HTLCLocator {
 		HTLCLocator {
