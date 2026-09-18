@@ -9,6 +9,10 @@
 //!
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
 
+mod offers;
+
+pub(crate) use offers::NodeOffersMessageHandler;
+
 use std::num::NonZeroU64;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -31,6 +35,8 @@ use lightning_types::string::UntrustedString;
 use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
+use crate::liquidity::client::lsps2::state::LeaseCacheTargetId;
+use crate::liquidity::LiquiditySource;
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::runtime::Runtime;
@@ -96,6 +102,7 @@ pub struct PayerProofOptions {
 pub struct Bolt12Payment {
 	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
+	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	keys_manager: Arc<KeysManager>,
 	payment_store: Arc<PaymentStore>,
 	config: Arc<Config>,
@@ -107,13 +114,14 @@ pub struct Bolt12Payment {
 impl Bolt12Payment {
 	pub(crate) fn new(
 		runtime: Arc<Runtime>, channel_manager: Arc<ChannelManager>,
-		keys_manager: Arc<KeysManager>, payment_store: Arc<PaymentStore>, config: Arc<Config>,
-		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
-		async_payments_role: Option<AsyncPaymentsRole>,
+		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, keys_manager: Arc<KeysManager>,
+		payment_store: Arc<PaymentStore>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
+		logger: Arc<Logger>, async_payments_role: Option<AsyncPaymentsRole>,
 	) -> Self {
 		Self {
 			runtime,
 			channel_manager,
+			liquidity_source,
 			keys_manager,
 			payment_store,
 			config,
@@ -189,6 +197,7 @@ impl Bolt12Payment {
 					hash: None,
 					preimage: None,
 					secret: None,
+					counterparty_skimmed_fee_msat: None,
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
@@ -214,6 +223,7 @@ impl Bolt12Payment {
 							hash: None,
 							preimage: None,
 							secret: None,
+							counterparty_skimmed_fee_msat: None,
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
@@ -269,6 +279,25 @@ impl Bolt12Payment {
 		})?;
 
 		Ok(finalized_offer)
+	}
+
+	fn register_cache_target(&self, offer: &LdkOffer, id: LeaseCacheTargetId) {
+		let absolute_expiry = offer.absolute_expiry().map(|expiry| expiry.as_secs());
+		if let Err(error) = self.runtime.block_on(
+			self.liquidity_source.lsps2_client().register_cache_target(id, absolute_expiry),
+		) {
+			// Cache targets only reduce invoice-request latency. Failing to persist one must not make a
+			// long-lived offer unusable because the request path can negotiate a lease on demand.
+			log_error!(self.logger, "Failed to cache LSPS2 lease target: {}", error);
+		}
+	}
+
+	fn has_sufficient_inbound_liquidity(&self, amount_msat: u64) -> bool {
+		self.channel_manager
+			.list_usable_channels()
+			.into_iter()
+			.fold(0u64, |total, channel| total.saturating_add(channel.inbound_capacity_msat))
+			>= amount_msat
 	}
 
 	fn blinded_paths_for_async_recipient_internal(
@@ -351,6 +380,7 @@ impl Bolt12Payment {
 					hash: None,
 					preimage: None,
 					secret: None,
+					counterparty_skimmed_fee_msat: None,
 					offer_id: offer.id(),
 					payer_note: payer_note.map(UntrustedString),
 					quantity,
@@ -376,6 +406,7 @@ impl Bolt12Payment {
 							hash: None,
 							preimage: None,
 							secret: None,
+							counterparty_skimmed_fee_msat: None,
 							offer_id: offer.id(),
 							payer_note: payer_note.map(UntrustedString),
 							quantity,
@@ -506,15 +537,28 @@ impl Bolt12Payment {
 
 	/// Returns a payable offer that can be used to request and receive a payment of the amount
 	/// given.
+	///
+	/// If LSPS2 is configured and existing inbound liquidity is insufficient when an invoice is
+	/// requested, the payment may be received through a just-in-time channel. Otherwise, it may be
+	/// received entirely over pre-existing channels. When a just-in-time channel is used, the LSP
+	/// fee is deducted from the amount received.
 	pub fn receive(
 		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
 	) -> Result<Offer, Error> {
 		let offer = self.receive_inner(amount_msat, description, expiry_secs, quantity)?;
+		if !self.has_sufficient_inbound_liquidity(amount_msat) {
+			self.register_cache_target(&offer, LeaseCacheTargetId::Fixed { amount_msat });
+		}
 		Ok(maybe_wrap(offer))
 	}
 
 	/// Returns a payable offer that can be used to request and receive a payment for which the
 	/// amount is to be determined by the user, also known as a "zero-amount" offer.
+	///
+	/// If LSPS2 is configured and existing inbound liquidity is insufficient when an invoice is
+	/// requested, the payment may be received through a just-in-time channel. Otherwise, it may be
+	/// received entirely over pre-existing channels. When a just-in-time channel is used, the LSP
+	/// fee is deducted from the amount received.
 	pub fn receive_variable_amount(
 		&self, description: &str, expiry_secs: Option<u32>,
 	) -> Result<Offer, Error> {
@@ -534,7 +578,7 @@ impl Bolt12Payment {
 			log_error!(self.logger, "Failed to create offer: {:?}", e);
 			Error::OfferCreationFailed
 		})?;
-
+		self.register_cache_target(&offer, LeaseCacheTargetId::Variable);
 		Ok(maybe_wrap(offer))
 	}
 
