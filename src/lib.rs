@@ -155,7 +155,10 @@ use lightning::chain::BlockLocator;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
-pub use lightning::ln::channel_state::ChannelShutdownState;
+pub use lightning::ln::channel_state::{
+	ChannelShutdownState, InboundHTLCDetails, InboundHTLCStateDetails, OutboundHTLCDetails,
+	OutboundHTLCStateDetails,
+};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
