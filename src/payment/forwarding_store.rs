@@ -74,9 +74,15 @@ pub(crate) struct ForwardRecord<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ForwardedPaymentReplayMarker {
 	id: ForwardedPaymentId,
+	/// When the forward this marker guards against replay was recorded. Defaults to `0` on read
+	/// for markers written before this field existed, so they're pruned immediately.
+	forwarded_at_timestamp: u64,
 }
 
-impl_writeable_tlv_based!(ForwardedPaymentReplayMarker, { (0, id, required) });
+impl_writeable_tlv_based!(ForwardedPaymentReplayMarker, {
+	(0, id, required),
+	(2, forwarded_at_timestamp, (default_value, 0)),
+});
 
 impl StorableObject for ForwardedPaymentReplayMarker {
 	type Id = ForwardedPaymentId;
@@ -312,12 +318,13 @@ impl ForwardingStore {
 		// Keep this marker after the event is handled. LDK can replay an older event after later
 		// events have replaced the directional retry tokens, and it provides no callback after its
 		// handled-event state is durable.
-		self.replay_markers.insert(ForwardedPaymentReplayMarker { id: forward_id }).await.map_err(
-			|e| {
+		self.replay_markers
+			.insert(ForwardedPaymentReplayMarker { id: forward_id, forwarded_at_timestamp })
+			.await
+			.map_err(|e| {
 				log_error!(self.logger, "Failed to store forwarded payment replay marker: {e}");
 				e
-			},
-		)?;
+			})?;
 
 		Ok(())
 	}
@@ -549,12 +556,17 @@ async fn aggregate_forwarded_payments_and_log(
 	}
 }
 
+async fn has_nothing_left_to_reclaim(forwarding_store: &ForwardingStore) -> Result<bool, Error> {
+	Ok(forwarding_store.details.is_empty().await?
+		&& forwarding_store.replay_markers.is_empty().await?)
+}
+
 pub(crate) async fn run_forwarded_payment_aggregation(
 	mut stop_receiver: tokio::sync::watch::Receiver<()>, forwarding_store: Arc<ForwardingStore>,
 	retention_secs: u64,
 ) {
 	if retention_secs == 0 {
-		match forwarding_store.details.is_empty().await {
+		match has_nothing_left_to_reclaim(&forwarding_store).await {
 			Ok(true) => return,
 			Ok(false) => {},
 			Err(e) => log_error!(
@@ -568,7 +580,7 @@ pub(crate) async fn run_forwarded_payment_aggregation(
 	aggregate_forwarded_payments_and_log(&forwarding_store, retention_secs).await;
 
 	if retention_secs == 0 {
-		match forwarding_store.details.is_empty().await {
+		match has_nothing_left_to_reclaim(&forwarding_store).await {
 			Ok(true) => return,
 			Ok(false) => {},
 			Err(e) => log_error!(
@@ -595,7 +607,7 @@ pub(crate) async fn run_forwarded_payment_aggregation(
 			_ = interval.tick() => {
 				aggregate_forwarded_payments_and_log(&forwarding_store, retention_secs).await;
 				if retention_secs == 0 {
-					match forwarding_store.details.is_empty().await {
+					match has_nothing_left_to_reclaim(&forwarding_store).await {
 						Ok(true) => break,
 						Ok(false) => {},
 						Err(e) => log_error!(forwarding_store.logger, "Failed to check forwarded payment store: {}", e),
@@ -616,7 +628,7 @@ async fn aggregate_expired_forwarded_payments(
 ) -> Result<(u64, u64), Error> {
 	let now =
 		SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs();
-	aggregate_expired_forwarded_payments_at(
+	let result = aggregate_expired_forwarded_payments_at(
 		forwarded_payment_store,
 		replay_marker_store,
 		channel_pair_stats_store,
@@ -625,7 +637,84 @@ async fn aggregate_expired_forwarded_payments(
 		now,
 		logger,
 	)
+	.await?;
+
+	// Reclaim markers independent of `retention_secs`, so `Stats` mode (no details to piggyback
+	// on) still reclaims them. Logged, not propagated -- the next pass retries.
+	match prune_expired_replay_markers(
+		forwarded_payment_store,
+		replay_marker_store,
+		FORWARDED_PAYMENT_AGGREGATION_BUCKET_SIZE_SECS,
+		now,
+		logger,
+	)
 	.await
+	{
+		Ok(removed) if removed > 0 => {
+			log_debug!(logger, "Reclaimed {} expired forwarded payment replay markers", removed);
+		},
+		Err(e) => {
+			log_error!(logger, "Failed to reclaim forwarded payment replay markers: {}", e);
+		},
+		_ => {},
+	}
+
+	Ok(result)
+}
+
+/// Removes replay markers older than one bucket width **and** whose detail, if any, is gone.
+///
+/// Both conditions matter: age alone isn't safe. A bucket with one detail still missing its
+/// marker gets deferred whole by the aggregation pass above, siblings included. Pruning an
+/// old-enough sibling marker by age alone would strand its still-present detail: every later pass
+/// would see it missing a marker again and defer the bucket forever. Requiring the detail to
+/// already be gone avoids that -- a marker outlives its own detail, however long that takes.
+///
+/// The cutoff ignores `retention_secs` on purpose: that knob is about how long `Detailed` mode
+/// keeps analytics data, not how long a marker needs to survive to do its job.
+async fn prune_expired_replay_markers(
+	forwarded_payment_store: &ForwardedPaymentStore,
+	replay_marker_store: &ForwardedPaymentReplayMarkerStore, bucket_size_secs: u64, now: u64,
+	logger: &Arc<Logger>,
+) -> Result<u64, Error> {
+	if bucket_size_secs == 0 {
+		return Ok(0);
+	}
+	let oldest_retained_bucket_start =
+		(now.saturating_sub(bucket_size_secs) / bucket_size_secs).saturating_mul(bucket_size_secs);
+
+	// `Stats` mode never writes a detail at all, so every marker would otherwise cost an
+	// uncached round-trip here just to learn that. Skip it in one read when there's nothing a
+	// marker could possibly still be guarding.
+	let no_details_exist = forwarded_payment_store.is_empty().await?;
+
+	let mut expired_ids = Vec::new();
+	let mut page_token = None;
+	loop {
+		let page = replay_marker_store.list_page(page_token).await?;
+		for marker in page.objects {
+			if marker.forwarded_at_timestamp >= oldest_retained_bucket_start {
+				continue;
+			}
+			if !no_details_exist && forwarded_payment_store.contains_key(&marker.id).await? {
+				// Still guarding a live detail record -- its bucket hasn't closed yet.
+				continue;
+			}
+			expired_ids.push(marker.id);
+		}
+		let Some(next_page_token) = page.next_page_token else { break };
+		page_token = Some(next_page_token);
+	}
+
+	let mut removed = 0u64;
+	for id in expired_ids {
+		replay_marker_store.remove(&id).await.map_err(|e| {
+			log_error!(logger, "Failed to remove replay marker {:?}: {}", id, e);
+			e
+		})?;
+		removed += 1;
+	}
+	Ok(removed)
 }
 
 async fn aggregate_expired_forwarded_payments_at(
@@ -952,8 +1041,12 @@ mod forwarding_stats_tests {
 		replay_marker_store: &TestReplayMarkerStore, payment: ForwardedPaymentDetails,
 	) {
 		let id = payment.id();
+		let forwarded_at_timestamp = payment.forwarded_at_timestamp;
 		forwarded_payment_store.insert(payment).await.unwrap();
-		replay_marker_store.insert(ForwardedPaymentReplayMarker { id }).await.unwrap();
+		replay_marker_store
+			.insert(ForwardedPaymentReplayMarker { id, forwarded_at_timestamp })
+			.await
+			.unwrap();
 	}
 
 	fn forwarded_payment(
@@ -1118,7 +1211,10 @@ mod forwarding_stats_tests {
 		);
 
 		replay_marker_store
-			.insert(ForwardedPaymentReplayMarker { id: payment.id() })
+			.insert(ForwardedPaymentReplayMarker {
+				id: payment.id(),
+				forwarded_at_timestamp: payment.forwarded_at_timestamp,
+			})
 			.await
 			.unwrap();
 		assert_eq!(
@@ -1157,7 +1253,10 @@ mod forwarding_stats_tests {
 		forwarding_store.details.insert(payment.clone()).await.unwrap();
 		forwarding_store
 			.replay_markers
-			.insert(ForwardedPaymentReplayMarker { id: payment.id() })
+			.insert(ForwardedPaymentReplayMarker {
+				id: payment.id(),
+				forwarded_at_timestamp: payment.forwarded_at_timestamp,
+			})
 			.await
 			.unwrap();
 		let (_stop_sender, stop_receiver) = tokio::sync::watch::channel(());
@@ -1170,6 +1269,7 @@ mod forwarding_stats_tests {
 		.unwrap();
 
 		assert!(forwarding_store.details.is_empty().await.unwrap());
+		assert!(forwarding_store.replay_markers.is_empty().await.unwrap());
 		let bucket_id =
 			channel_pair_stats_id(&payment.prev_channel_id, &payment.next_channel_id, 0);
 		assert_eq!(
@@ -1497,6 +1597,220 @@ mod forwarding_stats_tests {
 			forwarded_payment_store.get(&current_bucket_payment.id()).await.unwrap(),
 			Some(current_bucket_payment)
 		);
+	}
+
+	/// Regression test: replay markers used to leak forever (nothing removed them, and `Stats`
+	/// mode writes no detail to key cleanup off). Covers both tracking modes.
+	#[tokio::test]
+	async fn old_replay_markers_are_reclaimed_regardless_of_tracking_mode() {
+		for mode in [ForwardedPaymentTrackingMode::Stats, ForwardedPaymentTrackingMode::Detailed] {
+			let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+			let logger = Arc::new(Logger::new_log_facade());
+			let forwarding_store =
+				ForwardingStore::new(Vec::new(), mode.clone(), Arc::clone(&kv_store), logger);
+
+			let prev_channel_id = ChannelId([1; 32]);
+			let next_channel_id = ChannelId([2; 32]);
+			const FORWARDS: u64 = 50;
+			for htlc_id in 0..FORWARDS {
+				let prev_htlcs = [InboundHTLCLocator {
+					channel_id: prev_channel_id,
+					htlc_id: Some(htlc_id),
+					amount_msat: Some(1_000),
+					user_channel_id: None,
+					node_id: None,
+				}];
+				let next_htlcs = [OutboundHTLCLocator {
+					channel_id: next_channel_id,
+					amount_msat: Some(999),
+					user_channel_id: None,
+					node_id: None,
+				}];
+				forwarding_store
+					.record_forward(ForwardRecord {
+						prev_htlcs: &prev_htlcs,
+						next_htlcs: &next_htlcs,
+						total_fee_earned_msat: Some(1),
+						skimmed_fee_msat: None,
+						claim_from_onchain_tx: false,
+						outbound_amount_forwarded_msat: 999,
+					})
+					.await
+					.unwrap();
+			}
+			assert!(
+				!forwarding_store.replay_markers.is_empty().await.unwrap(),
+				"{mode:?}: forwarding should have written markers"
+			);
+
+			// Run aggregation as if a full bucket (plus margin) had already elapsed, so every
+			// marker just written is eligible for pruning -- mirroring what an operator sees after
+			// the node has been up for a couple of hours.
+			let real_now = SystemTime::now()
+				.duration_since(UNIX_EPOCH)
+				.unwrap_or(Duration::from_secs(0))
+				.as_secs();
+			let far_future = real_now + FORWARDED_PAYMENT_AGGREGATION_BUCKET_SIZE_SECS * 3;
+			let (_, _) = aggregate_expired_forwarded_payments_at(
+				&forwarding_store.details,
+				&forwarding_store.replay_markers,
+				&forwarding_store.channel_pair_stats,
+				FORWARDED_PAYMENT_AGGREGATION_BUCKET_SIZE_SECS,
+				0,
+				far_future,
+				&forwarding_store.logger,
+			)
+			.await
+			.unwrap();
+			let removed = prune_expired_replay_markers(
+				&forwarding_store.details,
+				&forwarding_store.replay_markers,
+				FORWARDED_PAYMENT_AGGREGATION_BUCKET_SIZE_SECS,
+				far_future,
+				&forwarding_store.logger,
+			)
+			.await
+			.unwrap();
+
+			assert_eq!(removed, FORWARDS, "{mode:?}: every expired marker should be reclaimed");
+			assert!(
+				forwarding_store.replay_markers.is_empty().await.unwrap(),
+				"{mode:?}: no replay markers should remain"
+			);
+		}
+	}
+
+	/// Pins the exact age cutoff: a marker from the still-open or immediately-preceding bucket
+	/// must survive (it may still be protecting a detail record the aggregation pass above hasn't
+	/// resolved yet), while one from two bucket widths ago must be reclaimed.
+	#[tokio::test]
+	async fn prune_expired_replay_markers_respects_the_bucket_cutoff() {
+		let (forwarded_payment_store, replay_marker_store, _, logger, _) = test_stores_with_kv();
+		let bucket_size_secs = FORWARDED_PAYMENT_AGGREGATION_BUCKET_SIZE_SECS;
+		let now = bucket_size_secs * 10;
+
+		let recent_id = ForwardedPaymentId([1; 32]);
+		let old_id = ForwardedPaymentId([2; 32]);
+		replay_marker_store
+			.insert(ForwardedPaymentReplayMarker {
+				id: recent_id,
+				forwarded_at_timestamp: now - bucket_size_secs / 2,
+			})
+			.await
+			.unwrap();
+		replay_marker_store
+			.insert(ForwardedPaymentReplayMarker {
+				id: old_id,
+				forwarded_at_timestamp: now - bucket_size_secs * 2,
+			})
+			.await
+			.unwrap();
+
+		let removed = prune_expired_replay_markers(
+			&forwarded_payment_store,
+			&replay_marker_store,
+			bucket_size_secs,
+			now,
+			&logger,
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(removed, 1);
+		assert!(replay_marker_store.contains_key(&recent_id).await.unwrap());
+		assert!(!replay_marker_store.contains_key(&old_id).await.unwrap());
+	}
+
+	/// Regression test: age-only pruning would strand a sibling detail. If a bucket has one detail
+	/// missing its marker (crash mid-write), the whole bucket is deferred -- pruning an old
+	/// sibling marker by age alone would make it look broken too, deferring the bucket forever.
+	#[tokio::test]
+	async fn pruning_never_orphans_a_sibling_detail_in_a_deferred_bucket() {
+		let (forwarded_payment_store, replay_marker_store, channel_pair_stats_store, logger) =
+			test_stores();
+
+		// Same bucket (bucket width 60, both timestamps floor to 840), one crashed mid-write
+		// (`straggler`, no marker yet), one fully committed and already old enough to prune.
+		let straggler = forwarded_payment(1, 850, 110, 100, 10);
+		let sibling = forwarded_payment(2, 851, 220, 200, 20);
+		forwarded_payment_store.insert(straggler.clone()).await.unwrap();
+		insert_completed_payment(&forwarded_payment_store, &replay_marker_store, sibling.clone())
+			.await;
+
+		// A pass far enough ahead that both would be prune-eligible by age alone.
+		let now = 10_000;
+		let bucket_size_secs = 60;
+		let retention_secs = 60;
+
+		let aggregate_result = aggregate_expired_forwarded_payments_at(
+			&forwarded_payment_store,
+			&replay_marker_store,
+			&channel_pair_stats_store,
+			bucket_size_secs,
+			retention_secs,
+			now,
+			&logger,
+		)
+		.await
+		.unwrap();
+		assert_eq!(aggregate_result, (0, 0), "the whole bucket must be deferred");
+
+		let removed = prune_expired_replay_markers(
+			&forwarded_payment_store,
+			&replay_marker_store,
+			bucket_size_secs,
+			now,
+			&logger,
+		)
+		.await
+		.unwrap();
+		assert_eq!(removed, 0, "the sibling's marker still guards a live detail");
+
+		// Both details, and the sibling's marker, must have survived untouched.
+		assert_eq!(
+			forwarded_payment_store.get(&sibling.id()).await.unwrap(),
+			Some(sibling.clone())
+		);
+		assert_eq!(
+			forwarded_payment_store.get(&straggler.id()).await.unwrap(),
+			Some(straggler.clone())
+		);
+		assert!(replay_marker_store.contains_key(&sibling.id()).await.unwrap());
+
+		// The straggler's write completes: its marker finally appears.
+		replay_marker_store
+			.insert(ForwardedPaymentReplayMarker {
+				id: straggler.id(),
+				forwarded_at_timestamp: straggler.forwarded_at_timestamp,
+			})
+			.await
+			.unwrap();
+
+		let aggregate_result = aggregate_expired_forwarded_payments_at(
+			&forwarded_payment_store,
+			&replay_marker_store,
+			&channel_pair_stats_store,
+			bucket_size_secs,
+			retention_secs,
+			now,
+			&logger,
+		)
+		.await
+		.unwrap();
+		assert_eq!(aggregate_result, (1, 2), "the now-complete bucket aggregates normally");
+		assert!(forwarded_payment_store.get(&sibling.id()).await.unwrap().is_none());
+		assert!(forwarded_payment_store.get(&straggler.id()).await.unwrap().is_none());
+
+		let removed = prune_expired_replay_markers(
+			&forwarded_payment_store,
+			&replay_marker_store,
+			bucket_size_secs,
+			now,
+			&logger,
+		)
+		.await
+		.unwrap();
+		assert_eq!(removed, 2, "both markers are reclaimed once their details are gone");
 	}
 
 	#[tokio::test]
