@@ -1478,6 +1478,152 @@ async fn onchain_send_all_retains_reserve() {
 		.contains(&node_a.list_balances().spendable_onchain_balance_sats));
 }
 
+#[cfg(all(feature = "chain-esplora", feature = "storage-sqlite"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn seed_only_recovery_sweeps_counterparty_close() {
+	do_seed_only_recovery_sweeps_counterparty_close("esplora").await;
+}
+
+#[cfg(all(feature = "chain-esplora", feature = "storage-sqlite", feature = "chain-electrum"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn seed_only_recovery_sweeps_counterparty_close_electrum() {
+	do_seed_only_recovery_sweeps_counterparty_close("electrum").await;
+}
+
+#[cfg(all(feature = "chain-esplora", feature = "storage-sqlite", feature = "chain-bitcoind"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn seed_only_recovery_sweeps_counterparty_close_rpc() {
+	do_seed_only_recovery_sweeps_counterparty_close("rpc").await;
+}
+
+#[cfg(all(feature = "chain-esplora", feature = "storage-sqlite", feature = "chain-bitcoind"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn seed_only_recovery_sweeps_counterparty_close_rest() {
+	do_seed_only_recovery_sweeps_counterparty_close("rest").await;
+}
+
+#[cfg(all(feature = "chain-esplora", feature = "storage-sqlite"))]
+async fn do_seed_only_recovery_sweeps_counterparty_close(backend: &str) {
+	use ldk_node::recovery::RecoveryNodeBuilder;
+
+	let timeout = Duration::from_secs(common::INTEROP_TIMEOUT_SECS);
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let counterparty = setup_node(&chain_source, random_config());
+	let mut original_config = random_config();
+	original_config
+		.node_config
+		.anchor_channels_config
+		.trusted_peers_no_reserve
+		.push(counterparty.node_id());
+	let entropy = original_config.node_entropy;
+	let original = setup_node(&chain_source, original_config);
+	let node_id = original.node_id();
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![counterparty.onchain_payment().new_address().unwrap()],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	counterparty.sync_wallets().unwrap();
+	open_channel_push_amt(&counterparty, &original, 500_000, Some(100_000_000), false, &electrsd)
+		.await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	counterparty.sync_wallets().unwrap();
+	original.sync_wallets().unwrap();
+	let channel_id = expect_channel_ready_event!(counterparty, node_id);
+	expect_channel_ready_event!(original, counterparty.node_id());
+	assert_eq!(original.list_balances().total_onchain_balance_sats, 0);
+	original.stop().unwrap();
+	drop(original);
+
+	counterparty.force_close_channel(&channel_id, node_id, None).unwrap();
+	expect_event!(counterparty, ChannelClosed);
+	let wait_for_broadcast = || async {
+		loop {
+			let mempool: Vec<String> = bitcoind.client.call("getrawmempool", &[]).unwrap();
+			if !mempool.is_empty() {
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+	};
+	tokio::time::timeout(timeout, wait_for_broadcast()).await.unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	counterparty.stop().unwrap();
+
+	// Use only the seed in a fresh store. Both the channel state and on-chain wallet are lost.
+	let mut builder = RecoveryNodeBuilder::from_config(random_config().node_config);
+	builder.set_filesystem_logger(None, None);
+	match backend {
+		"esplora" => {
+			builder.set_chain_source_esplora(
+				format!("http://{}", electrsd.esplora_url.as_ref().unwrap()),
+				None,
+			);
+		},
+		#[cfg(feature = "chain-electrum")]
+		"electrum" => {
+			builder.set_chain_source_electrum(format!("tcp://{}", electrsd.electrum_url), None);
+		},
+		#[cfg(feature = "chain-bitcoind")]
+		"rpc" | "rest" => {
+			let host = bitcoind.params.rpc_socket.ip().to_string();
+			let port = bitcoind.params.rpc_socket.port();
+			let credentials = bitcoind.params.get_cookie_values().unwrap().unwrap();
+			if backend == "rpc" {
+				builder.set_chain_source_bitcoind_rpc(
+					host,
+					port,
+					credentials.user,
+					credentials.password,
+					0,
+				);
+			} else {
+				builder.set_chain_source_bitcoind_rest(
+					host.clone(),
+					port,
+					host,
+					port,
+					credentials.user,
+					credentials.password,
+					0,
+				);
+			}
+		},
+		_ => unreachable!(),
+	}
+	let recovery = builder.build(entropy).unwrap();
+	assert_eq!(recovery.node_id(), node_id);
+	recovery.start().unwrap();
+	assert_eq!(recovery.status().recovered_outputs, 1, "{backend}");
+	tokio::time::timeout(timeout, wait_for_broadcast()).await.unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	tokio::time::timeout(timeout, async {
+		while recovery.list_balances().spendable_onchain_balance_sats == 0 {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+	})
+	.await
+	.unwrap();
+	let recovered_balance = recovery.list_balances().spendable_onchain_balance_sats;
+	assert!((99_000..100_000).contains(&recovered_balance), "{backend}: {recovered_balance}");
+	recovery.stop().unwrap();
+	drop(recovery);
+
+	let restarted = builder.build(entropy).unwrap();
+	restarted.start().unwrap();
+	assert_eq!(
+		restarted.list_balances().spendable_onchain_balance_sats,
+		recovered_balance,
+		"{backend}"
+	);
+	assert_eq!(restarted.status().recovered_outputs, 1, "{backend}");
+	restarted.stop().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_wallet_recovery() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();

@@ -326,6 +326,7 @@ impl std::error::Error for BuildError {}
 #[derive(Debug)]
 pub struct NodeBuilder {
 	config: Config,
+	recovery_store_scope: bool,
 	chain_data_source_config: Option<ChainDataSourceConfig>,
 	gossip_source_config: Option<GossipSourceConfig>,
 	liquidity_source_config: Option<LiquiditySourceConfig>,
@@ -357,6 +358,7 @@ impl NodeBuilder {
 		let probing_config = None;
 		Self {
 			config,
+			recovery_store_scope: false,
 			chain_data_source_config,
 			gossip_source_config,
 			liquidity_source_config,
@@ -366,6 +368,12 @@ impl NodeBuilder {
 			pathfinding_scores_sync_config,
 			probing_config,
 		}
+	}
+
+	pub(crate) fn for_recovery(config: Config) -> Self {
+		let mut builder = Self::from_config(config);
+		builder.recovery_store_scope = true;
+		builder
 	}
 
 	/// Configures the [`Node`] instance to (re-)use a specific `tokio` runtime.
@@ -956,8 +964,15 @@ impl NodeBuilder {
 		let seed_bytes = node_entropy.to_seed_bytes();
 		let config = Arc::new(self.config.clone());
 
+		let kv_store: Arc<DynStore> = if self.recovery_store_scope {
+			Arc::new(DynStoreWrapper(crate::recovery::RecoveryStore::new(kv_store)))
+		} else {
+			Arc::new(DynStoreWrapper(kv_store))
+		};
+
 		build_with_store_internal(
 			config,
+			self.recovery_store_scope,
 			self.chain_data_source_config.as_ref(),
 			self.gossip_source_config.as_ref(),
 			self.liquidity_source_config.as_ref(),
@@ -967,7 +982,7 @@ impl NodeBuilder {
 			seed_bytes,
 			runtime,
 			logger,
-			Arc::new(DynStoreWrapper(kv_store)),
+			kv_store,
 		)
 	}
 }
@@ -1507,7 +1522,8 @@ impl ArcedNodeBuilder {
 
 /// Builds a [`Node`] instance according to the options previously configured.
 fn build_with_store_internal(
-	config: Arc<Config>, chain_data_source_config: Option<&ChainDataSourceConfig>,
+	config: Arc<Config>, recovery_build: bool,
+	chain_data_source_config: Option<&ChainDataSourceConfig>,
 	gossip_source_config: Option<&GossipSourceConfig>,
 	liquidity_source_config: Option<&LiquiditySourceConfig>,
 	pathfinding_scores_sync_config: Option<&PathfindingScoresSyncConfig>,
@@ -1553,6 +1569,7 @@ fn build_with_store_internal(
 		node_metris_res,
 		pending_payment_store_res,
 		address_pool_res,
+		recovery_state_res,
 	) = runtime.block_on(async move {
 		tokio::join!(
 			read_n_objects(
@@ -1576,8 +1593,33 @@ fn build_with_store_internal(
 				Arc::clone(&logger_ref),
 			),
 			read_address_pool(&*kv_store_ref, &*logger_ref),
+			async {
+				if recovery_build {
+					KVStore::read(
+						&*kv_store_ref,
+						crate::recovery::RECOVERY_STATE_PRIMARY_NAMESPACE,
+						crate::recovery::RECOVERY_STATE_SECONDARY_NAMESPACE,
+						crate::recovery::RECOVERY_STATE_KEY,
+					)
+					.await
+				} else {
+					Err(bitcoin::io::Error::new(
+						bitcoin::io::ErrorKind::NotFound,
+						"not a recovery build",
+					))
+				}
+			}
 		)
 	});
+
+	let pending_recovery_state = match recovery_state_res {
+		Ok(bytes) => Some(bytes),
+		Err(e) if e.kind() == bitcoin::io::ErrorKind::NotFound => None,
+		Err(e) => {
+			log_error!(logger, "Failed to read recovery state from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
 
 	// Initialize the status fields.
 	let node_metrics = match node_metris_res {
@@ -2095,6 +2137,9 @@ fn build_with_store_internal(
 	));
 
 	let mut user_config = default_user_config(&config);
+	if recovery_build {
+		user_config.accept_inbound_channels = false;
+	}
 
 	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
 		// If we act as an LSPS2 service, we need to be able to intercept HTLCs and forward the
@@ -2558,6 +2603,7 @@ fn build_with_store_internal(
 		#[cfg(feature = "unified-payments")]
 		hrn_resolver,
 		prober,
+		pending_recovery_state,
 		#[cfg(cycle_tests)]
 		_leak_checker,
 	})
