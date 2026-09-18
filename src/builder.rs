@@ -334,6 +334,8 @@ pub struct NodeBuilder {
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	probing_config: Option<ProbingConfig>,
+	#[cfg(feature = "storage-sqlite")]
+	sqlite_backup_path: Option<PathBuf>,
 }
 
 #[cfg(not(feature = "uniffi"))]
@@ -365,6 +367,8 @@ impl NodeBuilder {
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
 			probing_config,
+			#[cfg(feature = "storage-sqlite")]
+			sqlite_backup_path: None,
 		}
 	}
 
@@ -566,6 +570,29 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Continuously replicates `{storage_dir_path}/ldk_node_data.sqlite` to `backup_path`.
+	///
+	/// After opening the primary database and after every successful persist, the store copies
+	/// it to `backup_path` using SQLite's [Online Backup API]. A failed replica update fails the
+	/// persist.
+	///
+	/// `backup_path` must be a filesystem path to a database *file* (not a `primary:backup`
+	/// URI — `:` is a valid path character). Parent directories are created if missing.
+	///
+	/// To restore, copy or place the replica at `{storage_dir}/ldk_node_data.sqlite` and call
+	/// [`build`] as usual. The replica is a hot-spare file, not a second live node. Seed/entropy
+	/// is not included.
+	///
+	/// Only applies to [`build`].
+	///
+	/// [Online Backup API]: https://www.sqlite.org/backup.html
+	/// [`build`]: Self::build
+	#[cfg(feature = "storage-sqlite")]
+	pub fn set_sqlite_backup_path(&mut self, backup_path: String) -> &mut Self {
+		self.sqlite_backup_path = Some(backup_path.into());
+		self
+	}
+
 	/// Configures the [`Node`] instance to write logs to the filesystem.
 	///
 	/// The `log_file_path` defaults to [`DEFAULT_LOG_FILENAME`] in the configured
@@ -707,10 +734,11 @@ impl NodeBuilder {
 		let storage_dir_path = self.config.storage_dir_path.clone();
 		create_dir_all_private(storage_dir_path.as_ref())
 			.map_err(|_| BuildError::StoragePathAccessFailed)?;
-		let kv_store = SqliteStore::new(
+		let kv_store = SqliteStore::new_with_backup(
 			storage_dir_path.into(),
 			Some(io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
 			Some(io::sqlite_store::KV_TABLE_NAME.to_string()),
+			self.sqlite_backup_path.clone(),
 		)
 		.map_err(|e| {
 			log_error!(logger, "Failed to setup Sqlite store: {}", e);
@@ -1306,6 +1334,15 @@ impl Builder {
 #[cfg(all(feature = "uniffi", feature = "storage-sqlite"))]
 #[uniffi::export]
 impl Builder {
+	/// Continuously replicates the SQLite database to `backup_path`.
+	///
+	/// See [`NodeBuilder::set_sqlite_backup_path`].
+	///
+	/// [`NodeBuilder::set_sqlite_backup_path`]: NodeBuilder::set_sqlite_backup_path
+	pub fn set_sqlite_backup_path(&self, backup_path: String) {
+		self.inner.write().expect("lock").set_sqlite_backup_path(backup_path);
+	}
+
 	/// Builds a [`Node`] instance with a [`SqliteStore`] backend and according to the options
 	/// previously configured.
 	pub fn build(&self, node_entropy: Arc<NodeEntropy>) -> Result<Arc<Node>, BuildError> {
