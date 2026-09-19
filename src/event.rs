@@ -1000,6 +1000,8 @@ where
 							} else {
 								None
 							},
+							// Set below, alongside the `Event::PaymentClaimable` we're about to emit.
+							claimable_amount_msat: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -1034,6 +1036,21 @@ where
 									preimage.is_none(),
 									"We would have registered the preimage if we knew"
 								);
+
+								// Record the amount this specific event reports as claimable so that
+								// `claim_for_id` can later verify the caller echoes it back correctly.
+								let claimable_update = PaymentDetailsUpdate {
+									claimable_amount_msat: Some(Some(amount_msat)),
+									..PaymentDetailsUpdate::new(payment_id)
+								};
+								if let Err(e) = self.payment_store.update(claimable_update).await {
+									log_error!(
+										self.logger,
+										"Failed to access payment store: {}",
+										e
+									);
+									return Err(ReplayEvent());
+								}
 
 								let custom_records = onion_fields
 									.map(|cf| {
@@ -1089,6 +1106,7 @@ where
 								} else {
 									None
 								},
+								claimable_amount_msat: None,
 							};
 
 							let payment = PaymentDetails::new(
@@ -1277,6 +1295,7 @@ where
 							preimage: payment_preimage,
 							secret: Some(payment_secret),
 							counterparty_skimmed_fee_msat: None,
+							claimable_amount_msat: None,
 						};
 						let update = PaymentDetailsUpdate {
 							preimage: Some(payment_preimage),

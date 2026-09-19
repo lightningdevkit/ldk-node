@@ -3901,6 +3901,29 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		client_node.payment(&client_payment_id).unwrap().unwrap().amount_msat,
 		Some(jit_amount_msat)
 	);
+
+	println!("Claiming with a mismatched amount should fail!");
+	// Forgetting to account for the LSP's skimmed fee and passing the full invoice amount must be
+	// rejected rather than silently accepted.
+	assert_eq!(
+		client_node.bolt11_payment().claim_for_id(
+			client_payment_id,
+			jit_amount_msat,
+			manual_preimage
+		),
+		Err(NodeError::InvalidAmount)
+	);
+	// An amount unrelated to either the invoice or the actually-claimable amount must also be
+	// rejected.
+	assert_eq!(
+		client_node.bolt11_payment().claim_for_id(
+			client_payment_id,
+			claimable_amount_msat + 1,
+			manual_preimage
+		),
+		Err(NodeError::InvalidAmount)
+	);
+
 	println!("Claiming payment!");
 	client_node
 		.bolt11_payment()
