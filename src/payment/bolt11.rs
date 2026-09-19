@@ -165,6 +165,41 @@ impl Bolt11Payment {
 	}
 }
 
+/// Validates the `claimable_amount_msat` argument given to [`Bolt11Payment::claim_for_id`].
+///
+/// `observed_claimable_amount_msat` is the amount reported by the last `PaymentClaimable` event
+/// we stored for this payment. When present (i.e., for any payment received since LDK Node v0.8),
+/// the caller must echo it back exactly, which both catches a caller mixing up arguments across
+/// concurrent claims and, since the event amount already accounts for the difference, correctly
+/// allows overpayments while implicitly enforcing the LSPS2 fee limits already checked before the
+/// event was emitted.
+///
+/// `requested_amount_msat` is `details.amount_msat`. For payments serialized before v0.8, this
+/// still holds the amount originally requested by the invoice, independent of any received event,
+/// so we enforce it as a historic underpayment guard (net of `counterparty_skimmed_fee_msat`).
+/// Payments received since v0.8 populate `amount_msat` from the event amount itself, making this
+/// check a no-op for them; they rely on the equality check above instead.
+fn validate_claimable_amount(
+	claimable_amount_msat: u64, requested_amount_msat: Option<u64>,
+	observed_claimable_amount_msat: Option<u64>, counterparty_skimmed_fee_msat: u64,
+) -> Result<(), Error> {
+	if let Some(observed_amount_msat) = observed_claimable_amount_msat {
+		if claimable_amount_msat != observed_amount_msat {
+			return Err(Error::InvalidAmount);
+		}
+	}
+
+	if let Some(requested_amount_msat) = requested_amount_msat {
+		if claimable_amount_msat
+			< requested_amount_msat.saturating_sub(counterparty_skimmed_fee_msat)
+		{
+			return Err(Error::InvalidAmount);
+		}
+	}
+
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use lightning::util::ser::{Readable, Writeable};
@@ -193,6 +228,164 @@ mod tests {
 		let decoded = PaymentMetadata::read(&mut &*encoded).unwrap();
 
 		assert_eq!(metadata, decoded);
+	}
+
+	// A migrated (pre-v0.8) record: `amount_msat` holds the originally requested invoice amount,
+	// and no `PaymentClaimable` event has been observed under the current, event-derived scheme.
+	#[test]
+	fn migrated_record_rejects_underpayment() {
+		let requested_amount_msat = Some(100_000);
+		let observed_claimable_amount_msat = None;
+
+		assert_eq!(
+			validate_claimable_amount(
+				99_999,
+				requested_amount_msat,
+				observed_claimable_amount_msat,
+				0
+			),
+			Err(Error::InvalidAmount)
+		);
+	}
+
+	#[test]
+	fn migrated_record_allows_overpayment() {
+		let requested_amount_msat = Some(100_000);
+		let observed_claimable_amount_msat = None;
+
+		assert_eq!(
+			validate_claimable_amount(
+				150_000,
+				requested_amount_msat,
+				observed_claimable_amount_msat,
+				0
+			),
+			Ok(())
+		);
+	}
+
+	#[test]
+	fn migrated_record_accounts_for_jit_fee() {
+		let requested_amount_msat = Some(100_000);
+		let observed_claimable_amount_msat = None;
+		let skimmed_fee_msat = 10_000;
+
+		// Exactly matching the fee-adjusted amount succeeds...
+		assert_eq!(
+			validate_claimable_amount(
+				90_000,
+				requested_amount_msat,
+				observed_claimable_amount_msat,
+				skimmed_fee_msat
+			),
+			Ok(())
+		);
+		// ...while anything less is still rejected as an underpayment.
+		assert_eq!(
+			validate_claimable_amount(
+				89_999,
+				requested_amount_msat,
+				observed_claimable_amount_msat,
+				skimmed_fee_msat
+			),
+			Err(Error::InvalidAmount)
+		);
+	}
+
+	// A payment received since v0.8: `amount_msat` was itself derived from the event, so it carries
+	// no independent expectation; only the observed-amount equality check applies.
+	#[test]
+	fn current_record_rejects_mismatched_argument() {
+		let requested_amount_msat = Some(100_000);
+		let observed_claimable_amount_msat = Some(100_000);
+
+		assert_eq!(
+			validate_claimable_amount(
+				150_000,
+				requested_amount_msat,
+				observed_claimable_amount_msat,
+				0
+			),
+			Err(Error::InvalidAmount)
+		);
+		assert_eq!(
+			validate_claimable_amount(
+				50_000,
+				requested_amount_msat,
+				observed_claimable_amount_msat,
+				0
+			),
+			Err(Error::InvalidAmount)
+		);
+	}
+
+	#[test]
+	fn current_record_accepts_the_observed_amount() {
+		let requested_amount_msat = Some(100_000);
+		let observed_claimable_amount_msat = Some(100_000);
+
+		assert_eq!(
+			validate_claimable_amount(
+				100_000,
+				requested_amount_msat,
+				observed_claimable_amount_msat,
+				0
+			),
+			Ok(())
+		);
+	}
+
+	// JIT channel scenario: the LSP skims a fee, so the event (and thus the observed amount)
+	// reports less than the invoice originally requested.
+	#[test]
+	fn current_record_accepts_fee_adjusted_jit_amount() {
+		let requested_amount_msat = Some(100_000);
+		let skimmed_fee_msat = 10_000;
+		let observed_claimable_amount_msat = Some(90_000);
+
+		// The caller passing the true (fee-adjusted) event amount succeeds.
+		assert_eq!(
+			validate_claimable_amount(
+				90_000,
+				requested_amount_msat,
+				observed_claimable_amount_msat,
+				skimmed_fee_msat
+			),
+			Ok(())
+		);
+		// Forgetting to account for the fee and passing the full invoice amount is rejected.
+		assert_eq!(
+			validate_claimable_amount(
+				100_000,
+				requested_amount_msat,
+				observed_claimable_amount_msat,
+				skimmed_fee_msat
+			),
+			Err(Error::InvalidAmount)
+		);
+	}
+
+	// Fully unregistered (never pre-known) manual claims still populate `amount_msat` from the
+	// event, so it can't be used as an independent expectation, but the observed-amount check still
+	// protects them.
+	#[test]
+	fn unregistered_record_relies_on_observed_amount_only() {
+		let requested_amount_msat = Some(90_000); // self-referentially derived from the same event
+		let observed_claimable_amount_msat = Some(90_000);
+
+		assert_eq!(
+			validate_claimable_amount(
+				90_000,
+				requested_amount_msat,
+				observed_claimable_amount_msat,
+				0
+			),
+			Ok(())
+		);
+		assert_eq!(
+			validate_claimable_amount(1, requested_amount_msat, observed_claimable_amount_msat, 0),
+			Err(Error::InvalidAmount)
+		);
 	}
 }
 
@@ -255,6 +448,7 @@ impl Bolt11Payment {
 					preimage: None,
 					secret: payment_secret,
 					counterparty_skimmed_fee_msat: None,
+					claimable_amount_msat: None,
 				};
 				let payment = PaymentDetails::new(
 					payment_id,
@@ -283,6 +477,7 @@ impl Bolt11Payment {
 							preimage: None,
 							secret: payment_secret,
 							counterparty_skimmed_fee_msat: None,
+							claimable_amount_msat: None,
 						};
 						let payment = PaymentDetails::new(
 							payment_id,
@@ -412,6 +607,15 @@ impl Bolt11Payment {
 	/// This should be called in response to a [`PaymentClaimable`] event as soon as the preimage is
 	/// available.
 	///
+	/// `claimable_amount_msat` must equal the `claimable_amount_msat` carried by that very event:
+	/// we check the two match to guard against a caller mixing up arguments when resolving
+	/// multiple concurrent manual claims. For payments received before LDK Node v0.8, we
+	/// additionally require the amount to cover what was originally requested by the invoice, net
+	/// of any [`counterparty_skimmed_fee_msat`] taken by a JIT-channel-opening LSP, rejecting
+	/// underpayments while still allowing overpayments; payments received since v0.8 rely solely
+	/// on the equality check above, as protocol-level and LSPS2 fee-limit checks already guard
+	/// against underpayment before the event is ever emitted.
+	///
 	/// Will check that the payment is known, and that the given preimage and claimable amount
 	/// match our expectations before attempting to claim the payment, and will return an error
 	/// otherwise.
@@ -420,6 +624,7 @@ impl Bolt11Payment {
 	///
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`PaymentReceived`]: crate::Event::PaymentReceived
+	/// [`counterparty_skimmed_fee_msat`]: crate::payment::PaymentKind::Bolt11::counterparty_skimmed_fee_msat
 	pub fn claim_for_id(
 		&self, payment_id: PaymentId, claimable_amount_msat: u64, preimage: PaymentPreimage,
 	) -> Result<(), Error> {
@@ -433,17 +638,23 @@ impl Bolt11Payment {
 				Error::InvalidPaymentId
 			})?;
 
-		let payment_hash = match details.kind {
-			PaymentKind::Bolt11 { hash, .. } => hash,
-			_ => {
-				log_error!(
-					self.logger,
-					"Failed to manually claim payment with ID {} of unsupported kind",
-					payment_id
-				);
-				return Err(Error::InvalidPaymentId);
-			},
-		};
+		let (payment_hash, counterparty_skimmed_fee_msat, observed_claimable_amount_msat) =
+			match details.kind {
+				PaymentKind::Bolt11 {
+					hash,
+					counterparty_skimmed_fee_msat,
+					claimable_amount_msat,
+					..
+				} => (hash, counterparty_skimmed_fee_msat.unwrap_or(0), claimable_amount_msat),
+				_ => {
+					log_error!(
+						self.logger,
+						"Failed to manually claim payment with ID {} of unsupported kind",
+						payment_id
+					);
+					return Err(Error::InvalidPaymentId);
+				},
+			};
 
 		let expected_payment_hash = PaymentHash(Sha256::hash(&preimage.0).to_byte_array());
 		if expected_payment_hash != payment_hash {
@@ -455,23 +666,18 @@ impl Bolt11Payment {
 			return Err(Error::InvalidPaymentPreimage);
 		}
 
-		// For payments requested via `receive*_via_jit_channel_for_hash()`
-		// `skimmed_fee_msat` held by LSP must be taken into account.
-		let skimmed_fee_msat = match details.kind {
-			PaymentKind::Bolt11 {
-				counterparty_skimmed_fee_msat: Some(skimmed_fee_msat), ..
-			} => skimmed_fee_msat,
-			_ => 0,
-		};
-		if let Some(invoice_amount_msat) = details.amount_msat {
-			if claimable_amount_msat < invoice_amount_msat.saturating_sub(skimmed_fee_msat) {
-				log_error!(
-					self.logger,
-					"Failed to manually claim payment {} as the claimable amount is less than expected",
-					payment_id
-				);
-				return Err(Error::InvalidAmount);
-			}
+		if let Err(e) = validate_claimable_amount(
+			claimable_amount_msat,
+			details.amount_msat,
+			observed_claimable_amount_msat,
+			counterparty_skimmed_fee_msat,
+		) {
+			log_error!(
+				self.logger,
+				"Failed to manually claim payment {} as the given claimable amount didn't match our expectations",
+				payment_id
+			);
+			return Err(e);
 		}
 
 		self.channel_manager.claim_funds(preimage);
