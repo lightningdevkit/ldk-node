@@ -26,7 +26,6 @@ use crate::data_store::{
 	DataStore, DataStorePage, KeepAllEntries, KeepNoEntries, StorableObject, StorableObjectId,
 	StorableObjectUpdate, UpdatableObject,
 };
-use crate::hex_utils;
 use crate::io::{
 	CHANNEL_FORWARDING_STATS_PERSISTENCE_SECONDARY_NAMESPACE,
 	CHANNEL_PAIR_FORWARDING_STATS_PERSISTENCE_SECONDARY_NAMESPACE,
@@ -38,7 +37,7 @@ use crate::logger::{log_debug, log_error, Logger};
 use crate::types::{
 	ChannelForwardingStatsStore, ChannelPairForwardingStatsStore, DynStore, ForwardedPaymentStore,
 };
-use crate::{Error, UserChannelId};
+use crate::{hex_utils, Error, UserChannelId};
 
 pub(crate) const FORWARDED_PAYMENT_AGGREGATION_BUCKET_SIZE_SECS: u64 = 60 * 60;
 
