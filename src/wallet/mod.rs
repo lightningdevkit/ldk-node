@@ -2804,6 +2804,7 @@ mod tests {
 
 		let mut wallet_persister =
 			KVStoreWalletPersister::new(Arc::clone(&store), Arc::clone(&logger));
+		#[allow(deprecated)]
 		let bdk_wallet = if load_existing {
 			BdkWallet::load()
 				.descriptor(KeychainKind::External, Some(EXTERNAL_DESCRIPTOR))
