@@ -3679,7 +3679,8 @@ async fn splice_round_superseded_on_an_open_channel_fails_its_payment() {
 ///
 /// LDK reports the round itself after `ChannelClosed`: a `DiscardFunding` for node A's
 /// contribution, whose handling reclaims its addresses, and a `SpliceNegotiationFailed` the node
-/// passes on.
+/// reports with reason `ChannelClosing` and no parameters, its intent having been cleared at the
+/// close.
 #[cfg(feature = "chain-esplora")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn signed_splice_round_the_monitor_does_not_watch_is_dropped_at_close() {
@@ -3709,7 +3710,9 @@ async fn signed_splice_round_the_monitor_does_not_watch_is_dropped_at_close() {
 	node_a.disconnect(node_b.node_id()).unwrap();
 	node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
 	expect_event!(node_a, ChannelClosed);
-	expect_event!(node_a, SpliceNegotiationFailed);
+	let (reason, parameters) = expect_splice_negotiation_failed_event!(node_a, node_b.node_id());
+	assert_eq!(reason, Some(SpliceFailureReason::ChannelClosing));
+	assert_eq!(parameters, None, "the intent outlived the close");
 	assert!(
 		logs_a.wait_for_count(RECLAIMED_ADDRESSES, reclaimed_a + 1).await,
 		"node A's contribution to the discarded round was not reclaimed"
