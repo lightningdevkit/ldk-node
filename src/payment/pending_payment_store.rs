@@ -409,6 +409,27 @@ pub(crate) fn test_funding_contribution_with_parts(
 	estimated_fee_sat: u64, feerate: u64, prevtxs: &[bitcoin::Transaction],
 	outputs: &[bitcoin::TxOut], change_output: Option<&bitcoin::TxOut>,
 ) -> lightning::ln::funding::FundingContribution {
+	test_funding_contribution_inheriting(
+		estimated_fee_sat,
+		feerate,
+		prevtxs,
+		outputs,
+		change_output,
+		&[],
+		&[],
+	)
+}
+
+/// Like [`test_funding_contribution_with_parts`], but recording `inherited_inputs` and
+/// `inherited_output_scripts` as parts a still-pending splice attempt reserved before this
+/// contribution, as LDK records them at the hand-off of a fee bump built from the round it
+/// replaces: the contribution's `reserved_inputs` and `reserved_outputs` leave them out.
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_inheriting(
+	estimated_fee_sat: u64, feerate: u64, prevtxs: &[bitcoin::Transaction],
+	outputs: &[bitcoin::TxOut], change_output: Option<&bitcoin::TxOut>,
+	inherited_inputs: &[bitcoin::OutPoint], inherited_output_scripts: &[bitcoin::ScriptBuf],
+) -> lightning::ln::funding::FundingContribution {
 	use lightning::util::ser::{BigSize, Writeable};
 	use lightning::util::wallet_utils::ConfirmedUtxo;
 	let mut records = vec![1, 8]; // (1, estimated_fee)
@@ -451,6 +472,42 @@ pub(crate) fn test_funding_contribution_with_parts(
 	records.extend_from_slice(&[11, 8]); // (11, max_feerate)
 	records.extend_from_slice(&feerate.to_be_bytes());
 	records.extend_from_slice(&[13, 1, 1]); // (13, is_splice: true)
+	if !inherited_inputs.is_empty() || !inherited_output_scripts.is_empty() {
+		// (17, pending_components): a length-prefixed TLV stream of its own.
+		let mut components = Vec::new();
+		if !inherited_inputs.is_empty() {
+			let mut bytes = Vec::new();
+			for outpoint in inherited_inputs {
+				outpoint.write(&mut bytes).expect("in-memory write must succeed");
+			}
+			components.push(1); // (1, inputs)
+			BigSize(bytes.len() as u64)
+				.write(&mut components)
+				.expect("in-memory write must succeed");
+			components.extend(bytes);
+		}
+		if !inherited_output_scripts.is_empty() {
+			let mut bytes = Vec::new();
+			for script in inherited_output_scripts {
+				script.write(&mut bytes).expect("in-memory write must succeed");
+			}
+			components.push(3); // (3, output_scripts)
+			BigSize(bytes.len() as u64)
+				.write(&mut components)
+				.expect("in-memory write must succeed");
+			components.extend(bytes);
+		}
+		let mut component_bytes = Vec::new();
+		BigSize(components.len() as u64)
+			.write(&mut component_bytes)
+			.expect("in-memory write must succeed");
+		component_bytes.extend(components);
+		records.push(17);
+		BigSize(component_bytes.len() as u64)
+			.write(&mut records)
+			.expect("in-memory write must succeed");
+		records.extend(component_bytes);
+	}
 	let mut tlv_bytes = Vec::new();
 	// BigSize length prefix over the TLV records above.
 	BigSize(records.len() as u64).write(&mut tlv_bytes).expect("in-memory write must succeed");
@@ -703,6 +760,86 @@ mod tests {
 		assert_eq!(record, decoded);
 		assert_eq!(decoded.id(), id);
 		assert!(decoded.details().is_none());
+	}
+
+	/// A fee bump's contribution inherits the inputs and change of the round it replaces, which
+	/// LDK records in the contribution at the hand-off so that `reserved_inputs` and
+	/// `reserved_outputs` leave them out: what a failure of the bump releases, and what a retry
+	/// must reserve again. That record is a private field the contribution's `PartialEq` ignores,
+	/// so a persisted intent's round trip is checked through those accessors.
+	#[test]
+	fn pending_splice_keeps_the_contribution_reserved_parts() {
+		use std::str::FromStr;
+
+		use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, WPubkeyHash};
+
+		let prevtx = |seed: u8| Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: bitcoin::absolute::LockTime::ZERO,
+			input: vec![TxIn::default()],
+			output: vec![TxOut {
+				value: Amount::from_sat(10_000),
+				script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([seed; 20])),
+			}],
+		};
+		let prevtxs = [prevtx(1), prevtx(2)];
+		let outpoint = |tx: &Transaction| OutPoint { txid: tx.compute_txid(), vout: 0 };
+		let script = |seed: u8| ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([seed; 20]));
+		let change = TxOut { value: Amount::from_sat(21_000), script_pubkey: script(9) };
+		let splice_out = TxOut { value: Amount::from_sat(50_000), script_pubkey: script(8) };
+		let reserved = |contribution: &FundingContribution| {
+			(
+				contribution.reserved_inputs().map(|input| input.outpoint()).collect::<Vec<_>>(),
+				contribution.reserved_outputs().cloned().collect::<Vec<_>>(),
+			)
+		};
+
+		// Without the record, every part counts as reserved.
+		let plain = test_funding_contribution_with_parts(
+			0,
+			300,
+			&prevtxs,
+			&[splice_out.clone()],
+			Some(&change),
+		);
+		assert_eq!(
+			reserved(&plain),
+			(prevtxs.iter().map(outpoint).collect(), vec![splice_out.clone(), change.clone()])
+		);
+
+		// The bump reuses the first input and the change address of the round it replaces; the
+		// second input and the splice-out output are its own.
+		let contribution = test_funding_contribution_inheriting(
+			0,
+			300,
+			&prevtxs,
+			&[splice_out.clone()],
+			Some(&change),
+			&[outpoint(&prevtxs[0])],
+			&[change.script_pubkey.clone()],
+		);
+		let expected = (vec![outpoint(&prevtxs[1])], vec![splice_out]);
+		assert_eq!(reserved(&contribution), expected);
+
+		let intent = SpliceIntent {
+			counterparty_node_id: PublicKey::from_str(
+				"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+			)
+			.unwrap(),
+			channel_id: ChannelId([11u8; 32]),
+			pre_splice_funding_txo: LdkOutPoint { txid: test_txid(12), index: 0 },
+			contribution,
+			kind: SpliceKind::Rbf {},
+		};
+		let record = PendingPaymentDetails::PendingSplice { id: PaymentId([10u8; 32]), intent };
+
+		let encoded = record.encode();
+		let decoded = PendingPaymentDetails::read(&mut &encoded[..]).unwrap();
+		assert_eq!(record, decoded);
+		let PendingPaymentDetails::PendingSplice { intent, .. } = decoded else {
+			panic!("a pending splice decoded as something else");
+		};
+		assert_eq!(reserved(&intent.contribution), expected);
 	}
 
 	#[test]
