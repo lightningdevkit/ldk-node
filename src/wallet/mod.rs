@@ -344,63 +344,8 @@ impl Wallet {
 						timestamp: block_time.confirmation_time,
 					};
 
-					// Hold the cross-store lock from payment-id resolution through the last write:
-					// a classification landing in between would leave the id resolved against a
-					// torn candidate index and the generic fallback below overwriting (or
-					// duplicating) the record classification just wrote.
-					let guard = self.funding_payment_update_lock.lock().await;
-
-					let mut payment_id = self
-						.find_payment_by_txid(txid)
-						.await?
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
-
-					match self
-						.apply_funding_status_update_locked(
-							&guard,
-							payment_id,
-							txid,
-							confirmation_status,
-						)
-						.await?
-					{
-						FundingStatusUpdate::Applied => continue,
-						FundingStatusUpdate::NotFunding => {},
-						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead, unless a
-						// settled funding payment sits there already.
-						FundingStatusUpdate::Foreign => {
-							match self.foreign_transaction_payment_id(payment_id, txid).await? {
-								Some(fallback_id) => payment_id = fallback_id,
-								None => {
-									log_debug!(
-										self.logger,
-										"Skipping wallet event for transaction {} of a settled funding payment",
-										txid,
-									);
-									continue;
-								},
-							}
-						},
-					}
-
-					let payment = {
-						let locked_wallet = self.inner.lock().expect("lock");
-						self.create_payment_from_tx(
-							&locked_wallet,
-							txid,
-							payment_id,
-							&tx,
-							payment_status,
-							confirmation_status,
-						)
-					};
-
-					self.payment_store.insert_or_update(payment.clone()).await?;
-
-					if payment_status == PaymentStatus::Pending {
-						self.upsert_pending_payment(payment, Vec::new()).await?;
-					}
+					self.record_wallet_transaction(txid, &tx, payment_status, confirmation_status)
+						.await?;
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
 					let pending_payments: Vec<PendingPaymentDetails> = self
@@ -530,62 +475,18 @@ impl Wallet {
 					}
 				},
 				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
-					// See `TxConfirmed`: id resolution and the writes below must not interleave
-					// with classification.
-					let guard = self.funding_payment_update_lock.lock().await;
-
-					let mut payment_id = self
-						.find_payment_by_txid(txid)
-						.await?
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
-
-					match self
-						.apply_funding_status_update_locked(
-							&guard,
-							payment_id,
-							txid,
-							ConfirmationStatus::Unconfirmed,
-						)
-						.await?
-					{
-						FundingStatusUpdate::Applied => continue,
-						FundingStatusUpdate::NotFunding => {},
-						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead, unless a
-						// settled funding payment sits there already.
-						FundingStatusUpdate::Foreign => {
-							match self.foreign_transaction_payment_id(payment_id, txid).await? {
-								Some(fallback_id) => payment_id = fallback_id,
-								None => {
-									log_debug!(
-										self.logger,
-										"Skipping wallet event for transaction {} of a settled funding payment",
-										txid,
-									);
-									continue;
-								},
-							}
-						},
-					}
-
-					let payment = {
-						let locked_wallet = self.inner.lock().expect("lock");
-						self.create_payment_from_tx(
-							&locked_wallet,
-							txid,
-							payment_id,
-							&tx,
-							PaymentStatus::Pending,
-							ConfirmationStatus::Unconfirmed,
-						)
-					};
-					self.payment_store.insert_or_update(payment.clone()).await?;
-					self.upsert_pending_payment(payment, Vec::new()).await?;
+					self.record_wallet_transaction(
+						txid,
+						&tx,
+						PaymentStatus::Pending,
+						ConfirmationStatus::Unconfirmed,
+					)
+					.await?;
 				},
 				WalletEvent::TxReplaced { txid, conflicts, .. } => {
-					// See `TxConfirmed`: id resolution and the writes below must not interleave
-					// with classification. The pending entry written below embeds a read of the
-					// payment record, which must not go stale against a concurrent
+					// As in `record_wallet_transaction`: id resolution and the writes below must
+					// not interleave with classification. The pending entry written below embeds
+					// a read of the payment record, which must not go stale against a concurrent
 					// classification either.
 					let _guard = self.funding_payment_update_lock.lock().await;
 
@@ -630,57 +531,13 @@ impl Wallet {
 					self.upsert_pending_payment(payment, conflict_txids).await?;
 				},
 				WalletEvent::TxDropped { txid, tx } => {
-					// See `TxConfirmed`: id resolution and the writes below must not interleave
-					// with classification.
-					let guard = self.funding_payment_update_lock.lock().await;
-
-					let mut payment_id = self
-						.find_payment_by_txid(txid)
-						.await?
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
-
-					match self
-						.apply_funding_status_update_locked(
-							&guard,
-							payment_id,
-							txid,
-							ConfirmationStatus::Unconfirmed,
-						)
-						.await?
-					{
-						FundingStatusUpdate::Applied => continue,
-						FundingStatusUpdate::NotFunding => {},
-						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead, unless a
-						// settled funding payment sits there already.
-						FundingStatusUpdate::Foreign => {
-							match self.foreign_transaction_payment_id(payment_id, txid).await? {
-								Some(fallback_id) => payment_id = fallback_id,
-								None => {
-									log_debug!(
-										self.logger,
-										"Skipping wallet event for transaction {} of a settled funding payment",
-										txid,
-									);
-									continue;
-								},
-							}
-						},
-					}
-
-					let payment = {
-						let locked_wallet = self.inner.lock().expect("lock");
-						self.create_payment_from_tx(
-							&locked_wallet,
-							txid,
-							payment_id,
-							&tx,
-							PaymentStatus::Pending,
-							ConfirmationStatus::Unconfirmed,
-						)
-					};
-					self.payment_store.insert_or_update(payment.clone()).await?;
-					self.upsert_pending_payment(payment, Vec::new()).await?;
+					self.record_wallet_transaction(
+						txid,
+						&tx,
+						PaymentStatus::Pending,
+						ConfirmationStatus::Unconfirmed,
+					)
+					.await?;
 				},
 				_ => {
 					continue;
@@ -691,37 +548,154 @@ impl Wallet {
 		Ok(())
 	}
 
-	/// The id to record a transaction under that the funding-status check found foreign to the
-	/// funding record resolved for it as `resolved_id`: its own txid-derived id, or `None` when a
-	/// funding record sits there already. A funding record wallet sync created before
-	/// classification keeps the txid-derived id of that transaction, so a wallet event for it
-	/// falls back to this id whenever the pending entry no longer maps it — which only happens
-	/// once the negotiation settled and the entry was removed. The generic event handling must
-	/// then skip its write: merging a wallet-view `Pending` payment into the settled record would
-	/// resurrect it with figures no classification derived. When `resolved_id` is the txid-derived
-	/// id already, the funding-status check has read that record, and finding the transaction
-	/// foreign to it is this very case; only a fallback from a different id needs a read.
-	async fn foreign_transaction_payment_id(
-		&self, resolved_id: PaymentId, txid: Txid,
-	) -> Result<Option<PaymentId>, Error> {
-		let fallback_id = PaymentId(txid.to_byte_array());
-		if resolved_id == fallback_id {
-			return Ok(None);
-		}
-		let has_funding_record =
-			self.payment_store.get(&fallback_id).await?.is_some_and(|payment| {
-				matches!(
-					payment.kind,
-					PaymentKind::Onchain {
-						tx_type: Some(
-							TransactionType::Funding { .. }
-								| TransactionType::InteractiveFunding { .. }
-						),
-						..
-					}
+	/// Records a wallet event about `tx` — confirmed, back in the mempool, or evicted from it —
+	/// under the payment the transaction belongs to. The payment is resolved through the
+	/// transaction's history ([`Self::find_payment_by_txid`]), falling back to the transaction's own
+	/// txid-derived id, and the record found under that id decides what is written, in a single
+	/// payment-store write ([`Self::record_transaction_locked`]). A funding record whose
+	/// history the transaction is not part of — a close spending the funding outpoint resolves to
+	/// the splice whose entry lists it as a conflict — declines it, and the same decision is run
+	/// once more under the transaction's own id; declined there as well, the event is skipped.
+	///
+	/// `payment_status` and `confirmation_status` describe the event. A generic on-chain record
+	/// takes both; a funding record takes only the confirmation, its status being LDK's and
+	/// graduation's to set.
+	async fn record_wallet_transaction(
+		&self, txid: Txid, tx: &Transaction, payment_status: PaymentStatus,
+		confirmation_status: ConfirmationStatus,
+	) -> Result<(), Error> {
+		// Hold the cross-store lock from payment-id resolution through the last write: a
+		// classification landing in between would leave the id resolved against a torn candidate
+		// index and the write below overwriting (or duplicating) the record classification just
+		// wrote.
+		let guard = self.funding_payment_update_lock.lock().await;
+
+		let own_id = PaymentId(txid.to_byte_array());
+		let payment_id = self.find_payment_by_txid(txid).await?.unwrap_or(own_id);
+		let mut recording = self
+			.record_transaction_locked(
+				&guard,
+				payment_id,
+				txid,
+				tx,
+				payment_status,
+				confirmation_status,
+			)
+			.await?;
+		if matches!(recording, TransactionRecording::Declined) && payment_id != own_id {
+			// Not part of the funding payment's history (a close spending the funding outpoint
+			// resolves to the splice whose entry lists it as a conflict): record the transaction
+			// under its own id instead.
+			recording = self
+				.record_transaction_locked(
+					&guard,
+					own_id,
+					txid,
+					tx,
+					payment_status,
+					confirmation_status,
 				)
-			});
-		Ok(if has_funding_record { None } else { Some(fallback_id) })
+				.await?;
+		}
+		if matches!(recording, TransactionRecording::Declined) {
+			// Under the transaction's own id there is nowhere else to record it. A funding record
+			// wallet sync created before classification keeps the txid-derived id of that
+			// transaction, so an event for it lands here once the negotiation settled and its
+			// entry no longer maps the transaction; merging a wallet-view `Pending` payment into
+			// the settled record would resurrect it with figures no classification derived.
+			log_debug!(
+				self.logger,
+				"Skipping wallet event for transaction {} of a settled funding payment",
+				txid,
+			);
+		}
+		Ok(())
+	}
+
+	/// Classifies `tx` against the record under `payment_id` and writes the result, deciding and
+	/// writing inside the payment store's critical section:
+	///
+	/// - A funding record that owns the transaction — its current txid or a recorded candidate —
+	///   has its confirmation status and the candidate txid the event refers to refreshed, while
+	///   the contribution-derived amount/fee and `tx_type` that wallet sync must not recompute
+	///   from its own view are preserved (see [`refresh_funding_record`]).
+	/// - Any other record, or none, takes the wallet's view of the transaction as a generic
+	///   on-chain record: created, or merged into the existing record.
+	/// - A funding record that does not own the transaction — e.g. a close spending the same
+	///   funding outpoint — must neither adopt it nor be merged with the wallet's view: nothing is
+	///   written, and the caller decides where else to record the transaction
+	///   ([`TransactionRecording::Declined`]).
+	///
+	/// A `Pending` result is mirrored onto the pending entry, which graduation and rebroadcast
+	/// read. The caller must hold [`Self::funding_payment_update_lock`] — from resolving
+	/// `payment_id` through this call, not just across it — so that classification's two-store
+	/// write pair cannot interleave with the decision. The `_guard` parameter serves as a reminder
+	/// of that contract.
+	async fn record_transaction_locked(
+		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, payment_id: PaymentId, txid: Txid,
+		tx: &Transaction, payment_status: PaymentStatus, confirmation_status: ConfirmationStatus,
+	) -> Result<TransactionRecording, Error> {
+		// The candidate history decides ownership beyond the record's current txid and supplies
+		// the confirmed candidate's figures; the caller's lock keeps it stable while the read
+		// awaits. The decision and the write then share the payment store's mutation lock: against
+		// a separate `get`, a classification merging in between would have its `tx_type` and
+		// contribution figures clobbered by this stale snapshot.
+		let pending_payment = self.pending_payment_store.get(&payment_id).await?;
+		let wallet_view = {
+			let locked_wallet = self.inner.lock().expect("lock");
+			self.create_payment_from_tx(
+				&locked_wallet,
+				txid,
+				payment_id,
+				tx,
+				payment_status,
+				confirmation_status,
+			)
+		};
+		let mut recording = None;
+		self.payment_store
+			.mutate(&payment_id, |existing| {
+				let Some(existing) = existing else {
+					recording = Some(TransactionRecording::Recorded(wallet_view.clone()));
+					return Some(wallet_view);
+				};
+				match refresh_funding_record(
+					existing,
+					pending_payment.as_ref(),
+					txid,
+					confirmation_status,
+				) {
+					FundingRecordRefresh::Owned { record, changed } => {
+						recording = Some(TransactionRecording::Recorded(record.clone()));
+						changed.then_some(record)
+					},
+					FundingRecordRefresh::Foreign => {
+						recording = Some(TransactionRecording::Declined);
+						None
+					},
+					FundingRecordRefresh::NotFunding => {
+						// Merge through the update machinery so its rules (e.g. which fields a
+						// merge may touch) keep applying, and skip the write when nothing changed.
+						let mut merged = existing.clone();
+						let changed = merged.update(wallet_view.to_update());
+						recording = Some(TransactionRecording::Recorded(merged.clone()));
+						changed.then_some(merged)
+					},
+				}
+			})
+			.await?;
+		let recording = recording.expect("the mutate closure always runs");
+		match &recording {
+			// Mirror the record onto the pending entry: `ChainTipChanged` graduates by reading the
+			// entry's details, so it must see the new confirmation status. An empty
+			// conflicting-txids list leaves any stored conflicts intact (the update treats absent
+			// as "unchanged").
+			TransactionRecording::Recorded(payment) if payment.status == PaymentStatus::Pending => {
+				self.upsert_pending_payment(payment.clone(), Vec::new()).await?;
+			},
+			TransactionRecording::Recorded(_) | TransactionRecording::Declined => {},
+		}
+		Ok(recording)
 	}
 
 	/// Fails a funding payment whose transaction has irrevocably lost a conflict: a transaction
@@ -3118,11 +3092,11 @@ impl Wallet {
 			// Only a confirmation is worth adopting; an unconfirmed duplicate carries nothing the
 			// record needs — the actively-broadcast candidate stays the record's current txid.
 			if matches!(status, ConfirmationStatus::Confirmed { .. }) {
-				let outcome = self
+				let adopted = self
 					.apply_funding_status_update_locked(guard, id, candidate.txid, status)
 					.await?;
-				debug_assert!(matches!(outcome, FundingStatusUpdate::Applied));
-				if !matches!(outcome, FundingStatusUpdate::Applied) {
+				debug_assert!(adopted);
+				if !adopted {
 					// Adoption declined; keep the duplicate rather than discard its confirmation.
 					continue;
 				}
@@ -3298,14 +3272,10 @@ impl Wallet {
 		Ok(None)
 	}
 
-	/// If `payment_id` refers to a classified funding payment, refreshes its confirmation status
-	/// and the candidate txid the event refers to, while preserving the contribution-derived
-	/// amount/fee and `tx_type` that wallet sync must not recompute from its own view: the wallet's
-	/// `sent`/`received` don't capture our contribution to a shared funding output. Returns
-	/// [`FundingStatusUpdate::Applied`] when it handled the payment, so the caller skips the
-	/// default on-chain path — or [`FundingStatusUpdate::Foreign`] when the transaction is not
-	/// part of the payment's funding history, so the caller records it under its own id.
-	/// Graduation to `Succeeded` is left to `ChainTipChanged` after `ANTI_REORG_DELAY`.
+	/// Adopts a confirmation of `event_txid` onto the funding record under `payment_id`, if that
+	/// record owns the transaction (see [`refresh_funding_record`]), mirroring the result onto the
+	/// pending entry as [`Self::record_transaction_locked`] does for wallet events. Returns
+	/// whether the record adopted the confirmation.
 	///
 	/// The caller must hold [`Self::funding_payment_update_lock`] — from resolving `payment_id`
 	/// through its own last write, not just across this call — so that classification's two-store
@@ -3314,78 +3284,42 @@ impl Wallet {
 	async fn apply_funding_status_update_locked(
 		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, payment_id: PaymentId, event_txid: Txid,
 		confirmation_status: ConfirmationStatus,
-	) -> Result<FundingStatusUpdate, Error> {
+	) -> Result<bool, Error> {
 		// The caller's wallet-level lock keeps the candidate history stable while we await its
 		// read. The funding-type gate, the candidate lookup, and the write then share the payment
 		// store's mutation lock: against a separate payment `get`, a classification merging in
 		// between would have its `tx_type` and contribution figures clobbered by this stale
 		// snapshot.
 		let pending_payment = self.pending_payment_store.get(&payment_id).await?;
-		let mut outcome = FundingStatusUpdate::NotFunding;
-		let mut handled = None;
+		let mut adopted = None;
 		self.payment_store
 			.mutate(&payment_id, |existing| {
 				let payment = existing?;
-				let (current_txid, tx_type) = match &payment.kind {
-					PaymentKind::Onchain {
-						txid,
-						tx_type:
-							tx_type @ Some(
-								TransactionType::Funding { .. }
-								| TransactionType::InteractiveFunding { .. },
-							),
-						..
-					} => (*txid, tx_type.clone()),
-					_ => return None,
-				};
-				// Adopt the event's txid only when the transaction is part of this payment's
-				// funding history: its current txid or a classified candidate. A conflicting
-				// transaction that is neither — a close also spends the funding outpoint — must
-				// not overwrite the record.
-				let owns_event_tx = event_txid == current_txid
-					|| pending_payment.as_ref().is_some_and(|p| p.candidate(event_txid).is_some());
-				if !owns_event_tx {
-					outcome = FundingStatusUpdate::Foreign;
-					return None;
-				}
-				// Report the figures of the candidate that actually confirmed, which need not be
-				// the last one broadcast (an earlier, lower-fee candidate may win) and may carry
-				// no figures at all (`None`) for a round we didn't contribute to. (`direction` is
-				// invariant across a splice's candidates and cannot be changed through the store
-				// anyway.)
-				let mut target = payment.clone();
-				if let Some(candidate) =
-					pending_payment.as_ref().and_then(|p| p.candidate(event_txid))
-				{
-					target.amount_msat = candidate.amount_msat;
-					target.fee_paid_msat = candidate.fee_paid_msat;
-				}
-				target.kind =
-					PaymentKind::Onchain { txid: event_txid, status: confirmation_status, tx_type };
-
-				// Merge through the update machinery so its rules (e.g. which fields a merge may
-				// touch) keep applying, and skip the write when nothing changed.
-				let mut merged = payment.clone();
-				if merged.update(target.to_update()) {
-					handled = Some(merged.clone());
-					Some(merged)
-				} else {
-					handled = Some(payment.clone());
-					None
+				match refresh_funding_record(
+					payment,
+					pending_payment.as_ref(),
+					event_txid,
+					confirmation_status,
+				) {
+					FundingRecordRefresh::NotFunding | FundingRecordRefresh::Foreign => None,
+					FundingRecordRefresh::Owned { record, changed } => {
+						adopted = Some(record.clone());
+						changed.then_some(record)
+					},
 				}
 			})
 			.await?;
-		let Some(payment) = handled else {
-			return Ok(outcome);
+		let Some(payment) = adopted else {
+			return Ok(false);
 		};
 		// Mirror the refreshed confirmation status onto the pending entry: `ChainTipChanged`
-		// graduates by reading the pending entry's details, so it must see the new status. This is
-		// the same dual-write the default `TxConfirmed` path performs; an empty conflicting-txids
-		// list leaves any stored conflicts intact (the update treats absent as "unchanged").
+		// graduates by reading the pending entry's details, so it must see the new status. An
+		// empty conflicting-txids list leaves any stored conflicts intact (the update treats
+		// absent as "unchanged").
 		if payment.status == PaymentStatus::Pending {
 			self.upsert_pending_payment(payment, Vec::new()).await?;
 		}
-		Ok(FundingStatusUpdate::Applied)
+		Ok(true)
 	}
 
 	#[allow(deprecated)]
@@ -3817,18 +3751,14 @@ pub(crate) fn random_payment_id() -> PaymentId {
 	PaymentId(bytes)
 }
 
-/// The outcome of [`Wallet::apply_funding_status_update_locked`].
-enum FundingStatusUpdate {
-	/// The event's transaction belongs to the funding payment; its refreshed confirmation status
-	/// was applied (or was already current).
-	Applied,
-	/// The resolved payment is not a classified funding payment; the caller's default on-chain
-	/// handling applies under the resolved id.
-	NotFunding,
-	/// The event's transaction is not part of the funding payment's history — e.g. a close
-	/// spending the same funding outpoint — so the funding record must not adopt it; the caller
-	/// should record the transaction under its own txid-derived id.
-	Foreign,
+/// The outcome of [`Wallet::record_transaction_locked`].
+enum TransactionRecording {
+	/// The record under the id — a funding record that owns the transaction, refreshed, or a
+	/// generic on-chain record created from or merged with the wallet's view — as it stands after
+	/// the write, or unchanged when the event brought nothing new.
+	Recorded(PaymentDetails),
+	/// The funding record under the id does not own the transaction: nothing was written.
+	Declined,
 }
 
 impl Listen for Wallet {
@@ -4203,6 +4133,64 @@ fn funding_reclassification_update(
 		}
 	}
 	update
+}
+
+/// The outcome of [`refresh_funding_record`].
+enum FundingRecordRefresh {
+	/// The record is not a classified funding payment.
+	NotFunding,
+	/// The event's transaction is not part of the funding payment's history — e.g. a close
+	/// spending the same funding outpoint — so the record must not adopt it.
+	Foreign,
+	/// The record owns the transaction. `record` carries the event's confirmation status and the
+	/// confirmed candidate's figures; `changed` says whether that differs from the stored record.
+	Owned { record: PaymentDetails, changed: bool },
+}
+
+/// If `payment` is a classified funding payment that owns `event_txid` — its current txid, or a
+/// candidate recorded on `pending_payment`, its pending entry — refreshes its confirmation status
+/// and the candidate txid the event refers to, while preserving the contribution-derived amount/fee
+/// and `tx_type` that wallet sync must not recompute from its own view: the wallet's
+/// `sent`/`received` don't capture our contribution to a shared funding output. Graduation to
+/// `Succeeded` is left to `ChainTipChanged` after `ANTI_REORG_DELAY`.
+fn refresh_funding_record(
+	payment: &PaymentDetails, pending_payment: Option<&PendingPaymentDetails>, event_txid: Txid,
+	confirmation_status: ConfirmationStatus,
+) -> FundingRecordRefresh {
+	let (current_txid, tx_type) = match &payment.kind {
+		PaymentKind::Onchain {
+			txid,
+			tx_type:
+				tx_type @ Some(
+					TransactionType::Funding { .. } | TransactionType::InteractiveFunding { .. },
+				),
+			..
+		} => (*txid, tx_type.clone()),
+		_ => return FundingRecordRefresh::NotFunding,
+	};
+	// Adopt the event's txid only when the transaction is part of this payment's funding history:
+	// its current txid or a classified candidate. A conflicting transaction that is neither — a
+	// close also spends the funding outpoint — must not overwrite the record.
+	let candidate = pending_payment.and_then(|p| p.candidate(event_txid));
+	if event_txid != current_txid && candidate.is_none() {
+		return FundingRecordRefresh::Foreign;
+	}
+	// Report the figures of the candidate that actually confirmed, which need not be the last one
+	// broadcast (an earlier, lower-fee candidate may win) and may carry no figures at all (`None`)
+	// for a round we didn't contribute to. (`direction` is invariant across a splice's candidates
+	// and cannot be changed through the store anyway.)
+	let mut target = payment.clone();
+	if let Some(candidate) = candidate {
+		target.amount_msat = candidate.amount_msat;
+		target.fee_paid_msat = candidate.fee_paid_msat;
+	}
+	target.kind = PaymentKind::Onchain { txid: event_txid, status: confirmation_status, tx_type };
+
+	// Merge through the update machinery so its rules (e.g. which fields a merge may touch) keep
+	// applying; `changed` lets the caller skip the write when nothing did.
+	let mut record = payment.clone();
+	let changed = record.update(target.to_update());
+	FundingRecordRefresh::Owned { record, changed }
 }
 
 #[cfg(all(test, any(feature = "chain-esplora", feature = "chain-electrum")))]
@@ -8110,11 +8098,12 @@ mod tests {
 		);
 	}
 
-	/// Recording a transaction the payment store does not know costs two reads of it: the
-	/// funding-status check looks the resolved id up, and the generic write merges against the
-	/// store. Nothing in between re-reads what the funding-status check has already seen.
+	/// Recording a transaction the payment store does not know costs one read of it: the write
+	/// that classifies the transaction against the record under the resolved id is the only place
+	/// that looks the id up, and the pending-store write after it finds the record in the store's
+	/// cache.
 	#[tokio::test]
-	async fn unknown_transaction_is_recorded_after_two_payment_store_reads() {
+	async fn unknown_transaction_is_recorded_after_one_payment_store_read() {
 		let counting_store = ReadCountingStore::new();
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(counting_store.clone()));
 		let wallet = new_test_wallet(Arc::clone(&store), false).await;
@@ -8128,7 +8117,61 @@ mod tests {
 
 		let payment_id = PaymentId(txid.to_byte_array());
 		assert!(wallet.payment_store.get(&payment_id).await.unwrap().is_some());
-		assert_eq!(reads, 2, "recording an unknown transaction re-read the payment store");
+		assert_eq!(reads, 1, "recording an unknown transaction re-read the payment store");
+	}
+
+	/// A later event for a transaction the store already knows as a generic on-chain payment is
+	/// merged into that record — the confirmation moves, the figures and direction stay — and the
+	/// pending entry mirrors the merged record. The record is served from the store's cache, so the
+	/// event costs no backend read.
+	#[tokio::test]
+	async fn known_generic_transaction_is_updated_in_place_without_a_backend_read() {
+		let counting_store = ReadCountingStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(counting_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let tx = wallet_paying_tx(&wallet, 1);
+		let txid = tx.compute_txid();
+		let payment_id = PaymentId(txid.to_byte_array());
+		let event =
+			WalletEvent::TxUnconfirmed { txid, tx: Arc::new(tx.clone()), old_block_time: None };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+		let unconfirmed = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert!(matches!(
+			unconfirmed.kind,
+			PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, tx_type: None, .. }
+		));
+
+		let reads_before = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		let event = WalletEvent::TxConfirmed {
+			txid,
+			tx: Arc::new(tx),
+			block_time: confirmed_block_time(5),
+			old_block_time: None,
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+		let reads = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE) - reads_before;
+
+		let confirmed = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		match &confirmed.kind {
+			PaymentKind::Onchain { txid: recorded, status, tx_type } => {
+				assert_eq!(*recorded, txid);
+				assert!(matches!(status, ConfirmationStatus::Confirmed { height: 5, .. }));
+				assert!(tx_type.is_none());
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
+		// Shallow confirmation: the payment stays `Pending` until graduation.
+		assert_eq!(confirmed.status, PaymentStatus::Pending);
+		assert_eq!(confirmed.amount_msat, unconfirmed.amount_msat);
+		assert_eq!(confirmed.fee_paid_msat, unconfirmed.fee_paid_msat);
+		assert_eq!(confirmed.direction, unconfirmed.direction);
+		let entry = wallet.pending_payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert!(matches!(
+			entry.details().map(|d| &d.kind),
+			Some(PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. })
+		));
+		assert_eq!(reads, 0, "a known record must be served from the store's cache");
 	}
 
 	/// A funding record wallet sync created before classification keeps the txid-derived id of
@@ -8180,18 +8223,22 @@ mod tests {
 	}
 
 	/// The same collision through a conflict list: a pending entry naming a settled funding
-	/// record's transaction as a conflict of its own round resolves an event for that transaction
-	/// to the entry's record, which finds it foreign, and the fallback to the transaction's own id
-	/// lands on the settled record. That id is read before anything is written under it.
+	/// record's first candidate as a conflict of its own round resolves an event for that
+	/// transaction to the entry's record, which finds it foreign, and the fallback to the
+	/// transaction's own id lands on the settled record. That record moved on to a later round and
+	/// lost its candidate history with its entry, so it does not own the transaction either: the
+	/// event must be skipped.
 	#[tokio::test]
 	async fn conflict_listed_event_does_not_resurrect_a_settled_funding_payment() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let wallet = new_test_wallet(store, false).await;
 
-		// A settled funding record under the txid-derived id of r1, its pending entry gone.
+		// A settled funding record under the txid-derived id of its first round r1, its current
+		// txid a later round r3, its pending entry (and with it r1's candidate) gone.
 		let r1 = Txid::from_byte_array([2u8; 32]);
+		let r3 = Txid::from_byte_array([6u8; 32]);
 		let settled_id = PaymentId(r1.to_byte_array());
-		let mut settled = interactive_funding_details(settled_id, r1, Some(1_000_000), Some(600));
+		let mut settled = interactive_funding_details(settled_id, r3, Some(1_000_000), Some(600));
 		settled.status = PaymentStatus::Failed;
 		settled.latest_update_timestamp = 7;
 		wallet.payment_store.insert_or_update(settled).await.unwrap();
@@ -8214,8 +8261,78 @@ mod tests {
 
 		let payment = wallet.payment_store.get(&settled_id).await.unwrap().unwrap();
 		assert_eq!(payment.status, PaymentStatus::Failed, "the settled record must not resurrect");
+		assert!(
+			matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == r3),
+			"the settled record must not adopt the foreign transaction"
+		);
 		assert_eq!(payment.latest_update_timestamp, 7);
 		assert!(wallet.pending_payment_store.get(&settled_id).await.unwrap().is_none());
+		assert_eq!(wallet.payment_store.get(&live_id).await.unwrap(), Some(live));
+	}
+
+	/// The same resolution through a conflict list, landing on a graduated funding record that
+	/// owns the transaction: a reorg event for the record's transaction must refresh its
+	/// confirmation, as it does when the record is resolved directly (graduation removed the
+	/// entry, so the transaction otherwise resolves through the payment store). Which entry
+	/// happens to list the transaction as a conflict must not decide whether the event reaches
+	/// the record.
+	#[tokio::test]
+	async fn conflict_listed_reorg_event_reaches_the_graduated_funding_record() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		// A graduated funding record under the txid-derived id of r1, its pending entry gone.
+		let r1 = Txid::from_byte_array([2u8; 32]);
+		let graduated_id = PaymentId(r1.to_byte_array());
+		let mut graduated =
+			interactive_funding_details(graduated_id, r1, Some(1_000_000), Some(600));
+		graduated.kind = PaymentKind::Onchain {
+			txid: r1,
+			status: confirmed_status(),
+			tx_type: Some(TransactionType::InteractiveFunding { channels: vec![] }),
+		};
+		graduated.status = PaymentStatus::Succeeded;
+		graduated.latest_update_timestamp = 7;
+		wallet.payment_store.insert_or_update(graduated).await.unwrap();
+
+		// A live funding record whose entry lists r1 as a conflict of its round r2.
+		let r2 = Txid::from_byte_array([4u8; 32]);
+		let live_id = PaymentId(r2.to_byte_array());
+		let live = interactive_funding_details(live_id, r2, Some(2_000_000), Some(700));
+		wallet.payment_store.insert_or_update(live.clone()).await.unwrap();
+		wallet
+			.pending_payment_store
+			.insert_or_update(PendingPaymentDetails::new(live.clone(), vec![r1], Vec::new()))
+			.await
+			.unwrap();
+		assert_eq!(wallet.find_payment_by_txid(r1).await.unwrap(), Some(live_id));
+
+		// A reorg drops r1 back into the mempool.
+		let event =
+			WalletEvent::TxUnconfirmed { txid: r1, tx: Arc::new(dummy_tx()), old_block_time: None };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&graduated_id).await.unwrap().unwrap();
+		match &payment.kind {
+			PaymentKind::Onchain { status, tx_type, .. } => {
+				assert!(
+					matches!(status, ConfirmationStatus::Unconfirmed),
+					"the reorg must reach the record"
+				);
+				assert!(matches!(tx_type, Some(TransactionType::InteractiveFunding { .. })));
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
+		assert_ne!(payment.latest_update_timestamp, 7, "the refresh must be written");
+		// The top-level status is graduation's to set; wallet sync leaves it alone, as it does
+		// when the record is resolved directly.
+		assert_eq!(payment.status, PaymentStatus::Succeeded);
+		assert_eq!(payment.amount_msat, Some(1_000_000));
+		assert_eq!(payment.fee_paid_msat, Some(600));
+		assert!(
+			wallet.pending_payment_store.get(&graduated_id).await.unwrap().is_none(),
+			"a settled record gets no pending entry"
+		);
 		assert_eq!(wallet.payment_store.get(&live_id).await.unwrap(), Some(live));
 	}
 
