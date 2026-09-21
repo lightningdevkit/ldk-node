@@ -1739,6 +1739,7 @@ fn build_with_store_internal(
 	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
 	let mut wallet_persister =
 		KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger));
+	#[allow(deprecated)]
 	let wallet_opt = runtime
 		.block_on(async {
 			BdkWallet::load()
