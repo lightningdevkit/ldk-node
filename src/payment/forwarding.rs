@@ -16,15 +16,13 @@ use lightning::impl_writeable_tlv_based;
 use lightning::ln::types::ChannelId;
 use lightning::util::ser::{Readable, Writeable, Writer};
 
+use super::forwarding_store::ForwardingStore;
+use super::PageToken;
 use crate::config::{Config, ForwardedPaymentTrackingMode};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
-use crate::hex_utils;
 use crate::runtime::Runtime;
-use crate::UserChannelId;
-
-use super::forwarding_store::ForwardingStore;
-use super::PageToken;
+use crate::{hex_utils, UserChannelId};
 
 fn parse_forwarding_id(id: &str) -> Option<[u8; 32]> {
 	hex_utils::to_vec(id)?.try_into().ok()
