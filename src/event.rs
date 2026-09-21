@@ -1946,13 +1946,12 @@ where
 				// A splice round this node signed dies with the channel unless LDK had already
 				// handed it to the broadcaster. Whatever the channel manager reports for a round
 				// still awaiting the counterparty's signatures when the channel closes is queued
-				// after this event, so its record is taken back here; nothing is reported before
-				// https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967 is fixed.
-				// The channel manager holds only the closed channel's last funding, but the
-				// channel's monitor still watches every round the counterparty committed to, and
-				// our signatures may have left the node for such a round, so it is kept (see
-				// `closed_channel_held_rounds`). The monitor's guard is not `Send`, so its watched
-				// transactions are collected before anything is awaited.
+				// after this event, so its record is taken back here. The channel manager holds
+				// only the closed channel's last funding, but the channel's monitor still watches
+				// every round the counterparty committed to, and our signatures may have left the
+				// node for such a round, so it is kept (see `closed_channel_held_rounds`). The
+				// monitor's guard is not `Send`, so its watched transactions are collected before
+				// anything is awaited.
 				let watched_txids: Vec<Txid> = self
 					.chain_monitor
 					.get_monitor(channel_id)

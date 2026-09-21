@@ -3017,6 +3017,8 @@ const BROADCAST_FUNDING: &str = "Broadcasting interactively funded transaction w
 const RECEIVED_TX_SIGNATURES: &str = "Received message TxSignatures";
 /// Logged by LDK's peer handler when the counterparty's `commitment_signed` arrives.
 const RECEIVED_COMMITMENT_SIGNED: &str = "Received message CommitmentSigned";
+/// Logged by a node as it returns the addresses of a contribution LDK discarded to the wallet.
+const RECLAIMED_ADDRESSES: &str = "Reclaiming unused addresses from channel";
 
 /// A splice round this node signed stays recorded when the channel closes before the
 /// counterparty's `tx_signatures` arrive, if the channel's monitor watches the round. The monitor
@@ -3110,11 +3112,9 @@ async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
 /// node B never signs, never sends its `commitment_signed`, and node A's monitor never learns of
 /// the round.
 ///
-/// Once <https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967> is fixed, LDK
-/// reports the round itself after `ChannelClosed`: a `DiscardFunding` for node A's contribution,
-/// whose handling reclaims its addresses, and a `SpliceNegotiationFailed` the node reports with
-/// reason `ChannelClosing` and no parameters, its intent having been cleared at the close. Assert
-/// both once the pinned LDK carries the fix; the assertion below holds either way.
+/// LDK reports the round itself after `ChannelClosed`: a `DiscardFunding` for node A's
+/// contribution, whose handling reclaims its addresses, and a `SpliceNegotiationFailed` the node
+/// passes on.
 #[cfg(feature = "chain-esplora")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn signed_splice_round_the_monitor_does_not_watch_is_dropped_at_close() {
@@ -3128,6 +3128,7 @@ async fn signed_splice_round_the_monitor_does_not_watch_is_dropped_at_close() {
 	let signed_a = logs_a.count(SIGNED_FUNDING);
 	let signed_b = logs_b.count(SIGNED_FUNDING);
 	let committed_a = logs_a.count(RECEIVED_COMMITMENT_SIGNED);
+	let reclaimed_a = logs_a.count(RECLAIMED_ADDRESSES);
 
 	let hold_b = Arc::clone(&store_b.serializer).write_owned().await;
 	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 200_000).unwrap();
@@ -3143,6 +3144,11 @@ async fn signed_splice_round_the_monitor_does_not_watch_is_dropped_at_close() {
 	node_a.disconnect(node_b.node_id()).unwrap();
 	node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
 	expect_event!(node_a, ChannelClosed);
+	expect_event!(node_a, SpliceNegotiationFailed);
+	assert!(
+		logs_a.wait_for_count(RECLAIMED_ADDRESSES, reclaimed_a + 1).await,
+		"node A's contribution to the discarded round was not reclaimed"
+	);
 
 	assert!(
 		node_a

@@ -3016,9 +3016,8 @@ pub(crate) fn held_splice_rounds(
 /// [`Wallet::drop_abandoned_splice_rounds`] takes them: the channel's last funding — which a
 /// zero-conf splice may have become before its transaction confirmed — and every transaction the
 /// channel's monitor still watches. The channel manager forgets a pending round with the channel,
-/// and what it reports for one awaiting the counterparty's signatures — nothing before
-/// <https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967> is fixed — is queued
-/// after `ChannelClosed`, but the monitor keeps watching every round the counterparty's
+/// and what it reports for one awaiting the counterparty's signatures is queued after
+/// `ChannelClosed`, but the monitor keeps watching every round the counterparty's
 /// `commitment_signed` reached, and our signatures cannot have left the node before that message:
 /// such a round may yet confirm and is left to wallet sync or `DiscardFunding` to resolve, while a
 /// round the monitor never watched never had our signatures released. The watched transactions also
