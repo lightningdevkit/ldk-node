@@ -2156,9 +2156,18 @@ impl Node {
 			// dropping it. This lets `channel_reestablish` drive the recovery flow, which is
 			// especially important against LND peers that don't always handle force-closure
 			// error messages correctly.
-		}
 
-		Ok(())
+			Ok(())
+		} else {
+			log_error!(
+				self.logger,
+				"Failed to {} channel: no matching channel found for user_channel_id {} and counterparty {}",
+				if force { "force-close" } else { "close" },
+				user_channel_id,
+				counterparty_node_id
+			);
+			Err(Error::ChannelClosingFailed)
+		}
 	}
 
 	/// Update the config for a previously opened channel.
