@@ -3279,16 +3279,11 @@ const ROUND_LOCKED: &str = "locked as the funding of channel";
 ///
 /// The kept record is resolved once the close settles: node A's commitment transaction confirms
 /// and its `to_self_delay` passes, the monitor stops watching the round and reports it discarded,
-/// and the record of a round node A never saw broadcast goes rather than fail a payment for a
-/// transaction that never existed.
-///
-/// Once <https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4967> is fixed, LDK
-/// reports `SpliceNegotiated` for this round after `ChannelClosed`, node A having sent its
-/// `tx_signatures`, so the node clears the round's awaiting-broadcast mark and the record is kept:
-/// at maturity the payment ends `Failed` with `NO_ROUND_CAN_CONFIRM` logged instead of being
-/// removed with `DROPPED_ABANDONED_ROUND`. The test's own tail shows node B does broadcast the
-/// round, which is why that is the right end state. The maturity assertions and the two comments
-/// describing the removal must change at that pin move, not before.
+/// and the payment fails, no round of ours being left that can confirm. LDK reports
+/// `SpliceNegotiated` for this round after `ChannelClosed`, node A having sent its `tx_signatures`,
+/// so the node clears the round's awaiting-broadcast mark and the record is not dropped at maturity
+/// as one nothing broadcast. The test's own tail shows node B does broadcast the round, which is
+/// why `Failed` is the right end state.
 #[cfg(feature = "chain-esplora")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
@@ -3306,6 +3301,7 @@ async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
 	let received_a = logs_a.count(RECEIVED_TX_SIGNATURES);
 	let received_b = logs_b.count(RECEIVED_TX_SIGNATURES);
 	let broadcast_b = logs_b.count(BROADCAST_FUNDING);
+	let marked_a = logs_a.count(ROUND_MARKED_BROADCAST);
 
 	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 200_000).unwrap();
 	// Recording the round writes the payment store before the round is signed, so node A does not
@@ -3337,6 +3333,12 @@ async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
 	node_a.disconnect(node_b.node_id()).unwrap();
 	node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
 	expect_event!(node_a, ChannelClosed);
+	let new_funding_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	assert_eq!(new_funding_txo.txid, rbf_txid, "LDK reported a different round negotiated");
+	assert!(
+		logs_a.wait_for_count(ROUND_MARKED_BROADCAST, marked_a + 1).await,
+		"the round's awaiting-broadcast mark was not cleared"
+	);
 
 	let payment = node_a
 		.list_all_payments()
@@ -3357,8 +3359,8 @@ async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
 	// node B's first round, which spends the same funding, sits there, so it is mined directly.
 	// The monitor settles a close by node A's own commitment only once the `to_self_delay` on its
 	// balance has passed, not after the six blocks that settle a counterparty's; it then reports
-	// the rounds it watched as discarded, and node A never saw its round broadcast, so the record
-	// goes.
+	// the rounds it watched as discarded, and no round of ours is left that can confirm, so the
+	// payment fails.
 	let commitment =
 		wait_for_broadcast(&bitcoind, &logs_a, |tx| is_commitment(tx, funding_txo), "commitment")
 			.await;
@@ -3366,17 +3368,19 @@ async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
 	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, BREAKDOWN_TIMEOUT as usize).await;
 	node_a.sync_wallets().unwrap();
 	assert!(
-		logs_a.wait_for(DROPPED_ABANDONED_ROUND).await,
-		"the discarded round's record was not taken back"
+		logs_a.wait_for(NO_ROUND_CAN_CONFIRM).await,
+		"the discarded round's payment was not failed"
 	);
+	let payment = node_a
+		.list_all_payments()
+		.into_iter()
+		.find(|p| matches!(p.kind, PaymentKind::Onchain { txid, .. } if txid == rbf_txid))
+		.expect("the record of a round node B could broadcast was taken back");
+	assert_eq!(payment.status, PaymentStatus::Failed);
 	assert!(
-		!node_a
-			.list_all_payments()
-			.iter()
-			.any(|p| matches!(p.kind, PaymentKind::Onchain { txid, .. } if txid == rbf_txid)),
-		"the record of a round nothing broadcast outlived the close"
+		!logs_a.contains(DROPPED_ABANDONED_ROUND),
+		"a round node B could broadcast was dropped"
 	);
-	assert!(!logs_a.contains(NO_ROUND_CAN_CONFIRM), "a round nothing broadcast was failed");
 
 	// With its monitor update through, node B holds both signature sets and hands the round to its
 	// broadcaster on its own — too late to confirm, the commitment having spent the funding — so
