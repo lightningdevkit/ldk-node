@@ -2225,9 +2225,10 @@ impl Wallet {
 						// so a removal that fails midway is finished by the replayed event.
 						self.payment_store.remove(&payment_id).await?;
 						self.pending_payment_store.remove(&payment_id).await?;
-						log_info!(
+						log_debug!(
 							self.logger,
-							"Dropped abandoned splice round(s) {:?} and funding payment {} with them",
+							"Dropped abandoned splice round(s) {:?} and removed funding payment {}: nothing of ours \
+							was broadcast under it",
 							abandoned_txids,
 							payment_id,
 						);
@@ -2260,7 +2261,7 @@ impl Wallet {
 					Some(entry)
 				})
 				.await?;
-			log_info!(
+			log_debug!(
 				self.logger,
 				"Dropped abandoned splice round(s) {:?} from funding payment {}",
 				abandoned_txids,
