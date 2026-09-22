@@ -2018,9 +2018,14 @@ impl Wallet {
 		// The write pair can fail between its two stores. The lock keeps the other writers of this
 		// record out, bar graduation, which only ever moves a record out of `Pending`: put the
 		// payment store back as it was while the record is still pending, or the replayed event
-		// would find the half-written record and take it for prior state.
-		let prior_details = self.payment_store.get(&payment_id).await?;
-		if let Err(e) = self.persist_funding_payment_locked(&guard, details, recorded).await {
+		// would find the half-written record and take it for prior state. The write hands back
+		// what it found in the payment store, read inside its own critical section.
+		if let Err(failure) = self.persist_funding_payment_locked(&guard, details, recorded).await {
+			let (e, prior_details) = match failure {
+				// The write pair failed before its first write, so there is nothing to put back.
+				FundingWriteError::Unread(e) => return Err(e),
+				FundingWriteError::Failed { error, prior } => (error, prior),
+			};
 			let rollback = match &prior_details {
 				Some(prior) => self
 					.payment_store
@@ -2375,15 +2380,20 @@ impl Wallet {
 		// Hold the cross-store lock across both writes so a funding confirmation never observes
 		// the record classified but the candidate history it needs still missing.
 		let guard = self.funding_payment_update_lock.lock().await;
-		self.persist_funding_payment_locked(&guard, details, candidates).await
+		self.persist_funding_payment_locked(&guard, details, candidates)
+			.await
+			.map(|_| ())
+			.map_err(Error::from)
 	}
 
 	/// [`Self::persist_funding_payment`] for a caller already holding the cross-store lock, whose
-	/// reads the write must not be separated from.
+	/// reads the write must not be separated from. Returns the payment store's record as it was
+	/// before the write, read inside the write's own critical section, so a caller needs no read of
+	/// its own to know what the write merged into.
 	async fn persist_funding_payment_locked(
 		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, details: PaymentDetails,
 		candidates: Vec<FundingTxCandidate>,
-	) -> Result<(), Error> {
+	) -> Result<Option<PaymentDetails>, FundingWriteError> {
 		// Everything this write does depends on the record's current state, so all of it must be
 		// decided inside the store's critical section. When a record exists — no matter when it
 		// appeared — only the classification (`tx_type`) and the figures of whichever candidate
@@ -2395,12 +2405,13 @@ impl Wallet {
 		// the update still names the actively-broadcast candidate, the confirmed-figures guard
 		// then rightly refuses it, and the record is left with figures no classification derived.
 		let id = details.id;
-		let mut update = None;
-		self.payment_store
+		let mut seen = None;
+		let written = self
+			.payment_store
 			.mutate(&id, |existing| {
 				let reclassification =
 					funding_reclassification_update(details.clone(), &candidates, existing);
-				update = Some(reclassification.clone());
+				seen = Some((existing.cloned(), reclassification.clone()));
 				match existing {
 					None => Some(details.clone()),
 					Some(current) => {
@@ -2409,8 +2420,14 @@ impl Wallet {
 					},
 				}
 			})
-			.await?;
-		let update = update.expect("the mutate closure always runs");
+			.await;
+		// The closure runs only once the record has been read, so a write that failed before it ran
+		// wrote nothing.
+		written.map_err(|error| match &seen {
+			Some((prior, _)) => FundingWriteError::Failed { error, prior: prior.clone() },
+			None => FundingWriteError::Unread(error),
+		})?;
+		let (prior, update) = seen.expect("the mutate closure always runs");
 
 		// The pending index must exist exactly while the authoritative record is Pending:
 		// graduation and rebroadcast read it, and a graduated payment must not be re-indexed.
@@ -2455,8 +2472,9 @@ impl Wallet {
 					},
 				})
 			})
-			.await?;
-		Ok(())
+			.await
+			.map_err(|error| FundingWriteError::Failed { error, prior: prior.clone() })?;
+		Ok(prior)
 	}
 
 	/// Returns the wallet's view of a transaction as `(amount_msat, fee_msat, direction)`.
@@ -3365,6 +3383,23 @@ fn ldk_to_bdk_satisfaction_weight(ldk_satisfaction_weight: u64) -> Weight {
 		ldk_satisfaction_weight
 			.saturating_sub(EMPTY_SCRIPT_SIG_WEIGHT + EMPTY_WITNESS_COUNT_WEIGHT),
 	)
+}
+
+/// How a funding-record write pair ([`Wallet::persist_funding_payment_locked`]) failed.
+enum FundingWriteError {
+	/// The payment store could not be read, so nothing was written.
+	Unread(Error),
+	/// A write failed after the payment store's record was read; `prior` is that record, for a
+	/// caller to put the store back to.
+	Failed { error: Error, prior: Option<PaymentDetails> },
+}
+
+impl From<FundingWriteError> for Error {
+	fn from(failure: FundingWriteError) -> Self {
+		match failure {
+			FundingWriteError::Unread(error) | FundingWriteError::Failed { error, .. } => error,
+		}
+	}
 }
 
 /// Builds the payment-store update for a freshly classified funding payment. `details` describes
@@ -5497,6 +5532,26 @@ mod tests {
 		wallet.record_signed_funding(&tx, &[]).await.unwrap();
 		assert!(wallet.payment_store.get(&id).await.unwrap().is_some());
 		assert!(wallet.pending_payment_store.get(&id).await.unwrap().is_some());
+	}
+
+	/// Recording a first splice round costs one read of the payment store: the write pair reads
+	/// the record it merges into, and that read also serves the rollback of a failed write.
+	#[tokio::test]
+	async fn a_first_round_signing_reads_the_payment_store_once() {
+		let counting_store = ReadCountingStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(counting_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
+
+		let reads_before = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		wallet.record_signed_funding(&tx, &candidates).await.unwrap();
+		let reads = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE) - reads_before;
+		assert_eq!(reads, 1, "recording a first round re-read the payment store");
 	}
 
 	/// The signing write fails between its two stores — the payment record lands, the pending
