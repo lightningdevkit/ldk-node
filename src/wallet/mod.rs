@@ -4194,8 +4194,20 @@ impl Wallet {
 
 			// Taken after the persister, the order wallet sync takes the two locks in.
 			let stores = self.payment_stores.lock().await;
+			// Wallet sync maps a replaced transaction to its payment with `find_payment_by_txid`.
+			// From the second bump on, the replaced `txid` matches only through the pending-store
+			// entry's `conflicting_txids`. A non-empty list in an update replaces the stored one,
+			// so extend it rather than writing just `txid`.
+			let mut conflicting_txids = stores
+				.pending_payment(&payment.id)
+				.await?
+				.map(|pending| pending.conflicting_txids)
+				.unwrap_or_default();
+			if !conflicting_txids.contains(&txid) {
+				conflicting_txids.push(txid);
+			}
 			stores.insert_or_update_payment(new_payment.clone()).await?;
-			self.upsert_pending_payment(&stores, new_payment, Vec::new()).await
+			self.upsert_pending_payment(&stores, new_payment, conflicting_txids).await
 		}
 		.await;
 		if let Err(e) = recorded {
@@ -13417,5 +13429,98 @@ mod tests {
 			);
 		}
 		assert!(recorded_at_some_point);
+	}
+
+	/// A second bump must add the replaced txid to the pending-store entry's `conflicting_txids`.
+	/// The payment id is derived from the first txid and the payment's txid is the newest one,
+	/// so wallet sync's `TxReplaced` event for an earlier replacement resolves the payment
+	/// only through that list. Without it, the event finds no payment and is skipped.
+	#[allow(deprecated)]
+	#[tokio::test]
+	async fn bump_fee_rbf_keeps_replaced_txid_mapped() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		wallet.set_channel_liveness(TestLiveness::empty());
+
+		// A confirmed output funds the wallet...
+		{
+			let mut locked_wallet = wallet.inner.lock().unwrap();
+			let funding_tx = Transaction {
+				version: bitcoin::transaction::Version::TWO,
+				lock_time: LockTime::ZERO,
+				input: Vec::new(),
+				output: vec![TxOut {
+					value: Amount::from_sat(200_000),
+					script_pubkey: locked_wallet
+						.reveal_next_address(KeychainKind::External)
+						.address
+						.script_pubkey(),
+				}],
+			};
+			let funding_txid = funding_tx.compute_txid();
+			let block_id = BlockId {
+				height: locked_wallet.latest_checkpoint().height() + 1,
+				hash: bitcoin::BlockHash::from_byte_array([42; 32]),
+			};
+			let mut tx_update = TxUpdate::default();
+			tx_update.txs = vec![Arc::new(funding_tx)];
+			tx_update.anchors =
+				[(ConfirmationBlockTime { block_id, confirmation_time: 1 }, funding_txid)].into();
+			let chain = CheckPoint::from_block_ids([
+				locked_wallet.latest_checkpoint().block_id(),
+				block_id,
+			])
+			.unwrap();
+			locked_wallet
+				.apply_update(Update { tx_update, chain: Some(chain), ..Default::default() })
+				.unwrap();
+		}
+
+		// ...which the wallet spends in a replaceable payment sitting in the mempool. This
+		// transaction (B) has already replaced the original (A).
+		let tx_b = {
+			let mut locked_wallet = wallet.inner.lock().unwrap();
+			let recipient = ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([0x42u8; 20]));
+			let mut builder = locked_wallet.build_tx();
+			builder
+				.add_recipient(recipient, Amount::from_sat(100_000))
+				.fee_rate(FeeRate::from_sat_per_kwu(500));
+			let tx = builder.finish().unwrap().unsigned_tx;
+			locked_wallet.apply_unconfirmed_txs([(tx.clone(), 1)]);
+			tx
+		};
+		let txid_b = tx_b.compute_txid();
+
+		// The stores hold what the first bump (A -> B) and its sync left behind: the payment id
+		// is derived from A, the payment's txid is B, and `conflicting_txids` holds A.
+		let txid_a = Txid::from_byte_array([0xaa; 32]);
+		let payment_id = PaymentId(txid_a.to_byte_array());
+		let details = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Onchain {
+				txid: txid_b,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: None,
+			},
+			Some(100_000_000),
+			Some(1_000),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		wallet.payment_stores.payment_store().insert(details.clone()).await.unwrap();
+		let entry = PendingPaymentDetails::new(details, vec![txid_a], Vec::new());
+		wallet.payment_stores.pending_payment_store().insert(entry).await.unwrap();
+
+		// Bump again: B -> C.
+		let txid_c = wallet.bump_fee_rbf(payment_id, None, 0).await.unwrap();
+
+		let payment = wallet.payment_stores.payment(&payment_id).await.unwrap().unwrap();
+		assert!(matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == txid_c));
+
+		// `PaymentId(txid_b)` is not the payment id and the payment's txid is C, so B must be in
+		// `conflicting_txids` for wallet sync to find the payment.
+		let entry = wallet.payment_stores.pending_payment(&payment_id).await.unwrap().unwrap();
+		assert_eq!(entry.conflicting_txids, vec![txid_a, txid_b]);
+		assert_eq!(wallet.find_payment_by_txid(txid_b).await.unwrap(), Some(payment_id));
 	}
 }
