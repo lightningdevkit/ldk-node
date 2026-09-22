@@ -652,6 +652,18 @@ pub enum PaymentKind {
 	},
 }
 
+impl PaymentKind {
+	pub(crate) fn is_lightning_payment(&self) -> bool {
+		match self {
+			Self::Onchain { .. } => false,
+			Self::Bolt11 { .. }
+			| Self::Bolt12Offer { .. }
+			| Self::Bolt12Refund { .. }
+			| Self::Spontaneous { .. } => true,
+		}
+	}
+}
+
 impl_writeable_tlv_based_enum!(PaymentKind,
 	(0, Onchain) => {
 		(0, txid, required),
