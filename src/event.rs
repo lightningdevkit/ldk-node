@@ -1088,6 +1088,22 @@ where
 				};
 			},
 			LdkEvent::PaymentFailed { payment_id, payment_hash, reason, .. } => {
+				// LDK may emit PaymentFailed after PaymentSent. Ignore the entire late failure so
+				// it cannot alter payment metadata or emit a contradictory event.
+				if let Some(payment) = self.payment_store.get(&payment_id) {
+					if payment.direction == PaymentDirection::Outbound
+						&& payment.kind.is_lightning_payment()
+						&& payment.status == PaymentStatus::Succeeded
+					{
+						log_info!(
+							self.logger,
+							"Ignoring late payment failure for already-succeeded payment with ID {}.",
+							payment_id
+						);
+						return Ok(());
+					}
+				}
+
 				log_info!(
 					self.logger,
 					"Failed to send payment with ID {} due to {:?}.",
