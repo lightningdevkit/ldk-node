@@ -2085,27 +2085,6 @@ impl Wallet {
 		}
 
 		let payment_id = PaymentId(txid.to_byte_array());
-
-		// A promoted-but-unconfirmed 0conf splice comes back through this generic path re-typed
-		// and carrying wallet-view figures; `funding_reclassification_update` declines the
-		// downgrade, leaving no trace that a re-broadcast arrived. Log the arrival so tests can
-		// observe the traffic; the read serves the log line alone, so a stale read costs no more.
-		if let Some(current) = self.payment_store.get(&payment_id).await? {
-			if matches!(
-				current.kind,
-				PaymentKind::Onchain {
-					tx_type: Some(TransactionType::InteractiveFunding { .. }),
-					..
-				}
-			) {
-				log_trace!(
-					self.logger,
-					"Keeping interactive-funding classification over funding-typed rebroadcast {}",
-					txid,
-				);
-			}
-		}
-
 		let details = PaymentDetails::new(
 			payment_id,
 			PaymentKind::Onchain {
@@ -2118,7 +2097,26 @@ impl Wallet {
 			direction,
 			PaymentStatus::Pending,
 		);
-		self.persist_funding_payment(details, Vec::new()).await?;
+		let prior = self.persist_funding_payment(details, Vec::new()).await?;
+		// A promoted-but-unconfirmed 0conf splice comes back through this generic path re-typed
+		// and carrying wallet-view figures; `funding_reclassification_update` declines the
+		// downgrade, leaving no trace that a re-broadcast arrived. Log the arrival so tests can
+		// observe the traffic, from the record the write found rather than a read of our own.
+		if prior.is_some_and(|prior| {
+			matches!(
+				prior.kind,
+				PaymentKind::Onchain {
+					tx_type: Some(TransactionType::InteractiveFunding { .. }),
+					..
+				}
+			)
+		}) {
+			log_trace!(
+				self.logger,
+				"Keeping interactive-funding classification over funding-typed rebroadcast {}",
+				txid,
+			);
+		}
 		log_debug!(
 			self.logger,
 			"Recorded channel-funding broadcast {} for channel {}",
@@ -2644,17 +2642,15 @@ impl Wallet {
 	}
 
 	/// Writes a freshly-classified funding payment to the authoritative payment store and adds a
-	/// pending-store index entry, so wallet sync graduates it through `ANTI_REORG_DELAY`.
+	/// pending-store index entry, so wallet sync graduates it through `ANTI_REORG_DELAY`. Returns the
+	/// payment store's record as it was before the write.
 	async fn persist_funding_payment(
 		&self, details: PaymentDetails, candidates: Vec<FundingTxCandidate>,
-	) -> Result<(), Error> {
+	) -> Result<Option<PaymentDetails>, Error> {
 		// Hold the cross-store lock across both writes so a funding confirmation never observes
 		// the record classified but the candidate history it needs still missing.
 		let guard = self.funding_payment_update_lock.lock().await;
-		self.persist_funding_payment_locked(&guard, details, candidates)
-			.await
-			.map(|_| ())
-			.map_err(Error::from)
+		Ok(self.persist_funding_payment_locked(&guard, details, candidates).await?)
 	}
 
 	/// [`Self::persist_funding_payment`] for a caller already holding the cross-store lock, whose
@@ -6929,6 +6925,28 @@ mod tests {
 			wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none(),
 			"the replay must finish the interrupted entry removal"
 		);
+	}
+
+	/// Classifying a channel-open funding the payment store does not know costs one read of it:
+	/// the write merges against the record it reads, and whether a promoted splice's re-broadcast
+	/// met its record is told from that same read.
+	#[tokio::test]
+	async fn unknown_funding_broadcast_is_recorded_after_one_payment_store_read() {
+		let counting_store = ReadCountingStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(counting_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		let tx = wallet_paying_tx(&wallet, 1);
+		let tx_type =
+			LdkTransactionType::Funding { channels: vec![(counterparty_node_id, channel_id)] };
+		let reads_before = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		wallet.classify_broadcast(&tx, &tx_type).await.unwrap();
+		let reads = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE) - reads_before;
+
+		let payment_id = PaymentId(tx.compute_txid().to_byte_array());
+		assert!(wallet.payment_store.get(&payment_id).await.unwrap().is_some());
+		assert_eq!(reads, 1, "classifying an unknown funding re-read the payment store");
 	}
 
 	/// Recording a transaction the payment store does not know costs two reads of it: the
