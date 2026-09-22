@@ -129,6 +129,16 @@ impl PaymentStoresGuard<'_> {
 		self.stores.payment_store.remove(id).await
 	}
 
+	/// Removes the payment record stored under `id` only while `predicate` holds for it, in one
+	/// critical section of the store; see
+	/// [`DataStore::remove_if`](crate::data_store::DataStore::remove_if). Returns whether the
+	/// record was removed.
+	pub(super) async fn remove_payment_if<F: FnOnce(&PaymentDetails) -> bool>(
+		&self, id: &PaymentId, predicate: F,
+	) -> Result<bool, Error> {
+		self.stores.payment_store.remove_if(id, predicate).await
+	}
+
 	/// Transforms the payment record stored under `id` through `f` and persists the result, all
 	/// in one critical section of the store; see
 	/// [`DataStore::mutate`](crate::data_store::DataStore::mutate).
