@@ -2184,36 +2184,23 @@ impl Wallet {
 							if abandoned_txids.contains(txid)
 					)
 			};
-			let record = self.payment_store.get(&payment_id).await?;
-			let hands_back = record.as_ref().map_or(true, waits_on_abandoned);
 			// A last remaining round without a contribution of ours means no remaining round has
 			// one.
 			let handed_back = remaining.last().filter(|round| round.amount_msat.is_some());
 
-			if hands_back && handed_back.is_none() {
-				// Nothing of this node's was ever broadcast under the record, so it goes rather
-				// than fail a payment for a transaction that never existed. The payment record
-				// goes first: the entry keeps resolving the rounds' txids, so a removal that
-				// fails midway is finished by the replayed event.
-				self.payment_store.remove(&payment_id).await?;
-				self.pending_payment_store.remove(&payment_id).await?;
-				log_info!(
-					self.logger,
-					"Dropped abandoned splice round(s) {:?} and funding payment {} with them",
-					abandoned_txids,
-					payment_id,
-				);
-				continue;
-			}
-
 			let mut mirrored = None;
+			let mut history_only = false;
 			match handed_back {
-				Some(active) if hands_back => {
+				Some(active) => {
+					// Whether the record still waits on the dropped rounds is decided inside the
+					// write's critical section, from the record found there.
 					self.payment_store
 						.mutate(&payment_id, |existing| {
 							let current = existing?;
 							if !waits_on_abandoned(current) {
-								mirrored = Some(current.clone());
+								history_only = true;
+								mirrored = Some(current.clone())
+									.filter(|current| current.status == PaymentStatus::Pending);
 								return None;
 							}
 							let mut update = PaymentDetailsUpdate::new(payment_id);
@@ -2228,20 +2215,40 @@ impl Wallet {
 						})
 						.await?;
 				},
-				_ => {
-					// The record does not wait on the dropped rounds: wallet sync moved it on, or
-					// an earlier drop was cut short between the two stores. Only its history
-					// shrinks, and the entry's copy of the record catches up with the record while
-					// the record is still pending.
+				None => {
+					// A removal has no critical section to decide in, so the record is read first.
+					let record = self.payment_store.get(&payment_id).await?;
+					if record.as_ref().map_or(true, waits_on_abandoned) {
+						// Nothing of this node's was ever broadcast under the record, so it goes
+						// rather than fail a payment for a transaction that never existed. The
+						// payment record goes first: the entry keeps resolving the rounds' txids,
+						// so a removal that fails midway is finished by the replayed event.
+						self.payment_store.remove(&payment_id).await?;
+						self.pending_payment_store.remove(&payment_id).await?;
+						log_info!(
+							self.logger,
+							"Dropped abandoned splice round(s) {:?} and funding payment {} with them",
+							abandoned_txids,
+							payment_id,
+						);
+						continue;
+					}
+					history_only = true;
 					mirrored = record.filter(|current| current.status == PaymentStatus::Pending);
-					log_warn!(
-						self.logger,
-						"Funding payment {} does not wait on abandoned splice round(s) {:?}: \
-						dropping them from its history only",
-						payment_id,
-						abandoned_txids,
-					);
 				},
+			}
+			if history_only {
+				// The record does not wait on the dropped rounds: wallet sync moved it on, or an
+				// earlier drop was cut short between the two stores. Only its history shrinks, and
+				// the entry's copy of the record catches up with the record while the record is
+				// still pending.
+				log_warn!(
+					self.logger,
+					"Funding payment {} does not wait on abandoned splice round(s) {:?}: \
+					dropping them from its history only",
+					payment_id,
+					abandoned_txids,
+				);
 			}
 			self.pending_payment_store
 				.mutate(&payment_id, |existing| {
@@ -5236,6 +5243,39 @@ mod tests {
 		assert_eq!(record.candidates.iter().map(|c| c.txid).collect::<Vec<_>>(), vec![txid]);
 		assert_eq!(record.details, payment);
 		assert_eq!(wallet.find_payment_by_txid(bump_txid).await.unwrap(), None);
+	}
+
+	/// The record moved on to a bump whose signing write was cut short after the payment store,
+	/// so the entry still lists only the original round. Abandoning that round, with no round of
+	/// ours remaining, leaves the record as it stands and only shrinks the entry's history, its
+	/// copy of the record catching up.
+	#[tokio::test]
+	async fn dropping_the_last_round_leaves_a_record_that_moved_on() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
+		wallet.record_signed_funding(&tx, &candidates).await.unwrap();
+		let id = wallet.find_payment_by_txid(txid).await.unwrap().expect("id");
+
+		// The bump's signing write landed in the payment store only.
+		let (bump_tx, _bump_contribution) = splice_out_round(&wallet, 2, 499_000, 700);
+		let bump_txid = bump_tx.compute_txid();
+		let mut moved_on = PaymentDetailsUpdate::new(id);
+		moved_on.txid = Some(bump_txid);
+		wallet.payment_store.update(moved_on).await.unwrap();
+		let payment = wallet.payment_store.get(&id).await.unwrap().expect("payment");
+
+		wallet.drop_abandoned_splice_rounds(channel_id, &[]).await.unwrap();
+
+		assert_eq!(wallet.payment_store.get(&id).await.unwrap(), Some(payment.clone()));
+		let record = wallet.pending_payment_store.get(&id).await.unwrap().expect("record");
+		assert!(record.candidates.is_empty());
+		assert_eq!(record.details, payment);
 	}
 
 	/// A removal that was cut short between the two stores — the payment record went, the pending
