@@ -2697,12 +2697,25 @@ impl Wallet {
 						.await?;
 				},
 				None => {
-					// A removal has no critical section to decide in, so the record is read first.
-					let record = self.payment_store.get(&payment_id).await?;
-					if record.as_ref().map_or(true, waits_on_abandoned) {
+					// Whether the record still waits on the dropped rounds is decided inside the
+					// removal's own critical section, from the record found there. A record already
+					// gone, its removal cut short between the two stores, takes the removal path
+					// too, for the entry to follow it.
+					self.payment_store
+						.remove_if(&payment_id, |current| {
+							if waits_on_abandoned(current) {
+								return true;
+							}
+							history_only = true;
+							mirrored = Some(current.clone())
+								.filter(|current| current.status == PaymentStatus::Pending);
+							false
+						})
+						.await?;
+					if !history_only {
 						// Nothing of this node's was ever broadcast under the record, so it goes
 						// rather than fail a payment for a transaction that never existed. The
-						// payment record goes first: the entry keeps resolving the rounds' txids,
+						// payment record went first: the entry keeps resolving the rounds' txids,
 						// so a removal that fails midway is finished by the replayed event. A
 						// splice intent the entry carries outlives the record as a bare intent:
 						// the failure LDK reports for the round is described from it, and its
@@ -2748,8 +2761,6 @@ impl Wallet {
 						}
 						continue;
 					}
-					history_only = true;
-					mirrored = record.filter(|current| current.status == PaymentStatus::Pending);
 				},
 			}
 			if history_only {
