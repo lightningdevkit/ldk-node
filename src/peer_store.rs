@@ -45,14 +45,19 @@ where
 	pub(crate) async fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let data = {
-			let mut locked_peers = self.peers.write().expect("lock");
-			if locked_peers.contains_key(&peer_info.node_id) {
-				return Ok(());
+			let locked_peers = self.peers.read().expect("lock");
+			if let Some(existing) = locked_peers.get(&peer_info.node_id) {
+				if existing.address == peer_info.address {
+					return Ok(());
+				}
 			}
-			locked_peers.insert(peer_info.node_id, peer_info);
-			PeerStoreSerWrapper(&locked_peers).encode()
+			let mut updated_peers = locked_peers.clone();
+			updated_peers.insert(peer_info.node_id, peer_info.clone());
+			PeerStoreSerWrapper(&updated_peers).encode()
 		};
-		self.persist_peers(data).await
+		self.persist_peers(data).await?;
+		self.peers.write().expect("lock").insert(peer_info.node_id, peer_info);
+		Ok(())
 	}
 
 	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
@@ -257,6 +262,87 @@ mod tests {
 		assert_eq!(peers.len(), 1);
 		assert_eq!(peers[0], expected_peer_info);
 		assert_eq!(deser_peer_store.get_peer(&node_id), Some(expected_peer_info));
+	}
+
+	#[tokio::test]
+	async fn add_peer_updates_stored_address() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let old_address = SocketAddress::from_str("127.0.0.1:9738").unwrap();
+		let new_address = SocketAddress::from_str("127.0.0.1:9739").unwrap();
+		peer_store.add_peer(PeerInfo { node_id, address: old_address.clone() }).await.unwrap();
+
+		let persisted_before = KVStore::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+
+		// An unchanged address must not rewrite the store.
+		peer_store.add_peer(PeerInfo { node_id, address: old_address.clone() }).await.unwrap();
+		let persisted_unchanged = KVStore::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+		assert_eq!(persisted_before, persisted_unchanged);
+		let reloaded_unchanged = PeerStore::read(
+			&mut &persisted_unchanged[..],
+			(Arc::clone(&store), Arc::clone(&logger)),
+		)
+		.unwrap();
+		assert_eq!(reloaded_unchanged.get_peer(&node_id).unwrap().address, old_address);
+
+		peer_store.add_peer(PeerInfo { node_id, address: new_address.clone() }).await.unwrap();
+		assert_eq!(peer_store.get_peer(&node_id).unwrap().address, new_address);
+
+		let persisted_bytes = KVStore::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+		let reloaded =
+			PeerStore::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
+		assert_eq!(reloaded.get_peer(&node_id).unwrap().address, new_address);
+		assert_ne!(reloaded.get_peer(&node_id).unwrap().address, old_address);
+	}
+
+	#[tokio::test]
+	async fn add_peer_does_not_mutate_memory_if_persist_fails() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let logger = Arc::new(TestLogger::new());
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let old_address = SocketAddress::from_str("127.0.0.1:9738").unwrap();
+		let new_address = SocketAddress::from_str("127.0.0.1:9739").unwrap();
+		let peer_info = PeerInfo { node_id, address: old_address };
+		let mut peers = HashMap::new();
+		peers.insert(node_id, peer_info.clone());
+		let persisted_bytes = PeerStoreSerWrapper(&peers).encode();
+		let peer_store = PeerStore::read(&mut &persisted_bytes[..], (store, logger)).unwrap();
+
+		assert_eq!(
+			Err(Error::PersistenceFailed),
+			peer_store.add_peer(PeerInfo { node_id, address: new_address }).await
+		);
+		assert_eq!(Some(peer_info), peer_store.get_peer(&node_id));
 	}
 
 	#[tokio::test]

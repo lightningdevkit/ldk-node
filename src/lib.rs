@@ -1294,6 +1294,8 @@ impl Node {
 	/// Connect to a node on the peer-to-peer network.
 	///
 	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
+	/// A later `connect` with `persist` set to `true` and a different address updates the stored
+	/// address used for reconnection.
 	pub fn connect(
 		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
