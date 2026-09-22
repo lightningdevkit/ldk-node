@@ -2836,20 +2836,23 @@ impl Wallet {
 			return Ok(Some(direct_payment_id));
 		}
 
-		if let Some(replaced_details) = self
+		let owns = |p: &PendingPaymentDetails| {
+			matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
+				// A middle RBF round is not the record's current txid and may never have
+				// received a `TxReplaced` event of its own, so map any of its candidate
+				// txids (an earlier RBF round may confirm) back to the record.
+				|| p.candidate(target_txid).is_some()
+		};
+		let matches = self
 			.pending_payment_store
-			.list_filter(|p| {
-				matches!(p.details.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid)
-					|| p.conflicting_txids.contains(&target_txid)
-					// A middle RBF round is not the record's current txid and may never have
-					// received a `TxReplaced` event of its own, so map any of its candidate
-					// txids (an earlier RBF round may confirm) back to the record.
-					|| p.candidate(target_txid).is_some()
-			})
-			.await
-			.first()
-		{
-			return Ok(Some(replaced_details.details.id));
+			.list_filter(|p| owns(p) || p.conflicting_txids.contains(&target_txid))
+			.await;
+		// An entry lists the transactions that replaced its own, so a transaction another entry
+		// records as its own (a splice round that replaced a close, say) matches both. The entry
+		// that owns it is its record; the conflict listing is only how a replaced round of a
+		// record with no candidates (an ordinary payment's RBF history) maps back to its record.
+		if let Some(entry) = matches.iter().find(|p| owns(p)).or(matches.first()) {
+			return Ok(Some(entry.details.id));
 		}
 
 		Ok(None)
@@ -6451,6 +6454,138 @@ mod tests {
 				assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
 			},
 			kind => panic!("unexpected kind {:?}", kind),
+		}
+	}
+
+	/// The mirror image of [`funding_record_does_not_adopt_a_conflicting_close`]: a cooperative
+	/// close that a splice round replaces lists the round among its conflicting txids, so the
+	/// round's confirmation resolves to the close's entry as readily as to the splice's, which
+	/// records the round as its own. It must land on the splice's record whichever entry the
+	/// pending cache lists first: the close's record is not the round's, and merging the round
+	/// into it leaves the splice's payment pending for good. Several closes and several fresh
+	/// wallets, each with its own cache order, make the splice's entry unlikely to come first
+	/// every time.
+	#[tokio::test]
+	async fn close_record_does_not_adopt_a_conflicting_splice_round() {
+		let secp = bitcoin::secp256k1::Secp256k1::new();
+		let counterparty_node_id = bitcoin::secp256k1::PublicKey::from_secret_key(
+			&secp,
+			&bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap(),
+		);
+		let channel_id = lightning::ln::types::ChannelId::from_bytes([4u8; 32]);
+
+		for _ in 0..12 {
+			let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+			let wallet = new_test_wallet(store, false).await;
+
+			// The round pays a wallet address, so the wallet's view of it carries figures of its own.
+			let script_pubkey = wallet
+				.inner
+				.lock()
+				.unwrap()
+				.reveal_next_address(KeychainKind::External)
+				.address
+				.script_pubkey();
+			let splice_tx = Transaction {
+				version: bitcoin::transaction::Version::TWO,
+				lock_time: LockTime::ZERO,
+				input: vec![bitcoin::TxIn {
+					previous_output: bitcoin::OutPoint {
+						txid: Txid::from_byte_array([3u8; 32]),
+						vout: 0,
+					},
+					script_sig: bitcoin::ScriptBuf::new(),
+					sequence: bitcoin::Sequence::MAX,
+					witness: bitcoin::Witness::new(),
+				}],
+				output: vec![TxOut { value: Amount::from_sat(90_000), script_pubkey }],
+			};
+			let splice_txid = splice_tx.compute_txid();
+			// Keyed away from the round's txid, as a later round of a splice is.
+			let payment_id = PaymentId([21u8; 32]);
+			let candidates = vec![FundingTxCandidate {
+				txid: splice_txid,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+				awaiting_broadcast: false,
+			}];
+			let details =
+				interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
+			wallet.persist_funding_payment(details, candidates).await.unwrap();
+
+			// Each close was recorded at broadcast, seen unconfirmed, then replaced by the round:
+			// what the `TxReplaced` arm leaves behind.
+			let close_txids: Vec<Txid> =
+				(7u8..11).map(|byte| Txid::from_byte_array([byte; 32])).collect();
+			for close_txid in &close_txids {
+				let close_details = PaymentDetails::new(
+					PaymentId(close_txid.to_byte_array()),
+					PaymentKind::Onchain {
+						txid: *close_txid,
+						status: ConfirmationStatus::Unconfirmed,
+						tx_type: Some(TransactionType::CooperativeClose {
+							counterparty_node_id,
+							channel_id,
+						}),
+					},
+					Some(50_000_000),
+					Some(1_000),
+					PaymentDirection::Inbound,
+					PaymentStatus::Pending,
+				);
+				wallet.payment_store.insert_or_update(close_details.clone()).await.unwrap();
+				let entry =
+					PendingPaymentDetails::new(close_details, vec![splice_txid], Vec::new());
+				wallet.pending_payment_store.insert_or_update(entry).await.unwrap();
+			}
+
+			assert_eq!(
+				wallet.find_payment_by_txid(splice_txid).await.unwrap(),
+				Some(payment_id),
+				"the round resolved to a record that only lists it as a conflict"
+			);
+
+			let event = WalletEvent::TxConfirmed {
+				txid: splice_txid,
+				tx: Arc::new(splice_tx),
+				block_time: confirmed_block_time(5),
+				old_block_time: None,
+			};
+			wallet.update_payment_store(vec![event]).await.unwrap();
+
+			let funding = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+			match &funding.kind {
+				PaymentKind::Onchain { txid, status, tx_type } => {
+					assert_eq!(*txid, splice_txid);
+					assert!(matches!(status, ConfirmationStatus::Confirmed { .. }));
+					assert!(matches!(tx_type, Some(TransactionType::InteractiveFunding { .. })));
+				},
+				kind => panic!("unexpected kind {:?}", kind),
+			}
+			assert_eq!(funding.amount_msat, Some(1_000_000));
+			assert_eq!(funding.fee_paid_msat, Some(500));
+
+			for close_txid in &close_txids {
+				let close = wallet
+					.payment_store
+					.get(&PaymentId(close_txid.to_byte_array()))
+					.await
+					.unwrap()
+					.unwrap();
+				match &close.kind {
+					PaymentKind::Onchain { txid, status, tx_type } => {
+						assert_eq!(
+							*txid, *close_txid,
+							"the close's record adopted the round's txid"
+						);
+						assert!(matches!(status, ConfirmationStatus::Unconfirmed));
+						assert!(matches!(tx_type, Some(TransactionType::CooperativeClose { .. })));
+					},
+					kind => panic!("unexpected kind {:?}", kind),
+				}
+				assert_eq!(close.amount_msat, Some(50_000_000));
+				assert_eq!(close.fee_paid_msat, Some(1_000));
+			}
 		}
 	}
 
