@@ -4447,12 +4447,12 @@ mod tests {
 		loop_task.await.unwrap();
 	}
 
-	/// A package awaiting a classification retry must die when the node stops. When the retry
-	/// was a detached task, it outlived the broadcast loop: its re-send into the still-open
-	/// queue succeeded after `stop()`, so a later `start()` would classify and broadcast the
-	/// stale package.
+	/// A package awaiting a classification retry survives a stop, as a package the loop has not
+	/// reached yet always has: the queue belongs to the broadcaster, not to the loop, so the next
+	/// `start()` classifies and broadcasts whatever was queued when the node stopped. A funding
+	/// package in particular has no other way back: no timer re-broadcasts it.
 	#[tokio::test]
-	async fn failed_classification_retry_dies_at_stop() {
+	async fn packages_awaiting_retry_survive_a_stop() {
 		use lightning::chain::chaininterface::BroadcasterInterface;
 
 		let fail_store = FailSwitchStore::new();
@@ -4515,24 +4515,112 @@ mod tests {
 			chain_source.continuously_process_broadcast_queue(stop_receiver).await
 		});
 
-		// Watch well past the retry delay: the package from before the stop must not be
-		// classified or broadcast by the restarted loop.
-		for _ in 0..40 {
+		// The restarted loop classifies the package from before the stop once its retry falls
+		// due.
+		let mut payments = Vec::new();
+		for _ in 0..100 {
 			tokio::time::sleep(Duration::from_millis(100)).await;
-			assert!(
-				wallet.payment_store.list_page(None).await.unwrap().objects.is_empty(),
-				"a package from before stop() resurfaced after restart"
-			);
+			payments = wallet.payment_store.list_page(None).await.unwrap().objects;
+			if !payments.is_empty() {
+				break;
+			}
 		}
+		assert_eq!(
+			payments.len(),
+			1,
+			"the package from before stop() was not classified after restart"
+		);
+		assert!(
+			matches!(&payments[0].kind, PaymentKind::Onchain { txid, .. } if *txid == tx.compute_txid()),
+			"the record does not track the package's transaction"
+		);
+
+		stop_sender.send(()).unwrap();
+		loop_task.await.unwrap();
+	}
+
+	/// A re-broadcast of a package awaiting a classification retry is dropped as it is queued,
+	/// without another classification attempt: LDK re-hands pending claims every 30 seconds, so
+	/// over a store outage each copy would otherwise cost a failed write and an error log before
+	/// the queue recognized it.
+	#[tokio::test]
+	async fn rebroadcast_of_a_waiting_package_is_not_classified_again() {
+		use lightning::chain::chaininterface::BroadcasterInterface;
+
+		let fail_store = FailSwitchStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		wallet.broadcaster.set_wallet(Arc::downgrade(&wallet));
+
+		let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
+		let chain_source = Arc::clone(&wallet.chain_source);
+		let loop_task = tokio::spawn(async move {
+			chain_source.continuously_process_broadcast_queue(stop_receiver).await
+		});
+
+		let script_pubkey = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::External)
+			.address
+			.script_pubkey();
+		let tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: Vec::new(),
+			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
+		};
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let funding_type = LdkTransactionType::Funding {
+			channels: vec![(counterparty_node_id, ChannelId([7u8; 32]))],
+		};
+
+		// The first copy fails classification and waits for its retry.
+		fail_store.fail_writes.store(true, Ordering::Release);
+		wallet.broadcaster.broadcast_transactions(&[(&tx, funding_type.clone())]);
+		let mut failed_writes = 0;
+		for _ in 0..100 {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			failed_writes = fail_store.failed_writes.load(Ordering::Acquire);
+			if failed_writes > 0 {
+				break;
+			}
+		}
+		assert_eq!(failed_writes, 1, "classification never attempted a payment-store write");
+
+		// A second copy arrives well within the retry delay. It must not reach the store.
+		wallet.broadcaster.broadcast_transactions(&[(&tx, funding_type)]);
+		tokio::time::sleep(Duration::from_millis(500)).await;
+		assert_eq!(
+			fail_store.failed_writes.load(Ordering::Acquire),
+			1,
+			"a re-broadcast of a package awaiting a retry was classified again"
+		);
+
+		// Once the store recovers, the waiting package is classified once.
+		fail_store.fail_writes.store(false, Ordering::Release);
+		let mut payments = Vec::new();
+		for _ in 0..100 {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+			payments = wallet.payment_store.list_page(None).await.unwrap().objects;
+			if !payments.is_empty() {
+				break;
+			}
+		}
+		assert_eq!(payments.len(), 1, "the waiting package was not classified after recovery");
 
 		stop_sender.send(()).unwrap();
 		loop_task.await.unwrap();
 	}
 
 	/// Fresh packages go before a due retry. Both are ready at once when the loop returns from a
-	/// slow classification with packages waiting in the channel and a retry past its deadline;
-	/// the channel is polled first until it is empty, so broadcasts arriving during a store outage
-	/// are never held back by the outage's retries.
+	/// slow classification with fresh packages queued and a retry past its deadline; the queue
+	/// hands out every fresh package first, so broadcasts arriving during a store outage are never
+	/// held back by the outage's retries.
 	#[tokio::test]
 	async fn fresh_package_is_classified_before_a_due_retry() {
 		use lightning::chain::chaininterface::BroadcasterInterface;
@@ -4603,8 +4691,9 @@ mod tests {
 		wallet.broadcaster.broadcast_transactions(&[(&parked_tx, funding_type.clone())]);
 		gated_store.write_entered.notified().await;
 
-		// Fresh packages queue while the retry falls due: eight, so that a select polling its arms
-		// in random order passes the assertion below by chance about one run in twenty-five.
+		// Fresh packages queue while the retry falls due: several, so a queue that only sometimes
+		// hands out a fresh package ahead of a due retry cannot pass the ordering assertion below
+		// by luck.
 		let fresh_txs: Vec<Transaction> =
 			(3..11).map(|input_byte| funding_tx(input_byte)).collect();
 		for fresh_tx in &fresh_txs {

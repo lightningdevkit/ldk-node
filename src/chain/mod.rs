@@ -37,7 +37,7 @@ use crate::config::{BackgroundSyncConfig, Config, WALLET_SYNC_INTERVAL_MINIMUM_S
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
-use crate::tx_broadcaster::{BroadcastPackage, RetryQueue, ScheduleOutcome};
+use crate::tx_broadcaster::BroadcastPackage;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
 
@@ -606,19 +606,11 @@ impl ChainSource {
 	pub(crate) async fn continuously_process_broadcast_queue(
 		&self, mut stop_tx_bcast_receiver: tokio::sync::watch::Receiver<()>,
 	) {
-		let mut receiver = self.tx_broadcaster.get_broadcast_queue().await;
-		// Packages whose classification failed, each waiting out FAILED_CLASSIFY_RETRY_DELAY
-		// before its next attempt. New packages keep flowing while these wait, and pending
-		// retries die with the loop on shutdown rather than resurfacing after a later start.
-		let mut retries = RetryQueue::new();
 		loop {
-			let next_retry_at = retries.next_retry_at();
 			let package = tokio::select! {
-				// Polled in order: a stop request first, then a fresh package, and a due retry
-				// only when neither is ready, so retries never hold back the broadcasts that
-				// keep arriving during a store outage. The retry keeps its delay regardless:
-				// without it, an empty channel would retry a fast-failing store back to back,
-				// logging an error each time.
+				// A stop request is polled first, so a queue that always has a package ready
+				// cannot starve it. Which package comes next — a fresh one before a due retry —
+				// is decided in `BroadcastQueue::next`.
 				biased;
 				_ = stop_tx_bcast_receiver.changed() => {
 					log_debug!(
@@ -627,39 +619,11 @@ impl ChainSource {
 					);
 					return;
 				}
-				Some(next_package) = receiver.recv() => next_package,
-				_ = tokio::time::sleep_until(
-					next_retry_at.unwrap_or_else(tokio::time::Instant::now)
-				), if next_retry_at.is_some() => {
-					retries.pop_next().expect("a retry is queued")
-				}
+				package = self.tx_broadcaster.next_package() => package,
 			};
 			if let Err(package) = self.classify_and_broadcast(package).await {
 				let retry_at = tokio::time::Instant::now() + FAILED_CLASSIFY_RETRY_DELAY;
-				match retries.schedule(package, retry_at) {
-					ScheduleOutcome::Scheduled { dropped: None } => {},
-					ScheduleOutcome::Scheduled { dropped: Some(dropped) } => {
-						log_error!(
-							self.logger,
-							"Dropped the oldest package awaiting a classification retry; LDK re-broadcasts its transactions periodically: {:?}",
-							dropped.txids(),
-						);
-					},
-					ScheduleOutcome::AlreadyQueued(duplicate) => {
-						log_debug!(
-							self.logger,
-							"Dropped a re-broadcast package; an identical one already awaits a classification retry: {:?}",
-							duplicate.txids(),
-						);
-					},
-					ScheduleOutcome::Refused(package) => {
-						log_error!(
-							self.logger,
-							"Dropped a package failing classification; too many await retries: {:?}",
-							package.txids(),
-						);
-					},
-				}
+				self.tx_broadcaster.retry_package(package, retry_at);
 			}
 		}
 	}
