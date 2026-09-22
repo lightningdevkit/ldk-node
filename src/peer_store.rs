@@ -50,17 +50,34 @@ where
 	pub(crate) async fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let data = {
-			let locked_peers = self.peers.read().expect("lock");
+			let mut locked_peers = self.peers.write().expect("lock");
 			if let Some(existing) = locked_peers.get(&peer_info.node_id) {
 				if existing.address == peer_info.address {
 					return Ok(());
 				}
 			}
-			let mut updated_peers = locked_peers.clone();
-			updated_peers.insert(peer_info.node_id, peer_info.clone());
-			PeerStoreSerWrapper(&updated_peers).encode()
+
+			// Temporarily apply the update so it is included in the
+			// serialized representation.
+			let previous = locked_peers.insert(peer_info.node_id, peer_info.clone());
+			let data = PeerStoreSerWrapper(&locked_peers).encode();
+
+			// Restore the original in-memory state before persistence.
+			match previous {
+				Some(previous) => {
+					locked_peers.insert(peer_info.node_id, previous);
+				},
+				None => {
+					locked_peers.remove(&peer_info.node_id);
+				},
+			}
+
+			data
 		};
+
 		self.persist_peers(data).await?;
+
+		// Persistence succeeded, so apply the update permanently.
 		self.peers.write().expect("lock").insert(peer_info.node_id, peer_info);
 		Ok(())
 	}
