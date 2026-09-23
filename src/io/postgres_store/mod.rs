@@ -20,6 +20,7 @@ use lightning_types::string::PrintableString;
 use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
 use tokio_postgres::config::SslMode;
+use tokio_postgres::types::ToSql;
 use tokio_postgres::{Config, Error as PgError};
 
 use self::pool::{make_config_connection, ClientConnection, PgTlsConnector, SmallPool};
@@ -662,6 +663,13 @@ impl PostgresStoreInner {
 		);
 	}
 
+	async fn execute_mutation<F: FnOnce(PgError) -> io::Error>(
+		&self, sql: &str, params: &[&(dyn ToSql + Sync)], err_map: F,
+	) -> io::Result<()> {
+		let mut locked = self.locked_client().await?;
+		query_with_retry!(self, locked, err_map, locked.execute(sql, params)).map(|_| ())
+	}
+
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<tokio::sync::Mutex<u64>> {
 		let mut outer_lock = self.write_version_locks.lock().unwrap();
 		Arc::clone(&outer_lock.entry(locking_key).or_default())
@@ -738,17 +746,12 @@ impl PostgresStoreInner {
 				io::Error::new(io::ErrorKind::Other, msg)
 			};
 
-			let mut locked = self.locked_client().await?;
-			query_with_retry!(
-				self,
-				locked,
+			self.execute_mutation(
+				sql.as_str(),
+				&[&primary_namespace, &secondary_namespace, &key, &buf],
 				err_map,
-				locked.execute(
-					sql.as_str(),
-					&[&primary_namespace, &secondary_namespace, &key, &buf],
-				)
 			)
-			.map(|_| ())
+			.await
 		})
 		.await
 	}
@@ -776,14 +779,12 @@ impl PostgresStoreInner {
 				io::Error::new(io::ErrorKind::Other, msg)
 			};
 
-			let mut locked = self.locked_client().await?;
-			query_with_retry!(
-				self,
-				locked,
+			self.execute_mutation(
+				sql.as_str(),
+				&[&primary_namespace, &secondary_namespace, &key],
 				err_map,
-				locked.execute(sql.as_str(), &[&primary_namespace, &secondary_namespace, &key])
 			)
-			.map(|_| ())
+			.await
 		})
 		.await
 	}
