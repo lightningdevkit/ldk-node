@@ -737,11 +737,10 @@ impl NodeBuilder {
 	///
 	/// # Warning
 	///
-	/// Do not point multiple [`Node`] instances at the same database and table. Concurrent access is
-	/// unsafe and can corrupt node state. You must make sure that only one node accesses each
-	/// database and table. The store uses a PostgreSQL advisory lock to reduce this risk. This lock
-	/// is only a temporary safeguard and does not make concurrent access safe.
-	/// Nodes using a different database or table on the same server may coexist.
+	/// This acquires an exclusive lease for the selected KV table before reading persisted node
+	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
+	/// Mutations panic on detected lease loss. Failed or timed-out renewals panic in the background
+	/// renewal task. Node recovery is not handled automatically.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
@@ -1334,11 +1333,10 @@ impl Builder {
 	///
 	/// # Warning
 	///
-	/// Do not point multiple [`Node`] instances at the same database and table. Concurrent access is
-	/// unsafe and can corrupt node state. You must make sure that only one node accesses each
-	/// database and table. The store uses a PostgreSQL advisory lock to reduce this risk. This lock
-	/// is only a temporary safeguard and does not make concurrent access safe.
-	/// Nodes using a different database or table on the same server may coexist.
+	/// This acquires an exclusive lease for the selected KV table before reading persisted node
+	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
+	/// Mutations panic on detected lease loss. Failed or timed-out renewals panic in the background
+	/// renewal task. Node recovery is not handled automatically.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
