@@ -737,11 +737,11 @@ impl NodeBuilder {
 	///
 	/// # Warning
 	///
-	/// Do not point multiple [`Node`] instances at the same database and table. Concurrent access is
-	/// unsafe and can corrupt node state. You must make sure that only one node accesses each
-	/// database and table. The store uses a PostgreSQL advisory lock to reduce this risk. This lock
-	/// is only a temporary safeguard and does not make concurrent access safe.
-	/// Nodes using a different database or table on the same server may coexist.
+	/// This acquires an exclusive lease for the selected KV table before reading persisted node
+	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
+	/// Detected lease loss or failed or timed-out background renewals panic. Applications must set
+	/// `panic = "abort"` in their own Cargo profiles so these panics terminate the process. Recovery
+	/// requires restarting the process and constructing a fresh node from persisted state.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
@@ -1334,11 +1334,11 @@ impl Builder {
 	///
 	/// # Warning
 	///
-	/// Do not point multiple [`Node`] instances at the same database and table. Concurrent access is
-	/// unsafe and can corrupt node state. You must make sure that only one node accesses each
-	/// database and table. The store uses a PostgreSQL advisory lock to reduce this risk. This lock
-	/// is only a temporary safeguard and does not make concurrent access safe.
-	/// Nodes using a different database or table on the same server may coexist.
+	/// This acquires an exclusive lease for the selected KV table before reading persisted node
+	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
+	/// Detected lease loss or failed or timed-out background renewals panic. Applications must set
+	/// `panic = "abort"` in their own Cargo profiles so these panics terminate the process. Recovery
+	/// requires restarting the process and constructing a fresh node from persisted state.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
