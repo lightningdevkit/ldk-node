@@ -443,7 +443,7 @@ impl PostgresStoreInner {
 
 		Self::create_database_if_not_exists(&config, &tls, logger.as_deref()).await?;
 
-		let client = make_config_connection(&config, &tls).await?;
+		let mut client = make_config_connection(&config, &tls).await?;
 		let lock_id = advisory_lock_id(&db_name, &kv_table_name);
 		let row = client.query_one("SELECT pg_try_advisory_lock($1)", &[&lock_id]).await.map_err(
 			|e| {
@@ -462,6 +462,14 @@ impl PostgresStoreInner {
 			));
 		}
 
+		let pool = SmallPool::new(&config, &tls).await?;
+		let transaction = client.transaction().await.map_err(|e| {
+			io::Error::new(
+				io::ErrorKind::Other,
+				format!("Failed to start PostgreSQL schema setup transaction: {e}"),
+			)
+		})?;
+
 		// Create the KV data table if it doesn't exist. `sort_order` uses BIGSERIAL so
 		// the database assigns a fresh, monotonically increasing value on each INSERT and
 		// keeps the previous value untouched on UPSERT-update; the sequence persists across
@@ -476,13 +484,13 @@ impl PostgresStoreInner {
 			PRIMARY KEY (primary_namespace, secondary_namespace, key)
 			)"
 		);
-		client.execute(sql.as_str(), &[]).await.map_err(|e| {
+		transaction.execute(sql.as_str(), &[]).await.map_err(|e| {
 			let msg = format!("Failed to create table {kv_table_name}: {e}");
 			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
 		// Read the schema version from the table comment (analogous to SQLite's PRAGMA user_version).
-		let row = client
+		let row = transaction
 			.query_one("SELECT obj_description(to_regclass($1), 'pg_class')", &[&kv_table_name_sql])
 			.await
 			.map_err(|e| {
@@ -513,13 +521,18 @@ impl PostgresStoreInner {
 		if version_res == 0 {
 			// New table, set our SCHEMA_VERSION.
 			let sql = format!("COMMENT ON TABLE {kv_table_name_sql} IS '{SCHEMA_VERSION}'");
-			client.execute(sql.as_str(), &[]).await.map_err(|e| {
+			transaction.execute(sql.as_str(), &[]).await.map_err(|e| {
 				let msg = format!("Failed to set schema version: {e}");
 				io::Error::new(io::ErrorKind::Other, msg)
 			})?;
 		} else if version_res < SCHEMA_VERSION {
-			migrations::migrate_schema(&client, &kv_table_name_sql, version_res, SCHEMA_VERSION)
-				.await?;
+			migrations::migrate_schema(
+				transaction.client(),
+				&kv_table_name_sql,
+				version_res,
+				SCHEMA_VERSION,
+			)
+			.await?;
 		} else if version_res > SCHEMA_VERSION {
 			let msg = format!(
 				"Failed to open database: incompatible schema version {version_res}. Expected: {SCHEMA_VERSION}"
@@ -532,12 +545,17 @@ impl PostgresStoreInner {
 		let sql = format!(
 			"CREATE INDEX IF NOT EXISTS {index_name_sql} ON {kv_table_name_sql} (primary_namespace, secondary_namespace, sort_order DESC, key ASC)"
 		);
-		client.execute(sql.as_str(), &[]).await.map_err(|e| {
+		transaction.execute(sql.as_str(), &[]).await.map_err(|e| {
 			let msg = format!("Failed to create index on table {kv_table_name}: {e}");
 			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
-		let pool = SmallPool::new(&config, &tls).await?;
+		transaction.commit().await.map_err(|e| {
+			io::Error::new(
+				io::ErrorKind::Other,
+				format!("Failed to commit PostgreSQL schema setup transaction: {e}"),
+			)
+		})?;
 
 		let write_version_locks = Mutex::new(HashMap::new());
 		Ok(Self {
@@ -1000,6 +1018,36 @@ mod tests {
 		assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
 
 		cleanup_store(&store).await;
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_postgres_store_rolls_back_failed_schema_setup() {
+		let table_name = "test_pg_schema_setup_rollback";
+		let store = create_test_store(table_name).await;
+		let kv_table = store.inner.kv_table_name_sql.clone();
+		let client = make_config_connection(&store.inner.config, &store.inner.tls).await.unwrap();
+		drop(store);
+
+		// Force index creation to fail after setup writes the schema version.
+		client
+			.batch_execute(&format!(
+				"COMMENT ON TABLE {kv_table} IS NULL; ALTER TABLE {kv_table} DROP COLUMN sort_order"
+			))
+			.await
+			.unwrap();
+		let err =
+			PostgresStore::new(test_connection_string(), None, Some(table_name.to_string()), None)
+				.await
+				.err()
+				.expect("schema setup must fail without sort_order");
+		assert!(err.to_string().contains("Failed to create index"));
+
+		let row = client
+			.query_one("SELECT obj_description(to_regclass($1), 'pg_class')", &[&kv_table])
+			.await
+			.unwrap();
+		client.execute(&format!("DROP TABLE {kv_table}"), &[]).await.unwrap();
+		assert_eq!(row.get::<_, Option<&str>>(0), None);
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
