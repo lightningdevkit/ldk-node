@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 /// and the max idle duration.
 ///
 /// For every passing of the refill interval, one token is added to the bucket, up to the maximum capacity. When the
-/// bucket has remained at the maximum capacity for longer than the max idle duration, it is removed to prevent memory
-/// leakage.
+/// bucket has remained unused for longer than the max idle duration, it is removed to prevent
+/// memory leakage.
 pub(crate) struct RateLimiter {
 	users: HashMap<Vec<u8>, Bucket>,
 	capacity: u32,
@@ -28,6 +28,7 @@ const MAX_USERS: usize = 10_000;
 struct Bucket {
 	tokens: u32,
 	last_refill: Instant,
+	last_seen: Instant,
 }
 
 impl RateLimiter {
@@ -43,20 +44,22 @@ impl RateLimiter {
 		if is_new_user {
 			self.garbage_collect(self.max_idle);
 			if self.users.len() >= MAX_USERS {
-				return false;
+				self.evict_least_recently_seen();
 			}
 		}
 
-		let bucket = self
-			.users
-			.entry(user_id.to_vec())
-			.or_insert(Bucket { tokens: self.capacity, last_refill: now });
+		let bucket = self.users.entry(user_id.to_vec()).or_insert(Bucket {
+			tokens: self.capacity,
+			last_refill: now,
+			last_seen: now,
+		});
+		bucket.last_seen = now;
 
 		let elapsed = now.duration_since(bucket.last_refill);
 		let tokens_to_add = (elapsed.as_secs_f64() / self.refill_interval.as_secs_f64()) as u32;
 
 		if tokens_to_add > 0 {
-			bucket.tokens = (bucket.tokens + tokens_to_add).min(self.capacity);
+			bucket.tokens = bucket.tokens.saturating_add(tokens_to_add).min(self.capacity);
 			bucket.last_refill = now;
 		}
 
@@ -72,7 +75,18 @@ impl RateLimiter {
 
 	fn garbage_collect(&mut self, max_idle: Duration) {
 		let now = Instant::now();
-		self.users.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_idle);
+		self.users.retain(|_, bucket| now.duration_since(bucket.last_seen) < max_idle);
+	}
+
+	fn evict_least_recently_seen(&mut self) {
+		if let Some(user_to_remove) = self
+			.users
+			.iter()
+			.min_by_key(|(_, bucket)| bucket.last_seen)
+			.map(|(user, _)| user.clone())
+		{
+			self.users.remove(&user_to_remove);
+		}
 	}
 }
 
@@ -98,5 +112,17 @@ mod tests {
 
 		assert!(rate_limiter.allow(b"user1"));
 		assert!(rate_limiter.allow(b"user2"));
+	}
+
+	#[test]
+	fn rate_limiter_admits_new_user_at_capacity() {
+		let mut rate_limiter =
+			RateLimiter::new(3, Duration::from_millis(100), Duration::from_secs(600));
+
+		for user in 0..super::MAX_USERS {
+			assert!(rate_limiter.allow(&user.to_be_bytes()));
+		}
+
+		assert!(rate_limiter.allow(b"legit"));
 	}
 }
