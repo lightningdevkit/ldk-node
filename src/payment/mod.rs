@@ -15,6 +15,7 @@ pub(crate) mod forwarding_store;
 #[cfg(feature = "unified-payments")]
 mod hrn;
 mod onchain;
+pub(crate) mod payjoin;
 pub(crate) mod pending_payment_store;
 mod spontaneous;
 pub(crate) mod store;
@@ -32,6 +33,7 @@ pub use forwarding::{
 #[cfg(feature = "unified-payments")]
 pub(crate) use hrn::HRNResolver;
 pub use onchain::OnchainPayment;
+pub use payjoin::PayjoinPayment;
 pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
 pub use spontaneous::SpontaneousPayment;
 pub use store::{

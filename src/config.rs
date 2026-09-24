@@ -193,6 +193,18 @@ impl Default for ForwardedPaymentTrackingMode {
 	}
 }
 
+// The time interval at which we resume persisted payjoin sessions.
+pub(crate) const PAYJOIN_RESUME_INTERVAL: Duration = Duration::from_secs(15);
+
+// The duration after which completed or failed payjoin sessions are cleaned up (24 hours).
+pub(crate) const PAYJOIN_SESSION_CLEANUP_AGE_SECS: u64 = 24 * 60 * 60;
+
+// The interval at which we check for old payjoin sessions to clean up (1 hour).
+pub(crate) const PAYJOIN_SESSION_CLEANUP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+// The default timeout after which we abort a transaction lookup operation.
+pub(crate) const DEFAULT_TX_LOOKUP_TIMEOUT_SECS: u64 = 10;
+
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
 /// Represents the configuration of an [`Node`] instance.
@@ -215,8 +227,9 @@ impl Default for ForwardedPaymentTrackingMode {
 	feature = "unified-payments",
 	doc = "| `hrn_config`                           | HumanReadableNamesConfig::default()  |"
 )]
-/// | `manually_handle_unknown_bolt11_payments` | false                              |
+/// | `manually_handle_unknown_bolt11_payments` | false                             |
 /// | `forwarded_payment_tracking_mode`      | Stats                               |
+/// | `payjoin_config`                       | None                                 |
 ///
 /// See [`AnchorChannelsConfig`], [`RouteParametersConfig`], and
 /// [`ForwardedPaymentTrackingMode`] for more information regarding their respective default values.
@@ -297,6 +310,8 @@ pub struct Config {
 	pub manually_handle_unknown_bolt11_payments: bool,
 	/// The mode used for tracking forwarded payments.
 	pub forwarded_payment_tracking_mode: ForwardedPaymentTrackingMode,
+	/// Configuration options for PayJoin payments.
+	pub payjoin_config: Option<PayjoinConfig>,
 }
 
 impl Default for Config {
@@ -316,6 +331,7 @@ impl Default for Config {
 			hrn_config: HumanReadableNamesConfig::default(),
 			manually_handle_unknown_bolt11_payments: false,
 			forwarded_payment_tracking_mode: ForwardedPaymentTrackingMode::default(),
+			payjoin_config: None,
 		}
 	}
 }
@@ -859,6 +875,16 @@ pub enum AsyncPaymentsRole {
 	/// Node acts as a server in an async payments context. This means that it will hold async payments HTLCs and onion
 	/// messages for its peers.
 	Server,
+}
+
+/// Configuration options for PayJoin payments.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct PayjoinConfig {
+	/// The URL of the PayJoin directory
+	pub payjoin_directory: String,
+	/// The URLs of the OHTTP relays to use for sending OHTTP requests to PayJoin receivers.
+	pub ohttp_relays: Vec<String>,
 }
 
 #[cfg(test)]
