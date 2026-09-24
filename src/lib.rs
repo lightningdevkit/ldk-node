@@ -147,6 +147,8 @@ use fee_estimator::{
 };
 #[cfg(feature = "uniffi")]
 use ffi::*;
+#[cfg(all(feature = "uniffi", feature = "storage-tier"))]
+pub use ffi::{DynStoreTrait, IOError, KVStoreKey, PaginatedListResponse};
 use gossip::GossipSource;
 use graph::NetworkGraph;
 use io::utils::update_and_persist_node_metrics;

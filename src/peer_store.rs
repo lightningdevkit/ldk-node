@@ -174,7 +174,9 @@ mod tests {
 	use std::sync::Arc;
 
 	use bitcoin::io;
-	use lightning::util::persist::{PageToken, PaginatedKVStore, PaginatedListResponse};
+	use lightning::util::persist::{
+		MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+	};
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
@@ -216,6 +218,16 @@ mod tests {
 		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
 		{
 			async { Err(io::Error::new(io::ErrorKind::Other, "list_paginated failed")) }
+		}
+	}
+
+	impl MigratableKVStore for FailingStore {
+		fn list_all_keys(
+			&self,
+		) -> impl std::future::Future<Output = Result<Vec<(String, String, String)>, io::Error>>
+		       + 'static
+		       + Send {
+			async { Err(io::Error::new(io::ErrorKind::Other, "list_all_keys failed")) }
 		}
 	}
 
