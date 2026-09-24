@@ -783,6 +783,69 @@ async fn multi_hop_sending() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn forwarding_to_unannounced_channels() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	for allow_forwarding in [false, true] {
+		let node_a = setup_node(&chain_source, random_config());
+		let mut router_config = random_config();
+		if !allow_forwarding {
+			router_config.node_config.node_alias = None;
+		}
+		let node_b = setup_node(&chain_source, router_config);
+		let node_c = setup_node(&chain_source, random_config());
+
+		premine_and_distribute_funds(
+			&bitcoind.client,
+			&electrsd.client,
+			vec![
+				node_a.onchain_payment().new_address().unwrap(),
+				node_b.onchain_payment().new_address().unwrap(),
+				node_c.onchain_payment().new_address().unwrap(),
+			],
+			Amount::from_sat(5_000_000),
+		)
+		.await;
+		for node in [&node_a, &node_b, &node_c] {
+			node.sync_wallets().unwrap();
+		}
+
+		// A -> B -> C uses only unannounced channels. B has no liquidity-provider or async role;
+		// its alias and listening addresses determine whether it accepts the forward.
+		open_channel(&node_a, &node_b, 1_000_000, false, &electrsd).await;
+		open_channel(&node_b, &node_c, 1_000_000, false, &electrsd).await;
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+		for node in [&node_a, &node_b, &node_c] {
+			node.sync_wallets().unwrap();
+		}
+		expect_channel_ready_event!(node_a, node_b.node_id());
+		expect_channel_ready_events!(node_b, node_a.node_id(), node_c.node_id());
+		expect_channel_ready_event!(node_c, node_b.node_id());
+
+		let amount_msat = 2_500_000;
+		let description = Bolt11InvoiceDescription::Direct(
+			Description::new("Unannounced channel forwarding".to_string()).unwrap(),
+		);
+		let invoice =
+			node_c.bolt11_payment().receive(amount_msat, &description.into(), 3600).unwrap();
+		assert!(!invoice.route_hints().is_empty());
+		let payment_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
+
+		if allow_forwarding {
+			expect_event!(node_b, PaymentForwarded);
+			expect_payment_received_event!(node_c, amount_msat);
+			expect_payment_successful_event!(node_a, payment_id, Some(Some(1000)));
+		} else {
+			expect_event!(node_a, PaymentFailed);
+			assert_eq!(node_a.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Failed);
+			assert_eq!(node_b.next_event(), None);
+			assert_eq!(node_c.next_event(), None);
+		}
+	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn detailed_forwarded_payment_tracking() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);

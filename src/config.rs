@@ -230,7 +230,8 @@ pub struct Config {
 	/// The addresses on which the node will listen for incoming connections.
 	///
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
-	/// `listening_addresses` are set.
+	/// `listening_addresses` are set. When both are set, we also accept payment forwards over
+	/// unannounced channels.
 	pub listening_addresses: Option<Vec<SocketAddress>>,
 	/// The addresses which the node will announce to the gossip network that it accepts connections on.
 	///
@@ -243,7 +244,8 @@ pub struct Config {
 	/// The provided alias must be a valid UTF-8 string and no longer than 32 bytes in total.
 	///
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
-	/// `listening_addresses` are set.
+	/// `listening_addresses` are set. When both are set, we also accept payment forwards over
+	/// unannounced channels.
 	pub node_alias: Option<NodeAlias>,
 	/// A list of peers that we allow to establish zero confirmation channels to us.
 	///
@@ -511,12 +513,14 @@ pub(crate) fn default_user_config(config: &Config) -> UserConfig {
 	// will mostly be relevant for inbound channels.
 	let mut user_config = UserConfig::default();
 	user_config.channel_handshake_limits.force_announced_channel_preference = false;
+	user_config.channel_handshake_config.negotiate_scid_privacy = true;
 	user_config.channel_handshake_config.negotiate_anchor_zero_fee_commitments =
 		config.anchor_channels_config.enable_zero_fee_commitments;
 	user_config.reject_inbound_splices = false;
 
-	if may_announce_channel(config).is_err() {
-		user_config.accept_forwards_to_priv_channels = false;
+	let may_announce = may_announce_channel(config).is_ok();
+	user_config.accept_forwards_to_priv_channels = may_announce;
+	if !may_announce {
 		user_config.channel_handshake_config.announce_for_forwarding = false;
 		user_config.channel_handshake_limits.force_announced_channel_preference = true;
 	}
@@ -862,9 +866,9 @@ mod tests {
 	use std::str::FromStr;
 
 	use super::{
-		clamp_full_scan_stop_gap, may_announce_channel, AnnounceError, Config, ElectrumSyncConfig,
-		EsploraSyncConfig, NodeAlias, SocketAddress, DEFAULT_FULL_SCAN_STOP_GAP,
-		MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
+		clamp_full_scan_stop_gap, default_user_config, may_announce_channel, AnnounceError, Config,
+		ElectrumSyncConfig, EsploraSyncConfig, NodeAlias, SocketAddress,
+		DEFAULT_FULL_SCAN_STOP_GAP, MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
 	};
 
 	#[test]
@@ -911,6 +915,37 @@ mod tests {
 			addresses.push(socket_address);
 		}
 		assert!(may_announce_channel(&node_config).is_ok());
+	}
+
+	#[test]
+	fn forwarding_requires_alias_and_listening_addresses() {
+		let address = SocketAddress::from_str("127.0.0.1:9735").unwrap();
+		let alias = Some(NodeAlias([1; 32]));
+		for (node_alias, listening_addresses, expected_forwarding) in [
+			(None, None, false),
+			(None, Some(vec![]), false),
+			(None, Some(vec![address.clone()]), false),
+			(alias, None, false),
+			(alias, Some(vec![]), false),
+			(alias, Some(vec![address.clone()]), true),
+		] {
+			let config = Config {
+				node_alias,
+				listening_addresses,
+				// Announcement addresses alone do not configure a forwarding node.
+				announcement_addresses: Some(vec![address.clone()]),
+				..Config::default()
+			};
+			let user_config = default_user_config(&config);
+			assert_eq!(user_config.accept_forwards_to_priv_channels, expected_forwarding);
+			assert_eq!(
+				user_config.channel_handshake_limits.force_announced_channel_preference,
+				!expected_forwarding
+			);
+			if !expected_forwarding {
+				assert!(!user_config.channel_handshake_config.announce_for_forwarding);
+			}
+		}
 	}
 
 	#[test]
