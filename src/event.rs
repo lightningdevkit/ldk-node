@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Amount, OutPoint};
+use bitcoin::{Amount, OutPoint, Txid};
 use lightning::blinded_path::message::NextMessageHop;
+use lightning::chain::chaininterface::FundingCandidate;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
 use lightning::events::PaidBolt12Invoice;
@@ -57,8 +58,10 @@ use crate::payment::PaymentMetadata;
 use crate::probing::Prober;
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	ChainMonitor, CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper,
+	Wallet,
 };
+use crate::wallet::{closed_channel_held_rounds, funding_candidates, held_splice_rounds};
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
@@ -559,6 +562,7 @@ where
 	wallet: Arc<Wallet>,
 	bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
 	channel_manager: Arc<ChannelManager>,
+	chain_monitor: Arc<ChainMonitor>,
 	connection_manager: Arc<ConnectionManager<L>>,
 	output_sweeper: Arc<Sweeper>,
 	network_graph: Arc<Graph>,
@@ -583,19 +587,21 @@ where
 	pub fn new(
 		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>,
 		bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
-		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
-		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
-		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
-		forwarding_store: Arc<ForwardingStore>, peer_store: Arc<PeerStore<L>>,
-		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
-		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
-		prober: Option<Arc<Prober>>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		connection_manager: Arc<ConnectionManager<L>>, output_sweeper: Arc<Sweeper>,
+		network_graph: Arc<Graph>, liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
+		payment_store: Arc<PaymentStore>, forwarding_store: Arc<ForwardingStore>,
+		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
+		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
+		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
+		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
 			wallet,
 			bump_tx_event_handler,
 			channel_manager,
+			chain_monitor,
 			connection_manager,
 			output_sweeper,
 			network_graph,
@@ -731,6 +737,31 @@ where
 		}
 
 		Ok((payment_id, None))
+	}
+
+	/// The channel's pending splice rounds that have a transaction, as LDK currently holds them.
+	fn pending_splice_rounds(
+		&self, counterparty_node_id: PublicKey, channel_id: ChannelId,
+	) -> Vec<FundingCandidate> {
+		let splice_details = self
+			.channel_manager
+			.list_channels_with_counterparty(&counterparty_node_id)
+			.into_iter()
+			.find(|channel| channel.channel_id == channel_id)
+			.and_then(|channel| channel.splice_details);
+		funding_candidates(splice_details.as_ref(), counterparty_node_id, channel_id)
+	}
+
+	/// The splice rounds LDK holds for the channel, as [`held_splice_rounds`] lists them, or
+	/// `None` once the channel is gone.
+	fn held_splice_rounds(
+		&self, counterparty_node_id: PublicKey, channel_id: ChannelId,
+	) -> Option<Vec<Txid>> {
+		self.channel_manager
+			.list_channels_with_counterparty(&counterparty_node_id)
+			.into_iter()
+			.find(|channel| channel.channel_id == channel_id)
+			.map(|channel| held_splice_rounds(channel.splice_details.as_ref(), channel.funding_txo))
 	}
 
 	pub async fn handle_event(&self, event: LdkEvent) -> Result<(), ReplayEvent> {
@@ -1907,6 +1938,39 @@ where
 					);
 				}
 
+				// A splice round LDK promoted to the funding — a zero-conf splice before its
+				// transaction confirms — can still confirm once a later splice builds on it and
+				// once the channel closes, when LDK holds it no longer, so its funding payment
+				// records the promotion and is kept at the close (see
+				// `closed_channel_held_rounds`). LDK discards the round's siblings as it promotes
+				// the round, so the channel's other funding payments are resolved now, by the
+				// rounds the channel manager holds once the channel is updated — the promoted
+				// round, and whatever was negotiated behind it — or left to the close for a
+				// channel the manager no longer lists (see
+				// `Wallet::resolve_promoted_splice_round`).
+				if let Some(funding_txo) = funding_txo {
+					let held_rounds = self.held_splice_rounds(counterparty_node_id, channel_id);
+					if let Err(e) = self
+						.wallet
+						.resolve_promoted_splice_round(
+							channel_id,
+							funding_txo.txid,
+							held_rounds.as_deref(),
+						)
+						.await
+					{
+						log_error!(
+							self.logger,
+							"Failed to resolve the funding payments of channel {} as splice round \
+							{} locked: {}",
+							channel_id,
+							funding_txo.txid,
+							e,
+						);
+						return Err(ReplayEvent());
+					}
+				}
+
 				self.liquidity_source
 					.lsps2_service()
 					.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
@@ -1931,9 +1995,44 @@ where
 				reason,
 				user_channel_id,
 				counterparty_node_id,
+				channel_funding_txo,
 				..
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
+
+				// A splice round this node signed dies with the channel unless LDK had already
+				// handed it to the broadcaster. Whatever the channel manager reports for a round
+				// still awaiting the counterparty's signatures when the channel closes is queued
+				// after this event, so its record is taken back here. The channel manager holds
+				// only the closed channel's last funding, but the channel's monitor still watches
+				// every pending round the counterparty committed to and the background processor
+				// has flushed to it, and our signatures may have left the node for such a round, so
+				// it is kept (see `closed_channel_held_rounds`). A payment left with no round of
+				// ours the monitor watches, and none LDK promoted to the funding before, is failed:
+				// the monitor's `DiscardFunding` events settle such payments once the close
+				// matures, but reach the handler ahead of this event when one sync delivers the
+				// close and its maturity, and then find the channel still listed with every round
+				// held. The monitor's guard is not `Send`, so its watched transactions are
+				// collected before anything is awaited.
+				let watched_txids: Vec<Txid> = self
+					.chain_monitor
+					.get_monitor(channel_id)
+					.map(|monitor| {
+						monitor.get_outputs_to_watch().into_iter().map(|(txid, _)| txid).collect()
+					})
+					.unwrap_or_default();
+				let held_rounds = closed_channel_held_rounds(channel_funding_txo, watched_txids);
+				if let Err(e) =
+					self.wallet.resolve_closed_channel_splice_rounds(channel_id, &held_rounds).await
+				{
+					log_error!(
+						self.logger,
+						"Failed to resolve the funding payments of channel {} at its close: {}",
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
 
 				// `counterparty_node_id` has been set on every `ChannelClosed` since LDK 0.0.117.
 				let counterparty_node_id = counterparty_node_id
@@ -1992,6 +2091,65 @@ where
 				}
 			},
 			LdkEvent::DiscardFunding { channel_id, funding_info } => {
+				// LDK lets a splice round go with this event — a sibling round locked, or the
+				// channel's close matured — naming this node's contribution to the round rather
+				// than the round, so the event itself resolves no funding payment. For a channel
+				// the manager lists, the payments were resolved as the sibling's promotion was
+				// handled, from the rounds the manager holds (see
+				// `Wallet::resolve_promoted_splice_round`), and the event only takes back a round
+				// nothing broadcast that the manager no longer holds: its pending rounds and its
+				// funding, the monitor left out — its updates land after the manager's, deferred
+				// to the background processor's flush, so it may still watch a round the manager
+				// let go. For a channel the manager no longer lists — the monitor's events for the
+				// rounds of a closed channel — the funding its monitor settled on and whatever it
+				// still watches decide, as at `ChannelClosed`. The monitor's guard is not `Send`,
+				// so its state is collected before anything is awaited.
+				let channel = self
+					.channel_manager
+					.list_channels()
+					.into_iter()
+					.find(|channel| channel.channel_id == channel_id);
+				let resolved = match channel {
+					Some(channel) => {
+						let held_rounds = held_splice_rounds(
+							channel.splice_details.as_ref(),
+							channel.funding_txo,
+						);
+						log_debug!(
+							self.logger,
+							"LDK discarded a splice round of channel {} while the channel is \
+							listed: its funding payments were resolved as the channel's funding \
+							locked, or are left to its close",
+							channel_id,
+						);
+						self.wallet.drop_abandoned_splice_rounds(channel_id, &held_rounds).await
+					},
+					None => {
+						let held_rounds = match self.chain_monitor.get_monitor(channel_id) {
+							Ok(monitor) => closed_channel_held_rounds(
+								Some(monitor.get_funding_txo()),
+								monitor.get_outputs_to_watch().into_iter().map(|(txid, _)| txid),
+							),
+							Err(()) => Vec::new(),
+						};
+						self.wallet
+							.resolve_closed_channel_splice_rounds(channel_id, &held_rounds)
+							.await
+					},
+				};
+				if let Err(e) = resolved {
+					log_error!(
+						self.logger,
+						"Failed to resolve the funding payments of channel {} for a discarded \
+						splice round: {}",
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
+
+				// TODO(#1037): once inputs are locked at coin selection, `inputs` are locks this
+				// event returns: unlock them here.
 				if let FundingInfo::Contribution { inputs: _, outputs } = funding_info {
 					log_info!(
 						self.logger,
@@ -2190,6 +2348,26 @@ where
 				..
 			} => match self.wallet.sign_owned_inputs(unsigned_transaction) {
 				Ok(partially_signed_tx) => {
+					// Record the splice's funding payment before handing our signatures to LDK:
+					// `funding_transaction_signed` releases them to the counterparty, after which
+					// either party may broadcast — and wallet sync could observe the transaction
+					// before this node has recorded it. The record is written from the channel's
+					// pending splice history, and the round's broadcast adds nothing to it. On a
+					// failed write, replay rather than proceed unrecorded: LDK re-offers the event
+					// in-session and regenerates it across restarts while the transaction is
+					// unsigned.
+					let candidates = self.pending_splice_rounds(counterparty_node_id, channel_id);
+					if let Err(e) =
+						self.wallet.record_signed_funding(&partially_signed_tx, &candidates).await
+					{
+						log_error!(
+							self.logger,
+							"Failed to record the splice funding payment for channel {}: {}",
+							channel_id,
+							e,
+						);
+						return Err(ReplayEvent());
+					}
 					match self.channel_manager.funding_transaction_signed(
 						&channel_id,
 						&counterparty_node_id,
@@ -2204,9 +2382,18 @@ where
 							);
 						},
 						Err(e) => {
-							// TODO(splicing): Abort splice once supported in LDK 0.3
-							debug_assert!(false, "Failed signing funding transaction: {:?}", e);
-							log_error!(self.logger, "Failed signing funding transaction: {:?}", e);
+							// Either the round was reset after its history was read above — LDK
+							// then reports the failure through `SpliceNegotiationFailed`, whose
+							// handling takes the record back — or LDK rejected the witnesses, in
+							// which case the round stays pending in LDK, and the record with it.
+							// TODO(splicing): cancel the contribution here through
+							// `ChannelManager::cancel_funding_contributed`; a follow-up wires it.
+							log_error!(
+								self.logger,
+								"LDK refused the signed funding transaction for channel {}: {:?}",
+								channel_id,
+								e,
+							);
 						},
 					}
 				},
@@ -2226,6 +2413,26 @@ where
 					counterparty_node_id,
 					new_funding_txo,
 				);
+
+				// LDK emits this event only once our `tx_signatures` for the round are ready to
+				// send, so the counterparty may already hold them and may broadcast the round
+				// without us. The round's funding payment, recorded when the round was signed,
+				// therefore no longer awaits broadcast. On a failed write, replay: LDK re-offers
+				// the event in-session and persists it across restarts.
+				if let Err(e) = self
+					.wallet
+					.record_broadcast_splice_round(channel_id, new_funding_txo.txid)
+					.await
+				{
+					log_error!(
+						self.logger,
+						"Failed to mark splice round {} of channel {} as broadcast: {}",
+						new_funding_txo.txid,
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
 
 				let event = Event::SpliceNegotiated {
 					channel_id,
@@ -2254,6 +2461,30 @@ where
 					channel_id,
 					counterparty_node_id,
 				);
+
+				// A round this node signed was recorded when signing; if the failed round was
+				// among them, nothing can broadcast it anymore, so take its record back. The
+				// rounds LDK still holds tell which recorded ones it abandoned (a contribution
+				// can fail while an earlier signed round still awaits its signatures). A closed
+				// channel is left to its `ChannelClosed` event: LDK queues one for every channel it
+				// removes — before the failures a force-close reports, after the one a cooperative
+				// close reports — and that event carries the channel's last funding, which this
+				// handler can no longer read from the channel.
+				if let Some(held_rounds) = self.held_splice_rounds(counterparty_node_id, channel_id)
+				{
+					if let Err(e) =
+						self.wallet.drop_abandoned_splice_rounds(channel_id, &held_rounds).await
+					{
+						log_error!(
+							self.logger,
+							"Failed to drop the abandoned splice round of channel {} from its \
+							funding payment: {}",
+							channel_id,
+							e,
+						);
+						return Err(ReplayEvent());
+					}
+				}
 
 				let event = Event::SpliceNegotiationFailed {
 					channel_id,
