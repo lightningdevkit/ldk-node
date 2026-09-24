@@ -1873,7 +1873,7 @@ where
 						})
 				};
 				if let Some(peer) = peer_to_store {
-					self.peer_store.add_peer(peer).await.unwrap_or_else(|e| {
+					self.peer_store.add_peer_if_missing(peer).await.unwrap_or_else(|e| {
 						log_error!(
 							self.logger,
 							"Failed to add peer {} to peer store: {}",
