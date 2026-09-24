@@ -30,6 +30,10 @@
   `Event::PaymentClaimable`.
 
 ## Feature and API updates
+- `Builder::set_sqlite_backup_path` continuously replicates `{storage_dir}/ldk_node_data.sqlite`
+  to a second SQLite file via the Online Backup API. Replica failures fail the persist.
+  Restore by placing the replica at `{storage_dir}/ldk_node_data.sqlite`. Seed/entropy is not
+  included.
 - Language-binding `Mnemonic` objects can be generated or constructed from entropy and expose
   their words, word indices, word count, entropy, checksum, and passphrase-derived seed.
 - `Node::list_payments` is now paginated: it takes an optional `PageToken` and returns a

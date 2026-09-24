@@ -106,7 +106,7 @@ bdk_wallet = { version = "3.1.0", default-features = false, features = ["std", "
 
 bitreq = { version = "0.3", default-features = false, features = ["async-https", "json-using-serde"] }
 rustls = { version = "0.23", default-features = false }
-rusqlite = { version = "0.31.0", features = ["bundled"], optional = true }
+rusqlite = { version = "0.31.0", features = ["bundled", "backup"], optional = true }
 bitcoin = "0.32.7"
 bip39 = { version = "3.0.0", features = ["rand"] }
 bip21 = { version = "0.5", features = ["std"], default-features = false, optional = true }
