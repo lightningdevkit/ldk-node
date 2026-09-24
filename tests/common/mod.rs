@@ -1152,6 +1152,17 @@ pub async fn open_channel_no_wait(
 	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
 	let funding_txo_b = expect_channel_pending_event!(node_b, node_a.node_id());
 	assert_eq!(funding_txo_a, funding_txo_b);
+	for node in [node_a, node_b] {
+		let channel = node
+			.list_channels()
+			.into_iter()
+			.find(|c| c.funding_txo == Some(funding_txo_a))
+			.unwrap();
+		assert_eq!(
+			channel.channel_type.as_ref().unwrap().requires_scid_privacy(),
+			!should_announce,
+		);
+	}
 	funding_txo_a
 }
 
