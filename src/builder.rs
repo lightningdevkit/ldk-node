@@ -522,7 +522,7 @@ impl NodeBuilder {
 	/// 0-confirmation channels opened by this LSP. If `false`, 0-confirmation
 	/// acceptance for this peer falls back to [`Config::trusted_peers_0conf`].
 	///
-	/// May be called multiple times to register several LSPs. Duplicate `node_id`s are ignored.
+	/// May be called multiple times to register several LSPs. Re-adding an existing `node_id` updates its address, token, and 0conf trust settings.
 	///
 	/// [bLIP-50 / LSPS0]: https://github.com/lightning/blips/blob/master/blip-0050.md
 	pub fn add_liquidity_source(
@@ -532,7 +532,12 @@ impl NodeBuilder {
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
 
-		if liquidity_source_config.lsp_nodes.iter().any(|n| n.node_id == node_id) {
+		if let Some(existing) =
+			liquidity_source_config.lsp_nodes.iter_mut().find(|n| n.node_id == node_id)
+		{
+			existing.address = address;
+			existing.token = token;
+			existing.trust_peer_0conf = trust_peer_0conf;
 			return self;
 		}
 
@@ -1176,7 +1181,7 @@ impl Builder {
 	/// 0-confirmation channels opened by this LSP. If `false`, 0-confirmation
 	/// acceptance for this peer falls back to [`Config::trusted_peers_0conf`].
 	///
-	/// May be called multiple times to register several LSPs. Duplicate `node_id`s are ignored.
+	/// May be called multiple times to register several LSPs. Re-adding an existing `node_id` updates its address, token, and 0conf trust settings.
 	///
 	/// [bLIP-50 / LSPS0]: https://github.com/lightning/blips/blob/master/blip-0050.md
 	pub fn add_liquidity_source(
