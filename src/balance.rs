@@ -404,5 +404,6 @@ fn value_from_descriptor(descriptor: &SpendableOutputDescriptor) -> Amount {
 		SpendableOutputDescriptor::StaticOutput { output, .. } => output.value,
 		SpendableOutputDescriptor::DelayedPaymentOutput(output) => output.output.value,
 		SpendableOutputDescriptor::StaticPaymentOutput(output) => output.output.value,
+		SpendableOutputDescriptor::RecoveredStaticPaymentOutput(output) => output.output.value,
 	}
 }

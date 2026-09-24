@@ -110,6 +110,7 @@ mod message_handler;
 pub mod payment;
 mod peer_store;
 pub mod probing;
+pub mod recovery;
 mod runtime;
 mod scoring;
 mod tx_broadcaster;
@@ -187,6 +188,11 @@ use peer_store::{PeerInfo, PeerStore};
 #[cfg(feature = "uniffi")]
 pub use probing::ArcedProbingConfigBuilder as ProbingConfigBuilder;
 use probing::{run_prober, Prober};
+#[cfg(feature = "uniffi")]
+pub use recovery::ArcedRecoveryNodeBuilder as RecoveryBuilder;
+#[cfg(not(feature = "uniffi"))]
+pub use recovery::RecoveryNodeBuilder as RecoveryBuilder;
+pub use recovery::{RecoveryNode, RecoveryPeer, RecoveryStatus};
 use runtime::Runtime;
 pub use tokio;
 use types::{
@@ -283,6 +289,7 @@ pub struct Node {
 	#[cfg(feature = "unified-payments")]
 	hrn_resolver: HRNResolver,
 	prober: Option<Arc<Prober>>,
+	pending_recovery_state: Option<Vec<u8>>,
 	#[cfg(cycle_tests)]
 	_leak_checker: LeakChecker,
 }

@@ -48,6 +48,34 @@ interface ProbingConfigBuilder {
 interface Builder {
 };
 
+typedef dictionary RecoveryPeer;
+
+typedef dictionary RecoveryStatus;
+
+interface RecoveryBuilder {
+	constructor();
+	[Name=from_config]
+	constructor(Config config);
+	void add_peer(RecoveryPeer peer);
+	void set_storage_dir_path(string storage_dir_path);
+	void set_filesystem_logger(string? log_file_path, LogLevel? max_log_level);
+	void set_log_facade_logger();
+	void set_custom_logger(LogWriter log_writer);
+	void set_network(Network network);
+	[Throws=BuildError]
+	void set_tor_config(TorConfig tor_config);
+};
+
+interface RecoveryNode {
+	[Throws=NodeError]
+	void start();
+	[Throws=NodeError]
+	void stop();
+	RecoveryStatus status();
+	PublicKey node_id();
+	BalanceDetails list_balances();
+};
+
 interface Node {
 	[Throws=NodeError]
 	void start();
