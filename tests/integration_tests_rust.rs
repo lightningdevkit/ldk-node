@@ -461,6 +461,117 @@ async fn channel_full_cycle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn channel_details_pending_htlcs() {
+	use ldk_node::{InboundHTLCStateDetails, OutboundHTLCStateDetails};
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![
+			node_a.onchain_payment().new_address().unwrap(),
+			node_b.onchain_payment().new_address().unwrap(),
+		],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 500_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	for node in [&node_a, &node_b] {
+		let channel = node.list_channels().remove(0);
+		assert!(channel.pending_inbound_htlcs.is_empty());
+		assert!(channel.pending_outbound_htlcs.is_empty());
+		assert_eq!(channel.current_dust_exposure_msat, Some(0));
+	}
+	let initial_splice_out_maximum_sat = node_a.list_channels()[0].next_splice_out_maximum_sat;
+	assert!(initial_splice_out_maximum_sat > 0);
+	assert!(initial_splice_out_maximum_sat < 500_000);
+
+	// Keep both a dust and a non-dust HTLC pending until we explicitly resolve them.
+	let amounts_msat = [1_000, 10_000_000];
+	let description =
+		Bolt11InvoiceDescription::Direct(Description::new("pending HTLCs".to_owned()).unwrap());
+	let mut payments = Vec::new();
+	for (index, amount_msat) in amounts_msat.into_iter().enumerate() {
+		let preimage = PaymentPreimage([index as u8 + 1; 32]);
+		let payment_hash = PaymentHash::from(preimage);
+		let invoice = node_b
+			.bolt11_payment()
+			.receive_for_hash(amount_msat, &description.clone().into(), 3600, payment_hash)
+			.unwrap();
+		let outbound_id = node_a.bolt11_payment().send(&invoice, None).unwrap();
+		let (inbound_id, _) = expect_payment_claimable_event!(node_b, payment_hash, amount_msat);
+		payments.push((outbound_id, inbound_id, payment_hash, preimage));
+	}
+
+	let outbound_channel = node_a.list_channels().remove(0);
+	let inbound_channel = node_b.list_channels().remove(0);
+	assert_eq!(outbound_channel.pending_outbound_htlcs.len(), 2);
+	assert!(outbound_channel.pending_inbound_htlcs.is_empty());
+	assert_eq!(inbound_channel.pending_inbound_htlcs.len(), 2);
+	assert!(inbound_channel.pending_outbound_htlcs.is_empty());
+	assert_eq!(outbound_channel.current_dust_exposure_msat, Some(amounts_msat[0]));
+	assert_eq!(inbound_channel.current_dust_exposure_msat, Some(amounts_msat[0]));
+	assert!(outbound_channel.next_splice_out_maximum_sat < initial_splice_out_maximum_sat);
+	for (index, (_, _, payment_hash, _)) in payments.iter().enumerate() {
+		let outbound = outbound_channel
+			.pending_outbound_htlcs
+			.iter()
+			.find(|htlc| htlc.payment_hash == *payment_hash)
+			.unwrap();
+		let inbound = inbound_channel
+			.pending_inbound_htlcs
+			.iter()
+			.find(|htlc| htlc.payment_hash == *payment_hash)
+			.unwrap();
+		assert_eq!(outbound.htlc_id, Some(inbound.htlc_id));
+		assert_eq!(outbound.amount_msat, amounts_msat[index]);
+		assert_eq!(inbound.amount_msat, amounts_msat[index]);
+		assert_eq!(outbound.cltv_expiry, inbound.cltv_expiry);
+		assert!(inbound.cltv_expiry > node_b.status().current_best_block.height);
+		assert_eq!(outbound.state, Some(OutboundHTLCStateDetails::Committed));
+		assert_eq!(inbound.state, Some(InboundHTLCStateDetails::Committed));
+		assert_eq!(outbound.is_dust, index == 0);
+		assert_eq!(inbound.is_dust, index == 0);
+		assert_eq!(outbound.skimmed_fee_msat, None);
+	}
+
+	let (outbound_id, inbound_id, _, preimage) = payments[0];
+	node_b.bolt11_payment().claim_for_id(inbound_id, amounts_msat[0], preimage).unwrap();
+	expect_payment_received_event!(node_b, amounts_msat[0]);
+	expect_payment_successful_event!(node_a, outbound_id, None);
+	node_b.bolt11_payment().fail_for_id(payments[1].1).unwrap();
+	expect_event!(node_a, PaymentFailed);
+
+	tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), async {
+		loop {
+			let channels = [node_a.list_channels().remove(0), node_b.list_channels().remove(0)];
+			if channels.iter().all(|channel| {
+				channel.pending_inbound_htlcs.is_empty()
+					&& channel.pending_outbound_htlcs.is_empty()
+			}) {
+				for channel in channels {
+					assert_eq!(channel.current_dust_exposure_msat, Some(0));
+				}
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("resolved HTLCs should disappear from channel details");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_force_close() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);

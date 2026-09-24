@@ -16,6 +16,7 @@ use lightning::chain::chainmonitor;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::{
 	ChannelDetails as LdkChannelDetails, ChannelShutdownState, CounterpartyForwardingInfo,
+	InboundHTLCDetails, OutboundHTLCDetails,
 };
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::IgnoringMessageHandler;
@@ -586,6 +587,8 @@ pub struct ChannelDetails {
 	/// an upper-bound. This is intended for use when routing, allowing us to ensure we pick a
 	/// route which is valid.
 	pub next_outbound_htlc_minimum_msat: u64,
+	/// The maximum value, in satoshis, of the next splice out from our channel balance.
+	pub next_splice_out_maximum_sat: u64,
 	/// The number of blocks (after our commitment transaction confirms) that we will need to wait
 	/// until we can claim our funds after we force-close the channel. During this time our
 	/// counterparty is allowed to punish us if we broadcasted a stale state. If our counterparty
@@ -616,6 +619,21 @@ pub struct ChannelDetails {
 	/// Will be `None` until channel negotiation has completed and the channel type has been
 	/// determined.
 	pub channel_type: Option<ChannelTypeFeatures>,
+	/// Pending inbound HTLCs.
+	pub pending_inbound_htlcs: Vec<InboundHTLCDetails>,
+	/// Pending outbound HTLCs.
+	pub pending_outbound_htlcs: Vec<OutboundHTLCDetails>,
+	/// The current total dust exposure on this channel, in millisatoshis.
+	///
+	/// This is the maximum of the dust exposure on the holder and counterparty commitment
+	/// transactions. It includes pending HTLCs below the dust threshold and the portion of
+	/// commitment transaction fees that contributes to dust exposure.
+	///
+	/// This is compared against [`ChannelConfig::max_dust_htlc_exposure`] when determining whether
+	/// new HTLCs can be accepted or offered on this channel.
+	///
+	/// Will be `None` for objects serialized prior to LDK Node v0.8.
+	pub current_dust_exposure_msat: Option<u64>,
 }
 
 impl ChannelDetails {
@@ -669,6 +687,7 @@ impl ChannelDetails {
 			cltv_expiry_delta: value.config.map(|c| c.cltv_expiry_delta),
 			next_outbound_htlc_limit_msat: value.next_outbound_htlc_limit_msat,
 			next_outbound_htlc_minimum_msat: value.next_outbound_htlc_minimum_msat,
+			next_splice_out_maximum_sat: value.next_splice_out_maximum_sat,
 			force_close_spend_delay: value.force_close_spend_delay,
 			inbound_htlc_minimum_msat: value
 				.inbound_htlc_minimum_msat
@@ -681,6 +700,9 @@ impl ChannelDetails {
 			channel_shutdown_state: value.channel_shutdown_state,
 			reserve_type,
 			channel_type: value.channel_type.map(maybe_wrap),
+			pending_inbound_htlcs: value.pending_inbound_htlcs,
+			pending_outbound_htlcs: value.pending_outbound_htlcs,
+			current_dust_exposure_msat: value.current_dust_exposure_msat,
 		}
 	}
 }
