@@ -3554,6 +3554,9 @@ fn setup_two_nodes_with_failing_store_a(
 ) -> (TestNode, TestNode) {
 	let config_a = random_config();
 	setup_builder!(builder_a, config_a.node_config);
+	#[cfg(feature = "uniffi")]
+	configure_chain_source(chain_source, &builder_a, &config_a);
+	#[cfg(not(feature = "uniffi"))]
 	configure_chain_source(chain_source, &mut builder_a, &config_a);
 	builder_a.set_async_payments_role(config_a.async_payments_role).unwrap();
 	let failing_store = PaymentFailingStore { inner: Arc::new(InMemoryStore::new()), fail_writes };

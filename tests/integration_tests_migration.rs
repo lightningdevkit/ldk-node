@@ -89,6 +89,9 @@ async fn build_migration_node(
 	instance: &BackendInstance, node_config: ldk_node::config::Config, node_entropy: NodeEntropy,
 	esplora_url: &str,
 ) -> common::TestNode {
+	#[cfg(feature = "uniffi")]
+	let builder = Builder::from_config(node_config);
+	#[cfg(not(feature = "uniffi"))]
 	let mut builder = Builder::from_config(node_config);
 	builder.set_chain_source_esplora(esplora_url.to_string(), None);
 	with_opened_store!(instance, |store| builder
