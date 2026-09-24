@@ -7,13 +7,13 @@
 
 use core::future::Future;
 use core::task::{Poll, Waker};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Amount, OutPoint};
+use bitcoin::{Amount, FeeRate, OutPoint};
 use lightning::blinded_path::message::NextMessageHop;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
@@ -574,6 +574,7 @@ where
 	runtime: Arc<Runtime>,
 	logger: L,
 	config: Arc<Config>,
+	pending_funding_fee_rates: Arc<Mutex<HashMap<u128, FeeRate>>>,
 }
 
 impl<L: Deref + Clone + Sync + Send + 'static> EventHandler<L>
@@ -590,6 +591,7 @@ where
 		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
 		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
 		prober: Option<Arc<Prober>>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		pending_funding_fee_rates: Arc<Mutex<HashMap<u128, FeeRate>>>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -611,6 +613,7 @@ where
 			runtime,
 			logger,
 			config,
+			pending_funding_fee_rates,
 		}
 	}
 
@@ -750,6 +753,10 @@ where
 				let cur_height = self.channel_manager.current_best_block().height;
 				let locktime = LockTime::from_height(cur_height).unwrap_or(LockTime::ZERO);
 
+				// Look up and remove any pending fee-rate override for this channel.
+				let fee_rate_override =
+					self.pending_funding_fee_rates.lock().expect("lock").remove(&user_channel_id);
+
 				// Sign the final funding transaction and broadcast it.
 				let channel_amount = Amount::from_sat(channel_value_satoshis);
 				let funding_transaction = self
@@ -759,6 +766,7 @@ where
 						channel_amount,
 						confirmation_target,
 						locktime,
+						fee_rate_override,
 					)
 					.await;
 				match funding_transaction {
@@ -1934,6 +1942,10 @@ where
 				..
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
+
+				// Clean up any funding fee-rate override still pending if the channel went
+				// away before the funding transaction was generated.
+				self.pending_funding_fee_rates.lock().expect("lock").remove(&user_channel_id);
 
 				// `counterparty_node_id` has been set on every `ChannelClosed` since LDK 0.0.117.
 				let counterparty_node_id = counterparty_node_id
