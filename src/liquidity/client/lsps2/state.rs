@@ -271,19 +271,13 @@ fn merge_absolute_expiry(current: Option<u64>, new: Option<u64>) -> Option<u64> 
 	}
 }
 
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-pub(crate) enum LeaseRequestKey {
-	Fixed(u64),
-	Variable,
-}
-
 #[derive(Default)]
 pub(crate) struct PendingLeaseRequestState {
-	locks: HashMap<LeaseRequestKey, Weak<AsyncMutex<()>>>,
+	locks: HashMap<LeaseCacheTargetId, Weak<AsyncMutex<()>>>,
 }
 
 impl PendingLeaseRequestState {
-	pub(crate) fn request_lock(&mut self, key: LeaseRequestKey) -> Arc<AsyncMutex<()>> {
+	pub(crate) fn request_lock(&mut self, key: LeaseCacheTargetId) -> Arc<AsyncMutex<()>> {
 		self.prune();
 		if let Some(lock) = self.locks.get(&key).and_then(Weak::upgrade) {
 			return lock;
@@ -729,10 +723,10 @@ mod tests {
 	fn lease_requests_are_serialized_per_key() {
 		let mut state = PendingLeaseRequestState::default();
 
-		let fixed = state.request_lock(LeaseRequestKey::Fixed(1_000));
-		let same_fixed = state.request_lock(LeaseRequestKey::Fixed(1_000));
-		let other_fixed = state.request_lock(LeaseRequestKey::Fixed(2_000));
-		let variable = state.request_lock(LeaseRequestKey::Variable);
+		let fixed = state.request_lock(LeaseCacheTargetId::Fixed { amount_msat: 1_000 });
+		let same_fixed = state.request_lock(LeaseCacheTargetId::Fixed { amount_msat: 1_000 });
+		let other_fixed = state.request_lock(LeaseCacheTargetId::Fixed { amount_msat: 2_000 });
+		let variable = state.request_lock(LeaseCacheTargetId::Variable);
 
 		assert!(Arc::ptr_eq(&fixed, &same_fixed));
 		assert!(!Arc::ptr_eq(&fixed, &other_fixed));

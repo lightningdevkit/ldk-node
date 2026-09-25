@@ -39,7 +39,7 @@ use crate::{Config, Error};
 use self::router::LSPS2LeaseParameters;
 use self::state::{
 	now_secs, LSPS2LeaseState, LeaseCacheTarget, LeaseCacheTargetId, LeaseCacheTargetStore,
-	LeaseRequestKey, PaymentLease, PaymentLeaseId, PaymentLeaseStore, PendingLeaseRequestState,
+	PaymentLease, PaymentLeaseId, PaymentLeaseStore, PendingLeaseRequestState,
 };
 
 // LSPS2 requires two blocks more than the usual final CLTV delta.
@@ -269,7 +269,7 @@ where
 			.pending_lease_request_state
 			.lock()
 			.expect("lock")
-			.request_lock(LeaseRequestKey::Fixed(amount_msat));
+			.request_lock(LeaseCacheTargetId::Fixed { amount_msat });
 		let _request_guard = request_lock.lock().await;
 		if let Some((lease, total_fee_msat, lsp)) =
 			self.take_cached_fixed_lease(amount_msat).await?
@@ -346,7 +346,7 @@ where
 			.pending_lease_request_state
 			.lock()
 			.expect("lock")
-			.request_lock(LeaseRequestKey::Variable);
+			.request_lock(LeaseCacheTargetId::Variable);
 		let _request_guard = request_lock.lock().await;
 		if let Some((lease, proportional_fee, lsp)) = self.take_cached_variable_lease().await? {
 			return Ok((lease, proportional_fee, lsp, false));
