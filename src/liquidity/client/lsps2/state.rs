@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::secp256k1::PublicKey;
-use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
@@ -28,8 +27,9 @@ use crate::logger::{log_error, LdkLogger};
 use crate::types::DynStore;
 use crate::Error;
 
+use super::LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA;
+
 pub(crate) const MIN_LEASE_REMAINING_SECS: u64 = 24 * 60 * 60;
-const BOLT12_FINAL_CLTV_EXPIRY_DELTA: u16 = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
 
 pub(crate) type PaymentLeaseStore<L> = DataStore<PaymentLease, L>;
 
@@ -406,7 +406,7 @@ pub(crate) fn is_lease_usable(lease: &PaymentLease) -> bool {
 pub(crate) fn checked_cltv_expiry_delta(cltv_expiry_delta: u32) -> Option<u16> {
 	u16::try_from(cltv_expiry_delta)
 		.ok()
-		.filter(|delta| *delta <= u16::MAX - BOLT12_FINAL_CLTV_EXPIRY_DELTA)
+		.filter(|delta| *delta <= u16::MAX - LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA)
 }
 
 pub(crate) fn now_secs() -> u64 {
@@ -420,6 +420,7 @@ mod tests {
 	use super::*;
 	use bitcoin::secp256k1::{Secp256k1, SecretKey};
 	use lightning::io;
+	use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
 	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 	use lightning::util::ser::{Readable, Writeable};
 	use lightning::util::test_utils::TestLogger;

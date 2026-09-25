@@ -16,13 +16,15 @@ use lightning::blinded_path::payment::{
 use lightning::blinded_path::IntroductionNode;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channel_state::ChannelDetails;
-use lightning::ln::channelmanager::{PaymentId, MIN_FINAL_CLTV_EXPIRY_DELTA};
+use lightning::ln::channelmanager::PaymentId;
 use lightning::routing::router::{InFlightHtlcs, Route, RouteParameters, Router};
 use lightning::sign::{EntropySource, ReceiveAuthKey};
 use lightning::types::features::BlindedHopFeatures;
 use lightning::types::payment::PaymentHash;
 
 use crate::payment::PaymentMetadata;
+
+use super::LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA;
 
 /// Parameters needed to construct an LSPS2 blinded payment path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,17 +61,15 @@ impl<R: Router, ES: EntropySource> LSPS2Router<R, ES> {
 		Self { inner_router, entropy_source }
 	}
 
-	fn payment_parameters(&self, payment_context: &PaymentContext) -> Vec<LSPS2LeaseParameters> {
+	fn payment_parameters(&self, payment_context: &PaymentContext) -> Option<LSPS2LeaseParameters> {
 		match payment_context {
 			PaymentContext::Bolt12Offer(_) | PaymentContext::AsyncBolt12Offer(_) => {},
-			_ => return Vec::new(),
+			_ => return None,
 		}
 		payment_context
 			.payment_metadata()
 			.and_then(PaymentMetadata::decode_from_bolt12_payment_metadata)
 			.and_then(|metadata| metadata.lsps2_lease_parameters)
-			.into_iter()
-			.collect()
 	}
 }
 
@@ -102,7 +102,7 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 		secp_ctx: &Secp256k1<T>,
 	) -> Result<Vec<BlindedPaymentPath>, ()> {
 		let parameters = self.payment_parameters(&tlvs.payment_context);
-		let allow_mpp = parameters.iter().all(|params| params.payment_size_msat.is_some());
+		let allow_mpp = parameters.map_or(true, |params| params.payment_size_msat.is_some());
 		let direct_path_has_sufficient_liquidity = amount_msats.map_or(true, |amount_msats| {
 			if allow_mpp {
 				first_hops
@@ -149,71 +149,56 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 			return inner_paths;
 		}
 
-		if parameters.is_empty() {
+		let Some(params) = parameters else {
 			return if is_direct_recipient_path { Err(()) } else { inner_paths };
-		}
+		};
 		let Some(amount_msats) = amount_msats else {
 			// Invoice construction supplies the resolved amount even for a variable-amount offer. Without
 			// it, we cannot constrain the JIT path to the full channel-open trigger amount.
 			return inner_paths;
 		};
 
-		let mut paths = Vec::new();
-		for params in parameters {
-			// A fixed lease is valid only for the exact amount negotiated with the LSP. A mismatch means
-			// these parameters were selected for a different response and must never be exposed.
-			if params.payment_size_msat.is_some_and(|fixed_amount| fixed_amount != amount_msats) {
-				continue;
-			}
-			// Both fixed and variable invoices require the entire resolved payment on any selected JIT
-			// path. Fixed invoices may advertise MPP across multiple regular paths, while variable
-			// invoices disable MPP at response construction. Setting both bounds here additionally makes
-			// every JIT candidate indivisible and lets us include several candidates for robustness.
-			let htlc_amount_msat = amount_msats;
-			let payment_constraints = PaymentConstraints {
-				max_cltv_expiry: tlvs
-					.payment_constraints
-					.max_cltv_expiry
-					.saturating_add(params.cltv_expiry_delta as u32),
-				htlc_minimum_msat: htlc_amount_msat,
-			};
-			let forward_node = PaymentForwardNode {
-				tlvs: ForwardTlvs {
-					short_channel_id: params.intercept_scid,
-					payment_relay: PaymentRelay {
-						cltv_expiry_delta: params.cltv_expiry_delta,
-						fee_proportional_millionths: 0,
-						fee_base_msat: 0,
-					},
-					payment_constraints,
-					features: BlindedHopFeatures::empty(),
-					next_blinding_override: None,
+		// A fixed lease is valid only for the exact amount negotiated with the LSP. A mismatch means
+		// these parameters were selected for a different response and must never be exposed.
+		if params.payment_size_msat.is_some_and(|fixed_amount| fixed_amount != amount_msats) {
+			return Err(());
+		}
+		// Both fixed and variable invoices require the entire resolved payment on the JIT path.
+		// Fixed invoices may advertise MPP across regular paths, while variable invoices disable
+		// MPP at response construction. Both bounds keep the JIT payment indivisible.
+		let payment_constraints = PaymentConstraints {
+			max_cltv_expiry: tlvs
+				.payment_constraints
+				.max_cltv_expiry
+				.saturating_add(params.cltv_expiry_delta as u32),
+			htlc_minimum_msat: amount_msats,
+		};
+		let forward_node = PaymentForwardNode {
+			tlvs: ForwardTlvs {
+				short_channel_id: params.intercept_scid,
+				payment_relay: PaymentRelay {
+					cltv_expiry_delta: params.cltv_expiry_delta,
+					fee_proportional_millionths: 0,
+					fee_base_msat: 0,
 				},
-				node_id: params.lsp_node_id,
-				htlc_maximum_msat: htlc_amount_msat,
-			};
-			if let Ok(path) = BlindedPaymentPath::new(
-				&[forward_node],
-				recipient,
-				local_node_receive_key,
-				tlvs.clone(),
-				htlc_amount_msat,
-				// LSPS2 requires two blocks more than the usual final CLTV delta.
-				MIN_FINAL_CLTV_EXPIRY_DELTA + 2,
-				&self.entropy_source,
-				secp_ctx,
-			) {
-				paths.push(path);
-			}
-		}
-		if paths.is_empty() {
-			// A capacity race may make ordinary paths available after a lease was negotiated. That case
-			// returned above and intentionally discards the single-use lease. Reaching here means neither
-			// ordinary nor valid JIT paths can receive the payment.
-			Err(())
-		} else {
-			Ok(paths)
-		}
+				payment_constraints,
+				features: BlindedHopFeatures::empty(),
+				next_blinding_override: None,
+			},
+			node_id: params.lsp_node_id,
+			htlc_maximum_msat: amount_msats,
+		};
+		BlindedPaymentPath::new(
+			&[forward_node],
+			recipient,
+			local_node_receive_key,
+			tlvs,
+			amount_msats,
+			LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA,
+			&self.entropy_source,
+			secp_ctx,
+		)
+		.map(|path| vec![path])
 	}
 }
 
@@ -225,6 +210,7 @@ mod tests {
 	use core::sync::atomic::{AtomicUsize, Ordering};
 	use lightning::blinded_path::payment::{Bolt12OfferContext, PaymentConstraints};
 	use lightning::ln::channel_state::{ChannelCounterparty, ChannelShutdownState};
+	use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
 	use lightning::ln::types::ChannelId;
 	use lightning::offers::invoice_request::InvoiceRequestFields;
 	use lightning::offers::offer::OfferId;
