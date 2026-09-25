@@ -65,11 +65,6 @@ where
 
 const DEFAULT_BOLT12_INVOICE_EXPIRY_SECS: u32 = 2 * 60 * 60;
 
-pub(crate) struct JitInvoiceResponse {
-	pub(crate) payment_metadata: BTreeMap<u64, Vec<u8>>,
-	pub(crate) allow_mpp: bool,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum JitInvoiceRequest {
 	Fixed { amount_msat: u64, absolute_expiry: Option<u64> },
@@ -158,8 +153,7 @@ where
 
 	pub(crate) async fn prepare_invoice_response(
 		self: Arc<Self>, request: JitInvoiceRequest, connection_manager: Arc<ConnectionManager<L>>,
-	) -> Result<JitInvoiceResponse, Error> {
-		let allow_mpp = request.allow_mpp();
+	) -> Result<BTreeMap<u64, Vec<u8>>, Error> {
 		let (lease, fee_parameters) = match request {
 			JitInvoiceRequest::Fixed { amount_msat, .. } => {
 				let (lease, total_fee_msat, _, _) =
@@ -209,7 +203,7 @@ where
 		}
 		.encode_as_bolt12_payment_metadata();
 
-		Ok(JitInvoiceResponse { payment_metadata, allow_mpp })
+		Ok(payment_metadata)
 	}
 
 	pub(crate) async fn lsps2_receive_to_jit_channel(

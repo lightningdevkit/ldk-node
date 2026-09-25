@@ -31,7 +31,7 @@ use lightning::types::payment::{PaymentHash, PaymentSecret};
 use lightning::util::logger::Logger as _;
 
 use crate::connection::ConnectionManager;
-use crate::liquidity::client::lsps2::{JitInvoiceRequest, JitInvoiceResponse, LSPS2Client};
+use crate::liquidity::client::lsps2::{JitInvoiceRequest, LSPS2Client};
 use crate::logger::{log_error, Logger};
 use crate::runtime::Runtime;
 use crate::types::{ChannelManager, KeysManager, MessageRouter, OnionMessenger, Router};
@@ -255,7 +255,7 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 		// regardless of whether the offer fixed the amount. Only disable MPP below when rebuilding a
 		// variable-amount response with an LSPS2 JIT path.
 		let allow_mpp = true;
-		let payment_info = Arc::new(InvoicePaymentInfo::new());
+		let payment_info = InvoicePaymentInfo::new();
 		let result = build_invoice(
 			self.flow.as_ref(),
 			self.channel_manager.as_ref(),
@@ -265,7 +265,7 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 			&invoice_request,
 			payment_metadata.clone(),
 			allow_mpp,
-			payment_info.as_ref(),
+			&payment_info,
 		);
 
 		match result {
@@ -307,27 +307,15 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 				));
 			},
 		};
-		let connection_manager = match dependencies.connection_manager.upgrade() {
-			Some(connection_manager) => connection_manager,
-			None => {
-				return Some((
-					OffersMessage::InvoiceError(InvoiceError::from_string(
-						"JIT invoice handling is unavailable".to_owned(),
-					)),
-					responder.respond(),
-				));
-			},
-		};
-		let onion_messenger = match dependencies.onion_messenger.upgrade() {
-			Some(onion_messenger) => onion_messenger,
-			None => {
-				return Some((
-					OffersMessage::InvoiceError(InvoiceError::from_string(
-						"JIT invoice handling is unavailable".to_owned(),
-					)),
-					responder.respond(),
-				));
-			},
+		let (Some(connection_manager), Some(onion_messenger)) =
+			(dependencies.connection_manager.upgrade(), dependencies.onion_messenger.upgrade())
+		else {
+			return Some((
+				OffersMessage::InvoiceError(InvoiceError::from_string(
+					"JIT invoice handling is unavailable".to_owned(),
+				)),
+				responder.respond(),
+			));
 		};
 
 		let lsps2_client = Arc::clone(&dependencies.lsps2_client);
@@ -342,8 +330,7 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 				.prepare_invoice_response(jit_request, connection_manager)
 				.await;
 			let (message, instructions) = match response {
-				Ok(JitInvoiceResponse { payment_metadata: jit_metadata, allow_mpp }) => {
-					debug_assert_eq!(allow_mpp, jit_request.allow_mpp());
+				Ok(jit_metadata) => {
 					let mut merged_metadata = payment_metadata.unwrap_or_default();
 					merged_metadata.extend(jit_metadata);
 					let invoice_result = build_invoice(
@@ -354,8 +341,8 @@ impl OffersMessageHandler for NodeOffersMessageHandler {
 						secp_ctx.as_ref(),
 						&invoice_request,
 						Some(merged_metadata),
-						allow_mpp,
-						payment_info.as_ref(),
+						jit_request.allow_mpp(),
+						&payment_info,
 					);
 					let invoice_result = commit_cache_target_on_success(invoice_result, || {
 						let lsps2_client = Arc::clone(&lsps2_client);
