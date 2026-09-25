@@ -2115,13 +2115,6 @@ where
 							channel.splice_details.as_ref(),
 							channel.funding_txo,
 						);
-						log_debug!(
-							self.logger,
-							"LDK discarded a splice round of channel {} while the channel is \
-							listed: its funding payments were resolved as the channel's funding \
-							locked, or are left to its close",
-							channel_id,
-						);
 						self.wallet.drop_abandoned_splice_rounds(channel_id, &held_rounds).await
 					},
 					None => {
