@@ -156,14 +156,7 @@ where
 		if let Err(error) = self.register_cache_target(target_id, absolute_expiry).await {
 			log_warn!(self.logger, "Failed recording LSPS2 lease cache target: {}", error);
 		}
-		match request {
-			JitInvoiceRequest::Fixed { amount_msat, .. } => {
-				self.schedule_fixed_lease_refill(amount_msat, connection_manager);
-			},
-			JitInvoiceRequest::Variable { .. } => {
-				self.schedule_variable_lease_refill(connection_manager);
-			},
-		}
+		self.schedule_lease_refill(target_id, connection_manager);
 	}
 
 	pub(crate) async fn prepare_invoice_response(
@@ -240,7 +233,7 @@ where
 			payment_hash,
 			lsps2_parameters,
 		)?;
-		self.schedule_fixed_lease_refill(amount_msat, &connection_manager);
+		self.schedule_lease_refill(LeaseCacheTargetId::Fixed { amount_msat }, &connection_manager);
 
 		if was_negotiated {
 			log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
@@ -265,7 +258,7 @@ where
 			payment_hash,
 			lsps2_parameters,
 		)?;
-		self.schedule_variable_lease_refill(&connection_manager);
+		self.schedule_lease_refill(LeaseCacheTargetId::Variable, &connection_manager);
 
 		if was_negotiated {
 			log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
@@ -429,27 +422,23 @@ where
 		Ok((negotiated_lease, min_prop_fee_ppm_msat, cheapest_lsp))
 	}
 
-	fn schedule_fixed_lease_refill(
-		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
+	fn schedule_lease_refill(
+		self: &Arc<Self>, target_id: LeaseCacheTargetId,
+		connection_manager: &Arc<ConnectionManager<L>>,
 	) {
 		let Some(runtime) = self.runtime.upgrade() else { return };
 		let client = Arc::clone(self);
 		let connection_manager = Arc::clone(connection_manager);
 		runtime.spawn_cancellable_background_task(async move {
-			if let Err(error) = client.cache_fixed_lease(amount_msat, &connection_manager).await {
-				log_warn!(client.logger, "Failed refilling LSPS2 payment lease: {}", error);
-			}
-		});
-	}
-
-	fn schedule_variable_lease_refill(
-		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
-	) {
-		let Some(runtime) = self.runtime.upgrade() else { return };
-		let client = Arc::clone(self);
-		let connection_manager = Arc::clone(connection_manager);
-		runtime.spawn_cancellable_background_task(async move {
-			if let Err(error) = client.cache_variable_lease(&connection_manager).await {
+			let result = match target_id {
+				LeaseCacheTargetId::Fixed { amount_msat } => {
+					client.cache_fixed_lease(amount_msat, &connection_manager).await
+				},
+				LeaseCacheTargetId::Variable => {
+					client.cache_variable_lease(&connection_manager).await
+				},
+			};
+			if let Err(error) = result {
 				log_warn!(client.logger, "Failed refilling LSPS2 payment lease: {}", error);
 			}
 		});
@@ -462,7 +451,7 @@ where
 			.pending_lease_request_state
 			.lock()
 			.expect("lock")
-			.request_lock(LeaseRequestKey::Fixed(amount_msat));
+			.request_lock(LeaseCacheTargetId::Fixed { amount_msat });
 		let _request_guard = request_lock.lock().await;
 		let available_lsps =
 			self.get_lsps2_nodes().await?.into_iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
@@ -484,7 +473,7 @@ where
 			.pending_lease_request_state
 			.lock()
 			.expect("lock")
-			.request_lock(LeaseRequestKey::Variable);
+			.request_lock(LeaseCacheTargetId::Variable);
 		let _request_guard = request_lock.lock().await;
 		let available_lsps =
 			self.get_lsps2_nodes().await?.into_iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
