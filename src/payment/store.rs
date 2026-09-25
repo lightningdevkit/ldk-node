@@ -68,6 +68,9 @@ pub struct PaymentDetails {
 	pub kind: PaymentKind,
 	/// The amount transferred.
 	///
+	/// For inbound Lightning payments, this excludes any fee withheld by our channel
+	/// counterparty once the payment is observed.
+	///
 	/// Will be `None` for variable-amount payments until we receive them.
 	pub amount_msat: Option<u64>,
 	/// The fees that were paid for this payment.
@@ -102,6 +105,23 @@ impl Writeable for PaymentDetails {
 	fn write<W: lightning::util::ser::Writer>(
 		&self, writer: &mut W,
 	) -> Result<(), lightning::io::Error> {
+		// Preserve the historical gross amount on disk for pending BOLT11 payments while
+		// exposing net amounts in memory. Older versions can then still validate manual claims.
+		let mut amount_msat = self.amount_msat;
+		if self.direction == PaymentDirection::Inbound && self.status == PaymentStatus::Pending {
+			if let (
+				Some(amount),
+				PaymentKind::Bolt11 { counterparty_skimmed_fee_msat: Some(fee), .. },
+			) = (amount_msat, &self.kind)
+			{
+				amount_msat = Some(amount.checked_add(*fee).ok_or_else(|| {
+					lightning::io::Error::new(
+						lightning::io::ErrorKind::InvalidData,
+						"BOLT11 payment amount and fee overflow",
+					)
+				})?);
+			}
+		}
 		write_tlv_fields!(writer, {
 			(0, self.id, required), // Used to be `hash` for v0.2.1 and prior
 			// 2 used to be `preimage` before it was moved to `kind` in v0.3.0
@@ -110,7 +130,7 @@ impl Writeable for PaymentDetails {
 			// 4 used to be `secret` before it was moved to `kind` in v0.3.0
 			(4, None::<Option<PaymentSecret>>, required),
 			(5, self.latest_update_timestamp, required),
-			(6, self.amount_msat, required),
+			(6, amount_msat, required),
 			(7, self.fee_paid_msat, option),
 			(8, self.direction, required),
 			(10, self.status, required)
@@ -142,7 +162,7 @@ impl Readable for PaymentDetails {
 		let secret: Option<PaymentSecret> = secret.0.ok_or(DecodeError::InvalidValue)?;
 		let latest_update_timestamp: u64 =
 			latest_update_timestamp.0.ok_or(DecodeError::InvalidValue)?;
-		let amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
+		let mut amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
 		let direction: PaymentDirection = direction.0.ok_or(DecodeError::InvalidValue)?;
 		let status: PaymentStatus = status.0.ok_or(DecodeError::InvalidValue)?;
 
@@ -168,6 +188,18 @@ impl Readable for PaymentDetails {
 				PaymentKind::Spontaneous { hash, preimage }
 			}
 		};
+
+		// Pending BOLT11 payments retain gross amounts on disk. Expose net amounts even when
+		// their claimable event was already handled before an upgrade.
+		if direction == PaymentDirection::Inbound && status == PaymentStatus::Pending {
+			if let (
+				Some(amount),
+				PaymentKind::Bolt11 { counterparty_skimmed_fee_msat: Some(fee), .. },
+			) = (amount_msat, &kind)
+			{
+				amount_msat = Some(amount.checked_sub(*fee).ok_or(DecodeError::InvalidValue)?);
+			}
+		}
 
 		Ok(PaymentDetails {
 			id,
@@ -221,11 +253,6 @@ impl UpdatableObject for PaymentDetails {
 		if let Some(hash_opt) = update.hash {
 			match self.kind {
 				PaymentKind::Bolt12Offer { ref mut hash, .. } => {
-					debug_assert_eq!(
-						self.direction,
-						PaymentDirection::Outbound,
-						"We should only ever override payment hash for outbound BOLT 12 payments"
-					);
 					debug_assert!(
 						hash.is_none() || *hash == hash_opt,
 						"We should never change a payment hash after being initially set"
@@ -233,11 +260,6 @@ impl UpdatableObject for PaymentDetails {
 					update_if_necessary!(*hash, hash_opt);
 				},
 				PaymentKind::Bolt12Refund { ref mut hash, .. } => {
-					debug_assert_eq!(
-						self.direction,
-						PaymentDirection::Outbound,
-						"We should only ever override payment hash for outbound BOLT 12 payments"
-					);
 					debug_assert!(
 						hash.is_none() || *hash == hash_opt,
 						"We should never change a payment hash after being initially set"
@@ -309,12 +331,13 @@ impl UpdatableObject for PaymentDetails {
 
 		if let Some(skimmed_fee_msat) = update.counterparty_skimmed_fee_msat {
 			match self.kind {
-				PaymentKind::Bolt11 { ref mut counterparty_skimmed_fee_msat, .. } => {
+				PaymentKind::Bolt11 { ref mut counterparty_skimmed_fee_msat, .. }
+				| PaymentKind::Bolt12Offer { ref mut counterparty_skimmed_fee_msat, .. } => {
 					update_if_necessary!(*counterparty_skimmed_fee_msat, skimmed_fee_msat);
 				},
 				_ => debug_assert!(
 					false,
-					"We should only ever override counterparty_skimmed_fee_msat for BOLT11 payments"
+					"We should only override counterparty_skimmed_fee_msat for invoice payments"
 				),
 			}
 		}
@@ -581,7 +604,7 @@ pub enum PaymentKind {
 		preimage: Option<PaymentPreimage>,
 		/// The secret used by the payment.
 		secret: Option<PaymentSecret>,
-		/// The value, in thousands of a satoshi, that was deducted from this payment as an extra
+		/// The value, in thousandths of a satoshi, that was deducted from this payment as an extra
 		/// fee taken by our channel counterparty.
 		///
 		/// Will only ever be `Some` for inbound payments received via an [bLIP-52 / LSPS 2]
@@ -601,6 +624,17 @@ pub enum PaymentKind {
 		preimage: Option<PaymentPreimage>,
 		/// The secret used by the payment.
 		secret: Option<PaymentSecret>,
+		/// The value, in thousandths of a satoshi, that was deducted from this payment as an extra
+		/// fee taken by our channel counterparty.
+		///
+		/// Will only ever be `Some` for inbound payments received via an [bLIP-52 / LSPS 2]
+		/// just-in-time channel, and only after the payment is observed; `None` otherwise.
+		///
+		/// This will always be `None` for payments serialized by versions that did not record
+		/// BOLT12 LSPS2 fees.
+		///
+		/// [bLIP-52 / LSPS 2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+		counterparty_skimmed_fee_msat: Option<u64>,
 		/// The ID of the offer this payment is for.
 		offer_id: OfferId,
 		/// The payer note for the payment.
@@ -692,6 +726,7 @@ impl_writeable_tlv_based_enum!(PaymentKind,
 		(2, preimage, option),
 		(3, quantity, option),
 		(4, secret, option),
+		(5, counterparty_skimmed_fee_msat, option),
 		(6, offer_id, required),
 	},
 	(8, Spontaneous) => {
@@ -834,7 +869,8 @@ impl From<&PaymentDetails> for PaymentDetailsUpdate {
 		};
 
 		let counterparty_skimmed_fee_msat = match value.kind {
-			PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. } => {
+			PaymentKind::Bolt11 { counterparty_skimmed_fee_msat, .. }
+			| PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat, .. } => {
 				Some(counterparty_skimmed_fee_msat)
 			},
 			_ => None,
@@ -889,6 +925,123 @@ mod tests {
 		(8, direction, required),
 		(10, status, required)
 	});
+
+	struct GrossAmountPaymentDetails(PaymentDetails);
+
+	impl Writeable for GrossAmountPaymentDetails {
+		fn write<W: lightning::util::ser::Writer>(
+			&self, writer: &mut W,
+		) -> Result<(), lightning::io::Error> {
+			let payment = &self.0;
+			write_tlv_fields!(writer, {
+				(0, payment.id, required),
+				(2, None::<Option<PaymentPreimage>>, required),
+				(3, payment.kind, required),
+				(4, None::<Option<PaymentSecret>>, required),
+				(5, payment.latest_update_timestamp, required),
+				(6, payment.amount_msat, required),
+				(7, payment.fee_paid_msat, option),
+				(8, payment.direction, required),
+				(10, payment.status, required)
+			});
+			Ok(())
+		}
+	}
+
+	#[test]
+	fn legacy_pending_bolt11_amount_becomes_net_once() {
+		let legacy = GrossAmountPaymentDetails(PaymentDetails::new(
+			PaymentId([42; 32]),
+			PaymentKind::Bolt11 {
+				hash: PaymentHash([43; 32]),
+				preimage: None,
+				secret: Some(PaymentSecret([44; 32])),
+				counterparty_skimmed_fee_msat: Some(1_000),
+			},
+			Some(100_000),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		));
+		let decoded = PaymentDetails::read(&mut legacy.encode().as_slice()).unwrap();
+		assert_eq!(
+			decoded.amount_msat,
+			Some(99_000),
+			"legacy pending BOLT11 amounts must become net"
+		);
+		assert_eq!(decoded.kind, legacy.0.kind);
+		assert!(
+			decoded.encode() == legacy.encode(),
+			"net pending amounts must retain the legacy gross encoding"
+		);
+		assert_eq!(decoded, PaymentDetails::read(&mut decoded.encode().as_slice()).unwrap());
+
+		let assert_unchanged = |payment: &PaymentDetails| {
+			assert_eq!(
+				*payment,
+				PaymentDetails::read(
+					&mut GrossAmountPaymentDetails(payment.clone()).encode().as_slice()
+				)
+				.unwrap()
+			);
+		};
+		let mut unchanged = legacy.0.clone();
+		unchanged.amount_msat = None;
+		assert_unchanged(&unchanged);
+		unchanged.amount_msat = Some(100_000);
+		unchanged.status = PaymentStatus::Succeeded;
+		assert_unchanged(&unchanged);
+		unchanged.status = PaymentStatus::Failed;
+		assert_unchanged(&unchanged);
+		unchanged.status = PaymentStatus::Pending;
+		unchanged.direction = PaymentDirection::Outbound;
+		assert_unchanged(&unchanged);
+		unchanged.direction = PaymentDirection::Inbound;
+		unchanged.kind = PaymentKind::Bolt12Offer {
+			hash: Some(PaymentHash([43; 32])),
+			preimage: None,
+			secret: None,
+			counterparty_skimmed_fee_msat: Some(1_000),
+			offer_id: OfferId([45; 32]),
+			payer_note: None,
+			quantity: None,
+		};
+		assert_unchanged(&unchanged);
+	}
+
+	#[test]
+	fn pending_bolt11_net_codec_rejects_invalid_amounts() {
+		let mut payment = PaymentDetails::new(
+			PaymentId([42; 32]),
+			PaymentKind::Bolt11 {
+				hash: PaymentHash([43; 32]),
+				preimage: None,
+				secret: None,
+				counterparty_skimmed_fee_msat: Some(1_000),
+			},
+			Some(999),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+		assert!(
+			matches!(
+				PaymentDetails::read(
+					&mut GrossAmountPaymentDetails(payment.clone()).encode().as_slice()
+				),
+				Err(DecodeError::InvalidValue)
+			),
+			"a stored fee must not exceed the gross amount"
+		);
+		payment.amount_msat = Some(u64::MAX);
+		assert!(
+			matches!(
+				payment.write(&mut Vec::new()),
+				Err(error) if error.kind() == lightning::io::ErrorKind::InvalidData
+			),
+			"a net amount plus fee must not overflow the stored gross amount"
+		);
+	}
 
 	#[test]
 	fn old_payment_details_deser_compat() {
@@ -1491,6 +1644,96 @@ mod tests {
 			inserted.kind,
 			PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
 		));
+	}
+
+	#[test]
+	fn inbound_bolt12_offer_payments_can_be_failed() {
+		let payment_id = PaymentId([41; 32]);
+		let hash = PaymentHash([42; 32]);
+		let mut payment = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Bolt12Offer {
+				hash: Some(hash),
+				preimage: None,
+				secret: None,
+				counterparty_skimmed_fee_msat: None,
+				offer_id: OfferId([43; 32]),
+				payer_note: None,
+				quantity: None,
+			},
+			Some(100_000),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		payment.update(PaymentDetailsUpdate {
+			hash: Some(Some(hash)),
+			status: Some(PaymentStatus::Failed),
+			..PaymentDetailsUpdate::new(payment_id)
+		});
+
+		assert_eq!(payment.status, PaymentStatus::Failed);
+	}
+
+	#[test]
+	fn inbound_bolt12_refunds_can_be_failed() {
+		let payment_id = PaymentId([41; 32]);
+		let hash = PaymentHash([42; 32]);
+		let mut payment = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Bolt12Refund {
+				hash: Some(hash),
+				preimage: None,
+				secret: None,
+				payer_note: None,
+				quantity: None,
+			},
+			Some(100_000),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		payment.update(PaymentDetailsUpdate {
+			hash: Some(Some(hash)),
+			status: Some(PaymentStatus::Failed),
+			..PaymentDetailsUpdate::new(payment_id)
+		});
+
+		assert_eq!(payment.status, PaymentStatus::Failed);
+	}
+
+	#[test]
+	fn bolt12_offer_records_counterparty_skimmed_fee() {
+		let payment_id = PaymentId([41; 32]);
+		let mut payment = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Bolt12Offer {
+				hash: Some(PaymentHash([42; 32])),
+				preimage: None,
+				secret: None,
+				counterparty_skimmed_fee_msat: None,
+				offer_id: OfferId([43; 32]),
+				payer_note: None,
+				quantity: None,
+			},
+			Some(100_000),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+
+		assert!(payment.update(PaymentDetailsUpdate {
+			counterparty_skimmed_fee_msat: Some(Some(1_000)),
+			..PaymentDetailsUpdate::new(payment_id)
+		}));
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Bolt12Offer { counterparty_skimmed_fee_msat: Some(1_000), .. }
+		));
+		let encoded = payment.encode();
+		assert_eq!(payment, PaymentDetails::read(&mut &*encoded).unwrap());
 	}
 
 	#[derive(Clone, Debug, PartialEq, Eq)]

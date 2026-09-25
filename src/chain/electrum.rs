@@ -37,6 +37,7 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, log_warn, LdkLogger, Logger};
+use crate::payment::NodeOffersMessageHandler;
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::SortedTransactions;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
@@ -220,7 +221,8 @@ impl ElectrumChainSource {
 	}
 
 	pub(crate) async fn sync_lightning_wallet(
-		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		&self, channel_manager: Arc<ChannelManager>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		let receiver_res = {
@@ -238,8 +240,14 @@ impl ElectrumChainSource {
 		let sync_guard =
 			WalletSyncGuard::new(&self.lightning_wallet_sync_status, Error::TxSyncFailed);
 
-		let res =
-			self.sync_lightning_wallet_inner(channel_manager, chain_monitor, output_sweeper).await;
+		let res = self
+			.sync_lightning_wallet_inner(
+				channel_manager,
+				offers_message_handler,
+				chain_monitor,
+				output_sweeper,
+			)
+			.await;
 
 		sync_guard.complete(res);
 
@@ -247,14 +255,17 @@ impl ElectrumChainSource {
 	}
 
 	async fn sync_lightning_wallet_inner(
-		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		&self, channel_manager: Arc<ChannelManager>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		let sync_cman = Arc::clone(&channel_manager);
+		let sync_offers = Arc::clone(&offers_message_handler);
 		let sync_cmon = Arc::clone(&chain_monitor);
 		let sync_sweeper = Arc::clone(&output_sweeper);
 		let confirmables: Vec<Arc<dyn Confirm + Sync + Send>> = vec![
 			sync_cman as Arc<dyn Confirm + Sync + Send>,
+			sync_offers as Arc<dyn Confirm + Sync + Send>,
 			sync_cmon as Arc<dyn Confirm + Sync + Send>,
 			sync_sweeper as Arc<dyn Confirm + Sync + Send>,
 		];
