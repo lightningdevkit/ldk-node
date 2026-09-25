@@ -16,7 +16,7 @@ use lightning::chain::chaininterface::{
 use tokio::sync::Notify;
 use tokio::time::Instant;
 
-use crate::logger::{log_debug, log_error, LdkLogger};
+use crate::logger::{log_error, log_trace, LdkLogger};
 use crate::types::Wallet;
 use crate::Error;
 
@@ -339,7 +339,7 @@ where
 				);
 			},
 			QueueOutcome::AlreadyQueued(duplicate) => {
-				log_debug!(
+				log_trace!(
 					self.logger,
 					"Dropped a re-broadcast package; an identical one already awaits a classification retry: {:?}",
 					duplicate.txids(),
