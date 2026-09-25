@@ -12,9 +12,7 @@ use bitcoin::secp256k1::PublicKey;
 use lightning::impl_writeable_tlv_based;
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
 
-use crate::data_store::{
-	DataStore, StorableObject, StorableObjectId, StorableObjectUpdate, UpdatableObject,
-};
+use crate::data_store::{DataStore, StorableObject, StorableObjectId};
 use crate::hex_utils;
 
 pub(crate) const MIN_LEASE_REMAINING_SECS: u64 = 24 * 60 * 60;
@@ -69,37 +67,11 @@ impl_writeable_tlv_based!(PaymentLease, {
 	(8, payment_size_msat, option),
 });
 
-#[derive(Clone, Debug)]
-pub(crate) struct PaymentLeaseUpdate(PaymentLease);
-
-impl StorableObjectUpdate<PaymentLease> for PaymentLeaseUpdate {
-	fn id(&self) -> PaymentLeaseId {
-		self.0.id
-	}
-}
-
 impl StorableObject for PaymentLease {
 	type Id = PaymentLeaseId;
 
 	fn id(&self) -> Self::Id {
 		self.id
-	}
-}
-
-impl UpdatableObject for PaymentLease {
-	type Update = PaymentLeaseUpdate;
-
-	fn update(&mut self, update: Self::Update) -> bool {
-		if *self == update.0 {
-			false
-		} else {
-			*self = update.0;
-			true
-		}
-	}
-
-	fn to_update(&self) -> Self::Update {
-		PaymentLeaseUpdate(self.clone())
 	}
 }
 
