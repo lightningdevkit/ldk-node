@@ -107,13 +107,11 @@ where
 		};
 
 		let invoice = self.lsps2_create_jit_invoice(
-			LSPS2BuyResponse::from(&lease),
-			Some(amount_msat),
+			&lease,
 			description,
 			expiry_secs,
 			payment_hash,
 			lsps2_parameters,
-			Some(&lsp.node_id),
 		)?;
 
 		if was_negotiated {
@@ -133,13 +131,11 @@ where
 			max_proportional_opening_fee_ppm_msat: Some(proportional_fee),
 		};
 		let invoice = self.lsps2_create_jit_invoice(
-			LSPS2BuyResponse::from(&lease),
-			None,
+			&lease,
 			description,
 			expiry_secs,
 			payment_hash,
 			lsps2_parameters,
-			Some(&lsp.node_id),
 		)?;
 
 		if was_negotiated {
@@ -494,12 +490,10 @@ where
 	}
 
 	fn lsps2_create_jit_invoice(
-		&self, buy_response: LSPS2BuyResponse, amount_msat: Option<u64>,
-		description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		&self, lease: &PaymentLease, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		payment_hash: Option<PaymentHash>, lsps2_parameters: LSPS2Parameters,
-		node_id: Option<&PublicKey>,
 	) -> Result<Bolt11Invoice, Error> {
-		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, node_id)
+		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, Some(&lease.id.lsp_node_id))
 			.ok_or(Error::LiquiditySourceUnavailable)?;
 
 		// LSPS2 requires min_final_cltv_expiry_delta to be at least 2 more than usual.
@@ -539,9 +533,9 @@ where
 
 		let route_hint = RouteHint(vec![RouteHintHop {
 			src_node_id: lsps2_node.node_id,
-			short_channel_id: buy_response.intercept_scid,
+			short_channel_id: lease.id.intercept_scid,
 			fees: RoutingFees { base_msat: 0, proportional_millionths: 0 },
-			cltv_expiry_delta: buy_response.cltv_expiry_delta as u16,
+			cltv_expiry_delta: lease.cltv_expiry_delta as u16,
 			htlc_minimum_msat: None,
 			htlc_maximum_msat: None,
 		}]);
@@ -556,7 +550,7 @@ where
 			.expiry_time(Duration::from_secs(expiry_secs.into()))
 			.private_route(route_hint);
 
-		if let Some(amount_msat) = amount_msat {
+		if let Some(amount_msat) = lease.payment_size_msat {
 			invoice_builder = invoice_builder.amount_milli_satoshis(amount_msat).basic_mpp();
 		}
 
@@ -707,11 +701,6 @@ pub(crate) struct LSPS2BuyResponse {
 	cltv_expiry_delta: u32,
 }
 
-impl From<&PaymentLease> for LSPS2BuyResponse {
-	fn from(lease: &PaymentLease) -> Self {
-		Self { intercept_scid: lease.id.intercept_scid, cltv_expiry_delta: lease.cltv_expiry_delta }
-	}
-}
 #[cfg(test)]
 mod tests {
 	use super::*;
