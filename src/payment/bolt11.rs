@@ -409,16 +409,8 @@ impl Bolt11Payment {
 			return Err(Error::InvalidPaymentPreimage);
 		}
 
-		// For payments requested via `receive*_via_jit_channel_for_hash()`
-		// `skimmed_fee_msat` held by LSP must be taken into account.
-		let skimmed_fee_msat = match details.kind {
-			PaymentKind::Bolt11 {
-				counterparty_skimmed_fee_msat: Some(skimmed_fee_msat), ..
-			} => skimmed_fee_msat,
-			_ => 0,
-		};
-		if let Some(invoice_amount_msat) = details.amount_msat {
-			if claimable_amount_msat < invoice_amount_msat.saturating_sub(skimmed_fee_msat) {
+		if let Some(received_amount_msat) = details.amount_msat {
+			if claimable_amount_msat < received_amount_msat {
 				log_error!(
 					self.logger,
 					"Failed to manually claim payment {} as the claimable amount is less than expected",

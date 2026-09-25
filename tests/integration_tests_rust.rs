@@ -3965,7 +3965,16 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	assert_ne!(client_payment_id.0, manual_payment_hash.0);
 	assert_eq!(
 		client_node.payment(&client_payment_id).unwrap().unwrap().amount_msat,
-		Some(jit_amount_msat)
+		Some(expected_received_amount_msat),
+		"claimable payments must store the net amount"
+	);
+	assert_eq!(
+		client_node.bolt11_payment().claim_for_id(
+			client_payment_id,
+			claimable_amount_msat - 1,
+			manual_preimage,
+		),
+		Err(NodeError::InvalidAmount)
 	);
 	println!("Claiming payment!");
 	client_node

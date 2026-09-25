@@ -1000,6 +1000,7 @@ where
 						match &info.kind {
 							PaymentKind::Bolt11 { .. } | PaymentKind::Bolt12Offer { .. } => {
 								let update = PaymentDetailsUpdate {
+									amount_msat: Some(Some(amount_msat)),
 									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
 									..PaymentDetailsUpdate::new(payment_id)
 								};
@@ -1034,8 +1035,6 @@ where
 							return Ok(());
 						}
 
-						let invoice_amount_msat =
-							amount_msat.saturating_add(counterparty_skimmed_fee_msat);
 						let kind = PaymentKind::Bolt11 {
 							hash: payment_hash,
 							preimage: None,
@@ -1049,7 +1048,7 @@ where
 						let payment = PaymentDetails::new(
 							payment_id,
 							kind,
-							Some(invoice_amount_msat),
+							Some(amount_msat),
 							None,
 							PaymentDirection::Inbound,
 							PaymentStatus::Pending,
@@ -1122,8 +1121,6 @@ where
 						..
 					} => {
 						if should_insert_payment {
-							let invoice_amount_msat =
-								amount_msat.saturating_add(counterparty_skimmed_fee_msat);
 							let kind = PaymentKind::Bolt11 {
 								hash: payment_hash,
 								preimage: payment_preimage,
@@ -1139,7 +1136,7 @@ where
 							let payment = PaymentDetails::new(
 								payment_id,
 								kind,
-								Some(invoice_amount_msat),
+								Some(amount_msat),
 								None,
 								PaymentDirection::Inbound,
 								PaymentStatus::Pending,
@@ -2329,12 +2326,164 @@ mod tests {
 	use std::sync::atomic::{AtomicU16, Ordering};
 	use std::time::Duration;
 
+	use lightning::ln::outbound_payment::RecipientOnionFields;
 	use lightning::util::test_utils::TestLogger;
+	use lightning_types::payment::PaymentSecret;
 
 	use super::*;
+	use crate::builder::NodeBuilder;
+	use crate::entropy::NodeEntropy;
 	use crate::io::test_utils::InMemoryStore;
 	use crate::payment::store::LSPS2Parameters;
 	use crate::types::DynStoreWrapper;
+	use crate::{LdkWallet, Node};
+
+	fn payment_event_handler(node: &Node) -> EventHandler<Arc<Logger>> {
+		let bump_handler = Arc::new(BumpTransactionEventHandler::new(
+			Arc::clone(&node.tx_broadcaster),
+			Arc::new(LdkWallet::new(Arc::clone(&node.wallet), Arc::clone(&node.logger))),
+			Arc::clone(&node.keys_manager),
+			Arc::clone(&node.logger),
+		));
+		EventHandler::new(
+			Arc::clone(&node.event_queue),
+			Arc::clone(&node.wallet),
+			bump_handler,
+			Arc::clone(&node.channel_manager),
+			Arc::clone(&node.connection_manager),
+			Arc::clone(&node.output_sweeper),
+			Arc::clone(&node.network_graph),
+			Arc::clone(&node.liquidity_source),
+			Arc::clone(&node.payment_store),
+			Arc::clone(&node.forwarding_store),
+			Arc::clone(&node.peer_store),
+			Arc::clone(&node.keys_manager),
+			None,
+			Arc::clone(&node.onion_messenger),
+			None,
+			None,
+			Arc::clone(&node.runtime),
+			Arc::clone(&node.logger),
+			Arc::clone(&node.config),
+		)
+	}
+
+	fn check_bolt11_claimable_net_amount(manual_claim: bool, existing_payment: bool) {
+		let mut builder = NodeBuilder::from_config(Config {
+			network: bitcoin::Network::Regtest,
+			manually_handle_unknown_bolt11_payments: true,
+			..Default::default()
+		});
+		builder.set_log_facade_logger();
+		#[cfg(not(feature = "uniffi"))]
+		let entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		let node = builder.build_with_store(entropy, InMemoryStore::new()).unwrap();
+		let handler = payment_event_handler(&node);
+		let preimage = PaymentPreimage([43; 32]);
+		let payment_hash = PaymentHash::from(preimage);
+		let payment_id = PaymentId([44; 32]);
+		let payment_secret = PaymentSecret([45; 32]);
+		let gross_amount_msat = 100_000;
+		let skimmed_fee_msat = 1_000;
+		let net_amount_msat = gross_amount_msat - skimmed_fee_msat;
+		let metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: Some(skimmed_fee_msat),
+				max_proportional_opening_fee_ppm_msat: None,
+			}),
+			lsps2_lease_parameters: None,
+		};
+		let mut onion_fields = RecipientOnionFields::secret_only(payment_secret, gross_amount_msat);
+		onion_fields.payment_metadata = Some(metadata.encode());
+		let purpose = PaymentPurpose::Bolt11InvoicePayment {
+			payment_preimage: (!manual_claim).then_some(preimage),
+			payment_secret,
+		};
+		if existing_payment {
+			let payment = PaymentDetails::new(
+				payment_id,
+				PaymentKind::Bolt11 {
+					hash: payment_hash,
+					preimage: None,
+					secret: Some(payment_secret),
+					counterparty_skimmed_fee_msat: None,
+				},
+				Some(gross_amount_msat),
+				None,
+				PaymentDirection::Inbound,
+				PaymentStatus::Pending,
+			);
+			node.runtime.block_on(node.payment_store.insert(payment)).unwrap();
+		}
+		node.runtime
+			.block_on(handler.handle_event(LdkEvent::PaymentClaimable {
+				receiver_node_id: Some(node.node_id()),
+				payment_hash,
+				onion_fields: Some(onion_fields.clone()),
+				amount_msat: net_amount_msat,
+				counterparty_skimmed_fee_msat: skimmed_fee_msat,
+				purpose: purpose.clone(),
+				receiving_channel_ids: Vec::new(),
+				claim_deadline: Some(100),
+				payment_id: Some(payment_id),
+			}))
+			.unwrap();
+		let payment = node.payment(&payment_id).unwrap().unwrap();
+		assert_eq!(
+			payment.amount_msat,
+			Some(net_amount_msat),
+			"claimable payments must store the net amount"
+		);
+		assert!(matches!(payment.kind, PaymentKind::Bolt11 {
+			counterparty_skimmed_fee_msat: Some(fee), ..
+		} if fee == skimmed_fee_msat));
+		if manual_claim {
+			assert!(matches!(node.next_event(), Some(Event::PaymentClaimable {
+				claimable_amount_msat, ..
+			}) if claimable_amount_msat == net_amount_msat));
+			assert_eq!(
+				node.bolt11_payment().claim_for_id(payment_id, net_amount_msat - 1, preimage),
+				Err(Error::InvalidAmount)
+			);
+			node.bolt11_payment().claim_for_id(payment_id, net_amount_msat, preimage).unwrap();
+			node.event_handled().unwrap();
+		}
+		node.runtime
+			.block_on(handler.handle_event(LdkEvent::PaymentClaimed {
+				receiver_node_id: Some(node.node_id()),
+				payment_hash,
+				amount_msat: net_amount_msat,
+				purpose,
+				htlcs: Vec::new(),
+				sender_intended_total_msat: Some(gross_amount_msat),
+				onion_fields: Some(onion_fields),
+				payment_id: Some(payment_id),
+			}))
+			.unwrap();
+		let payment = node.payment(&payment_id).unwrap().unwrap();
+		assert_eq!(payment.amount_msat, Some(net_amount_msat));
+		assert_eq!(payment.status, PaymentStatus::Succeeded);
+		assert!(matches!(node.next_event(), Some(Event::PaymentReceived {
+			amount_msat, ..
+		}) if amount_msat == net_amount_msat));
+	}
+
+	#[test]
+	fn bolt11_manual_claimable_stores_net_amount() {
+		check_bolt11_claimable_net_amount(true, false);
+	}
+
+	#[test]
+	fn bolt11_automatic_claimable_stores_net_amount() {
+		check_bolt11_claimable_net_amount(false, false);
+	}
+
+	#[test]
+	fn bolt11_existing_claimable_stores_net_amount() {
+		check_bolt11_claimable_net_amount(true, true);
+	}
 
 	fn htlc_locator(channel_byte: u8) -> HTLCLocator {
 		HTLCLocator {
