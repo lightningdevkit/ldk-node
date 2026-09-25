@@ -427,22 +427,8 @@ impl LSPS2LeaseState {
 			.filter(|(_, lease)| lease.payment_size_msat.is_none())
 			.filter(|(_, lease)| is_lease_usable(lease))
 			.filter_map(|(id, lease)| {
-				let selection_fee = if let Some(amount_msat) = amount_msat {
-					if amount_msat < lease.params.min_payment_size_msat
-						|| amount_msat > lease.params.max_payment_size_msat
-					{
-						return None;
-					}
-					compute_opening_fee(
-						amount_msat,
-						lease.params.min_fee_msat,
-						lease.params.proportional as u64,
-					)?
-				} else {
-					lease.params.proportional as u64
-				};
-				let fee_for_limit =
-					amount_msat.map_or(lease.params.min_fee_msat, |_| selection_fee);
+				let (selection_fee, fee_for_limit) =
+					variable_lease_fees(&lease.params, amount_msat)?;
 				max_total_fee_msat
 					.map_or(true, |max| fee_for_limit <= max)
 					.then_some((*id, selection_fee))
@@ -452,35 +438,37 @@ impl LSPS2LeaseState {
 	}
 
 	pub(crate) fn has_variable_amount(
-		&self, amount_msat: Option<u64>, max_total_fee_msat: Option<u64>,
-		available_lsps: &[PublicKey],
+		&self, max_total_fee_msat: Option<u64>, available_lsps: &[PublicKey],
 	) -> bool {
 		self.leases
 			.values()
 			.filter(|lease| available_lsps.contains(&lease.id.lsp_node_id))
 			.filter(|lease| lease.payment_size_msat.is_none())
 			.filter(|lease| is_lease_usable(lease))
-			.filter_map(|lease| {
-				if let Some(amount_msat) = amount_msat {
-					if amount_msat < lease.params.min_payment_size_msat
-						|| amount_msat > lease.params.max_payment_size_msat
-					{
-						return None;
-					}
-					compute_opening_fee(
-						amount_msat,
-						lease.params.min_fee_msat,
-						lease.params.proportional as u64,
-					)
-				} else {
-					Some(lease.params.min_fee_msat)
-				}
-			})
-			.any(|fee_msat| max_total_fee_msat.map_or(true, |max| fee_msat <= max))
+			.any(|lease| max_total_fee_msat.map_or(true, |max| lease.params.min_fee_msat <= max))
 	}
 
 	pub(crate) fn prune(&mut self) {
 		self.leases.retain(|_, lease| is_lease_usable(lease));
+	}
+}
+
+/// Returns the variable lease's (selection fee, fee for the configured limit).
+/// Resolved BOLT12 amounts must fit the advertised range and use the exact total fee for both.
+/// Unknown BOLT11 amounts rank by proportional fee and check the minimum fee against the limit.
+pub(crate) fn variable_lease_fees(
+	params: &LSPS2OpeningFeeParams, amount_msat: Option<u64>,
+) -> Option<(u64, u64)> {
+	if let Some(amount_msat) = amount_msat {
+		if amount_msat < params.min_payment_size_msat || amount_msat > params.max_payment_size_msat
+		{
+			return None;
+		}
+		let total_fee =
+			compute_opening_fee(amount_msat, params.min_fee_msat, params.proportional as u64)?;
+		Some((total_fee, total_fee))
+	} else {
+		Some((params.proportional as u64, params.min_fee_msat))
 	}
 }
 
@@ -711,8 +699,8 @@ mod tests {
 		assert!(state.has_fixed_amount(1_000, Some(100), &available_lsps));
 		assert!(!state.has_fixed_amount(1_000, Some(99), &available_lsps));
 		assert!(!state.has_fixed_amount(2_000, None, &available_lsps));
-		assert!(state.has_variable_amount(None, Some(50), &available_lsps));
-		assert!(!state.has_variable_amount(None, Some(49), &available_lsps));
+		assert!(state.has_variable_amount(Some(50), &available_lsps));
+		assert!(!state.has_variable_amount(Some(49), &available_lsps));
 	}
 
 	#[test]
@@ -736,7 +724,7 @@ mod tests {
 		let state = LSPS2LeaseState::from_leases(vec![unavailable]);
 
 		assert!(
-			!state.has_variable_amount(None, Some(50), &[available_lsp]),
+			!state.has_variable_amount(Some(50), &[available_lsp]),
 			"a lease from an unavailable LSP suppressed variable-amount refill"
 		);
 	}
