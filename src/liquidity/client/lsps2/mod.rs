@@ -151,14 +151,7 @@ where
 	) -> Result<(), Error> {
 		self.prune_stale_cache_targets().await?;
 		for target in self.cache_targets() {
-			match target.id {
-				LeaseCacheTargetId::Fixed { amount_msat } => {
-					self.schedule_fixed_lease_refill(amount_msat, connection_manager);
-				},
-				LeaseCacheTargetId::Variable => {
-					self.schedule_variable_lease_refill(connection_manager);
-				},
-			}
+			self.schedule_lease_refill(target.id, connection_manager);
 		}
 		Ok(())
 	}
