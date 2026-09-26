@@ -154,31 +154,56 @@ impl Liquidity {
 	/// The given `token` will be used by the LSP to authenticate the user.
 	/// `trust_peer_0conf` controls whether the node will accept 0-confirmation channels opened by this
 	/// LSP. Note this supersedes [`Config::trusted_peers_0conf`] for this peer.
-	/// Duplicate `node_id`s are ignored.
+	/// Re-adding an existing `node_id` updates its address/token/0conf settings and reconnects.
 	pub fn add_liquidity_source(
 		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 		trust_peer_0conf: bool,
 	) -> Result<(), Error> {
+		let mut previous: Option<(SocketAddress, Option<String>, bool, Option<Vec<u16>>)> = None;
 		{
 			let mut lsp_nodes = self.liquidity_source.lsp_nodes.write().expect("lock");
-			if lsp_nodes.iter().any(|n| n.node_id == node_id) {
-				log_info!(self.logger, "LSP node {} already added, skipping.", node_id);
-				return Ok(());
+			if let Some(existing) = lsp_nodes.iter_mut().find(|n| n.node_id == node_id) {
+				if existing.address == address {
+					log_info!(self.logger, "LSP node {} already added, skipping.", node_id);
+					return Ok(());
+				}
+				log_info!(
+					self.logger,
+					"Updating existing LSP node {} address/config and reconnecting.",
+					node_id
+				);
+				let prev_address = std::mem::replace(&mut existing.address, address.clone());
+				let prev_token = std::mem::replace(&mut existing.token, token.clone());
+				let prev_trust =
+					std::mem::replace(&mut existing.trust_peer_0conf, trust_peer_0conf);
+				// Force rediscovery after config/address change.
+				let prev_protocols = std::mem::take(&mut existing.supported_protocols);
+				previous = Some((prev_address, prev_token, prev_trust, prev_protocols));
+			} else {
+				lsp_nodes.push(LspNode {
+					node_id,
+					address: address.clone(),
+					token: token.clone(),
+					trust_peer_0conf,
+					supported_protocols: None,
+				});
 			}
-
-			lsp_nodes.push(LspNode {
-				node_id,
-				address: address.clone(),
-				token: token.clone(),
-				trust_peer_0conf,
-				supported_protocols: None,
-			});
 		}
 
-		// If anything below fails, drop the half-initialized entry so the user can retry cleanly.
+		// On failure: remove half-initialized inserts; restore prior config for updates.
 		let lsp_nodes = Arc::clone(&self.liquidity_source.lsp_nodes);
 		let cleanup = move || {
-			lsp_nodes.write().expect("lock").retain(|n| n.node_id != node_id);
+			let mut nodes = lsp_nodes.write().expect("lock");
+			if let Some((prev_address, prev_token, prev_trust, prev_protocols)) = previous {
+				if let Some(existing) = nodes.iter_mut().find(|n| n.node_id == node_id) {
+					existing.address = prev_address;
+					existing.token = prev_token;
+					existing.trust_peer_0conf = prev_trust;
+					existing.supported_protocols = prev_protocols;
+				}
+			} else {
+				nodes.retain(|n| n.node_id != node_id);
+			}
 		};
 
 		let con_cm = Arc::clone(&self.connection_manager);

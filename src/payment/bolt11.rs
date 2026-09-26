@@ -159,7 +159,7 @@ impl Bolt11Payment {
 
 		// Persist the chosen LSP peer to make sure we reconnect on restart.
 		let peer_info = PeerInfo { node_id: chosen_lsp.node_id, address: chosen_lsp.address };
-		self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
+		self.runtime.block_on(self.peer_store.upsert_peer(peer_info))?;
 
 		Ok(invoice)
 	}
