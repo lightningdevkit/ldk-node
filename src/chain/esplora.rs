@@ -24,8 +24,8 @@ use crate::config::{
 	MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
 };
 use crate::fee_estimator::{
-	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
-	OnchainFeeEstimator,
+	apply_post_estimation_adjustments, get_all_conf_targets, get_fallback_rate_for_target,
+	get_num_block_defaults_for_target, ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, log_warn, LdkLogger, Logger};
@@ -366,41 +366,20 @@ impl EsploraChainSource {
 			Error::FeerateEstimationUpdateFailed
 		})?;
 
-		if estimates.is_empty() && self.config.network == Network::Bitcoin {
-			// Ensure we fail if we didn't receive any estimates.
-			log_error!(
+		let new_fee_rate_cache =
+			build_fee_rate_cache(estimates, self.config.network).inspect_err(|_| {
+				log_error!(
 						self.logger,
 						"Failed to retrieve fee rate estimates: empty fee estimates are dissallowed on Mainnet.",
 					);
-			return Err(Error::FeerateEstimationUpdateFailed);
-		}
+			})?;
 
-		let confirmation_targets = get_all_conf_targets();
-
-		let mut new_fee_rate_cache = HashMap::with_capacity(10);
-		for target in confirmation_targets {
-			let num_blocks = get_num_block_defaults_for_target(target);
-
-			// Convert the retrieved fee rate and fall back to 1 sat/vb if we fail or it
-			// yields less than that. This is mostly necessary to continue on
-			// `signet`/`regtest` where we might not get estimates (or bogus values).
-			let converted_estimate_sat_vb =
-				esplora_client::convert_fee_rate(num_blocks, estimates.clone())
-					.map_or(1.0, |converted| converted.max(1.0));
-
-			let fee_rate = FeeRate::from_sat_per_kwu((converted_estimate_sat_vb * 250.0) as u64);
-
-			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
-			// require some post-estimation adjustments to the fee rates, which we do here.
-			let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
-
-			new_fee_rate_cache.insert(target, adjusted_fee_rate);
-
+		for (target, fee_rate) in new_fee_rate_cache.iter() {
 			log_trace!(
 				self.logger,
 				"Fee rate estimation updated for {:?}: {} sats/kwu",
 				target,
-				adjusted_fee_rate.to_sat_per_kwu(),
+				fee_rate.to_sat_per_kwu(),
 			);
 		}
 
@@ -536,5 +515,142 @@ impl Filter for EsploraChainSource {
 	}
 	fn register_output(&self, output: WatchedOutput) {
 		self.tx_sync.register_output(output);
+	}
+}
+
+// Builds the fee rate cache from the estimates Esplora returned for us.
+//
+// Note that Esplora may hand us a sparse map that has no usable estimate for some of our
+// confirmation targets. We then fall back to the target's own default rather than to the relay
+// floor, as the latter would silently downgrade urgent targets such as `UrgentOnChainSweep` to
+// 1 sat/vb.
+fn build_fee_rate_cache(
+	estimates: HashMap<u16, f64>, network: Network,
+) -> Result<HashMap<ConfirmationTarget, FeeRate>, Error> {
+	if estimates.is_empty() && network == Network::Bitcoin {
+		// Ensure we fail if we didn't receive any estimates.
+		return Err(Error::FeerateEstimationUpdateFailed);
+	}
+
+	let confirmation_targets = get_all_conf_targets();
+
+	let mut new_fee_rate_cache = HashMap::with_capacity(10);
+	for target in confirmation_targets {
+		let num_blocks = get_num_block_defaults_for_target(target);
+
+		let fee_rate = match esplora_client::convert_fee_rate(num_blocks, estimates.clone()) {
+			Some(converted) => {
+				// Enforce a lower bound of 1 sat/vb on the converted estimate. This is mostly
+				// necessary to continue on `signet`/`regtest` where we might get bogus values.
+				let estimate = FeeRate::from_sat_per_kwu((converted.max(1.0) * 250.0) as u64);
+
+				// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
+				// require some post-estimation adjustments to the fee rates, which we do here.
+				apply_post_estimation_adjustments(target, estimate)
+			},
+			None => {
+				// We have no estimate to adjust, so we fall back to the target's default. Note we
+				// deliberately don't apply the post-estimation adjustments to it, which mirrors
+				// what `OnchainFeeEstimator::estimate_fee_rate` does when it misses the cache.
+				FeeRate::from_sat_per_kwu(get_fallback_rate_for_target(target) as u64)
+			},
+		};
+
+		new_fee_rate_cache.insert(target, fee_rate);
+	}
+
+	Ok(new_fee_rate_cache)
+}
+
+#[cfg(test)]
+mod tests {
+	use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
+
+	use super::*;
+
+	// Esplora only gives us an estimate for a target if it knows a block count at or below the
+	// requested one, so a map holding nothing but high block counts starves our urgent targets.
+	fn sparse_estimates() -> HashMap<u16, f64> {
+		HashMap::from([(144, 2.0), (1008, 1.0)])
+	}
+
+	#[test]
+	fn sparse_estimates_fall_back_to_target_defaults() {
+		let cache = build_fee_rate_cache(sparse_estimates(), Network::Bitcoin).unwrap();
+
+		// These have no estimate at or below their block count, so they have to end up on their
+		// own defaults rather than on the 1 sat/vb (i.e., 250 sats/kwu) relay floor.
+		for (target, expected) in [
+			(ConfirmationTarget::Lightning(LdkConfirmationTarget::UrgentOnChainSweep), 5000),
+			(ConfirmationTarget::Lightning(LdkConfirmationTarget::MaximumFeeEstimate), 8000),
+			(ConfirmationTarget::OnchainPayment, 5000),
+			(ConfirmationTarget::ChannelFunding, 1000),
+		] {
+			assert_eq!(cache.get(&target).unwrap().to_sat_per_kwu(), expected, "{:?}", target);
+		}
+
+		// While the targets that do have an estimate keep using it.
+		assert_eq!(
+			cache
+				.get(&ConfirmationTarget::Lightning(LdkConfirmationTarget::ChannelCloseMinimum))
+				.unwrap()
+				.to_sat_per_kwu(),
+			500
+		);
+	}
+
+	#[test]
+	fn empty_estimates_are_rejected_on_mainnet_only() {
+		assert!(matches!(
+			build_fee_rate_cache(HashMap::new(), Network::Bitcoin),
+			Err(Error::FeerateEstimationUpdateFailed)
+		));
+
+		// Elsewhere we carry on, with every target on its default.
+		let cache = build_fee_rate_cache(HashMap::new(), Network::Regtest).unwrap();
+		assert_eq!(cache.len(), get_all_conf_targets().len());
+		for target in get_all_conf_targets() {
+			assert_eq!(
+				cache.get(&target).unwrap().to_sat_per_kwu(),
+				get_fallback_rate_for_target(target) as u64,
+				"{:?}",
+				target
+			);
+		}
+	}
+
+	#[test]
+	fn complete_estimates_are_used_and_adjusted() {
+		let estimates = HashMap::from([(1, 10.0), (6, 5.0), (12, 4.0), (144, 2.0), (1008, 1.0)]);
+		let cache = build_fee_rate_cache(estimates, Network::Bitcoin).unwrap();
+
+		// 5 sat/vb, no post-estimation adjustment.
+		assert_eq!(
+			cache
+				.get(&ConfirmationTarget::Lightning(LdkConfirmationTarget::UrgentOnChainSweep))
+				.unwrap()
+				.to_sat_per_kwu(),
+			1250
+		);
+
+		// 10 sat/vb, bumped by `x * 1.1 + 2500`.
+		assert_eq!(
+			cache
+				.get(&ConfirmationTarget::Lightning(LdkConfirmationTarget::MaximumFeeEstimate))
+				.unwrap()
+				.to_sat_per_kwu(),
+			5250
+		);
+
+		// 2 sat/vb, less 250 sats/kwu, but clamped back up to the relay floor.
+		assert_eq!(
+			cache
+				.get(&ConfirmationTarget::Lightning(
+					LdkConfirmationTarget::MinAllowedNonAnchorChannelRemoteFee
+				))
+				.unwrap()
+				.to_sat_per_kwu(),
+			253
+		);
 	}
 }
