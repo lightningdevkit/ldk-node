@@ -214,7 +214,8 @@ impl PaginatedKVStore for SqliteStore {
 impl MigratableKVStore for SqliteStore {
 	fn list_all_keys(
 		&self,
-	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send {
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+	{
 		let inner = Arc::clone(&self.inner);
 		let fut = tokio::task::spawn_blocking(move || inner.list_all_keys_internal());
 		async move {

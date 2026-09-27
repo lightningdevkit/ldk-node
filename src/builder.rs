@@ -2702,7 +2702,8 @@ mod tests {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 			page_token: Option<PageToken>,
-		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
 			PaginatedKVStore::list_paginated(
 				&self.0,
 				primary_namespace,
