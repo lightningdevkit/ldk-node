@@ -24,6 +24,8 @@ use lightning::events::{
 };
 use lightning::ln::channelmanager::{PaymentId, TrustedChannelFeatures};
 use lightning::ln::types::ChannelId;
+use lightning::offers::invoice::Bolt12Invoice;
+use lightning::offers::offer::Offer;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
 use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
@@ -36,7 +38,7 @@ use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
 use crate::connection::ConnectionManager;
-use crate::data_store::DataStoreUpdateResult;
+use crate::data_store::{DataStoreUpdateResult, StorableObject};
 use crate::fee_estimator::ConfirmationTarget;
 #[cfg(feature = "uniffi")]
 use crate::ffi::PaidBolt12Invoice;
@@ -48,6 +50,7 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use crate::payment::recurrence::{RecurrencePaymentState, RecurrenceStatus};
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
@@ -692,6 +695,67 @@ where
 				compute_opening_fee(amount_msat, 0, max_prop_fee)
 			})
 		})
+	}
+
+	/// Processes a successful payment event for an outbound recurrence.
+	async fn advance_recurrence_on_payment_sent(
+		&self, payment_id: PaymentId, invoice: &Bolt12Invoice,
+	) -> Result<(), ReplayEvent> {
+		let mut matches = self
+			.recurrence_store
+			.list_filter(|details| {
+				details.payment_state == RecurrencePaymentState::Active(payment_id)
+			})
+			.await
+			.into_iter();
+
+		let Some(mut details) = matches.next() else {
+			// Ordinary payments have no recurrence state.
+			return Ok(());
+		};
+
+		if matches.len() != 0 {
+			debug_assert!(false, "multiple recurrences have the same active payment ID?");
+			return Ok(());
+		}
+
+		let Some(invoice_recurrence) = invoice.invoice_recurrence() else {
+			debug_assert!(false, "Invoice that should be corresponding to recurrence according to our recurrence store doesn't?");
+			return Ok(())
+		};
+
+		let offer = Offer::try_from(details.original_offer.clone()).map_err(|_| ReplayEvent())?;
+
+		details.paid_count = details.paid_count.saturating_add(1);
+		details.basetime.get_or_insert(invoice_recurrence.recurrence_basetime());
+		details.opaque_state =
+			invoice_recurrence.recurrence_next_state().map(|state| state.to_vec());
+		details.last_successful_payment_id = Some(payment_id);
+		details.payment_state = RecurrencePaymentState::NoActivePayment;
+
+		let recurrence = offer.offer_recurrence().ok_or(ReplayEvent())?;
+		let period_index = recurrence
+			.period_index(details.paid_count as u32, details.initial_start)
+			.map_err(|_| ReplayEvent())?;
+
+		if recurrence.recurrence_limit.map(|limit| period_index >= limit.0).unwrap_or(false) {
+			details.status = RecurrenceStatus::Completed;
+		}
+
+		match self.recurrence_store.update(details.to_update()).await {
+			Ok(DataStoreUpdateResult::Updated | DataStoreUpdateResult::Unchanged) => Ok(()),
+			Ok(DataStoreUpdateResult::NotFound) => {
+				log_error!(
+					self.logger,
+					"Recurrence disappeared before its payment update was stored"
+				);
+				Err(ReplayEvent())
+			},
+			Err(e) => {
+				log_error!(self.logger, "Failed to store updated recurrence: {}", e);
+				Err(ReplayEvent())
+			},
+		}
 	}
 
 	async fn resolve_inbound_payment_id(
@@ -1412,6 +1476,16 @@ where
 					status: Some(PaymentStatus::Succeeded),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
+
+				if let Some(invoice) = bolt12_invoice
+					.as_ref()
+					.and_then(|paid_invoice| paid_invoice.bolt12_invoice())
+				{
+					if let Err(e) = self.advance_recurrence_on_payment_sent(payment_id, invoice).await {
+						log_error!(self.logger, "Failed to advance recurrence: replaying event");
+						return Err(e);
+					}
+				}
 
 				match self.payment_store.update(update).await {
 					Ok(_) => {},
