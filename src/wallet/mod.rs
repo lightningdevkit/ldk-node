@@ -147,6 +147,32 @@ impl AddressPool {
 	}
 }
 
+/// The lock serializing the writers of funding payment records, see
+/// [`Wallet::funding_payment_update_lock`]. Locking it hands out a guard of a type only this
+/// module constructs, so a function taking one can be called only by a holder of this lock, not of
+/// any other `Mutex<()>` the wallet has.
+mod funding_payment_update_lock {
+	pub(super) struct FundingPaymentUpdateLock(tokio::sync::Mutex<()>);
+
+	/// Held by a holder of the [`FundingPaymentUpdateLock`], and by no one else.
+	#[must_use = "dropping the guard releases the funding lock at once"]
+	pub(super) struct FundingPaymentUpdateGuard<'a> {
+		_guard: tokio::sync::MutexGuard<'a, ()>,
+	}
+
+	impl FundingPaymentUpdateLock {
+		pub(super) fn new() -> Self {
+			Self(tokio::sync::Mutex::new(()))
+		}
+
+		pub(super) async fn lock(&self) -> FundingPaymentUpdateGuard<'_> {
+			FundingPaymentUpdateGuard { _guard: self.0.lock().await }
+		}
+	}
+}
+
+use funding_payment_update_lock::{FundingPaymentUpdateGuard, FundingPaymentUpdateLock};
+
 pub(crate) struct Wallet {
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
@@ -171,8 +197,9 @@ pub(crate) struct Wallet {
 	// classification landing inside an arm's decision sequence gets overwritten by the arm's
 	// stale generic fallback. Graduation stays off this lock: it decides from the live record
 	// under the payment store's mutation lock and writes only the status, so it carries nothing
-	// a concurrent classification could lose.
-	funding_payment_update_lock: tokio::sync::Mutex<()>,
+	// a concurrent classification could lose. The functions that need it held take its guard,
+	// which only this lock hands out.
+	funding_payment_update_lock: FundingPaymentUpdateLock,
 }
 
 impl Wallet {
@@ -200,7 +227,7 @@ impl Wallet {
 			config,
 			logger,
 			pending_payment_store,
-			funding_payment_update_lock: tokio::sync::Mutex::new(()),
+			funding_payment_update_lock: FundingPaymentUpdateLock::new(),
 		}
 	}
 
@@ -826,7 +853,7 @@ impl Wallet {
 	/// A record already `Failed` — a prior pass whose entry removal was lost to a crash — still
 	/// matches, no-ops the update, and gets its lingering entry removed.
 	async fn fail_unconfirmed_funding_payment_locked(
-		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, payment_id: PaymentId, record_txid: Txid,
+		&self, _guard: &FundingPaymentUpdateGuard<'_>, payment_id: PaymentId, record_txid: Txid,
 	) -> Result<FundingPaymentFailure, Error> {
 		let mut outcome = FundingPaymentFailure::MovedOn;
 		self.payment_store
@@ -893,7 +920,7 @@ impl Wallet {
 	/// [`Self::resolve_closed_channel_splice_rounds`] for a caller already holding the
 	/// funding-record writers' lock.
 	async fn resolve_closed_channel_splice_rounds_locked(
-		&self, guard: &tokio::sync::MutexGuard<'_, ()>, channel_id: ChannelId, held_rounds: &[Txid],
+		&self, guard: &FundingPaymentUpdateGuard<'_>, channel_id: ChannelId, held_rounds: &[Txid],
 	) -> Result<(), Error> {
 		self.drop_abandoned_splice_rounds_locked(guard, channel_id, held_rounds).await?;
 		self.fail_funding_payments_without_held_round_locked(
@@ -925,8 +952,8 @@ impl Wallet {
 	/// failed already — is not touched beyond the entry a failure cut short left behind.
 	/// `resolution` names the occasion in what is logged.
 	async fn fail_funding_payments_without_held_round_locked(
-		&self, guard: &tokio::sync::MutexGuard<'_, ()>, channel_id: ChannelId,
-		held_rounds: &[Txid], resolution: FundingResolution,
+		&self, guard: &FundingPaymentUpdateGuard<'_>, channel_id: ChannelId, held_rounds: &[Txid],
+		resolution: FundingResolution,
 	) -> Result<(), Error> {
 		let occasion = match resolution {
 			FundingResolution::Close => format!("of closed channel {}", channel_id),
@@ -1071,7 +1098,7 @@ impl Wallet {
 	/// funding payment whose record holds the round, for a caller holding the funding-record
 	/// writers' lock (see [`Self::resolve_promoted_splice_round`]).
 	async fn record_locked_splice_round_locked(
-		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, channel_id: ChannelId, txid: Txid,
+		&self, _guard: &FundingPaymentUpdateGuard<'_>, channel_id: ChannelId, txid: Txid,
 	) -> Result<(), Error> {
 		let entries = self
 			.pending_payment_store
@@ -2402,8 +2429,7 @@ impl Wallet {
 	/// [`Self::drop_abandoned_splice_rounds`] for a caller already holding the funding-record
 	/// writers' lock.
 	async fn drop_abandoned_splice_rounds_locked(
-		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, channel_id: ChannelId,
-		held_rounds: &[Txid],
+		&self, _guard: &FundingPaymentUpdateGuard<'_>, channel_id: ChannelId, held_rounds: &[Txid],
 	) -> Result<(), Error> {
 		let entries = self
 			.pending_payment_store
@@ -2658,7 +2684,7 @@ impl Wallet {
 	/// before the write, read inside the write's own critical section, so a caller needs no read of
 	/// its own to know what the write merged into.
 	async fn persist_funding_payment_locked(
-		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, details: PaymentDetails,
+		&self, _guard: &FundingPaymentUpdateGuard<'_>, details: PaymentDetails,
 		candidates: Vec<FundingTxCandidate>,
 	) -> Result<Option<PaymentDetails>, FundingWriteError> {
 		// Everything this write does depends on the record's current state, so all of it must be
@@ -2866,9 +2892,9 @@ impl Wallet {
 	/// The caller must hold [`Self::funding_payment_update_lock`] — from resolving `payment_id`
 	/// through its own last write, not just across this call — so that classification's two-store
 	/// write pair cannot interleave with the caller's decision sequence. The `_guard` parameter
-	/// serves as a reminder of that contract.
+	/// proves the lock is held across this call; the rest of that contract is the caller's.
 	async fn apply_funding_status_update_locked(
-		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, payment_id: PaymentId, event_txid: Txid,
+		&self, _guard: &FundingPaymentUpdateGuard<'_>, payment_id: PaymentId, event_txid: Txid,
 		confirmation_status: ConfirmationStatus,
 	) -> Result<FundingStatusUpdate, Error> {
 		// The caller's wallet-level lock keeps the candidate history stable while we await its
