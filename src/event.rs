@@ -24,6 +24,8 @@ use lightning::events::{
 };
 use lightning::ln::channelmanager::{PaymentId, TrustedChannelFeatures};
 use lightning::ln::types::ChannelId;
+use lightning::offers::invoice::Bolt12Invoice;
+use lightning::offers::offer::Offer;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
 use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
@@ -36,7 +38,7 @@ use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
 use crate::connection::ConnectionManager;
-use crate::data_store::DataStoreUpdateResult;
+use crate::data_store::{DataStoreUpdateResult, StorableObject};
 use crate::fee_estimator::ConfirmationTarget;
 #[cfg(feature = "uniffi")]
 use crate::ffi::PaidBolt12Invoice;
@@ -48,6 +50,9 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use crate::payment::outbound_recurrence::{
+	OutboundRecurrencePaymentState, OutboundRecurrenceStatus,
+};
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
@@ -692,6 +697,160 @@ where
 				compute_opening_fee(amount_msat, 0, max_prop_fee)
 			})
 		})
+	}
+
+	/// Processes success for the retained outbound attempt without reopening terminal state.
+	///
+	/// The payment record is persisted first by the caller. Replay must still advance an owned
+	/// attempt even when that payment is already marked successful. Clearing its ownership and
+	/// retaining the successful ID in one write prevents double counting and stale updates.
+	async fn advance_outbound_recurrence_on_payment_sent(
+		&self, payment_id: PaymentId, invoice: &Bolt12Invoice,
+	) -> Result<(), ReplayEvent> {
+		let mut matches = self
+			.outbound_recurrence_store
+			.list_filter(|details| {
+				matches!(details.payment_state,
+					OutboundRecurrencePaymentState::Active(id) | OutboundRecurrencePaymentState::Failed(id)
+						if id == payment_id)
+			})
+			.await
+			.into_iter();
+
+		let Some(details) = matches.next() else {
+			// Ordinary payments have no recurrence state.
+			return Ok(());
+		};
+
+		if matches.len() != 0 {
+			debug_assert!(false, "multiple recurrences have the same active payment ID?");
+			return Ok(());
+		}
+
+		let Some(invoice_recurrence) = invoice.invoice_recurrence() else {
+			debug_assert!(false, "Invoice that should be corresponding to recurrence according to our recurrence store doesn't?");
+			return Ok(());
+		};
+
+		match self
+			.outbound_recurrence_store
+			.mutate_async(&details.id, |current| async move {
+				let Some(mut updated) = current else {
+					log_error!(
+						self.logger,
+						"Recurrence disappeared before its payment update was stored"
+					);
+					return Err(Error::InvalidRecurrenceId);
+				};
+				// A late success may follow failure or cancellation. Only the retained attempt
+				// owns this period; a replay or an older attempt must not advance a newer one.
+				if updated.last_successful_payment_id == Some(payment_id)
+					|| !matches!(updated.payment_state,
+						OutboundRecurrencePaymentState::Active(id) | OutboundRecurrencePaymentState::Failed(id)
+							if id == payment_id)
+				{
+					return Ok(None);
+				}
+
+				let offer = Offer::try_from(updated.original_offer.clone())
+					.map_err(|_| Error::InvalidOffer)?;
+				let recurrence = offer.offer_recurrence().ok_or(Error::InvalidOffer)?;
+				// paid_count still identifies the period just paid. Looking up the next period
+				// would complete early at an inclusive limit and may overflow a valid final index.
+				let paid_period_index = recurrence
+					.period_index(updated.paid_count, updated.initial_start)
+					.map_err(|_| Error::InvalidOffer)?;
+				updated.paid_count =
+					updated.paid_count.checked_add(1).ok_or(Error::InvalidOutboundRecurrence)?;
+				updated.basetime.get_or_insert(invoice_recurrence.recurrence_basetime());
+				updated.opaque_state =
+					invoice_recurrence.recurrence_next_state().map(|state| state.to_vec());
+				updated.last_successful_payment_id = Some(payment_id);
+				updated.payment_state = OutboundRecurrencePaymentState::NoActivePayment;
+
+				// Late success records progress while preserving Cancelled, Missed, or Completed.
+				if updated.status == OutboundRecurrenceStatus::Active
+					&& recurrence
+						.recurrence_limit
+						.map(|limit| paid_period_index >= limit.0)
+						.unwrap_or(false)
+				{
+					updated.status = OutboundRecurrenceStatus::Completed;
+				}
+				Ok(Some(updated))
+			})
+			.await
+		{
+			Ok(_) => Ok(()),
+			Err(e) => {
+				log_error!(self.logger, "Failed to store updated recurrence: {}", e);
+				Err(ReplayEvent())
+			},
+		}
+	}
+
+	/// Marks the unique recurrence with this active payment ID as failed.
+	///
+	/// Leaves unrelated or already-handled attempts unchanged and requests event replay on
+	/// persistence failure. Returns whether success superseded the failure, in which case the
+	/// caller must suppress its failure event. Payment-store locks are acquired second.
+	async fn update_outbound_recurrence_on_payment_failed(
+		&self, payment_id: PaymentId,
+	) -> Result<bool, ReplayEvent> {
+		let recurrence_id = match self
+			.outbound_recurrence_store
+			.list_filter(|details| {
+				matches!(details.payment_state,
+					OutboundRecurrencePaymentState::Active(id) | OutboundRecurrencePaymentState::Failed(id)
+						if id == payment_id)
+					|| details.last_successful_payment_id == Some(payment_id)
+			})
+			.await
+			.as_slice()
+		{
+			[] => return Ok(false),
+			[details] => details.id,
+			_ => {
+				debug_assert!(false, "multiple recurrences have the same active payment ID?");
+				return Ok(false);
+			},
+		};
+
+		let mut success_seen = false;
+		let success_seen_ref = &mut success_seen;
+		self.outbound_recurrence_store
+			.mutate_async(&recurrence_id, |current| async move {
+				let Some(mut updated) = current else {
+					log_error!(
+						self.logger,
+						"Recurrence disappeared before its failed payment update was stored"
+					);
+					return Err(Error::InvalidRecurrenceId);
+				};
+				// Success may have reached either record since the caller persisted this
+				// failure. Neither a late failure nor replay may downgrade that outcome.
+				if updated.last_successful_payment_id == Some(payment_id)
+					|| matches!(self.payment_store.get(&payment_id).await?,
+						Some(payment) if payment.status == PaymentStatus::Succeeded)
+				{
+					*success_seen_ref = true;
+					return Ok(None);
+				}
+				// Recheck under the mutation lock so stale or replayed failures
+				// cannot overwrite an already-handled or newer attempt.
+				if updated.payment_state != OutboundRecurrencePaymentState::Active(payment_id) {
+					return Ok(None);
+				}
+				updated.payment_state = OutboundRecurrencePaymentState::Failed(payment_id);
+				Ok(Some(updated))
+			})
+			.await
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to store updated recurrence: {}", e);
+				ReplayEvent()
+			})?;
+
+		Ok(success_seen)
 	}
 
 	async fn resolve_inbound_payment_id(
@@ -1413,6 +1572,8 @@ where
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
+				// Persist the payment before releasing the recurrence's attempt. If the
+				// recurrence write fails, replay must complete it even though this is idempotent.
 				match self.payment_store.update(update).await {
 					Ok(_) => {},
 					Err(e) => {
@@ -1420,6 +1581,17 @@ where
 						return Err(ReplayEvent());
 					},
 				};
+
+				if let Some(invoice) =
+					bolt12_invoice.as_ref().and_then(|paid_invoice| paid_invoice.bolt12_invoice())
+				{
+					if let Err(e) =
+						self.advance_outbound_recurrence_on_payment_sent(payment_id, invoice).await
+					{
+						log_error!(self.logger, "Failed to advance recurrence: replaying event");
+						return Err(e);
+					}
+				}
 
 				match self.payment_store.get(&payment_id).await {
 					Ok(Some(payment)) => {
@@ -1477,13 +1649,38 @@ where
 					status: Some(PaymentStatus::Failed),
 					..PaymentDetailsUpdate::new(payment_id)
 				};
-				match self.payment_store.update(update).await {
+				let mut already_succeeded = false;
+				// LDK requires failures following PaymentSent to be ignored. Check and update
+				// atomically so success cannot be overwritten between a lookup and a write.
+				match self
+					.payment_store
+					.mutate(&payment_id, |current| {
+						let mut payment = match current {
+							Some(payment) if payment.status == PaymentStatus::Succeeded => {
+								already_succeeded = true;
+								return None;
+							},
+							Some(payment) => payment.clone(),
+							None => return None,
+						};
+						match payment.update(update) {
+							true => Some(payment),
+							false => None,
+						}
+					})
+					.await
+				{
 					Ok(_) => {},
 					Err(e) => {
 						log_error!(self.logger, "Failed to access payment store: {}", e);
 						return Err(ReplayEvent());
 					},
-				};
+				}
+				if already_succeeded
+					|| self.update_outbound_recurrence_on_payment_failed(payment_id).await?
+				{
+					return Ok(());
+				}
 
 				let event = Event::PaymentFailed { payment_id, payment_hash, reason };
 				match self.event_queue.add_event(event).await {
