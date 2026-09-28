@@ -869,6 +869,35 @@ where
                                     amount_msat
                                 );
 								self.channel_manager.fail_htlc_backwards(&payment_hash);
+
+								self.runtime.block_on(async {
+									self.liquidity_source
+										.lsps1_service()
+										.handle_order_failed_and_refunded(
+											pending_order.counterparty_node_id,
+											LSPS1OrderId(pending_order.request_id.0),
+										)
+										.await
+								});
+
+								if let Err(e) = self
+									.event_queue
+									.kv_store
+									.remove(
+										"lsps1_pending_orders",
+										"",
+										&payment_hash.to_string(),
+										false,
+									)
+									.await
+								{
+									log_error!(
+										self.logger,
+										"Failed to remove pending LSPS1 order with hash {:?} from the store: {:?}. Aborting request.",
+										&payment_hash.to_string(),
+										e
+									);
+								}
 								return Ok(());
 							}
 
@@ -909,7 +938,7 @@ where
 									.channel_expiry_blocks,
 							};
 
-							let _ = self
+							if let Err(e) = self
 								.event_queue
 								.kv_store
 								.write(
@@ -918,7 +947,15 @@ where
 									&user_channel_id.to_string(),
 									pending_channel.encode(),
 								)
-								.await;
+								.await
+							{
+								log_error!(
+									self.logger,
+									"Failed to persist the LSPS1 ordered pending channel with user_channel_id {:?} to the store: {:?}",
+									&user_channel_id.to_string(),
+									e
+								);
+							}
 
 							if let Err(e) = self.channel_manager.create_channel(
 								pending_order.counterparty_node_id,
@@ -933,21 +970,55 @@ where
 									"Failed to open LSPS1 channel after claiming funds: {:?}",
 									e
 								);
-								self.liquidity_source
-									.lsps1_service()
-									.handle_order_failed_and_refunded(
-										pending_order.counterparty_node_id,
-										LSPS1OrderId(pending_order.request_id.0),
+
+								// TODO: We'll trigger a manual refund here to the refund onchain address
+
+								self.runtime.block_on(async {
+									self.liquidity_source
+										.lsps1_service()
+										.handle_order_failed_and_refunded(
+											pending_order.counterparty_node_id,
+											LSPS1OrderId(pending_order.request_id.0),
+										)
+										.await
+								});
+
+								if let Err(e) = self
+									.event_queue
+									.kv_store
+									.remove(
+										"lsps1_pending_orders",
+										"",
+										&payment_hash.to_string(),
+										false,
 									)
 									.await
+								{
+									log_error!(
+										self.logger,
+										"Failed to remove LSPS1 pending order from the store: {:?}",
+										e
+									);
+								}
 							}
 
-							let _ = self.event_queue.kv_store.remove(
-								"lsps1_pending_orders",
-								"",
-								&payment_hash.to_string(),
-								false,
-							);
+							if let Err(e) = self
+								.event_queue
+								.kv_store
+								.remove(
+									"lsps1_pending_orders",
+									"",
+									&payment_hash.to_string(),
+									false,
+								)
+								.await
+							{
+								log_error!(
+									self.logger,
+									"Failed to remove LSPS1 pending order from the store: {:?}",
+									e
+								);
+							}
 						} else {
 							log_error!(
                                 self.logger,
@@ -1946,12 +2017,24 @@ where
 								.await
 						});
 
-						let _ = self.event_queue.kv_store.remove(
-							"lsps1_pending_channels",
-							"",
-							&user_channel_id.to_string(),
-							false,
-						);
+						if let Err(e) = self
+							.event_queue
+							.kv_store
+							.remove(
+								"lsps1_pending_channels",
+								"",
+								&user_channel_id.to_string(),
+								false,
+							)
+							.await
+						{
+							log_error!(
+								self.logger,
+								"Failed to remove LSPS1 ordered pending channel with user_channel_id {:?} from the store: {:?}",
+								&user_channel_id.to_string(),
+								e
+							);
+						}
 					}
 				}
 

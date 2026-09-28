@@ -7,6 +7,7 @@
 
 use std::ops::Deref;
 use std::sync::{Arc, RwLock, Weak};
+use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::FeeRate;
@@ -29,9 +30,11 @@ use lightning_liquidity::lsps1::service::{
 };
 
 use crate::error::Error;
-use crate::logger::{log_error, LdkLogger};
+use crate::logger::{log_debug, log_error, log_trace, LdkLogger};
 use crate::types::{ChannelManager, DynStore, KeysManager, LiquidityManager, PeerManager};
 use crate::wallet::Wallet;
+
+const LSPS1_SWEEP_ORDERS_DURATION: Duration = Duration::from_secs(60 * 60 * 24);
 
 /// Server-side configuration options for bLIP-51 / LSPS1 channel requests.
 #[derive(Debug, Clone)]
@@ -60,6 +63,7 @@ pub(crate) struct PendingLSPS1Order {
 	pub order_params: LSPS1OrderParams,
 	pub order_total_amount_sat: u64,
 	pub channel_expiry_blocks: u32,
+	pub order_expires_at: LSPSDateTime,
 }
 
 impl_writeable_tlv_based!(PendingLSPS1Order, {
@@ -68,6 +72,7 @@ impl_writeable_tlv_based!(PendingLSPS1Order, {
 	(2, order_params, required),
 	(3, order_total_amount_sat, required),
 	(4, channel_expiry_blocks, required),
+	(5, order_expires_at, required),
 });
 
 pub(crate) struct PendingLSPS1Channel {
@@ -296,6 +301,7 @@ where
 						.ldk_service_config
 						.supported_options
 						.max_channel_expiry_blocks,
+					order_expires_at: lsps1_service_config.service_config.payment_option_expires_at,
 				};
 
 				let serialized_order = pending_order.encode();
@@ -472,10 +478,37 @@ where
 
 			if let Ok(bytes) = self.kv_store.read("lsps1_pending_orders", "", &script_hex).await {
 				if let Ok(pending_order) = PendingLSPS1Order::read(&mut &bytes[..]) {
+					if pending_order.order_expires_at.is_past() {
+						// TODO: we'll refund the payment here to the onchain address as the order has expired
+
+						log_error!(self.logger, "Failed order due to expiration");
+						self.handle_order_failed_and_refunded(
+							pending_order.counterparty_node_id,
+							LSPS1OrderId(pending_order.request_id.0.clone()),
+						)
+						.await;
+
+						if let Err(e) = self
+							.kv_store
+							.remove("lsps1_pending_orders", "", &script_hex, false)
+							.await
+						{
+							log_error!(
+								self.logger,
+								"Failed to remove expired order from the store: {:?}",
+								e
+							);
+						}
+
+						continue;
+					}
+
 					let amount_sat = utxo.output.value.to_sat();
 					if amount_sat < pending_order.order_total_amount_sat {
 						log_error!(self.logger, "Underpaid onchain LSPS1 order...");
 						continue;
+
+						// TODO we'll refund the payment here if it's an underpayment
 					}
 
 					let order_id = LSPS1OrderId(pending_order.request_id.0.clone());
@@ -508,7 +541,7 @@ where
 						channel_expiry_blocks: pending_order.order_params.channel_expiry_blocks,
 					};
 
-					let _ = self
+					if let Err(e) = self
 						.kv_store
 						.write(
 							"lsps1_pending_channels",
@@ -516,7 +549,15 @@ where
 							&user_channel_id.to_string(),
 							pending_channel.encode(),
 						)
-						.await;
+						.await
+					{
+						log_error!(
+								self.logger,
+								"Failed to persist the LSPS1 ordered pending channel with user_channel_id {:?} to the store: {:?}",
+								&user_channel_id.to_string(),
+								e
+							);
+					}
 
 					if let Err(e) = self.channel_manager.create_channel(
 						pending_order.counterparty_node_id,
@@ -538,9 +579,75 @@ where
 						.await
 					}
 
-					let _ = self.kv_store.remove("lsps1_pending_orders", "", &script_hex, false);
+					if let Err(e) =
+						self.kv_store.remove("lsps1_pending_orders", "", &script_hex, false).await
+					{
+						log_error!(
+								self.logger,
+								"Failed to remove LSPS1 ordered pending channel with user_channel_id {:?} from the store: {:?}",
+								&user_channel_id.to_string(),
+								e
+							);
+					}
 				}
 			}
+		}
+	}
+
+	pub(crate) async fn sweep_expired_orders(&self) {
+		let keys = match self.kv_store.list("lsps1_pending_orders", "").await {
+			Ok(keys) => keys,
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to list pending LSPS1 orders for sweeping: {:?}",
+					e
+				);
+				return;
+			},
+		};
+
+		let epoch = LSPSDateTime::new_from_duration_since_epoch(Duration::ZERO);
+
+		let mut swept_count = 0;
+
+		for key in keys {
+			if let Ok(bytes) = self.kv_store.read("lsps1_pending_orders", "", &key).await {
+				if let Ok(pending_order) = PendingLSPS1Order::read(&mut &bytes[..]) {
+					let order_expires_duration =
+						pending_order.order_expires_at.duration_since(&epoch);
+
+					let sweep_deadline = LSPSDateTime::new_from_duration_since_epoch(
+						order_expires_duration + LSPS1_SWEEP_ORDERS_DURATION,
+					);
+
+					if sweep_deadline.is_past() {
+						log_trace!(self.logger, "Sweeping expired LSPS1 order with key: {}", key);
+
+						if let Err(e) =
+							self.kv_store.remove("lsps1_pending_orders", "", &key, true).await
+						{
+							log_error!(
+								self.logger,
+								"Failed to remove expired LSPS1 order during sweep: {:?}",
+								e
+							);
+						} else {
+							swept_count += 1;
+						}
+					}
+				} else {
+					log_error!(
+						self.logger,
+						"Failed to deserialize pending LSPS1 order for key: {}",
+						key
+					);
+				}
+			}
+		}
+
+		if swept_count > 0 {
+			log_debug!(self.logger, "Swept {} expired LSPS1 orders from the store.", swept_count);
 		}
 	}
 
