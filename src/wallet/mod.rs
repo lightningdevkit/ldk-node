@@ -10,8 +10,10 @@ use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
+use bdk_chain::ChainPosition;
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
 #[allow(deprecated)]
@@ -84,6 +86,11 @@ pub(crate) mod persist;
 pub(crate) mod ser;
 
 const DUST_LIMIT_SATS: u64 = 546;
+
+/// Fallback deadline for CBF, which has no mempool to check eviction against directly: matches
+/// Core's default mempool expiry (336h). Funding-typed payments use LDK's own deadline instead
+/// (`ClosureReason::FundingTimedOut`). Compared against block time, not wall-clock time.
+const STALE_BROADCAST_EVICTION_SECS: u64 = 336 * 60 * 60;
 
 /// The number of external addresses kept revealed, persisted, and ready for handout via
 /// [`Wallet::pop_pooled_address`] and [`Wallet::get_new_address`].
@@ -260,7 +267,8 @@ impl Wallet {
 				},
 			}
 		};
-		self.update_payment_store(events).await.map_err(|e| {
+		let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+		self.update_payment_store(events, now).await.map_err(|e| {
 			log_error!(self.logger, "Failed to update payment store: {}", e);
 			Error::PersistenceFailed
 		})?;
@@ -273,7 +281,16 @@ impl Wallet {
 		Ok(())
 	}
 
-	#[cfg(feature = "chain-bitcoind")]
+	/// Applies a set of unconfirmed transactions (and evicts a set of now-superseded ones) to the
+	/// on-chain wallet's own graph, reconciling the payment store accordingly.
+	///
+	/// Bitcoind's mempool poll calls this with a live mempool snapshot. It's also the mechanism
+	/// [`Self::classify_broadcast`], [`Self::send_to_address`] and [`Self::bump_fee_rbf`] use to
+	/// apply a transaction we ourselves just built and broadcast, as unconfirmed, immediately —
+	/// rather than waiting on a chain-source sync that, on CBF, has no mempool to observe it from
+	/// at all. Without this, BDK's own coin selection would still see the just-spent inputs as
+	/// spendable until the transaction is mined, risking a second send double-spending the first.
+	#[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
 	pub(crate) async fn apply_mempool_txs(
 		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
 	) -> Result<(), Error> {
@@ -293,7 +310,8 @@ impl Wallet {
 				.expect("applying mempool updates cannot fail")
 		};
 
-		self.update_payment_store(events).await.map_err(|e| {
+		let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+		self.update_payment_store(events, now).await.map_err(|e| {
 			log_error!(self.logger, "Failed to update payment store: {}", e);
 			Error::PersistenceFailed
 		})?;
@@ -315,7 +333,16 @@ impl Wallet {
 		self.inner.lock().expect("lock").spk_index().inner().all_spks().values().cloned().collect()
 	}
 
-	async fn update_payment_store(&self, mut events: Vec<WalletEvent>) -> Result<(), Error> {
+	/// `reference_time` is what the `ChainTipChanged` arm's staleness check compares a pending
+	/// payment's `first_seen` against. Pass the connecting block's own header time where one
+	/// exists (`block_connected`); otherwise the current wall-clock time. Using the block's own
+	/// time matters during catch-up (e.g. CBF replaying many blocks after being offline): each
+	/// replayed block calls this once, and `SystemTime::now()` would compare a historic
+	/// `first_seen` against today's clock on every one of them, evicting (or not) based on how
+	/// long the catch-up took rather than how long the transaction has actually been unconfirmed.
+	async fn update_payment_store(
+		&self, mut events: Vec<WalletEvent>, reference_time: u64,
+	) -> Result<(), Error> {
 		if events.is_empty() {
 			return Ok(());
 		}
@@ -417,6 +444,7 @@ impl Wallet {
 						.await;
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
+					let mut stale_outbound_txids: Vec<Txid> = Vec::new();
 
 					for payment in pending_payments {
 						match payment.details.kind {
@@ -441,12 +469,8 @@ impl Wallet {
 											let current = existing?;
 											match current.kind {
 												PaymentKind::Onchain {
-													status:
-														ConfirmationStatus::Confirmed { height, .. },
-													..
-												} if new_tip.height
-													>= height + ANTI_REORG_DELAY - 1 =>
-												{
+													status: ConfirmationStatus::Confirmed { height, .. }, ..
+												} if new_tip.height >= height + ANTI_REORG_DELAY - 1 => {
 													graduated = true;
 													let mut update =
 														PaymentDetailsUpdate::new(payment_id);
@@ -466,12 +490,44 @@ impl Wallet {
 							PaymentKind::Onchain {
 								txid,
 								status: ConfirmationStatus::Unconfirmed,
-								..
+								tx_type,
 							} if payment.details.direction == PaymentDirection::Outbound => {
-								unconfirmed_outbound_txids.push(txid);
+								// Funding transactions are exempt: LDK's own `FundingTimedOut`
+								// deadline covers those instead of our stale-broadcast eviction.
+								let is_funding = matches!(
+									tx_type,
+									Some(
+										TransactionType::Funding { .. }
+											| TransactionType::InteractiveFunding { .. }
+									)
+								);
+								let is_stale = !is_funding
+									&& matches!(
+										self.inner.lock().expect("lock").get_tx(txid).map(|tx| tx.chain_position),
+										Some(ChainPosition::Unconfirmed { first_seen: Some(first_seen), .. })
+											if reference_time.saturating_sub(first_seen)
+												>= STALE_BROADCAST_EVICTION_SECS
+									);
+								if is_stale {
+									stale_outbound_txids.push(txid);
+								} else {
+									unconfirmed_outbound_txids.push(txid);
+								}
 							},
 							_ => {},
 						}
+					}
+
+					if !stale_outbound_txids.is_empty() {
+						let evicted_txids = stale_outbound_txids
+							.into_iter()
+							.map(|txid| (txid, reference_time))
+							.collect::<Vec<_>>();
+						let eviction_events = {
+							let mut locked_wallet = self.inner.lock().expect("lock");
+							locked_wallet.apply_evicted_txs_events(evicted_txids)
+						};
+						Box::pin(self.update_payment_store(eviction_events, reference_time)).await?;
 					}
 
 					if !unconfirmed_outbound_txids.is_empty() {
@@ -576,7 +632,7 @@ impl Wallet {
 
 					self.pending_payment_store.insert_or_update(pending_payment_details).await?;
 				},
-				WalletEvent::TxDropped { txid, tx } => {
+				WalletEvent::TxDropped { txid, tx: _ } => {
 					// See `TxConfirmed`: id resolution and the writes below must not interleave
 					// with classification.
 					let guard = self.funding_payment_update_lock.lock().await;
@@ -598,21 +654,22 @@ impl Wallet {
 						continue;
 					}
 
-					let payment = {
-						let locked_wallet = self.inner.lock().expect("lock");
-						self.create_payment_from_tx(
-							&locked_wallet,
-							txid,
-							payment_id,
-							&tx,
-							PaymentStatus::Pending,
-							ConfirmationStatus::Unconfirmed,
-						)
-					};
-					let pending_payment =
-						self.create_pending_payment_from_tx(payment.clone(), Vec::new());
-					self.payment_store.insert_or_update(payment).await?;
-					self.pending_payment_store.insert_or_update(pending_payment).await?;
+					// Not a funding-typed payment we mirror confirmation status for: BDK no longer
+					// considers this transaction canonical — either a mempool poll no longer sees
+					// it, or our own stale-broadcast deadline (`ChainTipChanged`, below) gave up
+					// waiting on it — and nothing takes its place, so mark the payment failed
+					// rather than resurrecting it as still-pending, which would just leave it
+					// stuck forever.
+					self.payment_store
+						.mutate(&payment_id, |existing| {
+							let current = existing?;
+							let mut update = PaymentDetailsUpdate::new(payment_id);
+							update.status = Some(PaymentStatus::Failed);
+							let mut updated = current.clone();
+							updated.update(update).then_some(updated)
+						})
+						.await?;
+					self.pending_payment_store.remove(&payment_id).await?;
 				},
 				_ => {
 					continue;
@@ -664,11 +721,25 @@ impl Wallet {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
+		// `apply_mempool_txs` below re-acquires this same (non-reentrant) lock itself.
+		drop(locked_persister);
 
 		let tx = psbt.extract_tx().map_err(|e| {
 			log_error!(self.logger, "Failed to extract transaction: {}", e);
 			e
 		})?;
+
+		// Apply as unconfirmed before handing the tx back to LDK for broadcasting: LDK may
+		// consider a 0conf channel ready synchronously, as part of the funding-signed handshake
+		// itself, with no dependency on our own async broadcast-queue classification having run
+		// yet (see `classify_broadcast`). Without this, a 0conf channel's `ChannelReady` can race
+		// ahead of the funding tx ever being reflected in the wallet's own spendable balance.
+		#[cfg(feature = "chain-cbf")]
+		if self.chain_source.is_cbf() {
+			let now =
+				SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+			self.apply_mempool_txs(vec![(tx.clone(), now)], Vec::new()).await?;
+		}
 
 		Ok(tx)
 	}
@@ -1227,6 +1298,8 @@ impl Wallet {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
+		// `apply_mempool_txs` below re-acquires this same (non-reentrant) lock itself.
+		drop(locked_persister);
 
 		let tx = psbt.extract_tx().map_err(|e| {
 			log_error!(self.logger, "Failed to extract transaction: {}", e);
@@ -1234,6 +1307,12 @@ impl Wallet {
 		})?;
 
 		let txid = tx.compute_txid();
+		#[cfg(feature = "chain-cbf")]
+		if self.chain_source.is_cbf() {
+			let now =
+				SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+			self.apply_mempool_txs(vec![(tx.clone(), now)], Vec::new()).await?;
+		}
 		self.broadcaster.broadcast_unclassified_transaction(tx);
 
 		match send_amount {
@@ -1538,6 +1617,13 @@ impl Wallet {
 	pub(crate) async fn classify_broadcast(
 		&self, tx: &Transaction, tx_type: &LdkTransactionType,
 	) -> Result<(), Error> {
+		#[cfg(feature = "chain-cbf")]
+		if self.chain_source.is_cbf() {
+			let now =
+				SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+			self.apply_mempool_txs(vec![(tx.clone(), now)], Vec::new()).await?;
+		}
+
 		match tx_type {
 			LdkTransactionType::Funding { channels } => {
 				self.classify_funding(tx, channels, tx_type.clone().into()).await
@@ -1747,7 +1833,12 @@ impl Wallet {
 		let txid = tx.compute_txid();
 		let (amount_msat, fee_paid_msat, direction) = self.onchain_payment_fields(tx);
 
-		if amount_msat == Some(0) && fee_paid_msat == Some(0) {
+		// Keep cooperative closes in payment history for both peers, even when this
+		// wallet has no net on-chain amount to report for the close transaction.
+		if amount_msat == Some(0)
+			&& fee_paid_msat == Some(0)
+			&& !matches!(&tx_type, TransactionType::CooperativeClose { .. })
+		{
 			log_trace!(
 				self.logger,
 				"Not recording classified broadcast {} as a payment: no wallet-level activity",
@@ -2286,10 +2377,18 @@ impl Wallet {
 			log_error!(self.logger, "Failed to persist wallet after fee bump of {}: {}", txid, e);
 			Error::PersistenceFailed
 		})?;
+		// `apply_mempool_txs` below re-acquires this same (non-reentrant) lock itself.
+		drop(locked_persister);
 
 		self.payment_store.insert_or_update(new_payment).await?;
 		self.pending_payment_store.insert_or_update(pending_payment_store).await?;
 
+		#[cfg(feature = "chain-cbf")]
+		if self.chain_source.is_cbf() {
+			let now =
+				SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+			self.apply_mempool_txs(vec![(fee_bumped_tx.clone(), now)], vec![(txid, now)]).await?;
+		}
 		self.broadcaster.broadcast_unclassified_transaction(fee_bumped_tx);
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
@@ -2402,7 +2501,8 @@ impl Listen for Wallet {
 				}
 			};
 
-			if let Err(e) = self.update_payment_store(events).await {
+			// Use the connecting block's own time, not the wall clock: see `update_payment_store`.
+			if let Err(e) = self.update_payment_store(events, block.header.time as u64).await {
 				log_error!(self.logger, "Failed to update payment store: {}", e);
 				return;
 			}
@@ -3883,7 +3983,7 @@ mod tests {
 		let block_id =
 			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
 		let event = WalletEvent::ChainTipChanged { old_tip: block_id(9), new_tip: block_id(10) };
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
 		assert_eq!(payment.status, PaymentStatus::Succeeded);
@@ -3933,7 +4033,7 @@ mod tests {
 		let block_id =
 			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
 		let event = WalletEvent::ChainTipChanged { old_tip: block_id(9), new_tip: block_id(10) };
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
 		assert_eq!(
@@ -4032,7 +4132,7 @@ mod tests {
 			tx: Arc::new(dummy_tx()),
 			conflicts: vec![(0, conflicting_txid)],
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 		assert!(wallet.payment_store.get(&payment_id).await.unwrap().is_none());
 	}
 
@@ -4204,7 +4304,7 @@ mod tests {
 			block_time: confirmed_block_time(5),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 		wallet.classify_funding(&tx, &channels, tx_type).await.unwrap();
 		assert_unchanged(&wallet, payment_id, true).await;
 	}
@@ -4258,7 +4358,7 @@ mod tests {
 		};
 		let sync = tokio::spawn({
 			let wallet = Arc::clone(&wallet);
-			async move { wallet.update_payment_store(vec![event]).await }
+			async move { wallet.update_payment_store(vec![event], 0).await }
 		});
 
 		// Liveness sanity only (both pre- and post-fix stall here): while classification is
@@ -4332,7 +4432,7 @@ mod tests {
 			let wallet = Arc::clone(&wallet);
 			let event =
 				WalletEvent::TxUnconfirmed { txid, tx: Arc::new(dummy_tx()), old_block_time: None };
-			async move { wallet.update_payment_store(vec![event]).await }
+			async move { wallet.update_payment_store(vec![event], 0).await }
 		});
 		tokio::time::sleep(Duration::from_millis(250)).await;
 
@@ -4432,5 +4532,56 @@ mod tests {
 			"estimating the max funding amount must not free a reserved change address",
 		);
 		assert_ne!(locked_wallet.next_unused_address(KeychainKind::Internal).index, 0);
+	}
+
+	#[tokio::test]
+	async fn stale_outbound_eviction_does_not_wait_on_the_callers_persister_lock() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailSwitchStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let script_pubkey = {
+			let mut locked_wallet = wallet.inner.lock().unwrap();
+			locked_wallet.reveal_next_address(KeychainKind::External).script_pubkey()
+		};
+		let tx = bitcoin::Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: bitcoin::absolute::LockTime::ZERO,
+			input: vec![bitcoin::TxIn {
+				previous_output: bitcoin::OutPoint::new(Txid::from_byte_array([3u8; 32]), 0),
+				script_sig: ScriptBuf::new(),
+				sequence: bitcoin::Sequence::MAX,
+				witness: bitcoin::Witness::new(),
+			}],
+			output: vec![bitcoin::TxOut { value: Amount::from_sat(10_000), script_pubkey }],
+		};
+		let txid = tx.compute_txid();
+		let first_seen = 1_000;
+		wallet.inner.lock().unwrap().apply_unconfirmed_txs(vec![(tx, first_seen)]);
+
+		let details = onchain_details(txid, ConfirmationStatus::Unconfirmed);
+		let payment_id = details.id;
+		wallet.payment_store.insert_or_update(details.clone()).await.unwrap();
+		let entry = PendingPaymentDetails::new(details, Vec::new(), Vec::new());
+		wallet.pending_payment_store.insert_or_update(entry).await.unwrap();
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged { old_tip: block_id(9), new_tip: block_id(10) };
+		let reference_time = first_seen + STALE_BROADCAST_EVICTION_SECS;
+
+		// Every caller of `update_payment_store` holds the persister while it runs.
+		let _persister_guard = wallet.persister.lock().await;
+		let result = tokio::time::timeout(
+			std::time::Duration::from_secs(5),
+			wallet.update_payment_store(vec![event], reference_time),
+		)
+		.await;
+		assert!(
+			result.expect("eviction must not wait on the persister lock held by its caller").is_ok()
+		);
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert!(wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none());
 	}
 }

@@ -468,6 +468,11 @@ impl ChainSource {
 		self.registered_txids.lock().expect("lock").clone()
 	}
 
+	#[cfg(feature = "chain-cbf")]
+	pub(crate) fn is_cbf(&self) -> bool {
+		matches!(self.kind, ChainSourceKind::Cbf(_))
+	}
+
 	pub(crate) fn is_transaction_based(&self) -> bool {
 		match &self.kind {
 			#[cfg(feature = "chain-esplora")]
