@@ -301,9 +301,30 @@ pub(crate) enum FactsRecordOutcome {
 	/// Part of what was reported is not on record, because recording it would have taken the
 	/// facts past the resources they are allowed. Nothing was lost, so what the refusal costs
 	/// is the reporting producer's to weigh: a transaction reported without a classification
-	/// for a producer that has nothing left to withhold, a reason to come back for one that
-	/// will not proceed unrecorded.
+	/// for a producer that has nothing left to withhold, a round left unsigned for one that
+	/// will not release a transaction it cannot measure.
 	Incomplete,
+}
+
+/// Whether a report about a transaction this node holds no record of at all is subject to the
+/// number of records the store may hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FactsAdmission {
+	/// Refused once the store holds as many records as it is allowed to.
+	///
+	/// This is what bounds the store: a counterparty opening and closing channels, or replacing
+	/// a negotiated funding again and again, drives records about transactions this node only
+	/// reports on, and each of them costs nothing to refuse beyond a transaction going
+	/// unclassified.
+	Capped,
+	/// Admitted beside however many records the store holds, and counted like any other, so that
+	/// capped reports are refused the sooner.
+	///
+	/// This is for the one report whose refusal costs more than the record: a round this node is
+	/// about to sign, which it will not release without its own share of it on record. How many
+	/// such records there can be is a question of how many rounds this node signs, which is its
+	/// own decision, and each carries no outputs.
+	Exempt,
 }
 
 /// The channels this node still holds on-chain state for, as the retention of recorded facts

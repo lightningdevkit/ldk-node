@@ -72,6 +72,7 @@ use crate::types::{
 use crate::wallet::provenance::{ChannelOutputRole, ChannelTxFacts, FactsRecordOutcome};
 use crate::wallet::{
 	closed_channel_held_rounds, funding_candidates, held_splice_rounds, FundingCandidate,
+	SignedFundingRecord,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -917,6 +918,27 @@ where
 		}
 
 		Ok((payment_id, None))
+	}
+
+	/// Cancels a splice whose funding transaction this node will not sign, so that LDK releases
+	/// what it reserved for this node's contribution through `DiscardFunding` and surfaces the
+	/// failure through `SpliceNegotiationFailed`, which also settles the persisted intent and
+	/// takes back the round's record once the round is gone from the channel's history.
+	///
+	/// A refusal means the splice is already beyond cancelling — LDK reset the round itself, or
+	/// the channel is gone — in which case those reports are on their way regardless and there is
+	/// nothing further to unwind.
+	fn cancel_splice(&self, counterparty_node_id: PublicKey, channel_id: ChannelId) {
+		if let Err(e) =
+			self.channel_manager.cancel_funding_contributed(&channel_id, &counterparty_node_id)
+		{
+			log_error!(
+				self.logger,
+				"Failed to cancel the splice on channel {}: {:?}",
+				channel_id,
+				e,
+			);
+		}
 	}
 
 	/// The channel's pending splice rounds that have a transaction, as LDK currently holds them.
@@ -2740,18 +2762,37 @@ where
 					// unrecorded: LDK re-offers the event in-session and regenerates it across
 					// restarts while the transaction is unsigned.
 					let candidates = self.pending_splice_rounds(counterparty_node_id, channel_id);
-					if let Err(e) = self
+					let record = match self
 						.splice_tracker
 						.on_funding_ready_for_signing(&partially_signed_tx, &candidates)
 						.await
 					{
+						Ok(record) => record,
+						Err(e) => {
+							log_error!(
+								self.logger,
+								"Failed to record the splice funding payment for channel {}: {}",
+								channel_id,
+								e,
+							);
+							return Err(ReplayEvent());
+						},
+					};
+					if record == SignedFundingRecord::Unmeasurable {
+						// Nothing was written and our signatures have not left the node, so the
+						// splice is cancelled rather than replayed. A replay would meet the same
+						// refusal, and an event that fails every time it is offered holds back
+						// every event queued behind it — including the ones that claim inbound
+						// HTLCs before they expire. Bounding the loss to this splice is the
+						// cheaper failure.
 						log_error!(
 							self.logger,
-							"Failed to record the splice funding payment for channel {}: {}",
+							"Not signing the funding transaction for channel {}, aborting the \
+							splice: this node's share of the round is not on record",
 							channel_id,
-							e,
 						);
-						return Err(ReplayEvent());
+						self.cancel_splice(counterparty_node_id, channel_id);
+						return Ok(());
 					}
 					match self.channel_manager.funding_transaction_signed(
 						&channel_id,
@@ -2768,13 +2809,8 @@ where
 						},
 						Err(e) => {
 							// The signed transaction never reached LDK, so nothing can ever
-							// broadcast it: cancel the splice. LDK responds with `DiscardFunding`
-							// (releasing whatever the wallet holds for the contribution) and
-							// `SpliceNegotiationFailed` (surfacing the failure, settling the
-							// persisted intent, and — the round now gone from the channel's
-							// history — taking back the record written above). If LDK had already
-							// reset the round when it refused the transaction, that report is on
-							// its way regardless, and the cancel finds nothing left to cancel.
+							// broadcast it: cancel the splice, which also takes back the record
+							// written above.
 							log_error!(
 								self.logger,
 								"LDK refused the signed funding transaction for channel {}, \
@@ -2782,43 +2818,19 @@ where
 								channel_id,
 								e,
 							);
-							if let Err(e) = self
-								.channel_manager
-								.cancel_funding_contributed(&channel_id, &counterparty_node_id)
-							{
-								// Every cancel error means the splice is already beyond canceling
-								// (e.g. the channel is gone); there is nothing further to unwind.
-								log_error!(
-									self.logger,
-									"Failed to cancel the splice on channel {}: {:?}",
-									channel_id,
-									e,
-								);
-							}
+							self.cancel_splice(counterparty_node_id, channel_id);
 						},
 					}
 				},
 				Err(()) => {
 					// No record has been written for this transaction yet, so there is nothing to
-					// unwind: cancel the splice and let LDK's `DiscardFunding` and
-					// `SpliceNegotiationFailed` events release the contribution and settle the
-					// persisted intent.
+					// unwind: cancel the splice.
 					log_error!(
 						self.logger,
 						"Failed signing the funding transaction for channel {}, aborting the splice",
 						channel_id,
 					);
-					if let Err(e) = self
-						.channel_manager
-						.cancel_funding_contributed(&channel_id, &counterparty_node_id)
-					{
-						log_error!(
-							self.logger,
-							"Failed to cancel the splice on channel {}: {:?}",
-							channel_id,
-							e,
-						);
-					}
+					self.cancel_splice(counterparty_node_id, channel_id);
 				},
 			},
 			LdkEvent::SpliceNegotiated {
