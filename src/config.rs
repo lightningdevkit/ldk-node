@@ -91,6 +91,23 @@ pub(crate) const CHANNEL_TX_FACTS_CACHE_WARMUP_COUNT: NonZeroUsize = NonZeroUsiz
 // without the cap such a record would be kept forever.
 pub(crate) const CHANNEL_TX_FACTS_RETENTION_BLOCKS: u32 = 52_560;
 
+// The number of bytes one channel transaction provenance record may take up.
+//
+// A record is written whole and holds one entry per channel-controlled output of its transaction,
+// so a counterparty loading a commitment transaction with HTLCs grows a record this node is
+// obliged to keep. The limit is comfortably above a commitment transaction carrying the most
+// HTLCs LDK allows, and bounds what any single transaction can cost.
+pub(crate) const CHANNEL_TX_FACTS_MAX_RECORD_BYTES: usize = 128 * 1024;
+
+// The number of channel transaction provenance records the node keeps.
+//
+// Records are dropped only once the channels they belong to have resolved, so between prunes a
+// counterparty opening and closing channels, or replacing a negotiated funding again and again,
+// drives the store's growth. Past this many records nothing new is admitted and the transactions
+// it would have described go unclassified, which is bounded loss of detail rather than unbounded
+// storage.
+pub(crate) const CHANNEL_TX_FACTS_MAX_RECORDS: usize = 100_000;
+
 // The number of pages of channel transaction provenance records one chain tip change examines.
 //
 // Pruning shares the pass that graduates payments, so it has to leave promptly; it resumes where
