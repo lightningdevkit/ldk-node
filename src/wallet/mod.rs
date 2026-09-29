@@ -735,17 +735,20 @@ impl Wallet {
 						conflicts.iter().map(|(_, conflict_txid)| *conflict_txid).collect();
 
 					conflict_txids.push(txid);
-					// The payment already exists in the store at this point: `bump_fee_rbf`
-					// updates the payment store with the replacement txid before the next sync
-					// cycle, and sync itself records a transaction the first time it observes it,
-					// before anything can report it replaced. So we can safely fetch it here.
-					let stored_payment = stores.payment(&payment_id).await?;
-					debug_assert!(
-						stored_payment.is_some(),
-						"Payment {:?} expected in store during WalletEvent::TxReplaced but not found",
-						payment_id,
-					);
-					let payment = stored_payment.ok_or(Error::InvalidPaymentId)?;
+					// An id outlives its record: the facts recorded when a round was signed
+					// name its payment before anything has created it, and go on naming it
+					// once `remove_payment` has taken it away. Neither leaves anything to
+					// update here, and failing would abandon the rest of the batch and the
+					// wallet's own view of the chain with it.
+					let Some(payment) = stores.payment(&payment_id).await? else {
+						log_debug!(
+							self.logger,
+							"No payment {} on record for replaced transaction {}. Skipping.",
+							payment_id,
+							txid,
+						);
+						continue;
+					};
 
 					// A terminal record means the entry is the leftover of an interrupted settle
 					// — the record write landed, the entry removal was lost to a crash — and this
@@ -2912,6 +2915,10 @@ impl Wallet {
 	/// entry indexing its txids. An orphaned entry would keep resolving those txids to the removed
 	/// record — routing later wallet-sync events to a payment that no longer exists — and nothing
 	/// would ever clean it up, since graduation only removes entries whose record is still live.
+	///
+	/// What this node recorded about the transactions themselves stays behind: those facts
+	/// describe transactions that happened, and classifying a later transaction — a close
+	/// spending a funding output, say — still reads them.
 	pub(crate) async fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
 		// Hold the cross-store lock so the two-store removal cannot interleave with a sync arm's
 		// or a funding-record writer's resolve-then-write sequence. The pending entry goes first: a failure
@@ -6440,6 +6447,77 @@ mod tests {
 		};
 		wallet.update_payment_store(vec![event]).await.unwrap();
 		assert!(wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().is_none());
+	}
+
+	/// A round's facts name its payment for as long as they are kept, which outlasts the record:
+	/// they describe a transaction that happened, so `remove_payment` leaves them behind. A later
+	/// wallet event naming that transaction therefore resolves an id whose record is gone, and
+	/// has to skip — failing would abandon the rest of the batch and the wallet's own view of the
+	/// chain with it.
+	#[tokio::test]
+	async fn a_replacement_of_a_removed_payments_transaction_is_skipped() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		// A signed splice round the wallet has observed: the facts name its payment and sync has
+		// created the record.
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+		let payment_id =
+			wallet.find_payment_by_txid(txid).await.unwrap().expect("the round names its payment");
+		assert!(wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().is_some());
+
+		wallet.remove_payment(&payment_id).await.unwrap();
+		assert_eq!(
+			wallet.find_payment_by_txid(txid).await.unwrap(),
+			Some(payment_id),
+			"the round's facts go on naming the payment the user removed",
+		);
+
+		// The user fee-bumps the splice, so the wallet reports the signed round replaced. A
+		// second event in the same batch pins that the batch goes on being handled.
+		let other = wallet_paying_tx(&wallet, 2);
+		let other_txid = other.compute_txid();
+		insert_unconfirmed_tx(&wallet, other.clone());
+		let events = vec![
+			WalletEvent::TxReplaced {
+				txid,
+				tx: Arc::new(tx.clone()),
+				conflicts: vec![(0, Txid::from_byte_array([0xB1; 32]))],
+			},
+			WalletEvent::TxUnconfirmed {
+				txid: other_txid,
+				tx: Arc::new(other),
+				old_block_time: None,
+			},
+		];
+		wallet.update_payment_store(events).await.unwrap();
+
+		assert!(
+			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().is_none(),
+			"a removed payment must not come back",
+		);
+		assert!(wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&payment_id)
+			.await
+			.unwrap()
+			.is_none());
+		assert!(
+			wallet
+				.payment_stores
+				.payment_store()
+				.get(&PaymentId(other_txid.to_byte_array()))
+				.await
+				.unwrap()
+				.is_some(),
+			"the rest of the batch must still be handled",
+		);
 	}
 
 	/// Payments without a pending-store entry — lightning payments, and on-chain payments that
