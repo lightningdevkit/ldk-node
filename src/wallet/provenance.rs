@@ -14,11 +14,12 @@
 //! pending — so records are merged rather than replaced, and a producer reporting a different
 //! value for something already recorded is rejected instead of overwriting it.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::Txid;
+use bitcoin::{Sequence, Transaction, Txid};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
@@ -291,8 +292,165 @@ impl fmt::Display for ChannelTxFactsConflict {
 	}
 }
 
+/// The recorded facts a transaction's classification rests on: what this node's channels reported
+/// about the transaction itself, and what they reported about the transactions its inputs spend.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct TxProvenance {
+	/// What was reported about the transaction itself, if anything.
+	self_facts: Option<ChannelTxFacts>,
+	/// What was reported about the transactions the inputs spend, keyed by transaction id. Only
+	/// the transactions the inputs actually reference are represented.
+	parent_facts: HashMap<Txid, ChannelTxFacts>,
+}
+
+impl TxProvenance {
+	/// The provenance assembled from the facts recorded for a transaction and for the
+	/// transactions its inputs spend.
+	pub(crate) fn new(
+		self_facts: Option<ChannelTxFacts>, parent_facts: HashMap<Txid, ChannelTxFacts>,
+	) -> Self {
+		Self { self_facts, parent_facts }
+	}
+
+	/// What `tx` is, as far as these facts can tell; see [`classify`].
+	pub(crate) fn classify(&self, tx: &Transaction) -> Option<TransactionType> {
+		classify(tx, self.self_facts.as_ref(), &self.parent_facts)
+	}
+
+	/// This node's share of the transaction, for a candidate of an interactively negotiated
+	/// funding a producer reported the figures of.
+	pub(crate) fn local_figures(&self) -> Option<&LocalFundingFigures> {
+		self.self_facts.as_ref()?.local_figures.as_ref()
+	}
+}
+
+/// What a transaction is, derived from what this node's channels recorded about it and about the
+/// transactions its inputs spend.
+///
+/// `self_facts` are the facts recorded for `tx`, `parent_facts` those recorded for the
+/// transactions `tx` spends from, keyed by transaction id. Anything these cannot account for is
+/// left unclassified rather than guessed: without a channel of this node's laying claim to an
+/// output, a transaction is an ordinary on-chain payment.
+pub(crate) fn classify(
+	tx: &Transaction, self_facts: Option<&ChannelTxFacts>,
+	parent_facts: &HashMap<Txid, ChannelTxFacts>,
+) -> Option<TransactionType> {
+	// A producer that named the transaction outright is the most reliable answer there is, and
+	// the only one that stays put across a re-broadcast or a replacement of the transaction.
+	if let Some(self_role) = self_facts.and_then(|facts| facts.self_role.as_ref()) {
+		return Some(self_role.clone());
+	}
+
+	let spent: Vec<&ChannelOutputFact> = tx
+		.input
+		.iter()
+		.filter_map(|input| {
+			parent_facts.get(&input.previous_output.txid).and_then(|parent| {
+				parent.outputs.iter().find(|output| output.vout == input.previous_output.vout)
+			})
+		})
+		.collect();
+	let created: &[ChannelOutputFact] = self_facts.map_or(&[], |facts| facts.outputs.as_slice());
+	let funds: Vec<&ChannelOutputFact> =
+		created.iter().filter(|output| output.role == ChannelOutputRole::Funding).collect();
+
+	let spent_funding = in_role(&spent, ChannelOutputRole::Funding);
+	if let Some(funding) = spent_funding.first() {
+		// Moving a channel's funds into a new funding output is what an interactive negotiation
+		// produces, whichever side of it this node is on.
+		if !funds.is_empty() {
+			let channels = channels_of(spent_funding.iter().copied().chain(funds.iter().copied()));
+			return Some(TransactionType::InteractiveFunding { channels });
+		}
+		if is_cooperative_close(tx) {
+			return Some(TransactionType::CooperativeClose {
+				counterparty_node_id: funding.counterparty_node_id,
+				channel_id: funding.channel_id,
+			});
+		}
+		if is_commitment(tx) {
+			return Some(TransactionType::UnilateralClose {
+				counterparty_node_id: funding.counterparty_node_id,
+				channel_id: funding.channel_id,
+			});
+		}
+		// The funding output is gone in a shape none of the transactions a channel produces has.
+		// Naming it anyway would put a guess on a payment record that nothing later corrects.
+		return None;
+	}
+
+	let spent_anchors = in_role(&spent, ChannelOutputRole::Anchor);
+	if let Some(anchor) = spent_anchors.first() {
+		return Some(TransactionType::AnchorBump {
+			counterparty_node_id: anchor.counterparty_node_id,
+			channel_id: anchor.channel_id,
+		});
+	}
+
+	let spent_htlcs = in_role(&spent, ChannelOutputRole::Htlc);
+	if let Some(htlc) = spent_htlcs.first() {
+		return Some(TransactionType::Claim {
+			counterparty_node_id: htlc.counterparty_node_id,
+			channel_id: htlc.channel_id,
+		});
+	}
+
+	let spent_spendable = in_role(&spent, ChannelOutputRole::Spendable);
+	if !spent_spendable.is_empty() {
+		return Some(TransactionType::Sweep { channels: channels_of(spent_spendable) });
+	}
+
+	if !funds.is_empty() {
+		return Some(TransactionType::Funding { channels: channels_of(funds) });
+	}
+
+	None
+}
+
+/// The outputs among `outputs` a channel controls in `role`.
+fn in_role<'a>(
+	outputs: &[&'a ChannelOutputFact], role: ChannelOutputRole,
+) -> Vec<&'a ChannelOutputFact> {
+	outputs.iter().copied().filter(|output| output.role == role).collect()
+}
+
+/// The channels controlling `outputs`, each named once, in the order the outputs name them.
+fn channels_of<'a>(outputs: impl IntoIterator<Item = &'a ChannelOutputFact>) -> Vec<Channel> {
+	let mut channels: Vec<Channel> = Vec::new();
+	for output in outputs {
+		let channel = Channel {
+			counterparty_node_id: output.counterparty_node_id,
+			channel_id: output.channel_id,
+		};
+		if !channels.contains(&channel) {
+			channels.push(channel);
+		}
+	}
+	channels
+}
+
+/// Whether `tx` has the shape BOLT 2 gives a cooperative closing transaction: the sole spend of
+/// the funding output, final and valid from the moment it is signed.
+fn is_cooperative_close(tx: &Transaction) -> bool {
+	tx.input.len() == 1
+		&& tx.input[0].sequence == Sequence::MAX
+		&& tx.lock_time.to_consensus_u32() == 0
+}
+
+/// Whether `tx` has the shape BOLT 3 gives a commitment transaction: the sole spend of the
+/// funding output, with the upper byte of its sequence and of its locktime set to the constants
+/// that mark the remainder of both as the obscured commitment number.
+fn is_commitment(tx: &Transaction) -> bool {
+	tx.input.len() == 1
+		&& (tx.input[0].sequence.0 >> 24) as u8 == 0x80
+		&& (tx.lock_time.to_consensus_u32() >> 24) as u8 == 0x20
+}
+
 #[cfg(test)]
 mod tests {
+	use bitcoin::absolute::LockTime;
+	use bitcoin::transaction::Version;
+	use bitcoin::{Amount, OutPoint, ScriptBuf, TxIn, TxOut, Witness};
 	use lightning::util::ser::{Readable, Writeable};
 
 	use super::*;
@@ -606,5 +764,274 @@ mod tests {
 		assert_eq!(filled.local_figures, Some(figures.clone()));
 
 		assert_eq!(filled.merged_with(&with_local_figures(txid, figures)), Ok(None));
+	}
+	/// The transaction whose outputs the classification cases below spend.
+	const PARENT: u8 = 0x11;
+
+	/// A transaction spending `inputs`, each input carrying `sequence`.
+	fn spending_tx(inputs: &[(Txid, u32)], sequence: Sequence, lock_time: u32) -> Transaction {
+		Transaction {
+			version: Version::TWO,
+			lock_time: LockTime::from_consensus(lock_time),
+			input: inputs
+				.iter()
+				.map(|(txid, vout)| TxIn {
+					previous_output: OutPoint { txid: *txid, vout: *vout },
+					script_sig: ScriptBuf::new(),
+					sequence,
+					witness: Witness::new(),
+				})
+				.collect(),
+			output: vec![TxOut { value: Amount::from_sat(1_000), script_pubkey: ScriptBuf::new() }],
+		}
+	}
+
+	/// The single spend of `PARENT`'s first output, in the shape BOLT 2 gives a cooperative
+	/// closing transaction.
+	fn cooperative_close_shaped() -> Transaction {
+		spending_tx(&[(test_txid(PARENT), 0)], Sequence::MAX, 0)
+	}
+
+	/// The single spend of `PARENT`'s first output, in the shape BOLT 3 gives a commitment
+	/// transaction: the obscured commitment number split across sequence and locktime.
+	fn commitment_shaped() -> Transaction {
+		spending_tx(&[(test_txid(PARENT), 0)], Sequence(0x80_12_34_56), 0x20_ab_cd_ef)
+	}
+
+	/// The single spend of `PARENT`'s first output in no shape a channel produces: replaceable,
+	/// and without a commitment number.
+	fn unrecognised_shaped() -> Transaction {
+		spending_tx(&[(test_txid(PARENT), 0)], Sequence(0xff_ff_ff_fd), 0)
+	}
+
+	fn parents(facts: impl IntoIterator<Item = ChannelTxFacts>) -> HashMap<Txid, ChannelTxFacts> {
+		facts.into_iter().map(|facts| (facts.txid, facts)).collect()
+	}
+
+	/// Facts recording `PARENT`'s outputs `vouts` as controlled by `channel` in `role`.
+	fn parent_outputs(
+		channel: &Channel, role: ChannelOutputRole, vouts: impl IntoIterator<Item = u32>,
+	) -> ChannelTxFacts {
+		ChannelTxFacts::new(test_txid(PARENT)).with_outputs(channel, None, role, vouts)
+	}
+
+	/// Facts recording `tx`'s first output as `channel`'s funding output.
+	fn funds(tx: &Transaction, channel: &Channel, vout: u32) -> ChannelTxFacts {
+		ChannelTxFacts::new(tx.compute_txid()).with_outputs(
+			channel,
+			Some(UserChannelId(42)),
+			ChannelOutputRole::Funding,
+			[vout],
+		)
+	}
+
+	#[test]
+	fn a_reported_role_settles_what_a_transaction_is() {
+		let channel = test_channel(1);
+		let tx = cooperative_close_shaped();
+		let recorded = parents([parent_outputs(&channel, ChannelOutputRole::Funding, [0])]);
+
+		// Left to its shape alone, the transaction is a cooperative close.
+		assert_eq!(
+			classify(&tx, None, &recorded),
+			Some(TransactionType::CooperativeClose {
+				counterparty_node_id: channel.counterparty_node_id,
+				channel_id: channel.channel_id,
+			})
+		);
+
+		// The channel that produced it says otherwise, and it is the one that knows.
+		let reported = TransactionType::UnilateralClose {
+			counterparty_node_id: channel.counterparty_node_id,
+			channel_id: channel.channel_id,
+		};
+		let self_facts = ChannelTxFacts::new(tx.compute_txid()).with_self_role(reported.clone());
+		assert_eq!(classify(&tx, Some(&self_facts), &recorded), Some(reported));
+	}
+
+	#[test]
+	fn spending_and_creating_a_funding_output_is_an_interactive_funding() {
+		let channel = test_channel(1);
+		let tx = unrecognised_shaped();
+		let self_facts = funds(&tx, &channel, 0);
+
+		assert_eq!(
+			classify(
+				&tx,
+				Some(&self_facts),
+				&parents([parent_outputs(&channel, ChannelOutputRole::Funding, [0])]),
+			),
+			Some(TransactionType::InteractiveFunding { channels: vec![channel] })
+		);
+	}
+
+	#[test]
+	fn a_final_single_spend_of_a_funding_output_is_a_cooperative_close() {
+		let channel = test_channel(1);
+		assert_eq!(
+			classify(
+				&cooperative_close_shaped(),
+				None,
+				&parents([parent_outputs(&channel, ChannelOutputRole::Funding, [0])]),
+			),
+			Some(TransactionType::CooperativeClose {
+				counterparty_node_id: channel.counterparty_node_id,
+				channel_id: channel.channel_id,
+			})
+		);
+	}
+
+	#[test]
+	fn a_commitment_shaped_spend_of_a_funding_output_is_a_unilateral_close() {
+		let channel = test_channel(1);
+		assert_eq!(
+			classify(
+				&commitment_shaped(),
+				None,
+				&parents([parent_outputs(&channel, ChannelOutputRole::Funding, [0])]),
+			),
+			Some(TransactionType::UnilateralClose {
+				counterparty_node_id: channel.counterparty_node_id,
+				channel_id: channel.channel_id,
+			})
+		);
+	}
+
+	#[test]
+	fn an_unrecognised_spend_of_a_funding_output_is_left_unnamed() {
+		let channel = test_channel(1);
+		let recorded = parents([parent_outputs(&channel, ChannelOutputRole::Funding, [0])]);
+
+		// Neither template matches and nothing reported the transaction, so there is no answer
+		// to give. A close of either kind would be a guess.
+		assert_eq!(classify(&unrecognised_shaped(), None, &recorded), None);
+
+		// A second input rules both templates out as well, whatever the first input looks like.
+		let two_inputs =
+			spending_tx(&[(test_txid(PARENT), 0), (test_txid(PARENT + 1), 0)], Sequence::MAX, 0);
+		assert_eq!(classify(&two_inputs, None, &recorded), None);
+	}
+
+	#[test]
+	fn spending_an_anchor_output_is_an_anchor_bump() {
+		let channel = test_channel(1);
+		let tx = spending_tx(
+			&[(test_txid(PARENT), 1), (test_txid(PARENT + 9), 0)],
+			Sequence(0xff_ff_ff_fd),
+			0,
+		);
+
+		assert_eq!(
+			classify(
+				&tx,
+				None,
+				&parents([parent_outputs(&channel, ChannelOutputRole::Anchor, [1])]),
+			),
+			Some(TransactionType::AnchorBump {
+				counterparty_node_id: channel.counterparty_node_id,
+				channel_id: channel.channel_id,
+			})
+		);
+	}
+
+	#[test]
+	fn spending_an_htlc_output_is_a_claim() {
+		let channel = test_channel(1);
+		let tx = spending_tx(&[(test_txid(PARENT), 2)], Sequence(0xff_ff_ff_fd), 0);
+
+		assert_eq!(
+			classify(&tx, None, &parents([parent_outputs(&channel, ChannelOutputRole::Htlc, [2])]),),
+			Some(TransactionType::Claim {
+				counterparty_node_id: channel.counterparty_node_id,
+				channel_id: channel.channel_id,
+			})
+		);
+	}
+
+	#[test]
+	fn spending_resolved_outputs_is_a_sweep_naming_every_channel() {
+		let channel = test_channel(1);
+		let other = test_channel(2);
+		let tx = spending_tx(
+			&[(test_txid(PARENT), 0), (test_txid(PARENT), 1), (test_txid(PARENT + 1), 0)],
+			Sequence(0xff_ff_ff_fd),
+			0,
+		);
+
+		// One sweep resolving outputs of two channels is associated with both of them.
+		let recorded = parents([
+			parent_outputs(&channel, ChannelOutputRole::Spendable, [0, 1]),
+			ChannelTxFacts::new(test_txid(PARENT + 1)).with_outputs(
+				&other,
+				None,
+				ChannelOutputRole::Spendable,
+				[0],
+			),
+		]);
+		assert_eq!(
+			classify(&tx, None, &recorded),
+			Some(TransactionType::Sweep { channels: vec![channel, other] })
+		);
+	}
+
+	#[test]
+	fn creating_a_funding_output_alone_is_a_funding_naming_every_channel() {
+		let channel = test_channel(1);
+		let other = test_channel(2);
+		// Nothing channel-controlled is spent: the wallet pays for both funding outputs.
+		let tx = spending_tx(&[(test_txid(PARENT + 20), 0)], Sequence(0xff_ff_ff_fd), 0);
+		let self_facts = funds(&tx, &channel, 0).with_outputs(
+			&other,
+			Some(UserChannelId(43)),
+			ChannelOutputRole::Funding,
+			[1],
+		);
+
+		assert_eq!(
+			classify(&tx, Some(&self_facts), &HashMap::new()),
+			Some(TransactionType::Funding { channels: vec![channel, other] })
+		);
+	}
+
+	#[test]
+	fn an_ordinary_wallet_spend_is_left_unnamed() {
+		let tx = spending_tx(&[(test_txid(PARENT), 0)], Sequence(0xff_ff_ff_fd), 0);
+
+		// Nothing was ever reported about the transaction or about what it spends.
+		assert_eq!(classify(&tx, None, &HashMap::new()), None);
+
+		// Nor does spending an output a channel left alone make the transaction a channel's.
+		let channel = test_channel(1);
+		let recorded = parents([parent_outputs(&channel, ChannelOutputRole::Spendable, [7])]);
+		assert_eq!(classify(&tx, None, &recorded), None);
+	}
+
+	#[test]
+	fn provenance_answers_from_the_facts_it_holds() {
+		let channel = test_channel(1);
+		let tx = cooperative_close_shaped();
+		let figures = LocalFundingFigures {
+			funding_payment_id: PaymentId([9u8; 32]),
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(2_500),
+			direction: PaymentDirection::Outbound,
+		};
+
+		let empty = TxProvenance::default();
+		assert_eq!(empty.classify(&tx), None);
+		assert_eq!(empty.local_figures(), None);
+
+		let provenance = TxProvenance::new(
+			Some(with_local_figures(tx.compute_txid(), figures.clone())),
+			parents([parent_outputs(&channel, ChannelOutputRole::Funding, [0])]),
+		);
+		assert_eq!(
+			provenance.classify(&tx),
+			Some(TransactionType::CooperativeClose {
+				counterparty_node_id: channel.counterparty_node_id,
+				channel_id: channel.channel_id,
+			})
+		);
+		assert_eq!(provenance.local_figures(), Some(&figures));
 	}
 }
