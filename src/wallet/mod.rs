@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
@@ -68,7 +68,7 @@ use crate::payment::{
 };
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChannelTxFactsStore, PaymentStore, PendingPaymentStore};
-use crate::wallet::provenance::ChannelTxFacts;
+use crate::wallet::provenance::{ChannelTxFacts, TxProvenance};
 use crate::{ChainSource, Error};
 
 pub(crate) enum OnchainSendAmount {
@@ -244,6 +244,62 @@ impl Wallet {
 				Err(Error::PersistenceFailed)
 			},
 			None => Ok(()),
+		}
+	}
+
+	/// Everything this node recorded about `tx` and about the transactions its inputs spend, as
+	/// classifying `tx` needs it.
+	///
+	/// Facts that cannot be read are logged and left out, leaving the transaction less
+	/// classifiable rather than failing the caller. That suits classification, which writes a
+	/// record's type only and runs again on the next tip change while the record is pending.
+	/// Wallet sync writes a record's amount and fee from a complete answer only, so it reads
+	/// through [`Self::read_tx_provenance`] instead, as does any caller whose decision must not
+	/// rest on a partial answer.
+	async fn tx_provenance(&self, txid: Txid, tx: &Transaction) -> TxProvenance {
+		let self_facts = self.channel_tx_facts(&txid).await;
+		let parents: HashSet<Txid> =
+			tx.input.iter().map(|input| input.previous_output.txid).collect();
+		let mut parent_facts = HashMap::new();
+		for parent in parents {
+			if let Some(facts) = self.channel_tx_facts(&parent).await {
+				parent_facts.insert(parent, facts);
+			}
+		}
+		TxProvenance::new(self_facts, parent_facts)
+	}
+
+	/// [`Self::tx_provenance`] for a decision that must not be taken on a partial answer: a fact
+	/// that cannot be read fails the caller rather than being left out.
+	async fn read_tx_provenance(
+		&self, txid: Txid, tx: &Transaction,
+	) -> Result<TxProvenance, Error> {
+		let self_facts = self.channel_tx_facts_store.get(&txid).await?;
+		let parents: HashSet<Txid> =
+			tx.input.iter().map(|input| input.previous_output.txid).collect();
+		let mut parent_facts = HashMap::new();
+		for parent in parents {
+			if let Some(facts) = self.channel_tx_facts_store.get(&parent).await? {
+				parent_facts.insert(parent, facts);
+			}
+		}
+		Ok(TxProvenance::new(self_facts, parent_facts))
+	}
+
+	/// What this node's channels reported about the transaction `txid`, or nothing when they
+	/// reported nothing or the report cannot be read.
+	async fn channel_tx_facts(&self, txid: &Txid) -> Option<ChannelTxFacts> {
+		match self.channel_tx_facts_store.get(txid).await {
+			Ok(facts) => facts,
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to read what this node recorded about transaction {}: {}",
+					txid,
+					e,
+				);
+				None
+			},
 		}
 	}
 
@@ -426,6 +482,12 @@ impl Wallet {
 						},
 					}
 
+					// A record written from the wallet's own view would misread a shared input of
+					// an interactively negotiated funding as wholly this node's, and once the
+					// record is classified or settled its amount and fee are never written again.
+					// So a fact that cannot be read fails the pass, as a write that fails does,
+					// rather than write the record on that view.
+					let provenance = self.read_tx_provenance(txid, &tx).await?;
 					let payment = {
 						let locked_wallet = self.inner.lock().expect("lock");
 						self.create_payment_from_tx(
@@ -433,6 +495,7 @@ impl Wallet {
 							txid,
 							payment_id,
 							&tx,
+							&provenance,
 							payment_status,
 							confirmation_status,
 						)
@@ -462,8 +525,18 @@ impl Wallet {
 						.await;
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
+					let mut unclassified_transactions: Vec<(PaymentId, Txid)> = Vec::new();
 
 					for payment in pending_payments {
+						// A record written before the channel that produced its transaction
+						// reported what the transaction is says nothing about it yet. The report
+						// may have arrived since, so try again while the record is in hand.
+						if let PaymentKind::Onchain { txid, tx_type: None, .. } =
+							payment.details.kind
+						{
+							unclassified_transactions.push((payment.details.id, txid));
+						}
+
 						match payment.details.kind {
 							PaymentKind::Onchain {
 								status: ConfirmationStatus::Confirmed { height, .. },
@@ -526,6 +599,8 @@ impl Wallet {
 							_ => {},
 						}
 					}
+
+					self.classify_recorded_transactions(unclassified_transactions).await?;
 
 					if !unconfirmed_outbound_txids.is_empty() {
 						let txs_to_broadcast: Vec<Transaction> = {
@@ -592,6 +667,8 @@ impl Wallet {
 						},
 					}
 
+					// See `TxConfirmed`: a fact that cannot be read fails the pass.
+					let provenance = self.read_tx_provenance(txid, &tx).await?;
 					let payment = {
 						let locked_wallet = self.inner.lock().expect("lock");
 						self.create_payment_from_tx(
@@ -599,6 +676,7 @@ impl Wallet {
 							txid,
 							payment_id,
 							&tx,
+							&provenance,
 							PaymentStatus::Pending,
 							ConfirmationStatus::Unconfirmed,
 						)
@@ -697,6 +775,8 @@ impl Wallet {
 						},
 					}
 
+					// See `TxConfirmed`: a fact that cannot be read fails the pass.
+					let provenance = self.read_tx_provenance(txid, &tx).await?;
 					let payment = {
 						let locked_wallet = self.inner.lock().expect("lock");
 						self.create_payment_from_tx(
@@ -704,6 +784,7 @@ impl Wallet {
 							txid,
 							payment_id,
 							&tx,
+							&provenance,
 							PaymentStatus::Pending,
 							ConfirmationStatus::Unconfirmed,
 						)
@@ -719,6 +800,57 @@ impl Wallet {
 			};
 		}
 
+		Ok(())
+	}
+
+	/// Classifies the transactions of the given payments from the facts this node has recorded
+	/// about them, for records that do not say what their transaction is.
+	///
+	/// This is how a record written before the producing channel reported its transaction picks
+	/// that report up: the facts are durable, so a report arriving after the record does reach it
+	/// on a later chain tip. A transaction the facts still cannot account for leaves its record
+	/// as it is, and so does a record that names its transaction already: whoever named it knew
+	/// more than the facts alone say.
+	async fn classify_recorded_transactions(
+		&self, payments: Vec<(PaymentId, Txid)>,
+	) -> Result<(), Error> {
+		for (payment_id, txid) in payments {
+			let tx = {
+				let locked_wallet = self.inner.lock().expect("lock");
+				locked_wallet.get_tx(txid).map(|tx| tx.tx_node.tx.as_ref().clone())
+			};
+			let Some(tx) = tx else {
+				continue;
+			};
+			let Some(tx_type) = self.tx_provenance(txid, &tx).await.classify(&tx) else {
+				continue;
+			};
+
+			let mut update = PaymentDetailsUpdate::new(payment_id);
+			update.tx_type = Some(Some(tx_type));
+			// The write touches one record and leaves its pending entry alone.
+			let classified = self
+				.payment_store
+				.mutate(&payment_id, |existing| {
+					let current = existing?;
+					// Whether the record is still unclassified is decided inside the store's
+					// critical section, where the answer cannot go stale against a
+					// classification written since this payment was listed.
+					if !matches!(current.kind, PaymentKind::Onchain { tx_type: None, .. }) {
+						return None;
+					}
+					let mut updated = current.clone();
+					updated.update(update).then_some(updated)
+				})
+				.await?;
+			if classified.is_some() {
+				log_debug!(
+					self.logger,
+					"Classified transaction {} from what is recorded of it",
+					txid
+				);
+			}
+		}
 		Ok(())
 	}
 
@@ -2178,27 +2310,28 @@ impl Wallet {
 		(amount_msat, Some(fee_sat * 1000), direction)
 	}
 
+	/// Builds the payment record for `tx`, classifying what the transaction is from `provenance`.
+	///
+	/// The provenance is read by the caller rather than here, because reading it awaits the facts
+	/// store while this runs under the wallet lock.
 	fn create_payment_from_tx(
 		&self, locked_wallet: &PersistedWallet<KVStoreWalletPersister>, txid: Txid,
-		payment_id: PaymentId, tx: &Transaction, payment_status: PaymentStatus,
-		confirmation_status: ConfirmationStatus,
+		payment_id: PaymentId, tx: &Transaction, provenance: &TxProvenance,
+		payment_status: PaymentStatus, confirmation_status: ConfirmationStatus,
 	) -> PaymentDetails {
-		// TODO: It would be great to introduce additional variants for
-		// `ChannelFunding` and `ChannelClosing`. For the former, we could just
-		// take a reference to `ChannelManager` here and check against
-		// `list_channels`. But for the latter the best approach is much less
-		// clear: for force-closes/HTLC spends we should be good querying
-		// `OutputSweeper::tracked_spendable_outputs`, but regular channel closes
-		// (i.e., `SpendableOutputDescriptor::StaticOutput` variants) are directly
-		// spent to a wallet address. The only solution I can come up with is to
-		// create and persist a list of 'static pending outputs' that we could use
-		// here to determine the `PaymentKind`, but that's not really satisfactory, so
-		// we're punting on it until we can come up with a better solution.
+		let kind = PaymentKind::Onchain {
+			txid,
+			status: confirmation_status,
+			tx_type: provenance.classify(tx),
+		};
 
-		let kind = PaymentKind::Onchain { txid, status: confirmation_status, tx_type: None };
-
-		let (amount_msat, fee_paid_msat, direction) =
-			self.onchain_payment_fields_locked(locked_wallet, tx);
+		// The figures a producer reported take precedence over the wallet's view: an
+		// interactively negotiated funding spends an output both parties own, which the wallet
+		// reads as this node having spent all of it.
+		let (amount_msat, fee_paid_msat, direction) = match provenance.local_figures() {
+			Some(figures) => (figures.amount_msat, figures.fee_paid_msat, figures.direction),
+			None => self.onchain_payment_fields_locked(locked_wallet, tx),
+		};
 
 		PaymentDetails::new(payment_id, kind, amount_msat, fee_paid_msat, direction, payment_status)
 	}
@@ -2568,19 +2701,29 @@ impl Wallet {
 
 		let new_txid = fee_bumped_tx.compute_txid();
 
-		let new_payment = self.create_payment_from_tx(
-			&locked_wallet,
-			new_txid,
-			payment.id,
-			&fee_bumped_tx,
-			PaymentStatus::Pending,
-			ConfirmationStatus::Unconfirmed,
-		);
+		let change_set = locked_wallet.take_staged().unwrap_or_default();
+		drop(locked_wallet);
+
+		// The replacement's provenance is only readable once the wallet lock is released, and
+		// only knowable once the replacement exists: its inputs are what decides which facts the
+		// classification rests on.
+		let provenance = self.tx_provenance(new_txid, &fee_bumped_tx).await;
+		let new_payment = {
+			let locked_wallet = self.inner.lock().expect("lock");
+			self.create_payment_from_tx(
+				&locked_wallet,
+				new_txid,
+				payment.id,
+				&fee_bumped_tx,
+				&provenance,
+				PaymentStatus::Pending,
+				ConfirmationStatus::Unconfirmed,
+			)
+		};
 
 		let pending_payment_store =
 			self.create_pending_payment_from_tx(new_payment.clone(), Vec::new());
-		let change_set = locked_wallet.take_staged().unwrap_or_default();
-		drop(locked_wallet);
+
 		locked_persister.persist_changeset(change_set).await.map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet after fee bump of {}: {}", txid, e);
 			Error::PersistenceFailed
@@ -3055,7 +3198,9 @@ mod tests {
 		PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
+	use crate::payment::store::Channel;
 	use crate::types::{DynStore, DynStoreWrapper};
+	use crate::wallet::provenance::{ChannelOutputRole, LocalFundingFigures};
 	use crate::{NodeMetrics, PersistedNodeMetrics};
 
 	const EXTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/0/*)";
@@ -3126,11 +3271,17 @@ mod tests {
 		}
 	}
 
-	/// An in-memory store whose writes can be made to fail on demand.
+	/// An in-memory store whose writes and reads can be made to fail on demand, all of them or
+	/// those of one primary namespace.
 	#[derive(Clone)]
 	struct FailSwitchStore {
 		inner: Arc<InMemoryStore>,
 		fail_writes: Arc<AtomicBool>,
+		/// Whether reads fail, within the same namespace as the writes.
+		fail_reads: Arc<AtomicBool>,
+		/// When set, only writes and reads of this primary namespace fail while their switch is
+		/// on.
+		failing_namespace: Option<String>,
 	}
 
 	impl FailSwitchStore {
@@ -3138,7 +3289,14 @@ mod tests {
 			Self {
 				inner: Arc::new(InMemoryStore::new()),
 				fail_writes: Arc::new(AtomicBool::new(false)),
+				fail_reads: Arc::new(AtomicBool::new(false)),
+				failing_namespace: None,
 			}
+		}
+
+		/// Like [`Self::new`], but only writes to and reads of `primary_namespace` fail.
+		fn failing_only(primary_namespace: &str) -> Self {
+			Self { failing_namespace: Some(primary_namespace.to_string()), ..Self::new() }
 		}
 	}
 
@@ -3146,7 +3304,19 @@ mod tests {
 		fn read(
 			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
 		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
-			KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+			let inner = Arc::clone(&self.inner);
+			let fail_reads = Arc::clone(&self.fail_reads);
+			let may_fail =
+				self.failing_namespace.as_deref().map_or(true, |ns| ns == primary_namespace);
+			let primary_namespace = primary_namespace.to_string();
+			let secondary_namespace = secondary_namespace.to_string();
+			let key = key.to_string();
+			async move {
+				if may_fail && fail_reads.load(Ordering::Acquire) {
+					return Err(io::Error::new(io::ErrorKind::Other, "reads disabled"));
+				}
+				KVStore::read(&*inner, &primary_namespace, &secondary_namespace, &key).await
+			}
 		}
 
 		fn write(
@@ -3154,11 +3324,13 @@ mod tests {
 		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
 			let inner = Arc::clone(&self.inner);
 			let fail_writes = Arc::clone(&self.fail_writes);
+			let may_fail =
+				self.failing_namespace.as_deref().map_or(true, |ns| ns == primary_namespace);
 			let primary_namespace = primary_namespace.to_string();
 			let secondary_namespace = secondary_namespace.to_string();
 			let key = key.to_string();
 			async move {
-				if fail_writes.load(Ordering::Acquire) {
+				if may_fail && fail_writes.load(Ordering::Acquire) {
 					return Err(io::Error::new(io::ErrorKind::Other, "writes disabled"));
 				}
 				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
@@ -5719,5 +5891,231 @@ mod tests {
 			"estimating the max funding amount must not free a reserved change address",
 		);
 		assert_ne!(locked_wallet.next_unused_address(KeychainKind::Internal).index, 0);
+	}
+
+	/// The facts a channel would record for a splice candidate: the pre-splice funding output it
+	/// spends, the new funding output it creates, and this node's share of it.
+	fn splice_candidate_facts(
+		txid: Txid, spends: Txid, channel: &Channel, figures: LocalFundingFigures,
+	) -> (ChannelTxFacts, ChannelTxFacts) {
+		let spent = ChannelTxFacts::new(spends).with_outputs(
+			channel,
+			None,
+			ChannelOutputRole::Funding,
+			[0],
+		);
+		let created =
+			ChannelTxFacts::new(txid).with_outputs(channel, None, ChannelOutputRole::Funding, [0]);
+		(spent, ChannelTxFacts { local_figures: Some(figures), ..created })
+	}
+
+	#[tokio::test]
+	async fn a_reported_share_of_a_transaction_outranks_the_wallets_view() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel = Channel { counterparty_node_id, channel_id: ChannelId([7u8; 32]) };
+		let tx = wallet_paying_tx(&wallet, 4);
+		let txid = tx.compute_txid();
+		insert_unconfirmed_tx(&wallet, tx.clone());
+
+		let figures = LocalFundingFigures {
+			funding_payment_id: PaymentId([31u8; 32]),
+			amount_msat: Some(77_000),
+			fee_paid_msat: Some(1_100),
+			direction: PaymentDirection::Outbound,
+		};
+		// The wallet reads a shared funding input as wholly this node's, so its view of the
+		// transaction is a different one, which is the point of preferring the reported share.
+		assert_ne!(
+			wallet.onchain_payment_fields(&tx),
+			(figures.amount_msat, figures.fee_paid_msat, figures.direction),
+		);
+
+		let (spent, created) = splice_candidate_facts(
+			txid,
+			tx.input[0].previous_output.txid,
+			&channel,
+			figures.clone(),
+		);
+		wallet.record_channel_tx_facts(spent).await.unwrap();
+		wallet.record_channel_tx_facts(created).await.unwrap();
+
+		let event =
+			WalletEvent::TxUnconfirmed { txid, tx: Arc::new(tx.clone()), old_block_time: None };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet
+			.payment_store
+			.get(&PaymentId(txid.to_byte_array()))
+			.await
+			.unwrap()
+			.expect("wallet sync records the transaction");
+		assert_eq!(payment.amount_msat, figures.amount_msat);
+		assert_eq!(payment.fee_paid_msat, figures.fee_paid_msat);
+		assert_eq!(payment.direction, figures.direction);
+		match payment.kind {
+			PaymentKind::Onchain {
+				tx_type: Some(TransactionType::InteractiveFunding { channels }),
+				..
+			} => {
+				assert_eq!(channels, vec![channel]);
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
+	}
+
+	/// Wallet sync first sees a transaction after a restart emptied the facts store's cache, and
+	/// the read of its facts fails. A record written from the wallet's view instead, which
+	/// misreads a shared funding input as wholly this node's, is wrong until a sync pass writes it
+	/// again, and graduation and a later classification change its status and type only: once
+	/// classified or settled, its amount and fee are never written again. So the pass fails,
+	/// whether the transaction is seen unconfirmed, confirmed or confirmed past the reorg depth,
+	/// and the confirmation replayed after a restart records the transaction from its facts.
+	#[tokio::test]
+	async fn a_settled_record_is_not_written_from_facts_that_cannot_be_read() {
+		let fail_store =
+			FailSwitchStore::failing_only(CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE);
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel = Channel { counterparty_node_id, channel_id: ChannelId([7u8; 32]) };
+		let figures = LocalFundingFigures {
+			funding_payment_id: PaymentId([31u8; 32]),
+			amount_msat: Some(77_000),
+			fee_paid_msat: Some(1_100),
+			direction: PaymentDirection::Outbound,
+		};
+
+		// The channel reports the round before the restart. The facts outlive the wallet; the
+		// cache of them does not.
+		let tx = {
+			let wallet = new_test_wallet(Arc::clone(&store), false).await;
+			let tx = wallet_paying_tx(&wallet, 4);
+			let (spent, created) = splice_candidate_facts(
+				tx.compute_txid(),
+				tx.input[0].previous_output.txid,
+				&channel,
+				figures.clone(),
+			);
+			wallet.record_channel_tx_facts(spent).await.unwrap();
+			wallet.record_channel_tx_facts(created).await.unwrap();
+			tx
+		};
+		let txid = tx.compute_txid();
+		let wallet = new_test_wallet(Arc::clone(&store), true).await;
+
+		// The wallet takes the transaction in with the chain already past the reorg depth.
+		let confirmation_height = 100;
+		let tip_height = confirmation_height + ANTI_REORG_DELAY;
+		insert_confirmed_tx(&wallet, tx.clone(), confirmation_height);
+		{
+			let mut locked = wallet.inner.lock().unwrap();
+			let block = BlockId {
+				height: tip_height,
+				hash: bitcoin::BlockHash::from_byte_array([tip_height as u8; 32]),
+			};
+			let chain = locked.latest_checkpoint().insert(block);
+			locked.apply_update(Update { chain: Some(chain), ..Default::default() }).unwrap();
+		}
+		let unconfirmed =
+			|| WalletEvent::TxUnconfirmed { txid, tx: Arc::new(tx.clone()), old_block_time: None };
+		let confirmed_at = |height| WalletEvent::TxConfirmed {
+			txid,
+			tx: Arc::new(tx.clone()),
+			block_time: confirmed_block_time(height),
+			old_block_time: None,
+		};
+		let payment_id = PaymentId(txid.to_byte_array());
+
+		fail_store.fail_reads.store(true, Ordering::Release);
+		for event in [unconfirmed(), confirmed_at(tip_height), confirmed_at(confirmation_height)] {
+			let result = wallet.update_payment_store(vec![event]).await;
+			assert!(matches!(result, Err(Error::PersistenceFailed)), "{:?}", result);
+			assert!(
+				wallet.payment_store.get(&payment_id).await.unwrap().is_none(),
+				"a record written now would carry the wallet's view of the amount for good",
+			);
+		}
+
+		// The replay with the reads back records the transaction as the channel reported it.
+		fail_store.fail_reads.store(false, Ordering::Release);
+		wallet.update_payment_store(vec![confirmed_at(confirmation_height)]).await.unwrap();
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().expect("record");
+		assert_eq!(payment.status, PaymentStatus::Succeeded);
+		assert_eq!(payment.amount_msat, figures.amount_msat);
+		assert_eq!(payment.fee_paid_msat, figures.fee_paid_msat);
+		assert_eq!(payment.direction, figures.direction);
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Onchain { tx_type: Some(TransactionType::InteractiveFunding { .. }), .. }
+		));
+	}
+
+	#[tokio::test]
+	async fn an_unclassified_transaction_is_classified_once_its_facts_arrive() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel = Channel { counterparty_node_id, channel_id: ChannelId([7u8; 32]) };
+		let sweep = wallet_paying_tx(&wallet, 3);
+		let sweep_txid = sweep.compute_txid();
+		let swept = sweep.input[0].previous_output.txid;
+		insert_unconfirmed_tx(&wallet, sweep.clone());
+
+		// Wallet sync sees the sweep before the channel gets to report what it resolved.
+		let event = WalletEvent::TxUnconfirmed {
+			txid: sweep_txid,
+			tx: Arc::new(sweep.clone()),
+			old_block_time: None,
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment_id = PaymentId(sweep_txid.to_byte_array());
+		let unclassified = wallet
+			.payment_store
+			.get(&payment_id)
+			.await
+			.unwrap()
+			.expect("wallet sync records the transaction");
+		assert!(
+			matches!(unclassified.kind, PaymentKind::Onchain { tx_type: None, .. }),
+			"the transaction has no recorded facts yet, so it cannot be classified: {:?}",
+			unclassified.kind,
+		);
+
+		wallet
+			.record_channel_tx_facts(ChannelTxFacts::new(swept).with_outputs(
+				&channel,
+				None,
+				ChannelOutputRole::Spendable,
+				[0],
+			))
+			.await
+			.unwrap();
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged { old_tip: block_id(1), new_tip: block_id(2) };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let classified =
+			wallet.payment_store.get(&payment_id).await.unwrap().expect("the record stays");
+		match classified.kind {
+			PaymentKind::Onchain { tx_type: Some(TransactionType::Sweep { channels }), .. } => {
+				assert_eq!(channels, vec![channel]);
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
 	}
 }
