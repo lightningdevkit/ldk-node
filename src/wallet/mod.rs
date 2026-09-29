@@ -3304,20 +3304,64 @@ impl Wallet {
 			Error::InvalidPaymentId
 		})?;
 
-		// Funding transactions (channel opens and splices) are driven by LDK's funding/splice
-		// lifecycle, not the on-chain wallet. Replacing one via on-chain RBF would broadcast a
-		// transaction LDK isn't tracking (and, for splices, can't sign). Fee-bumping a pending
-		// splice goes through `bump_channel_funding_fee` instead.
-		if let PaymentKind::Onchain {
-			tx_type:
-				Some(TransactionType::Funding { .. } | TransactionType::InteractiveFunding { .. }),
-			..
-		} = &payment.kind
-		{
+		let txid = match &payment.kind {
+			PaymentKind::Onchain { txid, .. } => *txid,
+			_ => {
+				log_error!(
+					self.logger,
+					"Payment {} is not an on-chain payment, cannot be replaced via RBF",
+					payment_id
+				);
+				return Err(Error::InvalidPaymentId);
+			},
+		};
+
+		// The transaction and whether the wallet owns every input it spends, read before the
+		// persister lock so what this node recorded about the transaction can be consulted
+		// without holding it. `list_output` rather than `get_utxo`, so an output this very
+		// transaction spends still counts as the wallet's.
+		let owned_inputs = {
+			let locked_wallet = self.inner.lock().expect("lock");
+			let tx = locked_wallet.tx_details(txid).map(|details| details.tx.deref().clone());
+			tx.map(|tx| {
+				let owned: HashSet<OutPoint> =
+					locked_wallet.list_output().map(|output| output.outpoint).collect();
+				let all_owned = tx.input.iter().all(|input| owned.contains(&input.previous_output));
+				(tx, all_owned)
+			})
+		};
+		let Some((old_tx, all_inputs_owned)) = owned_inputs else {
+			log_error!(self.logger, "Transaction {} not found in wallet", txid);
+			return Err(Error::InvalidPaymentId);
+		};
+
+		// Only an ordinary payment of this wallet's may be replaced, decided positively rather
+		// than by exclusion: what this node recorded must make nothing of the transaction, and
+		// every input must be an output this wallet owns and can re-sign. A transaction no
+		// recorded fact names is therefore still refused when it reaches beyond the wallet's own
+		// coins, rather than passing for want of a reason to reject it.
+		//
+		// Anything a channel of this node's has a claim on is driven by LDK's funding, splice and
+		// close lifecycle rather than by the on-chain wallet: replacing it would broadcast a
+		// transaction LDK isn't tracking, and an interactively negotiated funding cannot be
+		// re-signed by this node alone. Fee-bumping a pending splice goes through
+		// `bump_channel_funding_fee` instead.
+		if let Some(tx_type) = self.tx_provenance(txid, &old_tx).await.classify(&old_tx) {
 			log_error!(
 				self.logger,
-				"Cannot RBF funding payment {} via bump_fee_rbf; use bump_channel_funding_fee instead",
+				"Cannot RBF payment {} via bump_fee_rbf: {} is {:?}; a pending splice is fee-bumped with bump_channel_funding_fee",
 				payment_id,
+				txid,
+				tx_type,
+			);
+			return Err(Error::InvalidPaymentId);
+		}
+		if !all_inputs_owned {
+			log_error!(
+				self.logger,
+				"Cannot RBF payment {}: transaction {} spends inputs this wallet does not own",
+				payment_id,
+				txid,
 			);
 			return Err(Error::InvalidPaymentId);
 		}
@@ -3345,35 +3389,8 @@ impl Wallet {
 			return Err(Error::InvalidPaymentId);
 		}
 
-		let txid = match &payment.kind {
-			PaymentKind::Onchain { txid, .. } => *txid,
-			_ => {
-				log_error!(
-					self.logger,
-					"Payment {} is not an on-chain payment, cannot be replaced via RBF",
-					payment_id
-				);
-				return Err(Error::InvalidPaymentId);
-			},
-		};
-
 		let mut locked_persister = self.persister.lock().await;
 		let mut locked_wallet = self.inner.lock().expect("lock");
-
-		debug_assert!(
-			locked_wallet.tx_details(txid).is_some(),
-			"Transaction {} expected in wallet but not found",
-			txid,
-		);
-		let old_tx = locked_wallet
-			.tx_details(txid)
-			.ok_or_else(|| {
-				log_error!(self.logger, "Transaction {} not found in wallet", txid);
-				Error::InvalidPaymentId
-			})?
-			.tx
-			.deref()
-			.clone();
 
 		let old_fee_rate = locked_wallet.calculate_fee_rate(&old_tx).map_err(|e| {
 			log_error!(self.logger, "Failed to calculate fee rate of transaction {}: {}", txid, e);
