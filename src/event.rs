@@ -63,7 +63,7 @@ use crate::types::{
 	ChainMonitor, CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper,
 	Wallet,
 };
-use crate::wallet::provenance::{ChannelOutputRole, ChannelTxFacts};
+use crate::wallet::provenance::{ChannelOutputRole, ChannelTxFacts, FactsRecordOutcome};
 use crate::wallet::{closed_channel_tracked_rounds, funding_candidates, tracked_splice_rounds};
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -781,7 +781,12 @@ where
 	async fn record_channel_tx_facts(&self, facts: ChannelTxFacts) {
 		let txid = facts.txid;
 		match self.wallet.record_channel_tx_facts(facts).await {
-			Ok(()) => self.wallet.classify_recorded_transaction(txid).await,
+			Ok(FactsRecordOutcome::Recorded) => {
+				self.wallet.classify_recorded_transaction(txid).await
+			},
+			// Refused for lack of room, which the wallet has logged. The report was not recorded,
+			// so the transaction cannot be classified from it.
+			Ok(FactsRecordOutcome::Incomplete) => {},
 			Err(e) => {
 				log_error!(
 					self.logger,
@@ -854,14 +859,27 @@ where
 								ChannelOutputRole::Funding,
 								[vout as u32],
 							);
-							if let Err(e) = self.wallet.record_channel_tx_facts(facts).await {
-								log_error!(
-									self.logger,
-									"Failed to record the funding transaction of channel {}: {}",
-									temporary_channel_id,
-									e,
-								);
-								return Err(ReplayEvent());
+							match self.wallet.record_channel_tx_facts(facts).await {
+								Ok(FactsRecordOutcome::Recorded) => {},
+								// Replaying would rebuild the same transaction and find the same
+								// full store, so the channel is funded with a transaction this
+								// node will report without a classification.
+								Ok(FactsRecordOutcome::Incomplete) => {
+									log_error!(
+										self.logger,
+										"Funding channel {} with a transaction this node has no room to describe",
+										temporary_channel_id,
+									);
+								},
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to record the funding transaction of channel {}: {}",
+										temporary_channel_id,
+										e,
+									);
+									return Err(ReplayEvent());
+								},
 							}
 						} else {
 							log_error!(
