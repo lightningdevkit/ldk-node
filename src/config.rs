@@ -65,6 +65,22 @@ pub(crate) const PAYMENT_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1000).
 // may displace those entries.
 pub(crate) const PAYMENT_CACHE_WARMUP_COUNT: NonZeroUsize = NonZeroUsize::new(50).unwrap();
 
+// The number of channel transaction provenance records we keep in memory.
+//
+// A record is written when a channel produces a transaction and read back when the wallet meets
+// that transaction, so the working set is a node's recent channel activity rather than its whole
+// history. Records are small — a handful of outpoints, each with a role and a channel reference
+// — so this bounds the store's share of memory well below the payment store's while still
+// covering the channels a node is busy with.
+pub(crate) const CHANNEL_TX_FACTS_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1000).unwrap();
+
+// The number of channel transaction provenance records we read into the cache when starting up.
+//
+// This matches the built-in storage backends' page size, so warming the cache costs a single page
+// listing and one batch of reads. Later activity may displace those entries, which are then read
+// back individually as they are needed.
+pub(crate) const CHANNEL_TX_FACTS_CACHE_WARMUP_COUNT: NonZeroUsize = NonZeroUsize::new(50).unwrap();
+
 // The default {Esplora,Electrum} client timeout we're using.
 const DEFAULT_PER_REQUEST_TIMEOUT_SECS: u8 = 10;
 
