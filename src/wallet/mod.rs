@@ -32,14 +32,13 @@ use bitcoin::{
 	Address, Amount, FeeRate, OutPoint, ScriptBuf, SignedAmount, Transaction, TxOut, Txid,
 	WPubkeyHash, Weight, WitnessProgram, WitnessVersion,
 };
-use lightning::chain::chaininterface::{
-	ChannelFunding, FundingCandidate, FundingPurpose, INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
-};
+use lightning::chain::chaininterface::INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT;
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::transaction::OutPoint as LdkOutPoint;
 use lightning::chain::{BlockLocator, ClaimId, Listen};
 use lightning::ln::channel_state::{SpliceCandidateDetails, SpliceCandidateStatus, SpliceDetails};
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::FundingContribution;
 use lightning::ln::inbound_payment::ExpandedKey;
 use lightning::ln::msgs::UnsignedGossipMessage;
 use lightning::ln::script::ShutdownScript;
@@ -3626,11 +3625,33 @@ fn tracks_channel(entry: &PendingPaymentDetails, channel_id: ChannelId) -> bool 
 	entry.funding_channels().iter().any(|channel| channel.channel_id == channel_id)
 }
 
+/// A round of an interactive funding negotiation that has a transaction, and the channels that
+/// transaction funds.
+#[derive(Clone, Debug)]
+pub(crate) struct FundingCandidate {
+	/// The txid of this round.
+	pub txid: Txid,
+	/// The channels participating in this round.
+	pub channels: Vec<ChannelFunding>,
+}
+
+/// A single channel's participation in a [`FundingCandidate`].
+#[derive(Clone, Debug)]
+pub(crate) struct ChannelFunding {
+	/// The `node_id` of the channel counterparty.
+	pub counterparty_node_id: PublicKey,
+	/// The ID of the channel.
+	pub channel_id: ChannelId,
+	/// This node's contribution to this channel in this round, or `None` where it contributed
+	/// nothing — a pure acceptor adding no value, or a leading RBF round before it began
+	/// contributing.
+	pub contribution: Option<FundingContribution>,
+}
+
 /// Lists a channel's pending splice rounds that have a transaction — the negotiated predecessors
 /// and the round awaiting signatures, in LDK's order, each with this node's contribution to it —
-/// as the [`FundingCandidate`]s LDK hands the broadcaster for the round, for recording the round
-/// when signing it. A contribution still queued behind the pending rounds has no transaction and
-/// is left out; a channel with no pending splice yields nothing.
+/// for recording the round when signing it. A contribution still queued behind the pending rounds
+/// has no transaction and is left out; a channel with no pending splice yields nothing.
 pub(crate) fn funding_candidates(
 	details: Option<&SpliceDetails>, counterparty_node_id: PublicKey, channel_id: ChannelId,
 ) -> Vec<FundingCandidate> {
@@ -3645,7 +3666,6 @@ pub(crate) fn funding_candidates(
 				channels: vec![ChannelFunding {
 					counterparty_node_id,
 					channel_id,
-					purpose: FundingPurpose::Splice,
 					contribution: candidate.contribution.clone(),
 				}],
 			})
@@ -4087,7 +4107,6 @@ mod tests {
 	use bitcoin::hashes::Hash;
 	use bitcoin::Network;
 	use lightning::io;
-	use lightning::ln::funding::FundingContribution;
 	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 
 	use super::*;
@@ -5438,12 +5457,12 @@ mod tests {
 	}
 
 	/// Builds one [`FundingCandidate`] per `(txid, contribution)` round of a single channel, in
-	/// the given order — the shape LDK hands both the signing-time recording and the broadcaster.
+	/// the given order — the shape [`funding_candidates`] produces for the signing-time
+	/// recording.
 	fn splice_candidates(
 		counterparty_node_id: PublicKey, channel_id: ChannelId,
 		rounds: &[(Txid, Option<FundingContribution>)],
 	) -> Vec<FundingCandidate> {
-		use lightning::chain::chaininterface::{ChannelFunding, FundingPurpose};
 		rounds
 			.iter()
 			.map(|(txid, contribution)| FundingCandidate {
@@ -5451,7 +5470,6 @@ mod tests {
 				channels: vec![ChannelFunding {
 					counterparty_node_id,
 					channel_id,
-					purpose: FundingPurpose::Splice,
 					contribution: contribution.clone(),
 				}],
 			})
@@ -7467,7 +7485,6 @@ mod tests {
 	/// still queued behind the pending rounds has no transaction and is left out.
 	#[test]
 	fn funding_candidates_list_the_rounds_with_a_transaction() {
-		use lightning::chain::chaininterface::FundingPurpose;
 		use lightning::ln::channel_state::{
 			SpliceCandidateDetails, SpliceCandidateStatus, SpliceDetails,
 		};
@@ -7513,7 +7530,6 @@ mod tests {
 		assert_eq!(candidates[1].channels.len(), 1);
 		assert_eq!(candidates[1].channels[0].counterparty_node_id, counterparty_node_id);
 		assert_eq!(candidates[1].channels[0].channel_id, channel_id);
-		assert_eq!(candidates[1].channels[0].purpose, FundingPurpose::Splice);
 		assert_eq!(candidates[1].channels[0].contribution, Some(contribution));
 
 		assert!(funding_candidates(None, counterparty_node_id, channel_id).is_empty());

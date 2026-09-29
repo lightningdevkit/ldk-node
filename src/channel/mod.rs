@@ -15,7 +15,6 @@ use bitcoin::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::transaction::Version;
 use bitcoin::{OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid};
-use lightning::chain::chaininterface::FundingCandidate;
 use lightning::chain::transaction::OutPoint as LdkOutPoint;
 use lightning::ln::channel_state::{ChannelDetails, SpliceCandidateDetails, SpliceCandidateStatus};
 use lightning::ln::channelmanager::PaymentId;
@@ -29,7 +28,7 @@ use crate::payment::pending_payment_store::{
 };
 use crate::payment::{PaymentKind, TransactionType};
 use crate::types::{ChannelManager, PendingPaymentStore};
-use crate::wallet::{funding_candidates, random_payment_id, Wallet};
+use crate::wallet::{funding_candidates, random_payment_id, FundingCandidate, Wallet};
 use crate::Error;
 
 /// Whether two contributions describe the same splice attempt. LDK may adjust a contribution

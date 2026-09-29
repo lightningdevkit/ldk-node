@@ -10,9 +10,7 @@ use std::ops::Deref;
 use std::sync::Mutex as StdMutex;
 
 use bitcoin::{Transaction, Txid};
-use lightning::chain::chaininterface::{
-	BroadcasterInterface, TransactionType as LdkTransactionType,
-};
+use lightning::chain::chaininterface::BroadcasterInterface;
 use tokio::sync::Notify;
 
 use crate::logger::{log_trace, LdkLogger};
@@ -151,8 +149,8 @@ impl<L: Deref> BroadcasterInterface for TransactionBroadcaster<L>
 where
 	L::Target: LdkLogger,
 {
-	fn broadcast_transactions(&self, txs: &[(&Transaction, LdkTransactionType)]) {
-		self.queue_package(BroadcastPackage(txs.iter().map(|(tx, _)| (*tx).clone()).collect()));
+	fn broadcast_transactions(&self, txs: &[&Transaction]) {
+		self.queue_package(BroadcastPackage(txs.iter().map(|tx| (*tx).clone()).collect()));
 	}
 }
 

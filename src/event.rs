@@ -15,7 +15,6 @@ use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Amount, OutPoint, ScriptBuf, Txid};
 use lightning::blinded_path::message::NextMessageHop;
-use lightning::chain::chaininterface::FundingCandidate;
 use lightning::chain::transaction::OutPoint as LdkOutPoint;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
@@ -71,7 +70,9 @@ use crate::types::{
 	Wallet,
 };
 use crate::wallet::provenance::{ChannelOutputRole, ChannelTxFacts};
-use crate::wallet::{closed_channel_held_rounds, funding_candidates, held_splice_rounds};
+use crate::wallet::{
+	closed_channel_held_rounds, funding_candidates, held_splice_rounds, FundingCandidate,
+};
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
