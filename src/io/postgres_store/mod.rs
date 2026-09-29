@@ -25,7 +25,7 @@ use tokio_postgres::{Config, Error as PgError, GenericClient};
 
 use self::pool::{make_config_connection, ClientConnection, PgTlsConnector, SmallPool};
 use crate::io::utils::check_namespace_key_validity;
-use crate::logger::{log_debug, log_info, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::StoreRuntime;
 
 mod migrations;
@@ -136,9 +136,10 @@ fn handle_runtime_task_result<T>(
 ///
 /// Maintains an internal runtime for the underlying tokio-postgres connection drivers.
 /// Each instance exclusively leases its configured KV table and checks the lease within each KV
-/// mutation transaction. Lease rejection during a mutation panics in the calling task. A failed or
-/// timed-out background renewal panics in the renewal task. This does not provide node shutdown
-/// or recovery.
+/// mutation transaction. Lease rejection panics in the calling task; a failed or timed-out
+/// background renewal panics in the renewal task. Applications must set `panic = "abort"` in their
+/// own Cargo profiles so these panics terminate the process. Recovery requires restarting the
+/// process and constructing a fresh node from persisted state.
 ///
 /// [PostgreSQL]: https://www.postgresql.org
 pub struct PostgresStore {
@@ -152,6 +153,8 @@ pub struct PostgresStore {
 	internal_runtime: Option<Arc<StoreRuntime>>,
 
 	lease_renewal_task: Option<tokio::task::JoinHandle<()>>,
+	lease_shutdown_sender: Option<tokio::sync::oneshot::Sender<()>>,
+	lease_shutdown_complete: Mutex<std::sync::mpsc::Receiver<io::Result<()>>>,
 }
 
 // tokio::sync::Mutex (used for the DB client) contains UnsafeCell which opts out of
@@ -213,11 +216,18 @@ impl PostgresStore {
 		let inner = Arc::new(inner);
 
 		let inner_ref = Arc::clone(&inner);
+		let (lease_shutdown_sender, mut shutdown_rx) = tokio::sync::oneshot::channel();
+		let (completion_sender, lease_shutdown_complete) = std::sync::mpsc::channel();
 		let lease_renewal_task = internal_runtime.spawn(async move {
 			let mut interval = tokio::time::interval(NODE_LEASE_RENEWAL_INTERVAL);
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 			loop {
 				// The first tick is immediate; later attempts follow the renewal interval.
-				interval.tick().await;
+				tokio::select! {
+					biased;
+					_ = &mut shutdown_rx => break,
+					_ = interval.tick() => {},
+				}
 				let renewal = async {
 					let mut locked = inner_ref.locked_client().await?;
 					let err_map = |e| {
@@ -233,12 +243,19 @@ impl PostgresStore {
 						inner_ref.renew_node_lease(&**locked)
 					)
 				};
-				// Bound both the pool wait and query so an unreachable database also causes a panic.
-				tokio::time::timeout(NODE_LEASE_RENEWAL_TIMEOUT, renewal)
-					.await
+				// Bound both the pool wait and query, but allow shutdown to cancel either.
+				let result = tokio::select! {
+					biased;
+					_ = &mut shutdown_rx => break,
+					result = tokio::time::timeout(NODE_LEASE_RENEWAL_TIMEOUT, renewal) => result,
+				};
+				result
 					.expect("PostgreSQL node lease renewal timed out")
 					.expect("Failed to renew PostgreSQL node lease");
 			}
+
+			let result = inner_ref.release_node_lease().await;
+			let _ = completion_sender.send(result);
 		});
 
 		Ok(Self {
@@ -246,6 +263,8 @@ impl PostgresStore {
 			next_write_version: AtomicU64::new(1),
 			internal_runtime: Some(internal_runtime),
 			lease_renewal_task: Some(lease_renewal_task),
+			lease_shutdown_sender: Some(lease_shutdown_sender),
+			lease_shutdown_complete: Mutex::new(lease_shutdown_complete),
 		})
 	}
 
@@ -297,28 +316,26 @@ impl PostgresStore {
 
 impl Drop for PostgresStore {
 	fn drop(&mut self) {
-		if let Some(internal_runtime) = self.internal_runtime.as_ref() {
-			let renewal_task = self.lease_renewal_task.take();
-			if let Some(task) = renewal_task.as_ref() {
-				task.abort();
+		if let Some(sender) = self.lease_shutdown_sender.take() {
+			let _ = sender.send(());
+		}
+		// The store runtime drives shutdown independently. Bound the entire wait here and cancel
+		// the task below if release does not finish in time.
+		let result = self
+			.lease_shutdown_complete
+			.get_mut()
+			.unwrap()
+			.recv_timeout(NODE_LEASE_RELEASE_TIMEOUT);
+		if let Some(logger) = self.inner.logger.as_ref() {
+			match result {
+				Ok(Ok(())) => {},
+				Ok(Err(e)) => log_error!(logger, "Failed to release PostgreSQL node lease: {e}"),
+				Err(e) => log_error!(logger, "PostgreSQL lease shutdown did not complete: {e}"),
 			}
-
-			let runtime_handle = internal_runtime.handle().clone();
-			let inner = Arc::clone(&self.inner);
-			let _ = std::thread::spawn(move || {
-				runtime_handle.block_on(async move {
-					if let Some(task) = renewal_task {
-						let _ = task.await;
-					}
-
-					let _ = tokio::time::timeout(
-						NODE_LEASE_RELEASE_TIMEOUT,
-						inner.release_node_lease(),
-					)
-					.await;
-				});
-			})
-			.join();
+		}
+		if let Some(task) = self.lease_renewal_task.take() {
+			// Cancel any remaining work if shutdown failed or timed out.
+			task.abort();
 		}
 
 		if let Some(internal_runtime) = self.internal_runtime.take() {
@@ -1240,7 +1257,32 @@ mod tests {
 			.contains("PostgreSQL node lease renewal timed out"));
 		drop(first);
 		drop(second);
+		// The panicked renewal task cannot release its lease during shutdown.
+		store.inner.release_node_lease().await.unwrap();
 		cleanup_store(&store).await;
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_drop_with_blocked_pool() {
+		let store = create_test_store("test_pg_drop_blocked_pool").await;
+		let inner = Arc::clone(&store.inner);
+		let client = make_config_connection(&inner.config, &inner.tls).await.unwrap();
+		let _first = inner.pool.connections[0].lock().await;
+		let _second = inner.pool.connections[1].lock().await;
+		let start = std::time::Instant::now();
+		drop(store);
+		assert!(start.elapsed() < NODE_LEASE_RELEASE_TIMEOUT + Duration::from_secs(2));
+
+		client
+			.execute(
+				&format!(
+					"DROP TABLE {}, {}",
+					inner.kv_table_name_sql, inner.node_lease_table_name_sql
+				),
+				&[],
+			)
+			.await
+			.unwrap();
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
@@ -1392,7 +1434,9 @@ mod tests {
 		KVStore::write(&second_store, "test_ns", "test_sub", "key", vec![2]).await.unwrap();
 		let remove = tokio::spawn(KVStore::remove(&store, "test_ns", "test_sub", "key", false));
 		assert!(remove.await.unwrap_err().is_panic());
-		// Dropping the old owner must not release the replacement's lease.
+		// Exercise release even if the old renewal task has already panicked. Neither release
+		// nor dropping the old owner may remove the replacement's lease.
+		store.inner.release_node_lease().await.unwrap();
 		drop(store);
 		assert_eq!(
 			KVStore::read(&second_store, "test_ns", "test_sub", "key").await.unwrap(),

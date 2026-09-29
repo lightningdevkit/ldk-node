@@ -739,8 +739,9 @@ impl NodeBuilder {
 	///
 	/// This acquires an exclusive lease for the selected KV table before reading persisted node
 	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
-	/// Mutations panic on detected lease loss. Failed or timed-out renewals panic in the background
-	/// renewal task. Node recovery is not handled automatically.
+	/// Detected lease loss or failed or timed-out background renewals panic. Applications must set
+	/// `panic = "abort"` in their own Cargo profiles so these panics terminate the process. Recovery
+	/// requires restarting the process and constructing a fresh node from persisted state.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root
@@ -1335,8 +1336,9 @@ impl Builder {
 	///
 	/// This acquires an exclusive lease for the selected KV table before reading persisted node
 	/// state. Nodes may share a database when each node identity uses a distinct `kv_table_name`.
-	/// Mutations panic on detected lease loss. Failed or timed-out renewals panic in the background
-	/// renewal task. Node recovery is not handled automatically.
+	/// Detected lease loss or failed or timed-out background renewals panic. Applications must set
+	/// `panic = "abort"` in their own Cargo profiles so these panics terminate the process. Recovery
+	/// requires restarting the process and constructing a fresh node from persisted state.
 	///
 	/// If `certificate_pem` is `Some`, TLS will be used for database connections and the
 	/// provided PEM-encoded CA certificate will be added to the system's default root

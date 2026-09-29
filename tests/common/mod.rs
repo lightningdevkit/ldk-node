@@ -2198,9 +2198,7 @@ pub(crate) fn test_connection_string() -> String {
 		.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string())
 }
 
-/// Drops the given table from the `ldk_db` database, ignoring the case where the database doesn't
-/// exist yet. Used to ensure a clean slate before and after Postgres-backed tests.
-/// Also drops the companion lease table.
+// Best-effort cleanup of the KV and lease tables in `ldk_db` between tests.
 #[cfg(feature = "storage-postgres")]
 pub(crate) async fn drop_table(table_name: &str) {
 	let connection_string = format!("{} dbname=ldk_db", test_connection_string());
