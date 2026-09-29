@@ -71,7 +71,8 @@ use crate::payment::{
 	PendingPaymentDetails, TransactionType,
 };
 use crate::runtime::Runtime;
-use crate::types::{Broadcaster, PaymentStore, PendingPaymentStore};
+use crate::types::{Broadcaster, ChannelTxFactsStore, PaymentStore, PendingPaymentStore};
+use crate::wallet::provenance::ChannelTxFacts;
 use crate::{ChainSource, Error};
 
 pub(crate) enum OnchainSendAmount {
@@ -87,6 +88,7 @@ pub(crate) enum FundingAmount {
 
 mod payment_stores;
 pub(crate) mod persist;
+pub(crate) mod provenance;
 pub(crate) mod ser;
 
 const DUST_LIMIT_SATS: u64 = 546;
@@ -165,6 +167,9 @@ pub(crate) struct Wallet {
 	logger: Arc<Logger>,
 	// The wallet's payment stores; see the type for the lock serializing their writers.
 	payment_stores: PaymentStores,
+	// What this node's channels reported about the transactions they produced, keyed by
+	// transaction id.
+	channel_tx_facts_store: Arc<ChannelTxFactsStore>,
 }
 
 impl Wallet {
@@ -174,6 +179,7 @@ impl Wallet {
 		broadcaster: Arc<Broadcaster>, fee_estimator: Arc<OnchainFeeEstimator>,
 		chain_source: Arc<ChainSource>, payment_store: Arc<PaymentStore>, runtime: Arc<Runtime>,
 		config: Arc<Config>, logger: Arc<Logger>, pending_payment_store: Arc<PendingPaymentStore>,
+		channel_tx_facts_store: Arc<ChannelTxFactsStore>,
 	) -> Self {
 		let address_pool = Mutex::new(AddressPool::new(persisted_pool_indices, &wallet, &logger));
 		let inner = Mutex::new(wallet);
@@ -191,6 +197,45 @@ impl Wallet {
 			config,
 			logger,
 			payment_stores: PaymentStores::new(payment_store, pending_payment_store),
+			channel_tx_facts_store,
+		}
+	}
+
+	/// Records what a producer reported about the transaction `facts` describes, merging it into
+	/// whatever this node already knows about that transaction.
+	///
+	/// Re-recording facts already known writes nothing, so a producer may safely replay its
+	/// event. Facts that contradict what is recorded are rejected and logged rather than
+	/// overwriting it: one of the two producers is wrong, and the recorded facts came first.
+	pub(crate) async fn record_channel_tx_facts(&self, facts: ChannelTxFacts) -> Result<(), Error> {
+		let txid = facts.txid;
+		// The rejection is reported out of the closure rather than through it, so that the read,
+		// the merge and the write stay one critical section of the store's mutation lock.
+		let mut conflict = None;
+		self.channel_tx_facts_store
+			.mutate(&txid, |current| match current {
+				Some(recorded) => match recorded.clone().merged_with(&facts) {
+					Ok(merged) => merged,
+					Err(e) => {
+						conflict = Some(e);
+						None
+					},
+				},
+				None => Some(facts),
+			})
+			.await?;
+
+		match conflict {
+			Some(e) => {
+				log_error!(
+					self.logger,
+					"Rejected facts contradicting what is recorded for transaction {}: {}",
+					txid,
+					e,
+				);
+				Err(Error::PersistenceFailed)
+			},
+			None => Ok(()),
 		}
 	}
 
@@ -4281,12 +4326,14 @@ mod tests {
 	use crate::config::ElectrumSyncConfig;
 	#[cfg(feature = "chain-esplora")]
 	use crate::config::EsploraSyncConfig;
-	use crate::config::PAYMENT_CACHE_CAPACITY;
+	use crate::config::{CHANNEL_TX_FACTS_CACHE_CAPACITY, PAYMENT_CACHE_CAPACITY};
 	use crate::io::test_utils::InMemoryStore;
 	use crate::io::{
 		BDK_WALLET_ADDRESS_POOL_KEY, BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
-		BDK_WALLET_ADDRESS_POOL_SECONDARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-		PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+		BDK_WALLET_ADDRESS_POOL_SECONDARY_NAMESPACE,
+		CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE,
+		CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE,
+		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 		PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 		PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
@@ -4598,6 +4645,14 @@ mod tests {
 			Arc::clone(&store),
 			Arc::clone(&logger),
 		));
+		let channel_tx_facts_store = Arc::new(ChannelTxFactsStore::new(
+			Vec::new(),
+			KeepLeastRecentlyUsed::new(CHANNEL_TX_FACTS_CACHE_CAPACITY),
+			CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&store),
+			Arc::clone(&logger),
+		));
 		let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
 
 		let persisted_pool_indices = persist::read_address_pool(&*store, &*logger).await.unwrap();
@@ -4614,6 +4669,7 @@ mod tests {
 			config,
 			logger,
 			pending_payment_store,
+			channel_tx_facts_store,
 		))
 	}
 
