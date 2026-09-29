@@ -140,15 +140,34 @@ impl ChannelTxFacts {
 		self
 	}
 
+	/// Facts about `outpoints`, all controlled by `channel` in `role`, as one record per
+	/// transaction they belong to.
+	pub(crate) fn per_transaction(
+		channel: &Channel, user_channel_id: Option<UserChannelId>, role: ChannelOutputRole,
+		outpoints: impl IntoIterator<Item = (Txid, u32)>,
+	) -> Vec<Self> {
+		let mut grouped: Vec<(Txid, Vec<u32>)> = Vec::new();
+		for (txid, vout) in outpoints {
+			match grouped.iter_mut().find(|(recorded, _)| *recorded == txid) {
+				Some((_, vouts)) => {
+					if !vouts.contains(&vout) {
+						vouts.push(vout);
+					}
+				},
+				None => grouped.push((txid, vec![vout])),
+			}
+		}
+		grouped
+			.into_iter()
+			.map(|(txid, vouts)| {
+				Self::new(txid).with_outputs(channel, user_channel_id, role, vouts)
+			})
+			.collect()
+	}
+
 	/// Records what this transaction is.
 	pub(crate) fn with_self_role(mut self, self_role: TransactionType) -> Self {
 		self.self_role = Some(self_role);
-		self
-	}
-
-	/// Records this node's share of an interactively negotiated funding transaction.
-	pub(crate) fn with_local_figures(mut self, local_figures: LocalFundingFigures) -> Self {
-		self.local_figures = Some(local_figures);
 		self
 	}
 
@@ -301,6 +320,10 @@ mod tests {
 		.expect("static test key is valid")
 	}
 
+	fn with_local_figures(txid: Txid, local_figures: LocalFundingFigures) -> ChannelTxFacts {
+		ChannelTxFacts { local_figures: Some(local_figures), ..ChannelTxFacts::new(txid) }
+	}
+
 	fn round_trip<T: Readable + Writeable + PartialEq + std::fmt::Debug>(object: &T) {
 		let encoded = object.encode();
 		let decoded: T = Readable::read(&mut &encoded[..]).expect("round trip");
@@ -309,18 +332,23 @@ mod tests {
 
 	fn full_facts() -> ChannelTxFacts {
 		let channel = test_channel(1);
-		ChannelTxFacts::new(test_txid(7))
+		let facts = ChannelTxFacts::new(test_txid(7))
 			.with_outputs(&channel, Some(UserChannelId(42)), ChannelOutputRole::Funding, [0])
 			.with_outputs(&channel, None, ChannelOutputRole::Anchor, [1])
 			.with_outputs(&channel, None, ChannelOutputRole::Htlc, [2, 3])
 			.with_outputs(&channel, None, ChannelOutputRole::Spendable, [4])
-			.with_self_role(TransactionType::InteractiveFunding { channels: vec![channel.clone()] })
-			.with_local_figures(LocalFundingFigures {
+			.with_self_role(TransactionType::InteractiveFunding {
+				channels: vec![channel.clone()],
+			});
+		ChannelTxFacts {
+			local_figures: Some(LocalFundingFigures {
 				funding_payment_id: PaymentId([9u8; 32]),
 				amount_msat: Some(1_000_000),
 				fee_paid_msat: Some(2_500),
 				direction: PaymentDirection::Outbound,
-			})
+			}),
+			..facts
+		}
 	}
 
 	#[test]
@@ -342,6 +370,40 @@ mod tests {
 		assert!(decoded.outputs.is_empty());
 		assert_eq!(decoded.self_role, None);
 		assert_eq!(decoded.local_figures, None);
+	}
+
+	#[test]
+	fn outpoints_group_into_one_record_per_transaction() {
+		let channel = test_channel(1);
+		let records = ChannelTxFacts::per_transaction(
+			&channel,
+			Some(UserChannelId(7)),
+			ChannelOutputRole::Spendable,
+			[
+				(test_txid(1), 0),
+				(test_txid(2), 4),
+				(test_txid(1), 3),
+				// A producer reporting the same outpoint twice contributes it once.
+				(test_txid(2), 4),
+			],
+		);
+
+		assert_eq!(records.len(), 2);
+		assert_eq!(records[0].txid, test_txid(1));
+		assert_eq!(
+			records[0].outputs.iter().map(|output| output.vout).collect::<Vec<_>>(),
+			vec![0, 3]
+		);
+		assert_eq!(records[1].txid, test_txid(2));
+		assert_eq!(
+			records[1].outputs.iter().map(|output| output.vout).collect::<Vec<_>>(),
+			vec![4]
+		);
+		assert!(records.iter().flat_map(|facts| &facts.outputs).all(|output| {
+			output.role == ChannelOutputRole::Spendable
+				&& output.channel_id == channel.channel_id
+				&& output.user_channel_id == Some(UserChannelId(7))
+		}));
 	}
 
 	#[test]
@@ -467,9 +529,9 @@ mod tests {
 			fee_paid_msat: Some(2_500),
 			direction: PaymentDirection::Outbound,
 		};
-		let recorded = ChannelTxFacts::new(txid).with_local_figures(figures.clone());
-		let conflicting = ChannelTxFacts::new(txid)
-			.with_local_figures(LocalFundingFigures { fee_paid_msat: Some(5_000), ..figures });
+		let recorded = with_local_figures(txid, figures.clone());
+		let conflicting =
+			with_local_figures(txid, LocalFundingFigures { fee_paid_msat: Some(5_000), ..figures });
 
 		assert!(matches!(
 			recorded.merged_with(&conflicting),
@@ -538,14 +600,11 @@ mod tests {
 		};
 
 		let filled = ChannelTxFacts::new(txid)
-			.merged_with(&ChannelTxFacts::new(txid).with_local_figures(figures.clone()))
+			.merged_with(&with_local_figures(txid, figures.clone()))
 			.expect("fills in")
 			.expect("changed");
 		assert_eq!(filled.local_figures, Some(figures.clone()));
 
-		assert_eq!(
-			filled.merged_with(&ChannelTxFacts::new(txid).with_local_figures(figures)),
-			Ok(None)
-		);
+		assert_eq!(filled.merged_with(&with_local_figures(txid, figures)), Ok(None));
 	}
 }

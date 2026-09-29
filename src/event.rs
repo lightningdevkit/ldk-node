@@ -13,8 +13,9 @@ use std::sync::{Arc, Mutex};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Amount, OutPoint};
+use bitcoin::{Amount, OutPoint, Txid};
 use lightning::blinded_path::message::NextMessageHop;
+use lightning::chain::transaction::OutPoint as LdkOutPoint;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
 use lightning::events::PaidBolt12Invoice;
@@ -26,7 +27,7 @@ use lightning::events::{
 use lightning::ln::channelmanager::{PaymentId, TrustedChannelFeatures};
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
-use lightning::sign::EntropySource;
+use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
@@ -51,7 +52,8 @@ use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::forwarding_store::{ForwardRecord, ForwardingStore};
 use crate::payment::store::{
-	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
+	Channel, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
+	TransactionType,
 };
 use crate::payment::PaymentMetadata;
 use crate::probing::Prober;
@@ -59,6 +61,7 @@ use crate::runtime::Runtime;
 use crate::types::{
 	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
 };
+use crate::wallet::provenance::{ChannelOutputRole, ChannelTxFacts};
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
@@ -733,6 +736,18 @@ where
 		Ok((payment_id, None))
 	}
 
+	/// Records what one of this node's channels reported about a transaction it produced.
+	///
+	/// A failure is logged rather than reported: these facts accompany a transaction this node
+	/// has already released or a claim it has already made, so there is nothing left to withhold,
+	/// and the producing event is re-offered until the claim resolves.
+	async fn record_channel_tx_facts(&self, facts: ChannelTxFacts) {
+		let txid = facts.txid;
+		if let Err(e) = self.wallet.record_channel_tx_facts(facts).await {
+			log_error!(self.logger, "Failed to record what channel transaction {} is: {}", txid, e);
+		}
+	}
+
 	pub async fn handle_event(&self, event: LdkEvent) -> Result<(), ReplayEvent> {
 		match event {
 			LdkEvent::FundingGenerationReady {
@@ -755,7 +770,7 @@ where
 				let funding_transaction = self
 					.wallet
 					.create_funding_transaction(
-						output_script,
+						output_script.clone(),
 						channel_amount,
 						confirmation_target,
 						locktime,
@@ -763,6 +778,49 @@ where
 					.await;
 				match funding_transaction {
 					Ok(final_tx) => {
+						// Record what the transaction is before handing it to LDK, which is what
+						// authorizes either party to broadcast it. LDK identifies the funding
+						// output by the same script and value, and names the channel after that
+						// outpoint, so the fact matches the channel LDK will report from here on
+						// rather than the temporary one this event carries.
+						let txid = final_tx.compute_txid();
+						let funding_vout = final_tx
+							.output
+							.iter()
+							.position(|output| {
+								output.script_pubkey == output_script
+									&& output.value == channel_amount
+							})
+							.and_then(|index| u16::try_from(index).ok());
+						if let Some(vout) = funding_vout {
+							let funding_txo = LdkOutPoint { txid, index: vout };
+							let channel = Channel {
+								counterparty_node_id,
+								channel_id: ChannelId::v1_from_funding_outpoint(funding_txo),
+							};
+							let facts = ChannelTxFacts::new(txid).with_outputs(
+								&channel,
+								Some(UserChannelId(user_channel_id)),
+								ChannelOutputRole::Funding,
+								[vout as u32],
+							);
+							if let Err(e) = self.wallet.record_channel_tx_facts(facts).await {
+								log_error!(
+									self.logger,
+									"Failed to record the funding transaction of channel {}: {}",
+									temporary_channel_id,
+									e,
+								);
+								return Err(ReplayEvent());
+							}
+						} else {
+							log_error!(
+								self.logger,
+								"Failed to locate the funding output of channel {} in the transaction funding it",
+								temporary_channel_id,
+							);
+						}
+
 						let needs_manual_broadcast = self
 							.liquidity_source
 							.lsps2_service()
@@ -834,7 +892,22 @@ where
 					},
 				}
 			},
-			LdkEvent::FundingTxBroadcastSafe { user_channel_id, counterparty_node_id, .. } => {
+			LdkEvent::FundingTxBroadcastSafe {
+				channel_id,
+				user_channel_id,
+				counterparty_node_id,
+				funding_txo,
+				..
+			} => {
+				let channel = Channel { counterparty_node_id, channel_id };
+				let facts = ChannelTxFacts::new(funding_txo.txid).with_outputs(
+					&channel,
+					Some(UserChannelId(user_channel_id)),
+					ChannelOutputRole::Funding,
+					[funding_txo.vout],
+				);
+				self.record_channel_tx_facts(facts).await;
+
 				self.liquidity_source
 					.lsps2_service()
 					.lsps2_funding_tx_broadcast_safe(user_channel_id, counterparty_node_id);
@@ -1545,17 +1618,38 @@ where
 					.await;
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id, counterparty_node_id } => {
+				let spendable_outpoints = sweepable_outpoints(&outputs);
+
+				// Static outputs are excluded from the sweeper, as `sweepable_outpoints` excludes
+				// them from the record below.
 				match self
 					.output_sweeper
 					.track_spendable_outputs(outputs, channel_id, counterparty_node_id, true, None)
 					.await
 				{
-					Ok(_) => return Ok(()),
+					Ok(_) => {},
 					Err(_) => {
 						log_error!(self.logger, "Failed to track spendable outputs");
 						return Err(ReplayEvent());
 					},
 				};
+
+				// Record which channel resolved these outputs only once the sweeper holds them:
+				// the sweep itself must never wait on bookkeeping, and the sweeper's own record
+				// is durable, so a failure here costs a label rather than the funds.
+				if let (Some(counterparty_node_id), Some(channel_id)) =
+					(counterparty_node_id, channel_id)
+				{
+					let channel = Channel { counterparty_node_id, channel_id };
+					for facts in ChannelTxFacts::per_transaction(
+						&channel,
+						None,
+						ChannelOutputRole::Spendable,
+						spendable_outpoints,
+					) {
+						self.record_channel_tx_facts(facts).await;
+					}
+				}
 			},
 			LdkEvent::OpenChannelRequest {
 				temporary_channel_id,
@@ -1834,6 +1928,17 @@ where
 					"LDK Node has only ever persisted ChannelPending events from rust-lightning 0.0.115 or later",
 				);
 
+				let channel = Channel { counterparty_node_id, channel_id };
+				let facts = ChannelTxFacts::new(funding_txo.txid)
+					.with_outputs(
+						&channel,
+						Some(UserChannelId(user_channel_id)),
+						ChannelOutputRole::Funding,
+						[funding_txo.vout],
+					)
+					.with_self_role(TransactionType::Funding { channels: vec![channel.clone()] });
+				self.record_channel_tx_facts(facts).await;
+
 				let event = Event::ChannelPending {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
@@ -1905,6 +2010,20 @@ where
 						channel_id,
 						counterparty_node_id,
 					);
+				}
+
+				// The funding this channel now runs on is either the one it opened with or the
+				// splice round that just locked, so recording it here also catches a round that
+				// locked before anything else reported it.
+				if let Some(funding_txo) = funding_txo {
+					let channel = Channel { counterparty_node_id, channel_id };
+					let facts = ChannelTxFacts::new(funding_txo.txid).with_outputs(
+						&channel,
+						Some(UserChannelId(user_channel_id)),
+						ChannelOutputRole::Funding,
+						[funding_txo.vout],
+					);
+					self.record_channel_tx_facts(facts).await;
 				}
 
 				self.liquidity_source
@@ -2087,6 +2206,64 @@ where
 				}
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
+
+				// Record what the claim is spending only once it has been made: a claim must
+				// never wait on bookkeeping, and LDK re-offers the event until the claim
+				// resolves, so a failure here costs a label rather than the funds.
+				let facts = match &bte {
+					BumpTransactionEvent::ChannelClose {
+						channel_id,
+						counterparty_node_id,
+						commitment_tx,
+						anchor_descriptor,
+						pending_htlcs,
+						..
+					} => {
+						let channel = Channel {
+							counterparty_node_id: *counterparty_node_id,
+							channel_id: *channel_id,
+						};
+						// An HTLC below the dust limit is paid to fees instead of to an output of
+						// its own, and so has no output index to record.
+						let htlc_vouts =
+							pending_htlcs.iter().filter_map(|htlc| htlc.transaction_output_index);
+						vec![ChannelTxFacts::new(commitment_tx.compute_txid())
+							.with_outputs(
+								&channel,
+								None,
+								ChannelOutputRole::Anchor,
+								[anchor_descriptor.outpoint.vout],
+							)
+							.with_outputs(&channel, None, ChannelOutputRole::Htlc, htlc_vouts)
+							.with_self_role(TransactionType::UnilateralClose {
+								counterparty_node_id: *counterparty_node_id,
+								channel_id: *channel_id,
+							})]
+					},
+					BumpTransactionEvent::HTLCResolution {
+						channel_id,
+						counterparty_node_id,
+						htlc_descriptors,
+						..
+					} => {
+						let channel = Channel {
+							counterparty_node_id: *counterparty_node_id,
+							channel_id: *channel_id,
+						};
+						ChannelTxFacts::per_transaction(
+							&channel,
+							None,
+							ChannelOutputRole::Htlc,
+							htlc_descriptors.iter().map(|descriptor| {
+								let outpoint = descriptor.outpoint();
+								(outpoint.txid, outpoint.vout)
+							}),
+						)
+					},
+				};
+				for facts in facts {
+					self.record_channel_tx_facts(facts).await;
+				}
 			},
 			LdkEvent::OnionMessageIntercepted { next_hop, message, .. } => {
 				if let NextMessageHop::NodeId(peer_node_id) = next_hop {
@@ -2231,6 +2408,19 @@ where
 					new_funding_txo,
 				);
 
+				let channel = Channel { counterparty_node_id, channel_id };
+				let facts = ChannelTxFacts::new(new_funding_txo.txid)
+					.with_outputs(
+						&channel,
+						Some(UserChannelId(user_channel_id)),
+						ChannelOutputRole::Funding,
+						[new_funding_txo.vout],
+					)
+					.with_self_role(TransactionType::InteractiveFunding {
+						channels: vec![channel.clone()],
+					});
+				self.record_channel_tx_facts(facts).await;
+
 				let event = Event::SpliceNegotiated {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
@@ -2276,6 +2466,22 @@ where
 		}
 		Ok(())
 	}
+}
+
+/// The outpoints among `outputs` that the sweeper takes charge of, which are the ones a sweep
+/// will spend. LDK reports an output paying a script of this wallet's own — its destination
+/// script, or the shutdown script of a cooperative close — as a `StaticOutput`; the sweeper is
+/// told to leave those alone, and so is the record: whatever spends such an output next is an
+/// ordinary wallet transaction, not a sweep.
+fn sweepable_outpoints(outputs: &[SpendableOutputDescriptor]) -> Vec<(Txid, u32)> {
+	outputs
+		.iter()
+		.filter(|output| !matches!(output, SpendableOutputDescriptor::StaticOutput { .. }))
+		.map(|output| {
+			let outpoint = output.spendable_outpoint();
+			(outpoint.txid, outpoint.index as u32)
+		})
+		.collect()
 }
 
 #[cfg(test)]
@@ -2634,5 +2840,37 @@ mod tests {
 			}
 		}
 		assert_eq!(event_queue.next_event(), None);
+	}
+
+	/// A `StaticOutput` pays a script of this wallet's own, so the sweeper is told to leave it
+	/// alone and nothing about it is recorded: the transaction that spends it next is an
+	/// ordinary wallet transaction, not a sweep. The outputs the sweeper does take are recorded.
+	#[test]
+	fn static_outputs_are_not_recorded_as_spendable() {
+		use bitcoin::hashes::Hash;
+		use lightning::sign::StaticPaymentOutputDescriptor;
+
+		let outpoint =
+			|byte: u8| LdkOutPoint { txid: Txid::from_byte_array([byte; 32]), index: byte as u16 };
+		let output = bitcoin::TxOut {
+			value: Amount::from_sat(1_000),
+			script_pubkey: bitcoin::ScriptBuf::new(),
+		};
+		let outputs = vec![
+			SpendableOutputDescriptor::StaticOutput {
+				outpoint: outpoint(1),
+				output: output.clone(),
+				channel_keys_id: Some([1u8; 32]),
+			},
+			SpendableOutputDescriptor::StaticPaymentOutput(StaticPaymentOutputDescriptor {
+				outpoint: outpoint(2),
+				output,
+				channel_keys_id: [2u8; 32],
+				channel_value_satoshis: 100_000,
+				channel_transaction_parameters: None,
+			}),
+		];
+
+		assert_eq!(sweepable_outpoints(&outputs), vec![(outpoint(2).txid, 2)]);
 	}
 }
