@@ -712,17 +712,19 @@ impl Wallet {
 
 	/// Fails a funding payment whose transaction has irrevocably lost a conflict: a transaction
 	/// outside the record's candidate history — e.g. a channel close double-spending a pending
-	/// splice's shared input — has confirmed through [`ANTI_REORG_DELAY`] while neither the
-	/// record's transaction nor any candidate is canonical anymore. Returns whether the payment
-	/// was failed; failing also removes the pending entry, dropping the dead record from the
-	/// tip-change pass. (Its transaction was already excluded from rebroadcast by the same
-	/// canonical-only `get_tx` gate used below.)
+	/// splice's shared input — has confirmed through [`ANTI_REORG_DELAY`], and a transaction
+	/// confirmed that deep spends an input of the record's transaction and of every candidate.
+	/// Returns whether the payment was failed; failing also removes the pending entry, dropping
+	/// the failed record from the tip-change pass.
 	///
 	/// Only funding-classified records are considered: nothing re-submits a replaced funding
-	/// transaction under the same record (an RBF round is a new candidate), so a buried foreign
-	/// conflict is final for them. The liveness check guards the case where the conflict
-	/// double-spent only one round of the negotiation: as long as some candidate — including one
-	/// classification hasn't recorded yet — can still confirm, the record must stay pending.
+	/// transaction under the same record (an RBF round is a new candidate), so a foreign conflict
+	/// confirmed to that depth is final for them. Each round is judged by its own inputs because
+	/// the conflict may have double-spent only one round of the negotiation: as long as some
+	/// candidate — including one classification hasn't recorded yet — can still confirm, the
+	/// record must stay pending. Whether a round is still canonical does not answer that: BDK also
+	/// drops a round from the canonical set when the mempool evicts it, and an evicted round can
+	/// be rebroadcast and confirm.
 	async fn fail_funding_payment_lost_to_conflict(
 		&self, payment: &PendingPaymentDetails, tip_height: u32,
 	) -> Result<bool, Error> {
@@ -777,19 +779,27 @@ impl Wallet {
 
 		let lost = {
 			let locked_wallet = self.inner.lock().expect("lock");
-			// `get_tx` is canonical-only: a transaction that lost to a confirmed conflict
-			// returns `None`, while one that can still confirm is `Some`.
-			let a_candidate_is_live = locked_wallet.get_tx(record_txid).is_some()
-				|| entry.candidates.iter().any(|c| locked_wallet.get_tx(c.txid).is_some());
-			!a_candidate_is_live
-				&& foreign_conflicts.iter().any(|conflict| {
-					match locked_wallet.get_tx(*conflict).map(|tx| tx.chain_position) {
-						Some(ChainPosition::Confirmed { anchor, .. }) => {
-							tip_height >= anchor.block_id.height + ANTI_REORG_DELAY - 1
-						},
-						_ => false,
-					}
-				})
+			let confirmed_to_depth =
+				|txid: Txid| match locked_wallet.get_tx(txid).map(|tx| tx.chain_position) {
+					Some(ChainPosition::Confirmed { anchor, .. }) => {
+						tip_height >= anchor.block_id.height + ANTI_REORG_DELAY - 1
+					},
+					_ => false,
+				};
+			// A round can no longer confirm once a transaction confirmed to depth spends one of
+			// its inputs. The graph keeps evicted transactions, so an evicted round is still
+			// judged by its inputs; a round the wallet never saw cannot be rebroadcast and counts
+			// the same.
+			let graph = locked_wallet.tx_graph();
+			let cannot_confirm = |txid: Txid| match graph.get_tx(txid) {
+				Some(tx) => {
+					graph.direct_conflicts(&tx).any(|(_, spender)| confirmed_to_depth(spender))
+				},
+				None => true,
+			};
+			cannot_confirm(record_txid)
+				&& entry.candidates.iter().all(|c| cannot_confirm(c.txid))
+				&& foreign_conflicts.iter().any(|conflict| confirmed_to_depth(*conflict))
 		};
 		if !lost {
 			return Ok(false);
@@ -4103,6 +4113,15 @@ mod tests {
 		locked.apply_update(Update { tx_update, ..Default::default() }).unwrap();
 	}
 
+	/// Marks `txid` as evicted from the mempool after it was seen, so the BDK wallet still holds
+	/// the transaction but no longer considers it canonical.
+	fn evict_tx(wallet: &Wallet, txid: Txid) {
+		let mut locked = wallet.inner.lock().unwrap();
+		let mut tx_update = bdk_chain::TxUpdate::default();
+		tx_update.evicted_ats = [(txid, 101)].into();
+		locked.apply_update(Update { tx_update, ..Default::default() }).unwrap();
+	}
+
 	/// Builds a transaction paying a wallet address, spending an outpoint derived from
 	/// `input_byte` (distinct bytes yield non-conflicting transactions).
 	fn wallet_paying_tx(wallet: &Wallet, input_byte: u8) -> Transaction {
@@ -4545,7 +4564,7 @@ mod tests {
 	/// Continues the story above: once the conflicting close confirms through the anti-reorg
 	/// depth, the splice's funding transaction can never confirm — its shared input is spent for
 	/// good. The record must fail rather than stay `Pending` forever, and removing the pending
-	/// entry stops the dead transaction's rebroadcast on every tip change.
+	/// entry stops the lost transaction's rebroadcast on every tip change.
 	#[tokio::test]
 	async fn funding_payment_fails_once_a_foreign_conflict_confirms_to_depth() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -4601,8 +4620,89 @@ mod tests {
 		assert_eq!(payment.fee_paid_msat, Some(500));
 		assert!(
 			wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none(),
-			"the entry must go so the dead transaction stops being rebroadcast"
+			"the entry must go so the lost transaction stops being rebroadcast"
 		);
+	}
+
+	/// A round that fell out of the mempool has not lost: BDK drops an evicted transaction from
+	/// the canonical set just as it drops one displaced by a confirmed conflict, but an evicted
+	/// round can be rebroadcast and confirm. With one round double-spent by a close confirmed to
+	/// depth and the other merely evicted, the record must stay `Pending`; it is lost only once
+	/// a transaction confirmed to depth spends an input of every round.
+	#[tokio::test]
+	async fn funding_payment_survives_while_an_evicted_candidate_can_still_confirm() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		// Two rounds of one negotiation, both seen in the mempool.
+		let first_round = wallet_paying_tx(&wallet, 1);
+		let first_txid = first_round.compute_txid();
+		let second_round = wallet_paying_tx(&wallet, 2);
+		let second_txid = second_round.compute_txid();
+		insert_unconfirmed_tx(&wallet, first_round);
+		insert_unconfirmed_tx(&wallet, second_round);
+
+		let payment_id = PaymentId([22u8; 32]);
+		let candidates = vec![
+			FundingTxCandidate {
+				txid: first_txid,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+			},
+			FundingTxCandidate {
+				txid: second_txid,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(600),
+			},
+		];
+		let details =
+			interactive_funding_details(payment_id, second_txid, Some(1_000_000), Some(600));
+		wallet.persist_funding_payment(details, candidates).await.unwrap();
+
+		// A close double-spends the first round's input and confirms through the anti-reorg
+		// depth, while the second round merely drops out of the mempool.
+		let close_tx = wallet_paying_tx(&wallet, 1);
+		let close_txid = close_tx.compute_txid();
+		wallet
+			.pending_payment_store
+			.update(PendingPaymentDetailsUpdate {
+				id: payment_id,
+				payment_update: None,
+				conflicting_txids: Some(vec![close_txid]),
+				candidates: Vec::new(),
+			})
+			.await
+			.unwrap();
+		insert_confirmed_tx(&wallet, close_tx, 5);
+		evict_tx(&wallet, second_txid);
+
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let event = WalletEvent::ChainTipChanged {
+			old_tip: block_id(9),
+			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Pending, "the evicted round can still confirm");
+		let entry = wallet.pending_payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(entry.candidates.len(), 2, "both rounds stay on record");
+
+		// A second close spends the evicted round's input and confirms to depth too: no round
+		// can confirm now. It never displaced a canonical round, so the conflict list does not
+		// name it; the loss is read from the wallet's transaction graph.
+		let second_close = wallet_paying_tx(&wallet, 2);
+		insert_confirmed_tx(&wallet, second_close, 6);
+		let event = WalletEvent::ChainTipChanged {
+			old_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+			new_tip: block_id(6 + ANTI_REORG_DELAY - 1),
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+
+		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(payment.status, PaymentStatus::Failed);
+		assert!(wallet.pending_payment_store.get(&payment_id).await.unwrap().is_none());
 	}
 
 	/// A confirmed conflict that is one of the record's own candidates is RBF resolution, not a
@@ -4821,7 +4921,7 @@ mod tests {
 
 	/// A crash between the failure's record write and its entry removal loses the wallet
 	/// changeset too, so the restart's catch-up sync replays the same events: `TxReplaced` for
-	/// the dead funding transaction resolves through the lingering entry to the already-`Failed`
+	/// the lost funding transaction resolves through the lingering entry to the already-`Failed`
 	/// record. Re-embedding that record would stamp `Failed` into the entry and hide it from the
 	/// pending listing that repairs it; the replay must instead finish the interrupted removal.
 	#[tokio::test]
