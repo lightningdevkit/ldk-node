@@ -35,16 +35,11 @@ use crate::config::ElectrumSyncConfig;
 use crate::config::EsploraSyncConfig;
 use crate::config::{BackgroundSyncConfig, Config, WALLET_SYNC_INTERVAL_MINIMUM_SECS};
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::BroadcastPackage;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
-
-/// How long to wait before re-classifying a package whose classification failed. Long enough to
-/// give a struggling store room to recover, short against the ~minutes until the transaction
-/// could confirm.
-pub(crate) const FAILED_CLASSIFY_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// We use this parent-child TRUC package to make sure the configured chain source supports
 /// broadcasting packages via the `submitpackage` Bitcoin Core RPC.
@@ -568,23 +563,9 @@ impl ChainSource {
 		}
 	}
 
-	/// Classifies the package's funding broadcasts into payment records, then broadcasts it.
-	/// Returns the package back on classification failure so the caller can retry it after a
-	/// delay: broadcasting a tx we failed to record would leave it on-chain without a payment,
-	/// while dropping the package would keep a funding transaction off-chain until LDK re-hands
-	/// it when the channel next resumes — no timer re-broadcasts it, and the wallet's tip-change
-	/// re-broadcast covers recorded transactions only.
-	async fn classify_and_broadcast(
-		&self, package: BroadcastPackage,
-	) -> Result<(), BroadcastPackage> {
-		if let Err(e) = self.tx_broadcaster.classify_package(&package).await {
-			log_error!(
-				self.logger,
-				"Delaying broadcast: failed to persist payment records, will retry: {:?}",
-				e,
-			);
-			return Err(package);
-		}
+	/// Hands the package to the configured chain source, parents before their child so a CPFP
+	/// package a chain source submits one transaction at a time is still accepted.
+	async fn broadcast(&self, package: BroadcastPackage) {
 		let package = package.into_sorted_transactions();
 		match &self.kind {
 			#[cfg(feature = "chain-esplora")]
@@ -600,7 +581,6 @@ impl ChainSource {
 				bitcoind_chain_source.process_transaction_broadcast(package).await
 			},
 		}
-		Ok(())
 	}
 
 	pub(crate) async fn continuously_process_broadcast_queue(
@@ -609,8 +589,7 @@ impl ChainSource {
 		loop {
 			let package = tokio::select! {
 				// A stop request is polled first, so a queue that always has a package ready
-				// cannot starve it. Which package comes next — a fresh one before a due retry —
-				// is decided in `BroadcastQueue::next`.
+				// cannot starve it.
 				biased;
 				_ = stop_tx_bcast_receiver.changed() => {
 					log_debug!(
@@ -621,10 +600,7 @@ impl ChainSource {
 				}
 				package = self.tx_broadcaster.next_package() => package,
 			};
-			if let Err(package) = self.classify_and_broadcast(package).await {
-				let retry_at = tokio::time::Instant::now() + FAILED_CLASSIFY_RETRY_DELAY;
-				self.tx_broadcaster.retry_package(package, retry_at);
-			}
+			self.broadcast(package).await;
 		}
 	}
 }

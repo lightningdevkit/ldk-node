@@ -33,8 +33,7 @@ use bitcoin::{
 	WPubkeyHash, Weight, WitnessProgram, WitnessVersion,
 };
 use lightning::chain::chaininterface::{
-	ChannelFunding, FundingCandidate, FundingPurpose, TransactionType as LdkTransactionType,
-	INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
+	ChannelFunding, FundingCandidate, FundingPurpose, INCREMENTAL_RELAY_FEE_SAT_PER_1000_WEIGHT,
 };
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::chain::transaction::OutPoint as LdkOutPoint;
@@ -64,7 +63,7 @@ use crate::data_store::{KeepAllEntries, KeepLeastRecentlyUsed};
 use crate::data_store::{StorableObject, UpdatableObject};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, log_warn, LdkLogger, Logger};
-use crate::payment::pending_payment_store::{PendingPaymentDetailsUpdate, SpliceIntent};
+use crate::payment::pending_payment_store::SpliceIntent;
 use crate::payment::store::{Channel, ConfirmationStatus, PaymentDetailsUpdate};
 use crate::payment::{
 	FundingTxCandidate, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
@@ -416,9 +415,9 @@ impl Wallet {
 					};
 
 					// Hold the cross-store lock from payment-id resolution through the last write:
-					// a classification landing in between would leave the id resolved against a
-					// torn candidate index and the generic fallback below overwriting (or
-					// duplicating) the record classification just wrote.
+					// a funding-record write landing in between would leave the id resolved
+					// against a torn candidate index and the generic fallback below overwriting
+					// (or duplicating) the record that write had just made.
 					let stores = self.payment_stores.lock().await;
 
 					let mut payment_id = self
@@ -530,8 +529,8 @@ impl Wallet {
 								let payment_id = details.id;
 								if new_tip.height >= height + ANTI_REORG_DELAY - 1 {
 									// Graduate from the live record, not the snapshot listed
-									// above: a classification landing since then must not have
-									// its figures rolled back. The status-only update carries
+									// above: a write landing since then must not have its
+									// figures rolled back. The status-only update carries
 									// no figures/txid/confirmation, so nothing a concurrent
 									// writer wrote can be clobbered; the update machinery bumps
 									// `latest_update_timestamp` and no-ops when the record is
@@ -606,7 +605,7 @@ impl Wallet {
 						if !txs_to_broadcast.is_empty() {
 							let tx_count = txs_to_broadcast.len();
 							for tx in txs_to_broadcast {
-								self.broadcaster.broadcast_unclassified_transaction(tx);
+								self.broadcaster.broadcast(tx);
 							}
 							log_info!(
 								self.logger,
@@ -618,7 +617,7 @@ impl Wallet {
 				},
 				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
 					// See `TxConfirmed`: id resolution and the writes below must not interleave
-					// with classification.
+					// with the funding-record writers.
 					let stores = self.payment_stores.lock().await;
 
 					let mut payment_id = self
@@ -673,9 +672,9 @@ impl Wallet {
 				},
 				WalletEvent::TxReplaced { txid, conflicts, .. } => {
 					// See `TxConfirmed`: id resolution and the writes below must not interleave
-					// with classification. The pending entry written below embeds a read of the
-					// payment record, which must not go stale against a concurrent
-					// classification either.
+					// with the funding-record writers. The pending entry written below embeds a
+					// read of the payment record, which must not go stale against a concurrent
+					// write either.
 					let stores = self.payment_stores.lock().await;
 
 					let Some(payment_id) = self.find_payment_by_txid(txid).await? else {
@@ -694,9 +693,8 @@ impl Wallet {
 					conflict_txids.push(txid);
 					// The payment already exists in the store at this point: `bump_fee_rbf`
 					// updates the payment store with the replacement txid before the next sync
-					// cycle, and an id resolved through the candidate history comes from a
-					// classification whose payment-store write strictly precedes the candidate
-					// history it was resolved from. So we can safely fetch it here.
+					// cycle, and sync itself records a transaction the first time it observes it,
+					// before anything can report it replaced. So we can safely fetch it here.
 					let stored_payment = stores.payment(&payment_id).await?;
 					debug_assert!(
 						stored_payment.is_some(),
@@ -720,7 +718,7 @@ impl Wallet {
 				},
 				WalletEvent::TxDropped { txid, tx } => {
 					// See `TxConfirmed`: id resolution and the writes below must not interleave
-					// with classification.
+					// with the funding-record writers.
 					let stores = self.payment_stores.lock().await;
 
 					let mut payment_id = self
@@ -832,12 +830,12 @@ impl Wallet {
 
 	/// The id to record a transaction under that the funding-status check found foreign to the
 	/// funding record resolved for it as `resolved_id`: its own txid-derived id, or `None` when a
-	/// funding record sits there already. A funding record wallet sync created before
-	/// classification keeps the txid-derived id of that transaction, so a wallet event for it
+	/// funding record sits there already. A funding record wallet sync created for a round it
+	/// could not attribute keeps the txid-derived id of that transaction, so a wallet event for it
 	/// falls back to this id whenever the pending entry no longer maps it — which only happens
 	/// once the negotiation settled and the entry was removed. The generic event handling must
 	/// then skip its write: merging a wallet-view `Pending` payment into the settled record would
-	/// resurrect it with figures no classification derived. When `resolved_id` is the txid-derived
+	/// resurrect it with figures the negotiation never reported. When `resolved_id` is the txid-derived
 	/// id already, the funding-status check has read that record, and finding the transaction
 	/// foreign to it is this very case; only a fallback from a different id needs a read.
 	async fn foreign_transaction_payment_id(
@@ -1946,7 +1944,7 @@ impl Wallet {
 		})?;
 
 		let txid = tx.compute_txid();
-		self.broadcaster.broadcast_unclassified_transaction(tx);
+		self.broadcaster.broadcast(tx);
 
 		match send_amount {
 			OnchainSendAmount::ExactRetainingReserve { amount_sats, .. } => {
@@ -2243,147 +2241,6 @@ impl Wallet {
 		})?;
 
 		Ok(tx)
-	}
-
-	/// Classifies an on-chain broadcast handed to the broadcaster by LDK, recording a payment for it
-	/// before it is sent when it affects this node's wallet.
-	pub(crate) async fn classify_broadcast(
-		&self, tx: &Transaction, tx_type: &LdkTransactionType,
-	) -> Result<(), Error> {
-		match tx_type {
-			LdkTransactionType::Funding { channels } => {
-				self.classify_funding(tx, channels, tx_type.clone().into()).await
-			},
-			// A splice round this node contributed to is recorded when it is signed
-			// ([`Self::record_signed_funding`]) and marked as broadcast once LDK reports the splice
-			// negotiated ([`Self::record_broadcast_splice_round`]), so its broadcast has nothing
-			// left to record; a round without a contribution of ours is left for wallet sync.
-			LdkTransactionType::InteractiveFunding { .. } => Ok(()),
-			LdkTransactionType::UnilateralClose { .. } => Ok(()),
-			LdkTransactionType::CooperativeClose { .. }
-			| LdkTransactionType::AnchorBump { .. }
-			| LdkTransactionType::Claim { .. }
-			| LdkTransactionType::Sweep { .. } => {
-				self.classify_regular_broadcast(tx, tx_type.clone().into()).await
-			},
-		}
-	}
-
-	/// Records a single-channel funding (channel open) broadcast as a pending on-chain payment,
-	/// tagged with its transaction type. Amount and fee come from the wallet's view of the
-	/// transaction. Batched funding is left for wallet sync.
-	async fn classify_funding(
-		&self, tx: &Transaction, channels: &[(PublicKey, ChannelId)], tx_type: TransactionType,
-	) -> Result<(), Error> {
-		if channels.len() != 1 {
-			if channels.len() > 1 {
-				log_trace!(
-					self.logger,
-					"Skipping funding classification for batched broadcast ({} channels)",
-					channels.len()
-				);
-			}
-			return Ok(());
-		}
-
-		let (_counterparty_node_id, channel_id) = channels[0];
-		let txid = tx.compute_txid();
-		let (amount_msat, fee_paid_msat, direction) = self.onchain_payment_fields(tx);
-
-		// A funding transaction that moves no wallet funds carries nothing to record — e.g. LDK
-		// re-broadcasts a promoted-but-unconfirmed 0conf splice through its generic funding path,
-		// including splices the signing-time recording deliberately declined (no local
-		// contribution, or a splice-out moving no wallet funds). Recording it here would
-		// mint a zero-amount payment that nothing ever confirms. Skip on the wallet-derived
-		// amount alone — the condition `interactive_funding_record` declines on; anything
-		// declined there must be skipped here, or its re-broadcast resurrects the record. The fee
-		// is no participation signal: the wallet resolves a splice's shared input whenever the
-		// previous funding transaction touched it (e.g. it funded the original channel open).
-		//
-		// TODO(https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4878): The
-		// re-typed re-broadcasts are upstream behavior that should be fixed in `rust-lightning`:
-		// the re-offer ought to keep its `InteractiveFunding` classification, or not recur at
-		// all. `zero_conf_splice_out_funding_rebroadcast_canary` pins the current behavior by
-		// asserting the log line below; when it fails against a newer LDK, re-evaluate whether
-		// this skip still sees traffic.
-		if amount_msat == Some(0) {
-			log_trace!(
-				self.logger,
-				"Not recording channel-funding broadcast {} as a payment: no wallet-level activity",
-				txid,
-			);
-			return Ok(());
-		}
-
-		// A round this node signed is on record as an interactive funding of its channels, and
-		// that is what the transaction is however it is re-offered. Recording the re-offer would
-		// name the round a plain funding of the channel and give it the wallet's view of a funding
-		// output both parties own — the record wallet sync will create for it says both correctly
-		// — so leave the transaction to sync. A record the re-offer finds in place comes through
-		// unchanged either way (`funding_reclassification_update` declines the downgrade); this is
-		// what keeps a re-offer arriving before sync has seen the transaction from creating the
-		// record itself.
-		let named_interactive = self.channel_tx_facts(&txid).await.is_some_and(|facts| {
-			matches!(facts.self_role, Some(TransactionType::InteractiveFunding { .. }))
-		});
-		if named_interactive {
-			log_trace!(
-				self.logger,
-				"Keeping interactive-funding classification over funding-typed rebroadcast {}",
-				txid,
-			);
-			return Ok(());
-		}
-
-		// Resolution and the writes below must share one lock acquisition: resolved outside it,
-		// the id could go stale against a record wallet sync creates for the same transaction,
-		// and the write below would create a divergent record.
-		let stores = self.payment_stores.lock().await;
-
-		// Adopt the id of a record that already tracks this transaction — e.g. a 0conf splice
-		// re-broadcast through LDK's generic funding path resolves back to its
-		// interactive-funding record here — otherwise generate a fresh id.
-		let payment_id = self.find_payment_by_txid(txid).await?.unwrap_or_else(random_payment_id);
-
-		let details = PaymentDetails::new(
-			payment_id,
-			PaymentKind::Onchain {
-				txid,
-				status: ConfirmationStatus::Unconfirmed,
-				tx_type: Some(tx_type),
-			},
-			amount_msat,
-			fee_paid_msat,
-			direction,
-			PaymentStatus::Pending,
-		);
-		let prior = self.persist_funding_payment_locked(&stores, details, Vec::new()).await?;
-		// A promoted-but-unconfirmed 0conf splice comes back through this generic path re-typed
-		// and carrying wallet-view figures; `funding_reclassification_update` declines the
-		// downgrade, leaving no trace that a re-broadcast arrived. Log the arrival so tests can
-		// observe the traffic, from the record the write found rather than a read of our own.
-		if prior.is_some_and(|prior| {
-			matches!(
-				prior.kind,
-				PaymentKind::Onchain {
-					tx_type: Some(TransactionType::InteractiveFunding { .. }),
-					..
-				}
-			)
-		}) {
-			log_trace!(
-				self.logger,
-				"Keeping interactive-funding classification over funding-typed rebroadcast {}",
-				txid,
-			);
-		}
-		log_debug!(
-			self.logger,
-			"Recorded channel-funding broadcast {} for channel {}",
-			txid,
-			channel_id,
-		);
-		Ok(())
 	}
 
 	/// Returns the `PaymentId` of the user-initiated splice intent the round `candidate` belongs
@@ -3073,189 +2930,31 @@ impl Wallet {
 		Ok(())
 	}
 
-	/// Records a non-funding LDK broadcast as an on-chain payment, tagged with its transaction type.
-	/// Wallet sync later refreshes confirmation status while preserving the type.
-	async fn classify_regular_broadcast(
-		&self, tx: &Transaction, tx_type: TransactionType,
-	) -> Result<(), Error> {
-		let txid = tx.compute_txid();
-		let (amount_msat, fee_paid_msat, direction) = self.onchain_payment_fields(tx);
-
-		if amount_msat == Some(0) && fee_paid_msat == Some(0) {
-			log_trace!(
-				self.logger,
-				"Not recording classified broadcast {} as a payment: no wallet-level activity",
-				txid,
-			);
-			return Ok(());
-		}
-
-		let details = PaymentDetails::new(
-			PaymentId(txid.to_byte_array()),
-			PaymentKind::Onchain {
-				txid,
-				status: ConfirmationStatus::Unconfirmed,
-				tx_type: Some(tx_type),
-			},
-			amount_msat,
-			fee_paid_msat,
-			direction,
-			PaymentStatus::Pending,
-		);
-		self.payment_stores.lock().await.insert_or_update_payment(details).await?;
-		log_debug!(self.logger, "Recorded classified on-chain broadcast {}", txid);
-		Ok(())
-	}
-
-	/// Writes a freshly-classified funding payment to the authoritative payment store, adds a
-	/// pending-store index entry, so wallet sync graduates it through `ANTI_REORG_DELAY`, and
-	/// merges the duplicate records wallet sync created for its candidates, as
-	/// [`Self::merge_duplicate_candidate_records`] describes. Returns the payment store's record as
-	/// it was before the write.
-	///
-	/// Production callers go through [`Self::persist_funding_payment_locked`] because they resolve
-	/// the record's id under the same lock acquisition; this wrapper models that acquisition for
-	/// tests writing a record mid-flow.
+	/// Records a funding payment the way the node does: the rounds this node signed supply the
+	/// candidate history, wallet sync writes the payment record and its pending-store entry once
+	/// it observes the transaction, and the duplicates sync created for those rounds are merged
+	/// into the record. Composes that sequence for tests that need a recorded funding payment to
+	/// act on.
 	#[cfg(test)]
-	async fn persist_funding_payment(
+	async fn record_funding_payment(
 		&self, details: PaymentDetails, candidates: Vec<FundingTxCandidate>,
-	) -> Result<Option<PaymentDetails>, Error> {
-		// Hold the cross-store lock across both writes so a funding confirmation never observes
-		// the record classified but the candidate history it needs still missing.
+	) -> Result<(), Error> {
 		let stores = self.payment_stores.lock().await;
 		let id = details.id;
-		let prior =
-			self.persist_funding_payment_locked(&stores, details, candidates.clone()).await?;
-		self.merge_duplicate_candidate_records(&stores, id, &candidates).await?;
-		Ok(prior)
-	}
-
-	/// Writes a freshly recorded funding payment to the authoritative payment store and adds a
-	/// pending-store index entry, so wallet sync graduates it through `ANTI_REORG_DELAY`. The
-	/// caller holds the cross-store lock, resolving the record's id and performing both store
-	/// writes under one acquisition, so a funding confirmation never observes the record written
-	/// but the candidate history it needs still missing, and the resolved id never goes stale
-	/// against a concurrent sync write. Returns the payment store's record as it was before the
-	/// write, read inside the write's own critical section, so a caller needs no read of its own to
-	/// know what the write merged into.
-	async fn persist_funding_payment_locked(
-		&self, stores: &PaymentStoresGuard<'_>, details: PaymentDetails,
-		candidates: Vec<FundingTxCandidate>,
-	) -> Result<Option<PaymentDetails>, Error> {
-		// Everything this write does depends on the record's current state, so all of it must be
-		// decided inside the store's critical section. When a record exists — no matter when it
-		// appeared — only the classification (`tx_type`) and the figures of whichever candidate
-		// the record's state makes authoritative are merged: a full merge of the fresh
-		// Pending/Unconfirmed details would downgrade the confirmation state the wallet-sync
-		// events own. Which candidate is authoritative is equally stateful: substituting the
-		// confirmed candidate's figures requires seeing the confirmation. Selected from a read
-		// taken before the lock, the choice goes stale when a confirmation lands in between —
-		// the update still names the actively-broadcast candidate, the confirmed-figures guard
-		// then rightly refuses it, and the record is left with figures no classification derived.
-		let id = details.id;
-		let mut seen = None;
-		let written = stores
-			.mutate_payment(&id, |existing| {
-				let reclassification =
-					funding_reclassification_update(details.clone(), &candidates, existing);
-				seen = Some((existing.cloned(), reclassification.clone()));
-				match existing {
-					None => Some(details.clone()),
-					Some(current) => {
-						let mut updated = current.clone();
-						updated.update(reclassification).then_some(updated)
-					},
-				}
-			})
-			.await;
-		// The closure runs only once the record has been read, so a write that failed before it ran
-		// wrote nothing.
-		written?;
-		let (prior, update) = seen.expect("the mutate closure always runs");
-
-		// The pending index must exist exactly while the authoritative record is Pending:
-		// graduation and rebroadcast read it, and a graduated payment must not be re-indexed.
-		// Deciding by the post-write status rather than by whether the write inserted also
-		// repairs a missing index — a crash or failed write between the two stores leaves a
-		// Pending record with no entry, and a merge alone would never recreate it, leaving the
-		// payment unable to graduate and its txids unmapped.
-		//
-		// The status must be read inside the pending store's critical section. Graduation writes
-		// `Succeeded` before removing the entry, so a read there that still observes `Pending`
-		// is ordered before the removal, which then also deletes anything inserted here. A
-		// status read taken before this write goes stale when graduation lands in between, and
-		// would re-index the graduated payment.
-		let mut leftover_intent_to_remove = None;
-		// The `move` closure would capture the `Option` by value, so hand it a reference; the
-		// borrow ends with the mutate's future, before the leftover is read below.
-		let leftover = &mut leftover_intent_to_remove;
-		stores
-			.mutate_pending_payment_async(&id, move |existing| async move {
-				// The record was written above and removal serializes on the cross-store lock held
-				// here, so absence means the write failed out; fall back to the fresh details. A
-				// promoted or (re)created entry embeds this post-write record rather than the
-				// fresh Unconfirmed details, so a confirmation wallet sync already recorded keeps
-				// driving graduation.
-				let recorded = stores.payment(&id).await?.unwrap_or(details);
-				Ok(match existing {
-					// First time we record this funding payment — or a crash between the two
-					// store writes left a Pending record with no index entry: (re)create it so
-					// the payment can graduate and its candidate txids stay mapped. A graduated
-					// payment is never `Pending`, so absence with an advanced record means the
-					// graduation path removed the entry and it must not be re-indexed.
-					None => (recorded.status == PaymentStatus::Pending).then(|| {
-						PendingPaymentDetails::tracked(recorded, Vec::new(), candidates, None)
-					}),
-					// An entry without a record yet — a pre-broadcast splice intent, the rounds
-					// an earlier signing recorded, or both — is promoted to carry this record,
-					// keeping everything it tracks. If the payment already advanced beyond
-					// `Pending` (wallet sync confirmed it through `ANTI_REORG_DELAY` first), it
-					// must not enter the pending store — and the splice behind the entry
-					// confirmed, so the leftover entry is removed below rather than left to look
-					// like a splice still in flight after a restart.
-					Some(mut entry) if entry.details().is_none() => {
-						if recorded.status == PaymentStatus::Pending {
-							entry.details = Some(recorded);
-							if !candidates.is_empty() {
-								entry.candidates = candidates;
-							}
-							Some(entry)
-						} else {
-							*leftover = entry.splice_intent;
-							None
-						}
-					},
-					// The entry predates this write — an earlier round's recording or wallet sync
-					// recorded the transaction before this write (sync's arms and this write pair
-					// serialize on the cross-store lock, so nothing lands in between): merge only
-					// the funding classification (`tx_type`, candidate history and the figures of
-					// whichever candidate the record's state makes authoritative) into it.
-					Some(mut tracked) => {
-						let pending_update = PendingPaymentDetailsUpdate {
-							id,
-							payment_update: Some(update),
-							conflicting_txids: None,
-							candidates,
-							splice_intent: None,
-						};
-						tracked.update(pending_update).then_some(tracked)
-					},
-				})
-			})
-			.await?;
-		if let Some(intent) = leftover_intent_to_remove {
-			// Only remove the record while it still is the bare intent the closure saw: a fee bump
-			// submitted in between joins the bare record and replaces its intent, and that live
-			// intent must stay.
+		if !candidates.is_empty() {
 			stores
-				.remove_pending_payment_if(&id, |record| {
-					record.details().is_none()
-						&& record.candidates().is_empty()
-						&& record.splice_intent() == Some(&intent)
+				.mutate_pending_payment(&id, |existing| {
+					let mut entry = existing.cloned().unwrap_or_else(|| {
+						PendingPaymentDetails::signed_rounds(id, Vec::new(), Vec::new(), None)
+					});
+					entry.candidates = candidates.clone();
+					Some(entry)
 				})
 				.await?;
 		}
-		Ok(prior)
+		stores.insert_or_update_payment(details.clone()).await?;
+		self.upsert_pending_payment(&stores, details, Vec::new()).await?;
+		self.merge_duplicate_candidate_records(&stores, id, &candidates).await
 	}
 
 	/// Merges duplicate records wallet sync created for this funding payment's candidates before
@@ -3284,9 +2983,9 @@ impl Wallet {
 				Some(duplicate) => duplicate,
 				None => continue,
 			};
-			// Only a duplicate view of this candidate's transaction qualifies: an untyped record
-			// wallet sync created, or one a funding-typed rebroadcast classified onto it. Anything
-			// else keyed by the txid-derived id is left alone.
+			// Only a duplicate view of this candidate's transaction qualifies: a record wallet
+			// sync created for the round before it was a candidate, left untyped or named a plain
+			// funding. Anything else keyed by the txid-derived id is left alone.
 			let status = match &duplicate.kind {
 				PaymentKind::Onchain {
 					txid,
@@ -3395,7 +3094,7 @@ impl Wallet {
 		stores
 			.mutate_pending_payment_async(&id, move |existing| async move {
 				// Only `Pending` payments belong in the pending store. Like in
-				// [`Self::persist_funding_payment`], the authoritative status is re-read inside
+				// [`Self::upsert_pending_payment`], the authoritative status is re-read inside
 				// the store's critical section, where it cannot go stale against graduation.
 				let is_pending = stores
 					.payment(&id)
@@ -3435,7 +3134,7 @@ impl Wallet {
 	/// would ever clean it up, since graduation only removes entries whose record is still live.
 	pub(crate) async fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
 		// Hold the cross-store lock so the two-store removal cannot interleave with a sync arm's
-		// or classification's resolve-then-write sequence. The pending entry goes first: a failure
+		// or a funding-record writer's resolve-then-write sequence. The pending entry goes first: a failure
 		// in between then leaves an unindexed record (benign, and the retry removes it) rather
 		// than an entry indexing a removed record.
 		let stores = self.payment_stores.lock().await;
@@ -3485,10 +3184,10 @@ impl Wallet {
 		}
 
 		// The pending store only indexes in-flight records — graduation removes the entry — so a
-		// graduated record's transaction resolves through the payment store itself. Without this, a
-		// funding-typed broadcast classified after graduation (e.g. LDK re-broadcasting a promoted
-		// 0conf splice whose confirmation landed while the node was offline) would create a
-		// duplicate record, and a post-graduation reorg's events would never reach the record.
+		// graduated record's transaction resolves through the payment store itself. Without this,
+		// a wallet event naming a graduated record's transaction — a post-graduation reorg, or
+		// the first sight of a transaction whose confirmation landed while the node was offline —
+		// would miss the record and create a duplicate under the transaction's own id.
 		let mut page_token = None;
 		loop {
 			let page = self.payment_stores.payments_page(page_token).await?;
@@ -3516,8 +3215,8 @@ impl Wallet {
 	/// Graduation to `Succeeded` is left to `ChainTipChanged` after `ANTI_REORG_DELAY`.
 	///
 	/// The caller must hold the [`PaymentStores`] lock — from resolving `payment_id`
-	/// through its own last write, not just across this call — so that classification's two-store
-	/// write pair cannot interleave with the caller's decision sequence. The `stores` guard
+	/// through its own last write, not just across this call — so that a funding-record writer's
+	/// two-store write pair cannot interleave with the caller's decision sequence. The `stores` guard
 	/// proves the lock is held across this call; the rest of that contract is the caller's.
 	async fn apply_funding_status_update_locked(
 		&self, stores: &PaymentStoresGuard<'_>, payment_id: PaymentId, event_txid: Txid,
@@ -3525,8 +3224,8 @@ impl Wallet {
 	) -> Result<FundingStatusUpdate, Error> {
 		// The caller's wallet-level lock keeps the candidate history stable while we await its
 		// read. The funding-type gate, the candidate lookup, and the write then share the payment
-		// store's mutation lock: against a separate payment `get`, a classification merging in
-		// between would have its `tx_type` and contribution figures clobbered by this stale
+		// store's mutation lock: against a separate payment `get`, a funding-record write merging
+		// in between would have its `tx_type` and contribution figures clobbered by this stale
 		// snapshot.
 		let pending_payment = stores.pending_payment(&payment_id).await?;
 		let mut outcome = FundingStatusUpdate::NotFunding;
@@ -3855,7 +3554,7 @@ impl Wallet {
 		stores.insert_or_update_payment(new_payment.clone()).await?;
 		self.upsert_pending_payment(&stores, new_payment, Vec::new()).await?;
 
-		self.broadcaster.broadcast_unclassified_transaction(fee_bumped_tx);
+		self.broadcaster.broadcast(fee_bumped_tx);
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
 
@@ -4362,65 +4061,9 @@ fn ldk_to_bdk_satisfaction_weight(ldk_satisfaction_weight: u64) -> Weight {
 	)
 }
 
-/// Builds the payment-store update for a freshly classified funding payment. `details` describes
-/// the actively broadcast candidate, but when the record already confirmed a *different*
-/// candidate — wallet sync saw it win before this classification ran — the update instead carries
-/// the confirmed candidate's txid and figures from the candidate history, mirroring what
-/// [`Wallet::apply_funding_status_update_locked`] reports when confirmation arrives after
-/// classification.
-///
-/// `current` is the record as observed inside the payment store's `mutate` critical section — its
-/// sole caller, [`Wallet::persist_funding_payment_locked`], builds and applies the update within
-/// one closure — so the candidate choice cannot go stale against a concurrent confirmation before
-/// the update lands. [`PaymentDetails::update`]'s confirmed-figures rule still arbitrates which
-/// figures may land on the record.
-fn funding_reclassification_update(
-	details: PaymentDetails, candidates: &[FundingTxCandidate], current: Option<&PaymentDetails>,
-) -> PaymentDetailsUpdate {
-	// A funding-typed classification of a record already classified as interactive funding is a
-	// downgrade, not news: LDK re-broadcasts a promoted-but-unconfirmed splice through its
-	// generic funding path, where the figures are wallet-view rather than contribution-derived.
-	// Keep the record as classified; wallet-sync events own its confirmation state.
-	//
-	// TODO(https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/4878): The
-	// re-typed re-broadcasts are upstream behavior that should be fixed in `rust-lightning`:
-	// the re-offer ought to keep its `InteractiveFunding` classification, or not recur at all.
-	// `zero_conf_splice_in_funding_rebroadcast_canary` pins the current behavior via the
-	// arrival log in `classify_funding`; when it fails against a newer LDK, re-evaluate
-	// whether this guard still sees traffic.
-	if let (
-		Some(PaymentKind::Onchain {
-			tx_type: Some(TransactionType::InteractiveFunding { .. }),
-			..
-		}),
-		PaymentKind::Onchain { tx_type: Some(TransactionType::Funding { .. }), .. },
-	) = (current.map(|payment| &payment.kind), &details.kind)
-	{
-		return PaymentDetailsUpdate::new(details.id);
-	}
-
-	let mut update = PaymentDetailsUpdate::funding_reclassification(details);
-	if let Some(PaymentKind::Onchain {
-		txid: confirmed_txid,
-		status: ConfirmationStatus::Confirmed { .. },
-		..
-	}) = current.map(|payment| &payment.kind)
-	{
-		if update.txid != Some(*confirmed_txid) {
-			if let Some(candidate) = candidates.iter().find(|c| c.txid == *confirmed_txid) {
-				update.txid = Some(candidate.txid);
-				update.amount_msat = Some(candidate.amount_msat);
-				update.fee_paid_msat = Some(candidate.fee_paid_msat);
-			}
-		}
-	}
-	update
-}
-
 #[cfg(all(test, any(feature = "chain-esplora", feature = "chain-electrum")))]
 mod tests {
 	use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-	use std::time::Duration;
 
 	use bdk_chain::{BlockId, CheckPoint, ConfirmationBlockTime, TxUpdate};
 	use bdk_wallet::Wallet as BdkWallet;
@@ -4447,8 +4090,8 @@ mod tests {
 		PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
 	use crate::payment::pending_payment_store::{
-		test_funding_contribution_with_outputs, test_funding_contribution_with_parts, SpliceIntent,
-		SpliceKind,
+		test_funding_contribution_with_outputs, test_funding_contribution_with_parts,
+		PendingPaymentDetailsUpdate, SpliceIntent, SpliceKind,
 	};
 
 	use crate::types::{DynStore, DynStoreWrapper};
@@ -4842,7 +4485,7 @@ mod tests {
 			awaiting_broadcast: false,
 		}];
 		wallet
-			.persist_funding_payment(funding_payment(id, txid, PaymentStatus::Pending), candidates)
+			.record_funding_payment(funding_payment(id, txid, PaymentStatus::Pending), candidates)
 			.await
 			.unwrap();
 
@@ -4857,44 +4500,6 @@ mod tests {
 			.expect("the record must be promoted");
 		assert!(record.details().is_some());
 		assert!(record.splice_intent().is_some());
-	}
-
-	#[tokio::test]
-	async fn recording_a_round_removes_the_intent_record_of_an_advanced_payment() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let wallet = new_test_wallet(Arc::clone(&store), false).await;
-
-		let id = PaymentId([23u8; 32]);
-		let txid = Txid::from_byte_array([24u8; 32]);
-		wallet
-			.payment_stores
-			.pending_payment_store()
-			.insert(PendingPaymentDetails::pending_splice(id, test_splice_intent()))
-			.await
-			.unwrap();
-		// Wallet sync confirmed the payment through `ANTI_REORG_DELAY` before the record was written:
-		// the payment graduated, so the record must not enter the pending store...
-		wallet
-			.payment_stores
-			.payment_store()
-			.insert(funding_payment(id, txid, PaymentStatus::Succeeded))
-			.await
-			.unwrap();
-
-		let candidates = vec![FundingTxCandidate {
-			txid,
-			amount_msat: Some(1_000_000),
-			fee_paid_msat: Some(500),
-			awaiting_broadcast: false,
-		}];
-		wallet
-			.persist_funding_payment(funding_payment(id, txid, PaymentStatus::Pending), candidates)
-			.await
-			.unwrap();
-
-		// ...and the splice behind the intent confirmed, so the leftover intent record is removed
-		// rather than left to look like a splice still in flight after a restart.
-		assert!(wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().is_none());
 	}
 
 	#[tokio::test]
@@ -6759,43 +6364,6 @@ mod tests {
 		assert_eq!(record.candidate(txid).unwrap().amount_msat, Some(500_300_000));
 	}
 
-	/// A splice round this node contributed to is recorded when it is signed, so its broadcast has
-	/// nothing left to record: classifying it writes nothing, and the round keeps awaiting the
-	/// `SpliceNegotiated` event that marks it broadcast.
-	#[tokio::test]
-	async fn classifying_an_interactive_funding_broadcast_writes_nothing() {
-		let fail_store = FailSwitchStore::new();
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
-		let wallet = new_test_wallet(Arc::clone(&store), false).await;
-		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
-
-		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
-		let txid = tx.compute_txid();
-		let candidates =
-			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
-		sign_and_observe_round(&wallet, &tx, &candidates).await;
-		let id = wallet.find_payment_by_txid(txid).await.unwrap().expect("id");
-		let payment =
-			wallet.payment_stores.payment_store().get(&id).await.unwrap().expect("payment");
-		let record =
-			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().expect("record");
-		assert!(record.candidate(txid).unwrap().awaiting_broadcast);
-
-		fail_store.fail_writes.store(true, Ordering::Release);
-		let tx_type = LdkTransactionType::InteractiveFunding { candidates };
-		wallet.classify_broadcast(&tx, &tx_type).await.unwrap();
-		assert_eq!(
-			fail_store.failed_writes.load(Ordering::Acquire),
-			0,
-			"classifying a recorded round must write nothing"
-		);
-		assert_eq!(wallet.payment_stores.payment_store().get(&id).await.unwrap(), Some(payment));
-		assert_eq!(
-			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap(),
-			Some(record)
-		);
-	}
-
 	/// A replayed `SpliceNegotiated` event names a round already marked broadcast; nothing is
 	/// written.
 	#[tokio::test]
@@ -7934,115 +7502,6 @@ mod tests {
 		assert!(funding_candidates(None, counterparty_node_id, channel_id).is_empty());
 	}
 
-	#[test]
-	fn funding_reclassification_update_substitutes_the_confirmed_candidate() {
-		let confirmed_txid = Txid::from_byte_array([1u8; 32]);
-		let active_txid = Txid::from_byte_array([2u8; 32]);
-		let candidates = vec![
-			FundingTxCandidate {
-				txid: confirmed_txid,
-				amount_msat: Some(2_000_000),
-				fee_paid_msat: Some(999),
-				awaiting_broadcast: false,
-			},
-			FundingTxCandidate {
-				txid: active_txid,
-				amount_msat: Some(1_000_000),
-				fee_paid_msat: Some(500),
-				awaiting_broadcast: false,
-			},
-		];
-		let details = onchain_details(active_txid, ConfirmationStatus::Unconfirmed);
-
-		// The record confirmed an earlier candidate: the update reports that candidate, not the
-		// active one.
-		let current = onchain_details(confirmed_txid, confirmed_status());
-		let update = funding_reclassification_update(details.clone(), &candidates, Some(&current));
-		assert_eq!(update.txid, Some(confirmed_txid));
-		assert_eq!(update.amount_msat, Some(Some(2_000_000)));
-		assert_eq!(update.fee_paid_msat, Some(Some(999)));
-
-		// A confirmed candidate we did not contribute to still substitutes, with empty figures —
-		// the same figures a confirmation arriving after classification would report.
-		let uncontributed = vec![FundingTxCandidate {
-			txid: confirmed_txid,
-			amount_msat: None,
-			fee_paid_msat: None,
-			awaiting_broadcast: false,
-		}];
-		let update =
-			funding_reclassification_update(details.clone(), &uncontributed, Some(&current));
-		assert_eq!(update.txid, Some(confirmed_txid));
-		assert_eq!(update.amount_msat, Some(None));
-		assert_eq!(update.fee_paid_msat, Some(None));
-	}
-
-	#[test]
-	fn funding_reclassification_update_keeps_the_active_candidate() {
-		let active_txid = Txid::from_byte_array([2u8; 32]);
-		let candidates = vec![FundingTxCandidate {
-			txid: active_txid,
-			amount_msat: Some(1_000_000),
-			fee_paid_msat: Some(500),
-			awaiting_broadcast: false,
-		}];
-		let details = onchain_details(active_txid, ConfirmationStatus::Unconfirmed);
-
-		// No record yet: the update describes the active candidate.
-		let update = funding_reclassification_update(details.clone(), &candidates, None);
-		assert_eq!(update.txid, Some(active_txid));
-		assert_eq!(update.amount_msat, Some(Some(1_000_000)));
-
-		// An unconfirmed record: still the active candidate (RBF rotation).
-		let unconfirmed =
-			onchain_details(Txid::from_byte_array([1u8; 32]), ConfirmationStatus::Unconfirmed);
-		let update =
-			funding_reclassification_update(details.clone(), &candidates, Some(&unconfirmed));
-		assert_eq!(update.txid, Some(active_txid));
-
-		// The record confirmed the active candidate itself: nothing to substitute.
-		let current = onchain_details(active_txid, confirmed_status());
-		let update = funding_reclassification_update(details.clone(), &candidates, Some(&current));
-		assert_eq!(update.txid, Some(active_txid));
-		assert_eq!(update.amount_msat, Some(Some(1_000_000)));
-
-		// A confirmed txid outside the candidate history (e.g. the record is an unrelated
-		// same-id payment): fall back to the active candidate; `PaymentDetails::update` keeps
-		// the confirmed figures in place on mismatch.
-		let foreign = onchain_details(Txid::from_byte_array([9u8; 32]), confirmed_status());
-		let update = funding_reclassification_update(details, &candidates, Some(&foreign));
-		assert_eq!(update.txid, Some(active_txid));
-	}
-
-	/// A funding-typed (re)classification of a record already classified as interactive funding
-	/// carries nothing the record doesn't have — LDK re-broadcasts a promoted-but-unconfirmed
-	/// splice through its generic funding path with wallet-view figures — so the update must
-	/// move nothing.
-	#[test]
-	fn funding_reclassification_update_skips_funding_over_interactive_funding() {
-		let txid = Txid::from_byte_array([1u8; 32]);
-		let payment_id = PaymentId(txid.to_byte_array());
-		let current = interactive_funding_details(payment_id, txid, Some(1_000_000), Some(500));
-
-		let rebroadcast = PaymentDetails::new(
-			payment_id,
-			PaymentKind::Onchain {
-				txid,
-				status: ConfirmationStatus::Unconfirmed,
-				tx_type: Some(TransactionType::Funding { channels: vec![] }),
-			},
-			Some(10_000_000),
-			Some(0),
-			PaymentDirection::Inbound,
-			PaymentStatus::Pending,
-		);
-
-		let update = funding_reclassification_update(rebroadcast, &[], Some(&current));
-		let mut updated = current.clone();
-		assert!(!updated.update(update), "the rebroadcast must not move the record");
-		assert_eq!(updated, current);
-	}
-
 	/// Graduation must decide from the live record and write only the status: a pending-store
 	/// snapshot taken before a concurrent classification landed must not roll the record's
 	/// figures back when the payment graduates to `Succeeded`.
@@ -8347,7 +7806,7 @@ mod tests {
 		}];
 		let details =
 			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
-		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet.record_funding_payment(details, candidates).await.unwrap();
 
 		// Sync saw the close double-spend the splice's funding transaction.
 		wallet
@@ -8454,7 +7913,7 @@ mod tests {
 			}];
 			let details =
 				interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
-			wallet.persist_funding_payment(details, candidates).await.unwrap();
+			wallet.record_funding_payment(details, candidates).await.unwrap();
 
 			// Each close was recorded at broadcast, seen unconfirmed, then replaced by the round:
 			// what the `TxReplaced` arm leaves behind.
@@ -8566,7 +8025,7 @@ mod tests {
 		}];
 		let details =
 			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
-		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet.record_funding_payment(details, candidates).await.unwrap();
 		wallet
 			.payment_stores
 			.pending_payment_store()
@@ -8640,7 +8099,7 @@ mod tests {
 		];
 		let details =
 			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
-		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet.record_funding_payment(details, candidates).await.unwrap();
 		wallet
 			.payment_stores
 			.pending_payment_store()
@@ -8694,7 +8153,7 @@ mod tests {
 		}];
 		let details =
 			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
-		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet.record_funding_payment(details, candidates).await.unwrap();
 		wallet
 			.payment_stores
 			.pending_payment_store()
@@ -8762,7 +8221,7 @@ mod tests {
 		];
 		let details =
 			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
-		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet.record_funding_payment(details, candidates).await.unwrap();
 		wallet
 			.payment_stores
 			.pending_payment_store()
@@ -8904,27 +8363,6 @@ mod tests {
 			wallet.payment_stores.pending_payment_store().get(&payment_id).await.unwrap().is_none(),
 			"the replay must finish the interrupted entry removal"
 		);
-	}
-
-	/// Classifying a channel-open funding the payment store does not know costs one read of it:
-	/// the write merges against the record it reads, and whether a promoted splice's re-broadcast
-	/// met its record is told from that same read.
-	#[tokio::test]
-	async fn unknown_funding_broadcast_is_recorded_after_one_payment_store_read() {
-		let counting_store = ReadCountingStore::new();
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(counting_store.clone()));
-		let wallet = new_test_wallet(Arc::clone(&store), false).await;
-		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
-
-		let tx = wallet_paying_tx(&wallet, 1);
-		let tx_type =
-			LdkTransactionType::Funding { channels: vec![(counterparty_node_id, channel_id)] };
-		let reads_before = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
-		wallet.classify_broadcast(&tx, &tx_type).await.unwrap();
-		let reads = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE) - reads_before;
-
-		assert!(wallet.find_payment_by_txid(tx.compute_txid()).await.unwrap().is_some());
-		assert_eq!(reads, 1, "classifying an unknown funding re-read the payment store");
 	}
 
 	/// Recording a transaction the payment store does not know costs two reads of it: the
@@ -9080,7 +8518,7 @@ mod tests {
 		let mut details =
 			interactive_funding_details(payment_id, splice_txid, Some(1_000_000), Some(500));
 		details.direction = PaymentDirection::Inbound;
-		wallet.persist_funding_payment(details, candidates).await.unwrap();
+		wallet.record_funding_payment(details, candidates).await.unwrap();
 		wallet
 			.payment_stores
 			.pending_payment_store()
@@ -9116,769 +8554,6 @@ mod tests {
 			.is_none());
 	}
 
-	/// A funding-typed broadcast that doesn't touch the on-chain wallet must not be recorded.
-	/// LDK re-broadcasts a promoted-but-unconfirmed 0conf splice through its generic funding
-	/// path, so a splice the signing-time recording deliberately declined — no local
-	/// contribution, or none of the moved funds are the wallet's — would otherwise come back as
-	/// a spurious zero-amount record that nothing ever confirms.
-	#[tokio::test]
-	async fn funding_broadcast_without_wallet_activity_is_not_recorded() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let wallet = new_test_wallet(store, false).await;
-
-		let counterparty_node_id = PublicKey::from_str(
-			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-		)
-		.unwrap();
-		let channels = vec![(counterparty_node_id, ChannelId([7u8; 32]))];
-		let tx_type = TransactionType::Funding { channels: vec![] };
-
-		// No inputs or outputs involve the wallet: nothing to record.
-		wallet.classify_funding(&dummy_tx(), &channels, tx_type.clone()).await.unwrap();
-		assert!(wallet
-			.payment_stores
-			.payment_store()
-			.list_page(None)
-			.await
-			.unwrap()
-			.objects
-			.is_empty());
-		assert!(wallet
-			.payment_stores
-			.pending_payment_store()
-			.list_filter(|_| true)
-			.await
-			.is_empty());
-
-		// A computable fee is not wallet participation. The wallet can resolve a splice's shared
-		// input whenever the previous funding transaction touched it (e.g. it funded the original
-		// channel open), so it derives the splice's fee even when no wallet funds move.
-		let prev_funding_outpoint = OutPoint { txid: Txid::from_byte_array([8u8; 32]), vout: 0 };
-		wallet.inner.lock().unwrap().insert_txout(
-			prev_funding_outpoint,
-			TxOut { value: Amount::from_sat(100_000), script_pubkey: ScriptBuf::new() },
-		);
-		let splice_tx = Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: LockTime::ZERO,
-			input: vec![bitcoin::TxIn {
-				previous_output: prev_funding_outpoint,
-				..Default::default()
-			}],
-			output: vec![TxOut {
-				value: Amount::from_sat(99_000),
-				script_pubkey: ScriptBuf::new(),
-			}],
-		};
-		wallet.classify_funding(&splice_tx, &channels, tx_type.clone()).await.unwrap();
-		assert!(wallet
-			.payment_stores
-			.payment_store()
-			.list_page(None)
-			.await
-			.unwrap()
-			.objects
-			.is_empty());
-
-		// Control: a funding transaction the wallet participates in is still recorded.
-		let script_pubkey = wallet
-			.inner
-			.lock()
-			.unwrap()
-			.reveal_next_address(KeychainKind::External)
-			.address
-			.script_pubkey();
-		let funded_tx = Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: LockTime::ZERO,
-			input: Vec::new(),
-			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
-		};
-		wallet.classify_funding(&funded_tx, &channels, tx_type).await.unwrap();
-		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
-		assert_eq!(payments.len(), 1);
-		match &payments[0].kind {
-			PaymentKind::Onchain { txid, .. } => assert_eq!(*txid, funded_tx.compute_txid()),
-			kind => panic!("unexpected kind {:?}", kind),
-		}
-	}
-
-	/// A funding record's PaymentId is generated at record creation instead of being derived from a
-	/// txid: a replaceable transaction's txid is no stable identity for the record. Every lookup
-	/// resolves the record through its txid history (current txid, candidates, conflicts) rather
-	/// than re-deriving the id, so nothing may rely on the id and the txid coinciding.
-	#[tokio::test]
-	async fn funding_record_is_keyed_by_a_generated_id() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let wallet = new_test_wallet(store, false).await;
-
-		let counterparty_node_id = PublicKey::from_str(
-			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-		)
-		.unwrap();
-		let channels = vec![(counterparty_node_id, ChannelId([7u8; 32]))];
-		let tx_type = TransactionType::Funding { channels: vec![] };
-
-		let script_pubkey = wallet
-			.inner
-			.lock()
-			.unwrap()
-			.reveal_next_address(KeychainKind::External)
-			.address
-			.script_pubkey();
-		let funded_tx = Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: LockTime::ZERO,
-			input: Vec::new(),
-			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
-		};
-		let txid = funded_tx.compute_txid();
-		wallet.classify_funding(&funded_tx, &channels, tx_type).await.unwrap();
-
-		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
-		assert_eq!(payments.len(), 1);
-		let record = &payments[0];
-		assert_ne!(record.id, PaymentId(txid.to_byte_array()), "the id must not be the txid");
-		match &record.kind {
-			PaymentKind::Onchain { txid: kind_txid, .. } => assert_eq!(*kind_txid, txid),
-			kind => panic!("unexpected kind {:?}", kind),
-		}
-		// The pending entry shares the id, and txid lookups resolve to the record.
-		assert!(wallet
-			.payment_stores
-			.pending_payment_store()
-			.get(&record.id)
-			.await
-			.unwrap()
-			.is_some());
-		assert_eq!(wallet.find_payment_by_txid(txid).await.unwrap(), Some(record.id));
-	}
-
-	/// A funding transaction classified again — e.g. a 0conf splice re-broadcast through LDK's
-	/// generic funding path after a restart — must resolve to the record's generated id rather
-	/// than create a second record for the same transaction.
-	#[tokio::test]
-	async fn funding_rebroadcast_resolves_to_the_generated_id() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let wallet = new_test_wallet(store, false).await;
-
-		let counterparty_node_id = PublicKey::from_str(
-			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-		)
-		.unwrap();
-		let channels = vec![(counterparty_node_id, ChannelId([7u8; 32]))];
-
-		let script_pubkey = wallet
-			.inner
-			.lock()
-			.unwrap()
-			.reveal_next_address(KeychainKind::External)
-			.address
-			.script_pubkey();
-		let funded_tx = Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: LockTime::ZERO,
-			input: Vec::new(),
-			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
-		};
-		let txid = funded_tx.compute_txid();
-
-		// The interactive-funding record written when the round was signed, keyed by a generated
-		// id.
-		let payment_id = PaymentId([42u8; 32]);
-		let candidates = vec![FundingTxCandidate {
-			txid,
-			amount_msat: Some(1_000_000),
-			fee_paid_msat: Some(500),
-			awaiting_broadcast: false,
-		}];
-		let details = interactive_funding_details(payment_id, txid, Some(1_000_000), Some(500));
-		wallet.persist_funding_payment(details, candidates).await.unwrap();
-
-		// The re-typed rebroadcast comes back through the generic funding path.
-		wallet
-			.classify_funding(&funded_tx, &channels, TransactionType::Funding { channels: vec![] })
-			.await
-			.unwrap();
-
-		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
-		assert_eq!(payments.len(), 1, "the rebroadcast must not create a second record");
-		assert_eq!(payments[0].id, payment_id);
-		// The interactive classification and contribution figures survive the generic
-		// wallet-view update (`funding_reclassification_update` declines the downgrade).
-		assert!(matches!(
-			payments[0].kind,
-			PaymentKind::Onchain { tx_type: Some(TransactionType::InteractiveFunding { .. }), .. }
-		));
-		assert_eq!(payments[0].amount_msat, Some(1_000_000));
-	}
-
-	/// The same re-broadcast arriving before wallet sync has seen the transaction finds no record
-	/// to be declined against. The round is on record as an interactive funding of its channel,
-	/// which is what the transaction is whichever path re-offers it, so the re-offer must record
-	/// nothing and leave the transaction to sync.
-	#[tokio::test]
-	async fn a_funding_rebroadcast_of_a_named_round_records_nothing() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let wallet = new_test_wallet(store, false).await;
-		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
-		let channels = vec![(counterparty_node_id, channel_id)];
-
-		let script_pubkey = wallet
-			.inner
-			.lock()
-			.unwrap()
-			.reveal_next_address(KeychainKind::External)
-			.address
-			.script_pubkey();
-		let funded_tx = Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: LockTime::ZERO,
-			input: Vec::new(),
-			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
-		};
-		let txid = funded_tx.compute_txid();
-
-		wallet
-			.record_channel_tx_facts(ChannelTxFacts::new(txid).with_self_role(
-				TransactionType::InteractiveFunding {
-					channels: vec![Channel { counterparty_node_id, channel_id }],
-				},
-			))
-			.await
-			.unwrap();
-
-		wallet
-			.classify_funding(&funded_tx, &channels, TransactionType::Funding { channels: vec![] })
-			.await
-			.unwrap();
-
-		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
-		assert!(
-			payments.is_empty(),
-			"the re-offer recorded the round as a plain funding: {:?}",
-			payments,
-		);
-	}
-
-	/// LDK re-broadcasts a promoted-but-unconfirmed 0conf splice through its generic funding
-	/// path: same txid, but typed as a plain funding transaction with wallet-view figures and no
-	/// contribution metadata. The rebroadcast must not overwrite the contribution-derived
-	/// figures or the interactive-funding classification — neither while the record is
-	/// unconfirmed nor once it confirmed under that same txid, where updates naming the
-	/// confirmed txid may otherwise move figures.
-	#[tokio::test]
-	async fn funding_rebroadcast_keeps_interactive_funding_classification() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let wallet = new_test_wallet(store, false).await;
-
-		// The rebroadcast passes the wallet-activity guard: a splice-in funds the new channel
-		// output partly from the wallet, so the wallet sees movement.
-		let script_pubkey = wallet
-			.inner
-			.lock()
-			.unwrap()
-			.reveal_next_address(KeychainKind::External)
-			.address
-			.script_pubkey();
-		let tx = Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: LockTime::ZERO,
-			input: Vec::new(),
-			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
-		};
-		let txid = tx.compute_txid();
-		let payment_id = PaymentId(txid.to_byte_array());
-
-		let candidates = vec![FundingTxCandidate {
-			txid,
-			amount_msat: Some(1_000_000),
-			fee_paid_msat: Some(500),
-			awaiting_broadcast: false,
-		}];
-		let details = interactive_funding_details(payment_id, txid, Some(1_000_000), Some(500));
-		wallet.persist_funding_payment(details, candidates).await.unwrap();
-
-		let counterparty_node_id = PublicKey::from_str(
-			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-		)
-		.unwrap();
-		let channels = vec![(counterparty_node_id, ChannelId([7u8; 32]))];
-		let tx_type = TransactionType::Funding { channels: vec![] };
-
-		async fn assert_unchanged(wallet: &Wallet, payment_id: PaymentId, confirmed: bool) {
-			let payments =
-				wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
-			assert_eq!(payments.len(), 1, "the rebroadcast must not mint a second record");
-			let payment = &payments[0];
-			assert_eq!(payment.id, payment_id);
-			assert_eq!(payment.amount_msat, Some(1_000_000));
-			assert_eq!(payment.fee_paid_msat, Some(500));
-			match &payment.kind {
-				PaymentKind::Onchain {
-					status,
-					tx_type: Some(TransactionType::InteractiveFunding { .. }),
-					..
-				} => assert_eq!(matches!(status, ConfirmationStatus::Confirmed { .. }), confirmed),
-				kind => panic!("unexpected kind {:?}", kind),
-			}
-		}
-
-		wallet.classify_funding(&tx, &channels, tx_type.clone()).await.unwrap();
-		assert_unchanged(&wallet, payment_id, false).await;
-
-		// Confirm the record, then replay the rebroadcast: a monitor-update completion can race
-		// wallet sync around confirmation.
-		let event = WalletEvent::TxConfirmed {
-			txid,
-			tx: Arc::new(tx.clone()),
-			block_time: confirmed_block_time(5),
-			old_block_time: None,
-		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
-		wallet.classify_funding(&tx, &channels, tx_type).await.unwrap();
-		assert_unchanged(&wallet, payment_id, true).await;
-	}
-
-	/// A user-initiated splice's record is keyed by the PaymentId chosen at splice time, not by
-	/// its funding txid. The generic funding path must resolve a rebroadcast of that funding tx
-	/// back to the existing record rather than creating a duplicate under the txid-derived id.
-	#[tokio::test]
-	async fn classify_funding_resolves_the_splice_time_payment_id() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let wallet = new_test_wallet(store, false).await;
-
-		let script_pubkey = wallet
-			.inner
-			.lock()
-			.unwrap()
-			.reveal_next_address(KeychainKind::External)
-			.address
-			.script_pubkey();
-		let tx = Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: LockTime::ZERO,
-			input: Vec::new(),
-			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
-		};
-		let txid = tx.compute_txid();
-
-		let payment_id = PaymentId([21u8; 32]);
-		let candidates = vec![FundingTxCandidate {
-			txid,
-			amount_msat: Some(1_000_000),
-			fee_paid_msat: Some(500),
-			awaiting_broadcast: false,
-		}];
-		let details = interactive_funding_details(payment_id, txid, Some(1_000_000), Some(500));
-		wallet.persist_funding_payment(details, candidates).await.unwrap();
-
-		let counterparty_node_id = PublicKey::from_str(
-			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-		)
-		.unwrap();
-		let channels = vec![(counterparty_node_id, ChannelId([7u8; 32]))];
-		let tx_type = TransactionType::Funding { channels: vec![] };
-		wallet.classify_funding(&tx, &channels, tx_type).await.unwrap();
-
-		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
-		assert_eq!(payments.len(), 1, "the rebroadcast must not create a second record");
-		assert_eq!(payments[0].id, payment_id);
-		assert_eq!(payments[0].amount_msat, Some(1_000_000));
-		assert_eq!(payments[0].fee_paid_msat, Some(500));
-	}
-
-	/// A funding broadcast whose classification fails must be retried, not dropped: no timer
-	/// re-broadcasts a funding transaction, so a dropped package would keep the funding off-chain
-	/// until LDK re-hands it when the channel next resumes. The record is written before the
-	/// broadcast so that the confirmation refreshes it rather than minting an untyped record that
-	/// the retried classification types only once it lands.
-	#[tokio::test]
-	async fn failed_funding_classification_is_retried_not_dropped() {
-		use lightning::chain::chaininterface::BroadcasterInterface;
-
-		let fail_store = FailSwitchStore::new();
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
-		let wallet = new_test_wallet(Arc::clone(&store), false).await;
-		wallet.broadcaster.set_wallet(Arc::downgrade(&wallet));
-
-		// Run the production broadcast-queue loop. The broadcast itself fails fast against the
-		// fixture's unroutable Esplora server, which is irrelevant here: the record is written
-		// during classification, before the broadcast attempt.
-		let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
-		let chain_source = Arc::clone(&wallet.chain_source);
-		let loop_task = tokio::spawn(async move {
-			chain_source.continuously_process_broadcast_queue(stop_receiver).await
-		});
-
-		// A funding transaction paying the wallet passes the wallet-activity guard, so its
-		// classification reaches the payment-store write.
-		let script_pubkey = wallet
-			.inner
-			.lock()
-			.unwrap()
-			.reveal_next_address(KeychainKind::External)
-			.address
-			.script_pubkey();
-		let tx = Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: LockTime::ZERO,
-			input: Vec::new(),
-			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
-		};
-		let counterparty_node_id = PublicKey::from_str(
-			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-		)
-		.unwrap();
-
-		// Queue the broadcast while payment persistence is failing.
-		fail_store.fail_writes.store(true, Ordering::Release);
-		wallet.broadcaster.broadcast_transactions(&[(
-			&tx,
-			LdkTransactionType::Funding {
-				channels: vec![(counterparty_node_id, ChannelId([7u8; 32]))],
-			},
-		)]);
-
-		// Wait until the loop has actually failed a classification write; re-enabling writes
-		// before the first attempt would let the first attempt succeed and the test pass
-		// without any retry happening. A failed classification must not leave a partial
-		// record behind.
-		let mut failed_writes = 0;
-		for _ in 0..100 {
-			tokio::time::sleep(Duration::from_millis(100)).await;
-			failed_writes = fail_store.failed_writes.load(Ordering::Acquire);
-			if failed_writes > 0 {
-				break;
-			}
-		}
-		assert!(failed_writes > 0, "classification never attempted a payment-store write");
-		assert!(wallet
-			.payment_stores
-			.payment_store()
-			.list_page(None)
-			.await
-			.unwrap()
-			.objects
-			.is_empty());
-
-		// Once writes recover, the package must still be alive to classify.
-		fail_store.fail_writes.store(false, Ordering::Release);
-		let mut recorded = Vec::new();
-		for _ in 0..100 {
-			tokio::time::sleep(Duration::from_millis(100)).await;
-			recorded = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
-			if !recorded.is_empty() {
-				break;
-			}
-		}
-		assert!(
-			!recorded.is_empty(),
-			"the failed classification was never retried; the package was dropped"
-		);
-		assert_eq!(recorded.len(), 1);
-		assert!(matches!(
-			recorded[0].kind,
-			PaymentKind::Onchain { tx_type: Some(TransactionType::Funding { .. }), .. }
-		));
-
-		stop_sender.send(()).unwrap();
-		loop_task.await.unwrap();
-	}
-
-	/// A package awaiting a classification retry survives a stop, as a package the loop has not
-	/// reached yet always has: the queue belongs to the broadcaster, not to the loop, so the next
-	/// `start()` classifies and broadcasts whatever was queued when the node stopped. A funding
-	/// package in particular has no other way back: no timer re-broadcasts it.
-	#[tokio::test]
-	async fn packages_awaiting_retry_survive_a_stop() {
-		use lightning::chain::chaininterface::BroadcasterInterface;
-
-		let fail_store = FailSwitchStore::new();
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
-		let wallet = new_test_wallet(Arc::clone(&store), false).await;
-		wallet.broadcaster.set_wallet(Arc::downgrade(&wallet));
-
-		let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
-		let chain_source = Arc::clone(&wallet.chain_source);
-		let loop_task = tokio::spawn(async move {
-			chain_source.continuously_process_broadcast_queue(stop_receiver).await
-		});
-
-		let script_pubkey = wallet
-			.inner
-			.lock()
-			.unwrap()
-			.reveal_next_address(KeychainKind::External)
-			.address
-			.script_pubkey();
-		let tx = Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: LockTime::ZERO,
-			input: Vec::new(),
-			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
-		};
-		let counterparty_node_id = PublicKey::from_str(
-			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-		)
-		.unwrap();
-
-		// Queue the broadcast while payment persistence is failing and wait for the loop to
-		// fail a classification attempt, leaving a retry pending.
-		fail_store.fail_writes.store(true, Ordering::Release);
-		wallet.broadcaster.broadcast_transactions(&[(
-			&tx,
-			LdkTransactionType::Funding {
-				channels: vec![(counterparty_node_id, ChannelId([7u8; 32]))],
-			},
-		)]);
-		let mut failed_writes = 0;
-		for _ in 0..100 {
-			tokio::time::sleep(Duration::from_millis(100)).await;
-			failed_writes = fail_store.failed_writes.load(Ordering::Acquire);
-			if failed_writes > 0 {
-				break;
-			}
-		}
-		assert!(failed_writes > 0, "classification never attempted a payment-store write");
-
-		// Stop the node with the retry still pending, then bring the loop back up with
-		// working persistence, as a stop()/start() cycle would.
-		stop_sender.send(()).unwrap();
-		loop_task.await.unwrap();
-		fail_store.fail_writes.store(false, Ordering::Release);
-
-		let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
-		let chain_source = Arc::clone(&wallet.chain_source);
-		let loop_task = tokio::spawn(async move {
-			chain_source.continuously_process_broadcast_queue(stop_receiver).await
-		});
-
-		// The restarted loop classifies the package from before the stop once its retry falls
-		// due.
-		let mut payments = Vec::new();
-		for _ in 0..100 {
-			tokio::time::sleep(Duration::from_millis(100)).await;
-			payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
-			if !payments.is_empty() {
-				break;
-			}
-		}
-		assert_eq!(
-			payments.len(),
-			1,
-			"the package from before stop() was not classified after restart"
-		);
-		assert!(
-			matches!(&payments[0].kind, PaymentKind::Onchain { txid, .. } if *txid == tx.compute_txid()),
-			"the record does not track the package's transaction"
-		);
-
-		stop_sender.send(()).unwrap();
-		loop_task.await.unwrap();
-	}
-
-	/// A re-broadcast of a package awaiting a classification retry is dropped as it is queued,
-	/// without another classification attempt: LDK re-hands pending claims every 30 seconds, so
-	/// over a store outage each copy would otherwise cost a failed write and an error log before
-	/// the queue recognized it.
-	#[tokio::test]
-	async fn rebroadcast_of_a_waiting_package_is_not_classified_again() {
-		use lightning::chain::chaininterface::BroadcasterInterface;
-
-		let fail_store = FailSwitchStore::new();
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
-		let wallet = new_test_wallet(Arc::clone(&store), false).await;
-		wallet.broadcaster.set_wallet(Arc::downgrade(&wallet));
-
-		let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
-		let chain_source = Arc::clone(&wallet.chain_source);
-		let loop_task = tokio::spawn(async move {
-			chain_source.continuously_process_broadcast_queue(stop_receiver).await
-		});
-
-		let script_pubkey = wallet
-			.inner
-			.lock()
-			.unwrap()
-			.reveal_next_address(KeychainKind::External)
-			.address
-			.script_pubkey();
-		let tx = Transaction {
-			version: bitcoin::transaction::Version::TWO,
-			lock_time: LockTime::ZERO,
-			input: Vec::new(),
-			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
-		};
-		let counterparty_node_id = PublicKey::from_str(
-			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-		)
-		.unwrap();
-		let funding_type = LdkTransactionType::Funding {
-			channels: vec![(counterparty_node_id, ChannelId([7u8; 32]))],
-		};
-
-		// The first copy fails classification and waits for its retry.
-		fail_store.fail_writes.store(true, Ordering::Release);
-		wallet.broadcaster.broadcast_transactions(&[(&tx, funding_type.clone())]);
-		let mut failed_writes = 0;
-		for _ in 0..100 {
-			tokio::time::sleep(Duration::from_millis(100)).await;
-			failed_writes = fail_store.failed_writes.load(Ordering::Acquire);
-			if failed_writes > 0 {
-				break;
-			}
-		}
-		assert_eq!(failed_writes, 1, "classification never attempted a payment-store write");
-
-		// A second copy arrives well within the retry delay. It must not reach the store.
-		wallet.broadcaster.broadcast_transactions(&[(&tx, funding_type)]);
-		tokio::time::sleep(Duration::from_millis(500)).await;
-		assert_eq!(
-			fail_store.failed_writes.load(Ordering::Acquire),
-			1,
-			"a re-broadcast of a package awaiting a retry was classified again"
-		);
-
-		// Once the store recovers, the waiting package is classified once.
-		fail_store.fail_writes.store(false, Ordering::Release);
-		let mut payments = Vec::new();
-		for _ in 0..100 {
-			tokio::time::sleep(Duration::from_millis(100)).await;
-			payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
-			if !payments.is_empty() {
-				break;
-			}
-		}
-		assert_eq!(payments.len(), 1, "the waiting package was not classified after recovery");
-
-		stop_sender.send(()).unwrap();
-		loop_task.await.unwrap();
-	}
-
-	/// Fresh packages go before a due retry. Both are ready at once when the loop returns from a
-	/// slow classification with fresh packages queued and a retry past its deadline; the queue
-	/// hands out every fresh package first, so broadcasts arriving during a store outage are never
-	/// held back by the outage's retries.
-	#[tokio::test]
-	async fn fresh_package_is_classified_before_a_due_retry() {
-		use lightning::chain::chaininterface::BroadcasterInterface;
-
-		use crate::data_store::StorableObjectId;
-
-		let gated_store = GatedStore::new();
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(gated_store.clone()));
-		let wallet = new_test_wallet(Arc::clone(&store), false).await;
-		wallet.broadcaster.set_wallet(Arc::downgrade(&wallet));
-
-		let (stop_sender, stop_receiver) = tokio::sync::watch::channel(());
-		let chain_source = Arc::clone(&wallet.chain_source);
-		let loop_task = tokio::spawn(async move {
-			chain_source.continuously_process_broadcast_queue(stop_receiver).await
-		});
-
-		// Three funding transactions paying the wallet, so each classification reaches the
-		// payment-store write.
-		let funding_tx = |input_byte: u8| {
-			let script_pubkey = wallet
-				.inner
-				.lock()
-				.unwrap()
-				.reveal_next_address(KeychainKind::External)
-				.address
-				.script_pubkey();
-			Transaction {
-				version: bitcoin::transaction::Version::TWO,
-				lock_time: LockTime::ZERO,
-				input: vec![bitcoin::TxIn {
-					previous_output: bitcoin::OutPoint {
-						txid: Txid::from_byte_array([input_byte; 32]),
-						vout: 0,
-					},
-					..Default::default()
-				}],
-				output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
-			}
-		};
-		let retried_tx = funding_tx(1);
-		let parked_tx = funding_tx(2);
-		let counterparty_node_id = PublicKey::from_str(
-			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-		)
-		.unwrap();
-		let funding_type = LdkTransactionType::Funding {
-			channels: vec![(counterparty_node_id, ChannelId([7u8; 32]))],
-		};
-
-		// The first package fails classification and is scheduled to retry after the delay.
-		gated_store.fail_writes.store(true, Ordering::Release);
-		wallet.broadcaster.broadcast_transactions(&[(&retried_tx, funding_type.clone())]);
-		let mut failed_writes = 0;
-		for _ in 0..100 {
-			tokio::time::sleep(Duration::from_millis(100)).await;
-			failed_writes = gated_store.failed_writes.load(Ordering::Acquire);
-			if failed_writes > 0 {
-				break;
-			}
-		}
-		assert!(failed_writes > 0, "classification never attempted a payment-store write");
-
-		// The second package parks in its payment-store write, holding the loop past the retry's
-		// deadline.
-		gated_store.fail_writes.store(false, Ordering::Release);
-		gated_store.gate_writes.store(true, Ordering::Release);
-		wallet.broadcaster.broadcast_transactions(&[(&parked_tx, funding_type.clone())]);
-		gated_store.write_entered.notified().await;
-
-		// Fresh packages queue while the retry falls due: several, so a queue that only sometimes
-		// hands out a fresh package ahead of a due retry cannot pass the ordering assertion below
-		// by luck.
-		let fresh_txs: Vec<Transaction> =
-			(3..11).map(|input_byte| funding_tx(input_byte)).collect();
-		for fresh_tx in &fresh_txs {
-			wallet.broadcaster.broadcast_transactions(&[(fresh_tx, funding_type.clone())]);
-		}
-		tokio::time::sleep(crate::chain::FAILED_CLASSIFY_RETRY_DELAY + Duration::from_millis(500))
-			.await;
-
-		// Once the parked package completes, the fresh packages and the due retry are all ready.
-		gated_store.gate_writes.store(false, Ordering::Release);
-		gated_store.release.notify_one();
-		let expected_writes = fresh_txs.len() + 2;
-		let mut payment_writes = Vec::new();
-		let mut payments = Vec::new();
-		for _ in 0..100 {
-			tokio::time::sleep(Duration::from_millis(100)).await;
-			payment_writes = gated_store.written_keys(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
-			payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
-			if payment_writes.len() >= expected_writes && payments.len() >= expected_writes {
-				break;
-			}
-		}
-		assert_eq!(payment_writes.len(), expected_writes, "not every package was classified");
-		// A funding record's id is its own, so find each transaction's record to learn the key
-		// its write went under.
-		let position = |tx: &Transaction| {
-			let txid = tx.compute_txid();
-			let record = payments
-				.iter()
-				.find(|payment| {
-					matches!(payment.kind, PaymentKind::Onchain { txid: recorded, .. } if recorded == txid)
-				})
-				.expect("classified");
-			let key = record.id.encode_to_hex_str();
-			payment_writes.iter().position(|written| *written == key).expect("classified")
-		};
-		let retried_position = position(&retried_tx);
-		assert!(
-			fresh_txs.iter().all(|fresh_tx| position(fresh_tx) < retried_position),
-			"the due retry was classified before a fresh package"
-		);
-
-		stop_sender.send(()).unwrap();
-		loop_task.await.unwrap();
-	}
-
 	/// Wallet sync can record a genuine replacement round before it is recorded as a candidate:
 	/// the counterparty broadcast a round this node did not contribute to, which is recorded only
 	/// when this node signs a later round of the splice. The funding-status gate then routes the
@@ -9903,7 +8578,7 @@ mod tests {
 			awaiting_broadcast: false,
 		}];
 		let details = interactive_funding_details(funding_id, txid1, Some(1_000_000), Some(500));
-		wallet.persist_funding_payment(details, round1).await.unwrap();
+		wallet.record_funding_payment(details, round1).await.unwrap();
 
 		// Wallet sync recorded round 2's confirmation while the round was not yet a candidate: a
 		// duplicate untyped record under the txid-derived id, plus its pending entry.
@@ -9941,7 +8616,7 @@ mod tests {
 			},
 		];
 		let details = interactive_funding_details(funding_id, txid2, Some(1_000_000), Some(400));
-		wallet.persist_funding_payment(details, rounds).await.unwrap();
+		wallet.record_funding_payment(details, rounds).await.unwrap();
 
 		// One record: the funding record carries the duplicate's confirmation and the confirmed
 		// candidate's figures; the duplicate and its pending entry are gone, so the round's txid
@@ -10020,7 +8695,7 @@ mod tests {
 			},
 		];
 		let details = interactive_funding_details(funding_id, txid2, Some(1_000_000), Some(400));
-		wallet.persist_funding_payment(details, rounds).await.unwrap();
+		wallet.record_funding_payment(details, rounds).await.unwrap();
 
 		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
 		assert_eq!(payments.len(), 1, "the duplicate must be merged away");
@@ -10062,7 +8737,7 @@ mod tests {
 			awaiting_broadcast: false,
 		}];
 		let details = interactive_funding_details(funding_id, txid1, Some(1_000_000), Some(500));
-		wallet.persist_funding_payment(details, round1).await.unwrap();
+		wallet.record_funding_payment(details, round1).await.unwrap();
 
 		// Wallet sync recorded round 2's confirmation while the round was not yet a candidate.
 		let duplicate_id = PaymentId(txid2.to_byte_array());
@@ -10099,11 +8774,11 @@ mod tests {
 		];
 		let details = interactive_funding_details(funding_id, txid2, Some(1_000_000), Some(400));
 		fail_store.fail_next_remove_in(PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
-		let res = wallet.persist_funding_payment(details.clone(), rounds.clone()).await;
+		let res = wallet.record_funding_payment(details.clone(), rounds.clone()).await;
 		assert!(res.is_err(), "the injected remove failure must surface");
 
 		// The merge re-runs with the record's next write; it must finish the cleanup.
-		wallet.persist_funding_payment(details, rounds).await.unwrap();
+		wallet.record_funding_payment(details, rounds).await.unwrap();
 
 		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
 		assert_eq!(payments.len(), 1, "the duplicate must be merged away");
@@ -10430,174 +9105,6 @@ mod tests {
 			.unwrap()
 			.is_none());
 		assert_eq!(wallet.find_payment_by_txid(replacement_txid).await.unwrap(), Some(id));
-	}
-
-	/// Barrier test, classification-first ordering: wallet sync's confirmation handling must
-	/// wait for classification's two-store write pair. Classification is parked between its
-	/// payment-store and pending-store writes (the torn window) and only then is the
-	/// confirmation of the replacement candidate dispatched; unless the sync arm holds the
-	/// cross-store lock from payment-id resolution onwards, it resolves the id against the
-	/// still-missing pending index and mints a duplicate record keyed by the event txid.
-	#[tokio::test]
-	async fn funding_confirmation_waits_for_classification() {
-		let gated = NamespaceGatedStore::new(PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(gated.clone()));
-		let wallet = new_test_wallet(Arc::clone(&store), false).await;
-
-		let txid1 = Txid::from_byte_array([1u8; 32]);
-		let txid2 = Txid::from_byte_array([2u8; 32]);
-		let payment_id = PaymentId(txid1.to_byte_array());
-		let candidates = vec![
-			FundingTxCandidate {
-				txid: txid1,
-				amount_msat: Some(1_000_000),
-				fee_paid_msat: Some(500),
-				awaiting_broadcast: false,
-			},
-			FundingTxCandidate {
-				txid: txid2,
-				amount_msat: Some(2_000_000),
-				fee_paid_msat: Some(999),
-				awaiting_broadcast: false,
-			},
-		];
-		let details = interactive_funding_details(payment_id, txid2, Some(2_000_000), Some(999));
-
-		// Hold the gate so classification parks on its pending-store write: the payment record
-		// is persisted, the pending entry is not — the torn window a concurrent confirmation
-		// must not observe.
-		let gate_guard = gated.gate.write().await;
-		let classification = tokio::spawn({
-			let wallet = Arc::clone(&wallet);
-			let candidates = candidates.clone();
-			async move { wallet.persist_funding_payment(details, candidates).await }
-		});
-		gated.parked.notified().await;
-
-		// Only now dispatch the confirmation of the candidate that won.
-		let event = WalletEvent::TxConfirmed {
-			txid: txid2,
-			tx: Arc::new(dummy_tx()),
-			block_time: confirmed_block_time(5),
-			old_block_time: None,
-		};
-		let sync = tokio::spawn({
-			let wallet = Arc::clone(&wallet);
-			async move { wallet.update_payment_store(vec![event]).await }
-		});
-
-		// Liveness sanity only (both pre- and post-fix stall here): while classification is
-		// parked, no second record may have been committed.
-		tokio::time::sleep(Duration::from_millis(250)).await;
-		let payment_keys = KVStore::list(
-			&*store,
-			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-		)
-		.await
-		.unwrap();
-		assert!(payment_keys.len() <= 1);
-
-		drop(gate_guard);
-		classification.await.unwrap().unwrap();
-		sync.await.unwrap().unwrap();
-
-		// Both writers converge on the classified record: the confirmation refreshes it in
-		// place with the confirmed candidate's figures rather than minting a second record
-		// keyed by the event txid.
-		let payment_keys = KVStore::list(
-			&*store,
-			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-		)
-		.await
-		.unwrap();
-		assert_eq!(payment_keys.len(), 1, "the confirmation must not mint a duplicate record");
-		let payment =
-			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
-		assert_eq!(payment.id, payment_id);
-		assert_eq!(payment.amount_msat, Some(2_000_000));
-		assert_eq!(payment.fee_paid_msat, Some(999));
-		match &payment.kind {
-			PaymentKind::Onchain {
-				txid,
-				status: ConfirmationStatus::Confirmed { .. },
-				tx_type: Some(TransactionType::InteractiveFunding { .. }),
-			} => assert_eq!(*txid, txid2),
-			kind => panic!("unexpected kind {:?}", kind),
-		}
-	}
-
-	/// Barrier test, sync-first ordering: classification must wait for wallet sync's complete
-	/// decision-plus-write sequence. Wallet sync is parked inside its generic-fallback window —
-	/// past the funding-status check that found no record, before its writes — by holding the
-	/// BDK wallet lock the fallback needs. Unless the sync arm holds the cross-store lock
-	/// across that window, classification lands in between and the fallback's stale merge
-	/// overwrites the contribution-derived figures with wallet-derived ones.
-	#[tokio::test(flavor = "multi_thread")]
-	async fn funding_classification_waits_for_wallet_sync() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let wallet = new_test_wallet(Arc::clone(&store), false).await;
-
-		let txid = Txid::from_byte_array([3u8; 32]);
-		let payment_id = PaymentId(txid.to_byte_array());
-		let candidates = vec![FundingTxCandidate {
-			txid,
-			amount_msat: Some(1_000_000),
-			fee_paid_msat: Some(500),
-			awaiting_broadcast: false,
-		}];
-		let details = interactive_funding_details(payment_id, txid, Some(1_000_000), Some(500));
-
-		// Park wallet sync inside its fallback window: the TxUnconfirmed arm reads no wallet
-		// state before that point, so it passes the funding-status check (no record exists yet)
-		// and then blocks on the wallet lock held here. The sleeps give the tasks time to reach
-		// their parking spots; they make the pre-fix failure deterministic, while the fixed
-		// code converges to the same final state under any arrival order.
-		let inner_guard = wallet.inner.lock().unwrap();
-		let sync = tokio::spawn({
-			let wallet = Arc::clone(&wallet);
-			let event =
-				WalletEvent::TxUnconfirmed { txid, tx: Arc::new(dummy_tx()), old_block_time: None };
-			async move { wallet.update_payment_store(vec![event]).await }
-		});
-		tokio::time::sleep(Duration::from_millis(250)).await;
-
-		let classification = tokio::spawn({
-			let wallet = Arc::clone(&wallet);
-			let candidates = candidates.clone();
-			async move { wallet.persist_funding_payment(details, candidates).await }
-		});
-		tokio::time::sleep(Duration::from_millis(250)).await;
-
-		drop(inner_guard);
-		sync.await.unwrap().unwrap();
-		classification.await.unwrap().unwrap();
-
-		// Both writers converge on one record carrying the classification: the generic
-		// fallback must not clobber the contribution-derived figures with its wallet-derived
-		// view of the transaction.
-		let payment_keys = KVStore::list(
-			&*store,
-			PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-			PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-		)
-		.await
-		.unwrap();
-		assert_eq!(payment_keys.len(), 1);
-		let payment =
-			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
-		assert_eq!(payment.id, payment_id);
-		assert_eq!(
-			payment.amount_msat,
-			Some(1_000_000),
-			"wallet sync's fallback must not overwrite contribution figures"
-		);
-		assert_eq!(payment.fee_paid_msat, Some(500));
-		assert!(matches!(
-			&payment.kind,
-			PaymentKind::Onchain { tx_type: Some(TransactionType::InteractiveFunding { .. }), .. }
-		));
 	}
 
 	#[tokio::test]

@@ -23,12 +23,12 @@ use crate::Error;
 /// The wallet's payment store and pending payment store, with the lock serializing their writers.
 ///
 /// The writers must observe the payment record and its pending-store entry (candidate history
-/// included) as one consistent unit: classification and wallet sync's event arms each hold the
-/// lock from payment-id resolution through their last write (classification's being its two-store
-/// write pair). Without the lock, a confirmation landing between classification's two writes sees
-/// the record classified but the candidate history absent — resolving the wrong payment id or
-/// stamping the confirmed candidate with another candidate's figures — and a classification
-/// landing inside an arm's decision sequence gets overwritten by the arm's stale generic fallback.
+/// included) as one consistent unit: wallet sync's event arms and the funding-record writers each
+/// hold the lock from payment-id resolution through their last write. Without the lock, a
+/// confirmation landing between a writer's two store writes sees the record but not the candidate
+/// history — resolving the wrong payment id or stamping the confirmed candidate with another
+/// candidate's figures — and a funding-record write landing inside an arm's decision sequence gets
+/// overwritten by the arm's stale generic fallback.
 ///
 /// The writes are methods of [`PaymentStoresGuard`], which only [`Self::lock`] hands out, so a
 /// write compiles only for a holder of the lock. The reads are methods of this type and take no
