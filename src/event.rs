@@ -69,7 +69,7 @@ use crate::types::{
 	ChainMonitor, CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper,
 	Wallet,
 };
-use crate::wallet::provenance::{ChannelOutputRole, ChannelTxFacts};
+use crate::wallet::provenance::{ChannelOutputRole, ChannelTxFacts, FactsRecordOutcome};
 use crate::wallet::{
 	closed_channel_held_rounds, funding_candidates, held_splice_rounds, FundingCandidate,
 };
@@ -1012,14 +1012,25 @@ where
 								ChannelOutputRole::Funding,
 								[vout as u32],
 							);
-							if let Err(e) = self.wallet.record_channel_tx_facts(facts).await {
-								log_error!(
+							match self.wallet.record_channel_tx_facts(facts).await {
+								Ok(FactsRecordOutcome::Recorded) => {},
+								// Replaying would rebuild the same transaction and find the same
+								// full store, so the channel is funded with a transaction this
+								// node will report without a classification.
+								Ok(FactsRecordOutcome::Incomplete) => log_error!(
 									self.logger,
-									"Failed to record the funding transaction of channel {}: {}",
+									"Funding channel {} with a transaction this node has no room to describe",
 									temporary_channel_id,
-									e,
-								);
-								return Err(ReplayEvent());
+								),
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to record the funding transaction of channel {}: {}",
+										temporary_channel_id,
+										e,
+									);
+									return Err(ReplayEvent());
+								},
 							}
 						} else {
 							log_error!(

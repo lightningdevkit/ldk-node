@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
@@ -24,8 +24,10 @@ use bitcoin::{Sequence, Transaction, Txid};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
 use lightning::util::persist::PageToken;
+use lightning::util::ser::Writeable;
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 
+use crate::config::{CHANNEL_TX_FACTS_MAX_RECORDS, CHANNEL_TX_FACTS_MAX_RECORD_BYTES};
 use crate::data_store::{StorableObject, StorableObjectId};
 use crate::hex_utils;
 use crate::payment::store::{Channel, TransactionType};
@@ -204,15 +206,16 @@ impl ChannelTxFacts {
 	/// Outputs are unioned by `vout`, while `self_role` and `local_figures` are filled in only
 	/// where they are still absent. Re-reporting a fact is therefore a no-op, which is what lets
 	/// a producer replay its event without consequence. Reporting a *different* value for
-	/// something already recorded is rejected, leaving the recorded facts as they were.
+	/// something already recorded is rejected, leaving the recorded facts as they were, and so is
+	/// a report that would take the record past the size a single record is allowed.
 	///
 	/// A merge that changes something dates the record at the incoming report's height, so that
 	/// retention measures how long ago this node last learned anything about the transaction.
 	pub(crate) fn merged_with(
 		mut self, incoming: &ChannelTxFacts,
-	) -> Result<Option<Self>, ChannelTxFactsConflict> {
+	) -> Result<Option<Self>, ChannelTxFactsRejection> {
 		if self.txid != incoming.txid {
-			return Err(ChannelTxFactsConflict::Txid {
+			return Err(ChannelTxFactsRejection::Txid {
 				recorded: self.txid,
 				incoming: incoming.txid,
 			});
@@ -223,7 +226,7 @@ impl ChannelTxFacts {
 			match self.outputs.iter().find(|recorded| recorded.vout == output.vout) {
 				Some(recorded) if recorded == output => {},
 				Some(recorded) => {
-					return Err(ChannelTxFactsConflict::Output {
+					return Err(ChannelTxFactsRejection::Output {
 						recorded: recorded.clone(),
 						incoming: output.clone(),
 					})
@@ -237,7 +240,7 @@ impl ChannelTxFacts {
 
 		match (&self.self_role, &incoming.self_role) {
 			(Some(recorded), Some(incoming)) if recorded != incoming => {
-				return Err(ChannelTxFactsConflict::SelfRole {
+				return Err(ChannelTxFactsRejection::SelfRole {
 					recorded: recorded.clone(),
 					incoming: incoming.clone(),
 				})
@@ -251,7 +254,7 @@ impl ChannelTxFacts {
 
 		match (&self.local_figures, &incoming.local_figures) {
 			(Some(recorded), Some(incoming)) if recorded != incoming => {
-				return Err(ChannelTxFactsConflict::LocalFigures {
+				return Err(ChannelTxFactsRejection::LocalFigures {
 					recorded: recorded.clone(),
 					incoming: incoming.clone(),
 				})
@@ -267,8 +270,37 @@ impl ChannelTxFacts {
 			return Ok(None);
 		}
 		self.recorded_at_height = self.recorded_at_height.max(incoming.recorded_at_height);
-		Ok(Some(self))
+		self.size_checked().map(Some)
 	}
+
+	/// These facts, or a rejection when storing them would take one record past the size a
+	/// record is allowed.
+	///
+	/// A record is written whole, so its size is the one resource a producer drives without
+	/// creating a record of its own: every channel-controlled output of a transaction lands on
+	/// that transaction's record, and a counterparty decides how many HTLCs a commitment
+	/// transaction carries. What a refused report would have described stays unclassifiable.
+	pub(crate) fn size_checked(self) -> Result<Self, ChannelTxFactsRejection> {
+		let bytes = self.serialized_length();
+		if bytes > CHANNEL_TX_FACTS_MAX_RECORD_BYTES {
+			return Err(ChannelTxFactsRejection::TooLarge {
+				bytes,
+				limit: CHANNEL_TX_FACTS_MAX_RECORD_BYTES,
+			});
+		}
+		Ok(self)
+	}
+}
+
+/// What became of a producer's report of what a transaction is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FactsRecordOutcome {
+	/// Everything reported is on record.
+	Recorded,
+	/// Part of what was reported is not on record, because recording it would have taken the
+	/// facts past the resources they are allowed. Transactions that would have been classified
+	/// from the missing part are reported without a classification instead.
+	Incomplete,
 }
 
 /// The channels this node still holds on-chain state for, as the retention of recorded facts
@@ -335,29 +367,71 @@ pub(crate) fn live_channels_of(
 	live
 }
 
-/// How far the pruning of recorded facts has walked the store.
+/// How far the pruning of recorded facts has walked the store, and how many records that walk
+/// found there.
 ///
-/// The walk visits every record over consecutive chain tips rather than in one pass, so a batch
-/// costs one page however large the store is.
+/// The walk is what keeps the store's size known: it visits every record over consecutive chain
+/// tips, so the count it arrives at is the store's own, without a second pass over it and without
+/// holding an index of its keys in memory. Between walks the count follows the records created
+/// and dropped, so it is exact except for records created during a walk that the walk had already
+/// gone past — those are counted by the walk after, which bounds how far the store can run past
+/// its limit at one walk's worth of growth.
 pub(crate) struct FactsRetention {
-	/// Where the walk resumes, held by the pruning pass alone.
+	/// Where the walk resumes and what it has counted, held by the pruning pass alone.
 	walk: tokio::sync::Mutex<FactsWalk>,
+	/// How many records the store holds. `None` until a walk has completed, until when nothing
+	/// is refused for want of room.
+	count: Mutex<Option<usize>>,
 }
 
 /// The pruning pass's place in its walk of the store.
 pub(crate) struct FactsWalk {
 	/// Where the next batch resumes, or `None` to walk the store from the start.
 	pub cursor: Option<PageToken>,
+	/// How many records this walk has counted so far.
+	pub seen: usize,
 }
 
 impl FactsRetention {
 	pub(crate) fn new() -> Self {
-		Self { walk: tokio::sync::Mutex::new(FactsWalk { cursor: None }) }
+		Self {
+			walk: tokio::sync::Mutex::new(FactsWalk { cursor: None, seen: 0 }),
+			count: Mutex::new(None),
+		}
 	}
 
 	/// Takes the pruning pass's place in its walk, for as long as the guard lives.
 	pub(crate) async fn walk(&self) -> tokio::sync::MutexGuard<'_, FactsWalk> {
 		self.walk.lock().await
+	}
+
+	/// Whether the store has room for a record it does not hold yet.
+	pub(crate) fn has_room(&self) -> bool {
+		self.count.lock().expect("lock").map_or(true, |count| count < CHANNEL_TX_FACTS_MAX_RECORDS)
+	}
+
+	/// Notes that a record was created.
+	pub(crate) fn record_created(&self) {
+		if let Some(count) = self.count.lock().expect("lock").as_mut() {
+			*count = count.saturating_add(1);
+		}
+	}
+
+	/// Notes that a record was dropped.
+	pub(crate) fn record_dropped(&self) {
+		if let Some(count) = self.count.lock().expect("lock").as_mut() {
+			*count = count.saturating_sub(1);
+		}
+	}
+
+	/// Notes that a walk of the whole store ended having counted `seen` records.
+	pub(crate) fn walk_completed(&self, seen: usize) {
+		*self.count.lock().expect("lock") = Some(seen);
+	}
+
+	#[cfg(test)]
+	pub(crate) fn counted(&self) -> Option<usize> {
+		*self.count.lock().expect("lock")
 	}
 }
 
@@ -428,12 +502,13 @@ impl StorableObject for ChannelTxFacts {
 	}
 }
 
-/// A reported fact that contradicts one already recorded for the same transaction.
+/// A reported fact that was not recorded, leaving what is on record as it was.
 ///
-/// Facts are immutable, so this means two producers disagree about the same transaction, which
-/// they cannot both be right about. The recorded value stands and the reported one is dropped.
+/// Most of these mean two producers disagree about the same transaction, which they cannot both
+/// be right about: facts are immutable, so the recorded value stands and the reported one is
+/// dropped. The remaining one is a report the record has no room for.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ChannelTxFactsConflict {
+pub(crate) enum ChannelTxFactsRejection {
 	/// The reported facts are about a different transaction altogether.
 	Txid { recorded: Txid, incoming: Txid },
 	/// The same output is reported with a different role or a different channel.
@@ -442,9 +517,24 @@ pub(crate) enum ChannelTxFactsConflict {
 	SelfRole { recorded: TransactionType, incoming: TransactionType },
 	/// This node's share of the transaction is reported differently than it is recorded.
 	LocalFigures { recorded: LocalFundingFigures, incoming: LocalFundingFigures },
+	/// Recording the report would take the transaction's record past the size one record is
+	/// allowed.
+	TooLarge { bytes: usize, limit: usize },
+	/// The store holds as many records as it is allowed to, and this report is about a
+	/// transaction it holds no record of.
+	NoRoom { limit: usize },
 }
 
-impl fmt::Display for ChannelTxFactsConflict {
+impl ChannelTxFactsRejection {
+	/// Whether the report was refused for want of room rather than because it contradicts what is
+	/// on record. Both leave the recorded facts as they were, but only a contradiction says a
+	/// producer is wrong about something.
+	pub(crate) fn is_resource_limit(&self) -> bool {
+		matches!(self, Self::TooLarge { .. } | Self::NoRoom { .. })
+	}
+}
+
+impl fmt::Display for ChannelTxFactsRejection {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
 			Self::Txid { recorded, incoming } => {
@@ -458,6 +548,12 @@ impl fmt::Display for ChannelTxFactsConflict {
 			},
 			Self::LocalFigures { recorded, incoming } => {
 				write!(f, "local funding figures {:?} reported as {:?}", recorded, incoming)
+			},
+			Self::TooLarge { bytes, limit } => {
+				write!(f, "record of {} bytes exceeds the {} bytes allowed", bytes, limit)
+			},
+			Self::NoRoom { limit } => {
+				write!(f, "no room for a further record beside the {} already held", limit)
 			},
 		}
 	}
@@ -801,7 +897,7 @@ mod tests {
 			ChannelTxFacts::new(txid).with_outputs(&channel, None, ChannelOutputRole::Anchor, [0]);
 
 		match recorded.clone().merged_with(&conflicting) {
-			Err(ChannelTxFactsConflict::Output { recorded, incoming }) => {
+			Err(ChannelTxFactsRejection::Output { recorded, incoming }) => {
 				assert_eq!(recorded.role, ChannelOutputRole::Funding);
 				assert_eq!(incoming.role, ChannelOutputRole::Anchor);
 			},
@@ -822,7 +918,7 @@ mod tests {
 		);
 		assert!(matches!(
 			recorded.merged_with(&reattributed),
-			Err(ChannelTxFactsConflict::Output { .. })
+			Err(ChannelTxFactsRejection::Output { .. })
 		));
 	}
 
@@ -838,7 +934,7 @@ mod tests {
 			});
 
 		match recorded.clone().merged_with(&conflicting) {
-			Err(ChannelTxFactsConflict::SelfRole { recorded, incoming }) => {
+			Err(ChannelTxFactsRejection::SelfRole { recorded, incoming }) => {
 				assert_eq!(recorded, TransactionType::Funding { channels: vec![channel.clone()] });
 				assert_eq!(
 					incoming,
@@ -864,7 +960,7 @@ mod tests {
 
 		assert!(matches!(
 			recorded.merged_with(&conflicting),
-			Err(ChannelTxFactsConflict::LocalFigures { .. })
+			Err(ChannelTxFactsRejection::LocalFigures { .. })
 		));
 	}
 
@@ -874,7 +970,7 @@ mod tests {
 		let other = ChannelTxFacts::new(test_txid(8));
 		assert_eq!(
 			recorded.merged_with(&other),
-			Err(ChannelTxFactsConflict::Txid { recorded: test_txid(7), incoming: test_txid(8) })
+			Err(ChannelTxFactsRejection::Txid { recorded: test_txid(7), incoming: test_txid(8) })
 		);
 	}
 
@@ -1307,6 +1403,41 @@ mod tests {
 	}
 
 	#[test]
+	fn a_report_that_would_outgrow_one_record_is_refused() {
+		let channel = test_channel(1);
+		let recorded = ChannelTxFacts::new(test_txid(30)).with_outputs(
+			&channel,
+			None,
+			ChannelOutputRole::Htlc,
+			0..8,
+		);
+
+		// One output costs well under a hundred bytes, so a report of this many cannot fit.
+		let oversized = ChannelTxFacts::new(test_txid(30)).with_outputs(
+			&channel,
+			None,
+			ChannelOutputRole::Htlc,
+			8..40_000,
+		);
+		match recorded.clone().merged_with(&oversized) {
+			Err(ChannelTxFactsRejection::TooLarge { bytes, limit }) => {
+				assert!(bytes > limit, "{} is not past {}", bytes, limit);
+				assert_eq!(limit, CHANNEL_TX_FACTS_MAX_RECORD_BYTES);
+			},
+			Ok(merged) => panic!(
+				"unexpected merge outcome: {} outputs recorded",
+				merged.map_or(0, |facts| facts.outputs.len()),
+			),
+			Err(e) => panic!("unexpected rejection {:?}", e),
+		}
+		// The refusal is what the caller sees; what is on record is untouched, as it is for a
+		// contradiction.
+		assert_eq!(recorded.clone().merged_with(&recorded).unwrap(), None);
+		assert!(oversized.size_checked().is_err());
+		assert!(recorded.size_checked().is_ok());
+	}
+
+	#[test]
 	fn a_record_is_dated_at_the_last_report_that_added_to_it() {
 		let channel = test_channel(1);
 		let first = ChannelTxFacts::new(test_txid(31))
@@ -1322,5 +1453,23 @@ mod tests {
 			.reported_at_height(900);
 		let merged = first.merged_with(&later).unwrap().expect("the anchor is new");
 		assert_eq!(merged.recorded_at_height, 900);
+	}
+
+	#[test]
+	fn the_census_bounds_admission_only_once_a_walk_has_counted_the_store() {
+		let retention = FactsRetention::new();
+		assert_eq!(retention.counted(), None);
+		// Nothing is refused while the store's size is unknown, however much is created.
+		for _ in 0..CHANNEL_TX_FACTS_MAX_RECORDS + 1 {
+			retention.record_created();
+		}
+		assert!(retention.has_room());
+
+		retention.walk_completed(CHANNEL_TX_FACTS_MAX_RECORDS - 1);
+		assert!(retention.has_room());
+		retention.record_created();
+		assert!(!retention.has_room(), "the store is full");
+		retention.record_dropped();
+		assert!(retention.has_room(), "dropping a record makes room");
 	}
 }

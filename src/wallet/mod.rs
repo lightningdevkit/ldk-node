@@ -57,7 +57,7 @@ use persist::KVStoreWalletPersister;
 
 use crate::channel::is_same_splice;
 use crate::config::{
-	Config, ADDRESS_POOL_SIZE, CHANNEL_TX_FACTS_PRUNE_PAGES_PER_TIP,
+	Config, ADDRESS_POOL_SIZE, CHANNEL_TX_FACTS_MAX_RECORDS, CHANNEL_TX_FACTS_PRUNE_PAGES_PER_TIP,
 	CHANNEL_TX_FACTS_RETENTION_BLOCKS,
 };
 #[cfg(test)]
@@ -74,8 +74,8 @@ use crate::payment::{
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChannelTxFactsStore, PaymentStore, PendingPaymentStore};
 use crate::wallet::provenance::{
-	ChannelLiveness, ChannelTxFacts, FactsRetention, LocalFundingFigures, RetentionCheck,
-	TxProvenance,
+	ChannelLiveness, ChannelTxFacts, ChannelTxFactsRejection, FactsRecordOutcome, FactsRetention,
+	LocalFundingFigures, RetentionCheck, TxProvenance,
 };
 use crate::{ChainSource, Error};
 
@@ -229,27 +229,66 @@ impl Wallet {
 	/// Re-recording facts already known writes nothing, so a producer may safely replay its
 	/// event. Facts that contradict what is recorded are rejected and logged rather than
 	/// overwriting it: one of the two producers is wrong, and the recorded facts came first.
-	pub(crate) async fn record_channel_tx_facts(&self, facts: ChannelTxFacts) -> Result<(), Error> {
+	///
+	/// A report the store has no room for is likewise refused, and reported as
+	/// [`FactsRecordOutcome::Incomplete`] rather than as a failure: there is nothing to retry,
+	/// and the consequence is a transaction this node cannot say anything about, not a lost
+	/// write. Only what this node has no record of at all is refused that way — a transaction it
+	/// already describes goes on being described, however full the store is.
+	pub(crate) async fn record_channel_tx_facts(
+		&self, facts: ChannelTxFacts,
+	) -> Result<FactsRecordOutcome, Error> {
 		let txid = facts.txid;
 		// Dated by the chain tip the report arrives at, which is what retention measures from.
 		let facts = facts.reported_at_height(self.latest_checkpoint_height());
 		// The rejection is reported out of the closure rather than through it, so that the read,
 		// the merge and the write stay one critical section of the store's mutation lock.
-		let mut conflict = None;
+		let mut rejection = None;
+		let mut created = false;
 		self.channel_tx_facts_store
 			.mutate(&txid, |current| match current {
 				Some(recorded) => match recorded.clone().merged_with(&facts) {
 					Ok(merged) => merged,
 					Err(e) => {
-						conflict = Some(e);
+						rejection = Some(e);
 						None
 					},
 				},
-				None => Some(facts),
+				// A transaction nothing is recorded of yet needs room of its own; one already on
+				// record is merged into above however full the store is, so an obligation this
+				// node took on is never half-kept.
+				None if !self.facts_retention.has_room() => {
+					rejection = Some(ChannelTxFactsRejection::NoRoom {
+						limit: CHANNEL_TX_FACTS_MAX_RECORDS,
+					});
+					None
+				},
+				None => match facts.clone().size_checked() {
+					Ok(checked) => {
+						created = true;
+						Some(checked)
+					},
+					Err(e) => {
+						rejection = Some(e);
+						None
+					},
+				},
 			})
 			.await?;
+		if created {
+			self.facts_retention.record_created();
+		}
 
-		match conflict {
+		match rejection {
+			Some(e) if e.is_resource_limit() => {
+				log_error!(
+					self.logger,
+					"Not recording what transaction {} is: {}. It will be reported without a classification",
+					txid,
+					e,
+				);
+				Ok(FactsRecordOutcome::Incomplete)
+			},
 			Some(e) => {
 				log_error!(
 					self.logger,
@@ -259,7 +298,7 @@ impl Wallet {
 				);
 				Err(Error::PersistenceFailed)
 			},
-			None => Ok(()),
+			None => Ok(FactsRecordOutcome::Recorded),
 		}
 	}
 
@@ -872,7 +911,8 @@ impl Wallet {
 	/// way the facts could still be needed, so any one of them keeps them.
 	///
 	/// The walk of the store resumes where the previous tip left it, so a batch costs one page
-	/// however large the store is.
+	/// however large the store is, and a full walk doubles as the census the admission of new
+	/// records is bounded by.
 	///
 	/// Nothing here is reported to the caller: dropping records is housekeeping, and failing the
 	/// chain tip pass over it would cost the payment graduations it shares the pass with.
@@ -892,9 +932,11 @@ impl Wallet {
 					// fail every tip from here on: start the walk over instead.
 					log_error!(self.logger, "Failed to list recorded channel facts: {}", e);
 					walk.cursor = None;
+					walk.seen = 0;
 					return;
 				},
 			};
+			walk.seen = walk.seen.saturating_add(page.objects.len());
 
 			for facts in page.objects {
 				let check = RetentionCheck {
@@ -914,6 +956,8 @@ impl Wallet {
 				let txid = facts.txid;
 				match self.drop_recorded_facts(facts).await {
 					Ok(true) => {
+						walk.seen = walk.seen.saturating_sub(1);
+						self.facts_retention.record_dropped();
 						log_debug!(
 							self.logger,
 							"Dropped what was recorded about transaction {}: nothing needs it anymore",
@@ -933,8 +977,11 @@ impl Wallet {
 			match page.next_page_token {
 				Some(token) => walk.cursor = Some(token),
 				None => {
-					// The walk has been all the way round; start the next one from the beginning.
+					// The walk has been all the way round, so what it counted is what the store
+					// holds. Start the next one from the beginning.
+					self.facts_retention.walk_completed(walk.seen);
 					walk.cursor = None;
+					walk.seen = 0;
 					break;
 				},
 			}
@@ -10677,6 +10724,8 @@ mod tests {
 			wallet.channel_tx_facts(&funding_txid).await.is_none(),
 			"nothing holds the channel and its funding is long spent",
 		);
+		// The walk went all the way round, so the store's size is known from here on.
+		assert_eq!(wallet.facts_retention.counted(), Some(0));
 	}
 
 	#[tokio::test]
@@ -10848,5 +10897,88 @@ mod tests {
 		assert!(!wallet.drop_recorded_facts(evaluated).await.unwrap());
 		let kept = wallet.channel_tx_facts(&funding_txid).await.expect("the record stays");
 		assert_eq!(kept.outputs.len(), 2);
+	}
+
+	#[tokio::test]
+	async fn a_full_store_leaves_a_new_transaction_undescribed() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let channel = Channel { counterparty_node_id, channel_id };
+
+		let admitted = Txid::from_byte_array([46u8; 32]);
+		assert_eq!(
+			wallet
+				.record_channel_tx_facts(ChannelTxFacts::new(admitted).with_outputs(
+					&channel,
+					None,
+					ChannelOutputRole::Funding,
+					[0],
+				))
+				.await
+				.unwrap(),
+			FactsRecordOutcome::Recorded,
+		);
+
+		// A walk of the store found it as full as it may get.
+		wallet.facts_retention.walk_completed(CHANNEL_TX_FACTS_MAX_RECORDS);
+
+		// What the node already took on is still kept up to date...
+		assert_eq!(
+			wallet
+				.record_channel_tx_facts(ChannelTxFacts::new(admitted).with_outputs(
+					&channel,
+					None,
+					ChannelOutputRole::Anchor,
+					[1],
+				))
+				.await
+				.unwrap(),
+			FactsRecordOutcome::Recorded,
+		);
+		let kept = wallet.channel_tx_facts(&admitted).await.expect("the record stays");
+		assert_eq!(kept.outputs.len(), 2);
+
+		// ...while a transaction it holds no record of is refused, and said to be refused.
+		let refused = Txid::from_byte_array([47u8; 32]);
+		assert_eq!(
+			wallet
+				.record_channel_tx_facts(ChannelTxFacts::new(refused).with_outputs(
+					&channel,
+					None,
+					ChannelOutputRole::Funding,
+					[0],
+				))
+				.await
+				.unwrap(),
+			FactsRecordOutcome::Incomplete,
+		);
+		assert!(wallet.channel_tx_facts(&refused).await.is_none());
+
+		// The cost of the refusal is a transaction reported without a classification, rather
+		// than one reported as something it may not be.
+		let close = tx_spending(&wallet, OutPoint { txid: refused, vout: 0 });
+		let close_txid = close.compute_txid();
+		insert_unconfirmed_tx(&wallet, close.clone());
+		wallet
+			.update_payment_store(vec![WalletEvent::TxUnconfirmed {
+				txid: close_txid,
+				tx: Arc::new(close),
+				old_block_time: None,
+			}])
+			.await
+			.unwrap();
+		let payment = wallet
+			.payment_stores
+			.payment_store()
+			.get(&PaymentId(close_txid.to_byte_array()))
+			.await
+			.unwrap()
+			.expect("wallet sync records the transaction");
+		assert!(
+			matches!(payment.kind, PaymentKind::Onchain { tx_type: None, .. }),
+			"unexpected kind {:?}",
+			payment.kind,
+		);
 	}
 }
