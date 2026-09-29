@@ -948,11 +948,26 @@ where
 	///
 	/// A failure is logged rather than reported: these facts accompany a transaction this node
 	/// has already released or a claim it has already made, so there is nothing left to withhold,
-	/// and the producing event is re-offered until the claim resolves.
+	/// and the producing event is re-offered until the claim resolves. A refusal for want of
+	/// room costs a transaction reported without a classification, which is likewise nothing
+	/// this node can take back.
 	async fn record_channel_tx_facts(&self, facts: ChannelTxFacts) {
 		let txid = facts.txid;
-		if let Err(e) = self.wallet.record_channel_tx_facts(facts).await {
-			log_error!(self.logger, "Failed to record what channel transaction {} is: {}", txid, e);
+		match self.wallet.record_channel_tx_facts(facts).await {
+			Ok(FactsRecordOutcome::Recorded) => {},
+			Ok(FactsRecordOutcome::Incomplete) => log_error!(
+				self.logger,
+				"Reporting transaction {} without a classification: this node has no room to describe it",
+				txid,
+			),
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to record what channel transaction {} is: {}",
+					txid,
+					e
+				)
+			},
 		}
 	}
 

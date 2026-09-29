@@ -279,7 +279,8 @@ impl ChannelTxFacts {
 	/// A record is written whole, so its size is the one resource a producer drives without
 	/// creating a record of its own: every channel-controlled output of a transaction lands on
 	/// that transaction's record, and a counterparty decides how many HTLCs a commitment
-	/// transaction carries. What a refused report would have described stays unclassifiable.
+	/// transaction carries. What a refused report would have described stays undescribed, and
+	/// what that costs is for the producer that reported it to weigh.
 	pub(crate) fn size_checked(self) -> Result<Self, ChannelTxFactsRejection> {
 		let bytes = self.serialized_length();
 		if bytes > CHANNEL_TX_FACTS_MAX_RECORD_BYTES {
@@ -298,8 +299,10 @@ pub(crate) enum FactsRecordOutcome {
 	/// Everything reported is on record.
 	Recorded,
 	/// Part of what was reported is not on record, because recording it would have taken the
-	/// facts past the resources they are allowed. Transactions that would have been classified
-	/// from the missing part are reported without a classification instead.
+	/// facts past the resources they are allowed. Nothing was lost, so what the refusal costs
+	/// is the reporting producer's to weigh: a transaction reported without a classification
+	/// for a producer that has nothing left to withhold, a reason to come back for one that
+	/// will not proceed unrecorded.
 	Incomplete,
 }
 

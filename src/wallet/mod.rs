@@ -231,10 +231,11 @@ impl Wallet {
 	/// overwriting it: one of the two producers is wrong, and the recorded facts came first.
 	///
 	/// A report the store has no room for is likewise refused, and reported as
-	/// [`FactsRecordOutcome::Incomplete`] rather than as a failure: there is nothing to retry,
-	/// and the consequence is a transaction this node cannot say anything about, not a lost
-	/// write. Only what this node has no record of at all is refused that way — a transaction it
-	/// already describes goes on being described, however full the store is.
+	/// [`FactsRecordOutcome::Incomplete`] rather than as a failure: nothing was lost, and what
+	/// the refusal costs is the reporting producer's to weigh — for most of them a transaction
+	/// this node cannot say anything about, for one that will not proceed unrecorded a reason to
+	/// come back. Only what this node has no record of at all is refused that way — a
+	/// transaction it already describes goes on being described, however full the store is.
 	pub(crate) async fn record_channel_tx_facts(
 		&self, facts: ChannelTxFacts,
 	) -> Result<FactsRecordOutcome, Error> {
@@ -281,12 +282,7 @@ impl Wallet {
 
 		match rejection {
 			Some(e) if e.is_resource_limit() => {
-				log_error!(
-					self.logger,
-					"Not recording what transaction {} is: {}. It will be reported without a classification",
-					txid,
-					e,
-				);
+				log_error!(self.logger, "Not recording what transaction {} is: {}", txid, e,);
 				Ok(FactsRecordOutcome::Incomplete)
 			},
 			Some(e) => {
@@ -2635,7 +2631,9 @@ impl Wallet {
 	/// replayed event), or without a local contribution or wallet-level activity. A failed write
 	/// leaves the caller to replay: a losing RBF candidate's contribution figures exist only while
 	/// the candidate is live in the channel's splice details, and both writes are idempotent, so
-	/// the replay completes whichever of them was lost.
+	/// the replay completes whichever of them was lost. A refusal to take the round's facts on
+	/// for want of room fails the same way, so the transaction stays unsigned rather than being
+	/// recorded with the wallet's view of a funding output both parties own.
 	///
 	/// [`ChannelManager::funding_transaction_signed`]: lightning::ln::channelmanager::ChannelManager::funding_transaction_signed
 	pub(crate) async fn record_signed_funding(
@@ -2715,14 +2713,26 @@ impl Wallet {
 		// The fact goes first: it is what ties the transaction to this payment, so a failure
 		// afterwards leaves the round attributable rather than a history pointing at a payment
 		// nothing would ever file the transaction under.
-		self.record_channel_tx_facts(
-			ChannelTxFacts::new(txid)
-				.with_self_role(TransactionType::InteractiveFunding {
-					channels: funding_channels.clone(),
-				})
-				.with_local_figures(figures),
-		)
-		.await?;
+		//
+		// A refusal for want of room fails the signing too, though nothing was lost: without
+		// this node's share on record, whoever first observes the transaction records it with
+		// the wallet's view of a funding output both parties own — the whole of it read as this
+		// node's spend. LDK re-offers the event while the transaction is unsigned, so replaying
+		// costs a splice that does not complete until the retention pass frees room, rather
+		// than a payment reporting a figure nothing later corrects.
+		let facts = ChannelTxFacts::new(txid)
+			.with_self_role(TransactionType::InteractiveFunding {
+				channels: funding_channels.clone(),
+			})
+			.with_local_figures(figures);
+		if self.record_channel_tx_facts(facts).await? == FactsRecordOutcome::Incomplete {
+			log_error!(
+				self.logger,
+				"Not signing interactive funding {}: this node's share of it is not on record",
+				txid,
+			);
+			return Err(Error::PersistenceFailed);
+		}
 
 		stores
 			.mutate_pending_payment(&payment_id, |existing| {
@@ -5971,6 +5981,45 @@ mod tests {
 			figures.direction,
 			PaymentDirection::Inbound,
 			"a splice-out returns funds to the wallet"
+		);
+	}
+
+	/// A round whose facts the store has no room for is not signed. Without this node's share on
+	/// record, whoever first observes the transaction records it with the wallet's view of a
+	/// funding output both parties own — the whole of it read as this node's spend — and nothing
+	/// later corrects that. The event is re-offered while the transaction is unsigned, so the
+	/// splice waits for room rather than being measured wrong.
+	#[tokio::test]
+	async fn a_round_this_node_has_no_room_to_measure_is_not_signed() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
+
+		// The store holds as many records as it may, so a transaction it holds none for is
+		// refused room.
+		wallet.facts_retention.walk_completed(CHANNEL_TX_FACTS_MAX_RECORDS);
+
+		assert!(
+			wallet.record_signed_funding(&tx, &candidates).await.is_err(),
+			"a round this node cannot measure must not be signed",
+		);
+		assert!(
+			wallet.channel_tx_facts(&txid).await.is_none(),
+			"nothing was recorded, which is what the refusal means",
+		);
+		assert!(
+			wallet
+				.payment_stores
+				.pending_payment_store()
+				.list_filter(|entry| entry.candidate(txid).is_some())
+				.await
+				.is_empty(),
+			"a round the signing refused must not be left in a candidate history",
 		);
 	}
 

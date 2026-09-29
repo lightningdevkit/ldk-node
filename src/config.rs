@@ -103,9 +103,10 @@ pub(crate) const CHANNEL_TX_FACTS_MAX_RECORD_BYTES: usize = 128 * 1024;
 //
 // Records are dropped only once the channels they belong to have resolved, so between prunes a
 // counterparty opening and closing channels, or replacing a negotiated funding again and again,
-// drives the store's growth. Past this many records nothing new is admitted and the transactions
-// it would have described go unclassified, which is bounded loss of detail rather than unbounded
-// storage.
+// drives the store's growth. Past this many records nothing new is admitted. A producer that has
+// already released what it reports on loses only the detail, so its transaction goes
+// unclassified; one that will not release a transaction it cannot measure comes back for it once
+// the dropping pass has freed room.
 pub(crate) const CHANNEL_TX_FACTS_MAX_RECORDS: usize = 100_000;
 
 // The number of pages of channel transaction provenance records one chain tip change examines.
