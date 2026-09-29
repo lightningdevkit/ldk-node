@@ -89,7 +89,6 @@ impl ElectrumChainSource {
 			self.server_url.clone(),
 			self.sync_config.clone(),
 			Arc::clone(&runtime),
-			Arc::clone(&self.config),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -430,15 +429,14 @@ impl ElectrumRuntimeStatus {
 
 	pub(super) fn start(
 		&mut self, server_url: String, sync_config: ElectrumSyncConfig, runtime: Arc<Runtime>,
-		config: Arc<Config>, logger: Arc<Logger>,
+		logger: Arc<Logger>,
 	) -> Result<(), Error> {
 		if self.client.is_some() {
 			debug_assert!(false, "We shouldn't call start if we're already started");
 			return Ok(());
 		}
 
-		let client =
-			Arc::new(ElectrumRuntimeClient::new(server_url, sync_config, runtime, config, logger)?);
+		let client = Arc::new(ElectrumRuntimeClient::new(server_url, sync_config, runtime, logger)?);
 
 		// (Re-)apply all known `Filter` entries to the fresh client.
 		for (txid, script_pubkey) in self.registered_txs.iter() {
@@ -487,7 +485,6 @@ struct ElectrumRuntimeClient {
 	bdk_electrum_client: Arc<BdkElectrumClient<Arc<ElectrumClient>>>,
 	tx_sync: Arc<ElectrumSyncClient<Arc<Logger>>>,
 	runtime: Arc<Runtime>,
-	config: Arc<Config>,
 	logger: Arc<Logger>,
 	confirm_gate: Arc<ConfirmGate>,
 }
@@ -495,7 +492,7 @@ struct ElectrumRuntimeClient {
 impl ElectrumRuntimeClient {
 	fn new(
 		server_url: String, sync_config: ElectrumSyncConfig, runtime: Arc<Runtime>,
-		config: Arc<Config>, logger: Arc<Logger>,
+		logger: Arc<Logger>,
 	) -> Result<Self, Error> {
 		let electrum_config = ElectrumConfigBuilder::new()
 			.retry(ELECTRUM_CLIENT_NUM_RETRIES)
@@ -524,7 +521,6 @@ impl ElectrumRuntimeClient {
 			bdk_electrum_client,
 			tx_sync,
 			runtime,
-			config,
 			logger,
 			confirm_gate: Arc::new(ConfirmGate::new()),
 		})
