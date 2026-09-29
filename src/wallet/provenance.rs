@@ -172,6 +172,13 @@ impl ChannelTxFacts {
 		self
 	}
 
+	/// Records this node's share of an interactively negotiated funding candidate, and the funding
+	/// payment the candidate belongs to.
+	pub(crate) fn with_local_figures(mut self, local_figures: LocalFundingFigures) -> Self {
+		self.local_figures = Some(local_figures);
+		self
+	}
+
 	/// Merges `incoming` into these facts, returning the result, or `None` when `incoming` adds
 	/// nothing to what is already recorded.
 	///

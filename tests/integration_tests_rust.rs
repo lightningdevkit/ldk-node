@@ -95,15 +95,17 @@ macro_rules! expect_splice_negotiation_failed_event {
 }
 
 /// Waits until `node` has recorded the funding broadcast `funding_txid` (a channel open or splice
-/// candidate) as a payment carrying a `tx_type`. A splice contributor records the payment when it
-/// signs the funding transaction, before the transaction can even be broadcast, so for splices
-/// this settles immediately and only stabilizes assertion timing. A channel open is classified off
-/// the broadcaster's queue, which can lag a `sync_wallets` call under load; waiting keeps the next
-/// sync on the funding short-circuit instead of recording a generic on-chain payment that clobbers
-/// the classification.
+/// candidate) as a payment carrying a `tx_type`, syncing its wallet until it has. A splice
+/// candidate's payment is recorded when wallet sync first observes the transaction, so the sync is
+/// what settles this; a channel open is classified off the broadcaster's queue, which can lag a
+/// `sync_wallets` call under load, and waiting keeps the next sync on the funding short-circuit
+/// instead of recording a generic on-chain payment that clobbers the classification.
 async fn wait_for_classified_funding_payment(node: &Node, funding_txid: Txid) {
 	let poll = async {
 		loop {
+			// A sync that cannot reach the transaction yet is retried rather than reported: the
+			// timeout below is what turns a transaction that never arrives into a failure.
+			let _ = node.sync_wallets();
 			let classified = node.list_all_payments().into_iter().any(|p| {
 				matches!(
 					p.kind,

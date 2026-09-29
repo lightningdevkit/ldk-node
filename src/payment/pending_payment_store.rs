@@ -14,7 +14,7 @@ use lightning::ln::types::ChannelId;
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 
 use crate::data_store::{StorableObject, StorableObjectUpdate, UpdatableObject};
-use crate::payment::store::PaymentDetailsUpdate;
+use crate::payment::store::{Channel, PaymentDetailsUpdate, TransactionType};
 use crate::payment::{PaymentDetails, PaymentKind};
 
 /// One candidate transaction in an interactive-funding (splice) RBF history, holding this node's
@@ -110,58 +110,48 @@ impl_writeable_tlv_based!(SpliceIntent, {
 
 /// A pending payment tracked by LDK Node, keyed by [`PaymentId`].
 ///
-/// A user-initiated splice is persisted as a [`PendingSplice`] before its contribution is handed
-/// to LDK — at which point no funding transaction, and therefore no [`PaymentDetails`], exists yet.
-/// Once the splice is recorded as a funding payment it becomes a [`Tracked`] payment carrying the
-/// real [`PaymentDetails`], while retaining its [`SpliceIntent`] until the splice locks.
-///
-/// [`PendingSplice`]: Self::PendingSplice
-/// [`Tracked`]: Self::Tracked
+/// Each part of an entry is written by a different subsystem and is present on its own schedule,
+/// so all of them are optional. A user-initiated splice is persisted with nothing but its
+/// [`SpliceIntent`] before its contribution is handed to LDK; signing a round of it adds the
+/// round to `candidates` and names the `funding_channels` it belongs to, still without a
+/// transaction anyone has seen; wallet sync adds `details` once it observes the transaction, and
+/// records `conflicting_txids` for any wallet transaction; the `ChannelReady` arm records
+/// `locked_rounds`. A splice uses all of them; the fields do not partition by payment type. An
+/// entry holding none of them tracks nothing and is removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PendingPaymentDetails {
-	/// A user-initiated splice persisted before hand-off to LDK; no funding transaction exists yet.
-	/// Keyed by the generated [`PaymentId`]; never mirrored into the payment store.
-	PendingSplice { id: PaymentId, intent: SpliceIntent },
-	/// A pending payment tracked toward confirmation, optionally still carrying a live splice
-	/// intent until the splice locks.
-	///
-	/// Each field is written by a different subsystem: wallet sync records `conflicting_txids`
-	/// for any wallet transaction (splice fundings included), the signing-time recording
-	/// records `candidates` for interactive funding, the `ChannelReady` arm records
-	/// `locked_rounds`, and `splice_intent` is owned by the splice entry points and the splice
-	/// tracker — persisted at splice initiation, carried over from a [`PendingSplice`] record
-	/// when the payment is promoted, and cleared once the splice locks or its failure is
-	/// surfaced. A splice uses all of them; the fields do not partition by payment type.
-	///
-	/// [`PendingSplice`]: Self::PendingSplice
-	Tracked {
-		/// The full payment details.
-		details: PaymentDetails,
-		/// Transaction IDs wallet sync observed to have replaced or to conflict with this
-		/// payment, used to map later events about those txids back to this record. This is
-		/// BDK's view, distinct from `candidates`: it can hold conflicts that were never
-		/// negotiated candidates, while a candidate replaced between wallet syncs may never
-		/// appear here (it gets no `TxReplaced` event of its own).
-		conflicting_txids: Vec<Txid>,
-		/// For interactive funding (splices), this node's per-candidate funding figures across the
-		/// RBF history, keyed by each candidate's txid and recorded as each round is signed.
-		/// Empty for non-funding payments.
-		candidates: Vec<FundingTxCandidate>,
-		/// The live splice intent, or `None` for a non-splice payment or a splice that has
-		/// locked. It lives here as well as on
-		/// [`PendingSplice`] because a fee bump — a fresh negotiation LDK likewise abandons if the
-		/// peer disconnects before signing — would share the broadcast splice's record rather than
-		/// get one of its own.
-		///
-		/// [`PendingSplice`]: Self::PendingSplice
-		splice_intent: Option<SpliceIntent>,
-		/// The candidates LDK promoted to the channel's funding, as `ChannelReady` reported them.
-		/// A zero-conf splice locks before its transaction confirms, and every later splice builds
-		/// on it, so such a round can still confirm once the channel's funding has moved on from
-		/// it and once the channel has closed, when LDK holds it no longer. Kept apart from the
-		/// candidates, which each funding-record write replaces as a whole.
-		locked_rounds: Vec<Txid>,
-	},
+pub(crate) struct PendingPaymentDetails {
+	/// The payment this entry tracks.
+	pub id: PaymentId,
+	/// The full payment details, or `None` for a splice whose transaction wallet sync has yet to
+	/// observe — including one this node has signed but nothing has broadcast.
+	pub details: Option<PaymentDetails>,
+	/// Transaction IDs wallet sync observed to have replaced or to conflict with this
+	/// payment, used to map later events about those txids back to this record. This is
+	/// BDK's view, distinct from `candidates`: it can hold conflicts that were never
+	/// negotiated candidates, while a candidate replaced between wallet syncs may never
+	/// appear here (it gets no `TxReplaced` event of its own).
+	pub conflicting_txids: Vec<Txid>,
+	/// The channels whose interactive funding `candidates` are rounds of, as the signing of a
+	/// round named them. Empty for a non-funding payment and for a record wallet sync created
+	/// on its own, whose channels its classification names instead.
+	pub funding_channels: Vec<Channel>,
+	/// For interactive funding (splices), this node's per-candidate funding figures across the
+	/// RBF history, keyed by each candidate's txid and recorded as each round is signed.
+	/// Empty for non-funding payments.
+	pub candidates: Vec<FundingTxCandidate>,
+	/// The live splice intent, or `None` for a non-splice payment or a splice that has
+	/// locked. It is owned by the splice entry points and the splice tracker — persisted at
+	/// splice initiation and cleared once the splice locks or its failure is surfaced — and
+	/// outlives the rounds negotiated under it, because a fee bump is a fresh negotiation LDK
+	/// likewise abandons if the peer disconnects before signing, and shares the bumped round's
+	/// record rather than getting one of its own.
+	pub splice_intent: Option<SpliceIntent>,
+	/// The candidates LDK promoted to the channel's funding, as `ChannelReady` reported them.
+	/// A zero-conf splice locks before its transaction confirms, and every later splice builds
+	/// on it, so such a round can still confirm once the channel's funding has moved on from
+	/// it and once the channel has closed, when LDK holds it no longer. Kept apart from the
+	/// candidates, which each funding-record write replaces as a whole.
+	pub locked_rounds: Vec<Txid>,
 }
 
 impl PendingPaymentDetails {
@@ -175,9 +165,11 @@ impl PendingPaymentDetails {
 		details: PaymentDetails, conflicting_txids: Vec<Txid>, candidates: Vec<FundingTxCandidate>,
 		splice_intent: Option<SpliceIntent>,
 	) -> Self {
-		Self::Tracked {
-			details,
+		Self {
+			id: details.id,
+			details: Some(details),
 			conflicting_txids,
+			funding_channels: Vec::new(),
 			candidates,
 			splice_intent,
 			locked_rounds: Vec::new(),
@@ -185,91 +177,109 @@ impl PendingPaymentDetails {
 	}
 
 	pub(crate) fn pending_splice(id: PaymentId, intent: SpliceIntent) -> Self {
-		Self::PendingSplice { id, intent }
+		Self {
+			id,
+			details: None,
+			conflicting_txids: Vec::new(),
+			funding_channels: Vec::new(),
+			candidates: Vec::new(),
+			splice_intent: Some(intent),
+			locked_rounds: Vec::new(),
+		}
 	}
 
-	/// The full payment details, or `None` for a splice not yet broadcast.
-	pub(crate) fn details(&self) -> Option<&PaymentDetails> {
-		match self {
-			Self::PendingSplice { .. } => None,
-			Self::Tracked { details, .. } => Some(details),
+	/// An entry for the rounds of an interactive funding of `funding_channels` this node has
+	/// signed, before any transaction of it has been observed and therefore before a payment
+	/// record for it exists.
+	pub(crate) fn signed_rounds(
+		id: PaymentId, funding_channels: Vec<Channel>, candidates: Vec<FundingTxCandidate>,
+		splice_intent: Option<SpliceIntent>,
+	) -> Self {
+		Self {
+			id,
+			details: None,
+			conflicting_txids: Vec::new(),
+			funding_channels,
+			candidates,
+			splice_intent,
+			locked_rounds: Vec::new(),
 		}
+	}
+
+	/// The full payment details, or `None` for a splice whose transaction has not been observed.
+	pub(crate) fn details(&self) -> Option<&PaymentDetails> {
+		self.details.as_ref()
 	}
 
 	/// Transaction IDs that have replaced or conflict with this payment.
 	pub(crate) fn conflicting_txids(&self) -> &[Txid] {
-		match self {
-			Self::PendingSplice { .. } => &[],
-			Self::Tracked { conflicting_txids, .. } => conflicting_txids,
-		}
+		&self.conflicting_txids
 	}
 
-	/// The rounds LDK promoted to the channel's funding, as `ChannelReady` reported them; empty
-	/// for a splice without a funding transaction yet.
+	/// The rounds LDK promoted to the channel's funding, as `ChannelReady` reported them.
 	pub(crate) fn locked_rounds(&self) -> &[Txid] {
-		match self {
-			Self::PendingSplice { .. } => &[],
-			Self::Tracked { locked_rounds, .. } => locked_rounds,
-		}
+		&self.locked_rounds
 	}
 
 	/// Records that LDK promoted the round with the given txid to the channel's funding. Returns
-	/// whether the record changed: a round recorded as promoted already, or a splice without a
-	/// funding transaction yet, leaves it as it is.
+	/// whether the record changed: a round recorded as promoted already leaves it as it is.
 	pub(crate) fn record_locked_round(&mut self, txid: Txid) -> bool {
-		match self {
-			Self::PendingSplice { .. } => false,
-			Self::Tracked { locked_rounds, .. } => {
-				if locked_rounds.contains(&txid) {
-					return false;
-				}
-				locked_rounds.push(txid);
-				true
-			},
+		if self.locked_rounds.contains(&txid) {
+			return false;
 		}
+		self.locked_rounds.push(txid);
+		true
 	}
 
 	/// The splice intent this record carries, if it is a splice that has not yet locked.
 	pub(crate) fn splice_intent(&self) -> Option<&SpliceIntent> {
-		match self {
-			Self::PendingSplice { intent, .. } => Some(intent),
-			Self::Tracked { splice_intent, .. } => splice_intent.as_ref(),
-		}
+		self.splice_intent.as_ref()
 	}
 
 	/// Returns this node's recorded funding figures for the candidate with the given txid, if any.
 	pub(crate) fn candidate(&self, txid: Txid) -> Option<&FundingTxCandidate> {
-		match self {
-			Self::PendingSplice { .. } => None,
-			Self::Tracked { candidates, .. } => {
-				candidates.iter().find(|candidate| candidate.txid == txid)
-			},
+		self.candidates.iter().find(|candidate| candidate.txid == txid)
+	}
+
+	/// This node's recorded funding figures across the candidate history, in LDK's order; empty
+	/// for a splice without a signed round yet and for non-funding payments.
+	pub(crate) fn candidates(&self) -> &[FundingTxCandidate] {
+		&self.candidates
+	}
+
+	/// The channels of the interactive funding this entry tracks: those the signing of a round
+	/// named, else those its classification names.
+	pub(crate) fn funding_channels(&self) -> &[Channel] {
+		if !self.funding_channels.is_empty() {
+			return &self.funding_channels;
+		}
+		match self.details.as_ref().map(|details| &details.kind) {
+			Some(PaymentKind::Onchain {
+				tx_type: Some(TransactionType::InteractiveFunding { channels }),
+				..
+			}) => channels,
+			_ => &[],
 		}
 	}
 
-	/// This node's recorded funding figures across the candidate history, in LDK's order; empty for
-	/// a splice without a funding transaction yet and for non-funding payments.
-	pub(crate) fn candidates(&self) -> &[FundingTxCandidate] {
-		match self {
-			Self::PendingSplice { .. } => &[],
-			Self::Tracked { candidates, .. } => candidates,
-		}
+	/// Whether this entry tracks nothing anymore and can be dropped.
+	pub(crate) fn is_empty(&self) -> bool {
+		self.details.is_none()
+			&& self.splice_intent.is_none()
+			&& self.candidates.is_empty()
+			&& self.locked_rounds.is_empty()
 	}
 }
 
-impl_writeable_tlv_based_enum!(PendingPaymentDetails,
-	(0, PendingSplice) => {
-		(0, id, required),
-		(2, intent, required),
-	},
-	(2, Tracked) => {
-		(0, details, required),
-		(2, conflicting_txids, optional_vec),
-		(4, candidates, optional_vec),
-		(6, splice_intent, option),
-		(8, locked_rounds, optional_vec),
-	},
-);
+impl_writeable_tlv_based!(PendingPaymentDetails, {
+	(0, id, required),
+	(2, details, option),
+	(4, conflicting_txids, optional_vec),
+	(6, funding_channels, optional_vec),
+	(8, candidates, optional_vec),
+	(10, splice_intent, option),
+	(12, locked_rounds, optional_vec),
+});
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PendingPaymentDetailsUpdate {
@@ -278,8 +288,8 @@ pub(crate) struct PendingPaymentDetailsUpdate {
 	pub conflicting_txids: Option<Vec<Txid>>,
 	pub candidates: Vec<FundingTxCandidate>,
 	/// The splice intent to set (`Some(Some(..))`) or clear (`Some(None)`), or `None` to leave it
-	/// unchanged. Setting it on a [`PendingPaymentDetails::PendingSplice`] replaces the intent;
-	/// clearing a pre-broadcast splice is done by removing the record, not through this field.
+	/// unchanged. Clearing the intent of an entry that tracks nothing else is done by removing the
+	/// entry, not through this field.
 	pub splice_intent: Option<Option<SpliceIntent>>,
 }
 
@@ -287,10 +297,7 @@ impl StorableObject for PendingPaymentDetails {
 	type Id = PaymentId;
 
 	fn id(&self) -> Self::Id {
-		match self {
-			Self::PendingSplice { id, .. } => *id,
-			Self::Tracked { details, .. } => details.id,
-		}
+		self.id
 	}
 }
 
@@ -298,58 +305,50 @@ impl UpdatableObject for PendingPaymentDetails {
 	type Update = PendingPaymentDetailsUpdate;
 
 	fn update(&mut self, update: Self::Update) -> bool {
-		match self {
-			Self::PendingSplice { intent, .. } => {
-				// A pre-broadcast record only carries a splice intent; the only meaningful update
-				// is replacing that intent. Clearing it is done by removing the record.
-				if let Some(Some(new_intent)) = update.splice_intent {
-					if *intent != new_intent {
-						*intent = new_intent;
-						return true;
-					}
-				}
-				false
-			},
-			Self::Tracked { details, conflicting_txids, candidates, splice_intent, .. } => {
-				let mut updated = false;
+		let mut updated = false;
 
-				// Update the underlying payment details if present
-				if let Some(payment_update) = update.payment_update {
-					updated |= details.update(payment_update);
-				}
-
-				if let Some(new_conflicting_txids) = update.conflicting_txids {
-					if *conflicting_txids != new_conflicting_txids {
-						*conflicting_txids = new_conflicting_txids;
-						updated = true;
-					}
-				}
-
-				if let PaymentKind::Onchain { txid, .. } = &details.kind {
-					let conflicts_len = conflicting_txids.len();
-					conflicting_txids.retain(|conflicting_txid| conflicting_txid != txid);
-					updated |= conflicting_txids.len() != conflicts_len;
-				}
-
-				// Each funding-record write passes the candidate history as of its own round, so a
-				// non-empty update replaces the stored list. An empty update (e.g. a non-funding
-				// payment) leaves it untouched. Dropping an abandoned round, the only writer that
-				// shrinks it, goes through the store's `mutate` instead.
-				if !update.candidates.is_empty() && *candidates != update.candidates {
-					*candidates = update.candidates;
-					updated = true;
-				}
-
-				if let Some(new_splice_intent) = update.splice_intent {
-					if *splice_intent != new_splice_intent {
-						*splice_intent = new_splice_intent;
-						updated = true;
-					}
-				}
-
-				updated
-			},
+		// Update the underlying payment details if present. An entry with no record yet is not
+		// given one here: only the writer that observed the transaction knows what the record
+		// says, and it sets the field directly.
+		if let (Some(payment_update), Some(details)) =
+			(update.payment_update, self.details.as_mut())
+		{
+			updated |= details.update(payment_update);
 		}
+
+		if let Some(new_conflicting_txids) = update.conflicting_txids {
+			if self.conflicting_txids != new_conflicting_txids {
+				self.conflicting_txids = new_conflicting_txids;
+				updated = true;
+			}
+		}
+
+		if let Some(PaymentKind::Onchain { txid, .. }) =
+			self.details.as_ref().map(|details| &details.kind)
+		{
+			let txid = *txid;
+			let conflicts_len = self.conflicting_txids.len();
+			self.conflicting_txids.retain(|conflicting_txid| *conflicting_txid != txid);
+			updated |= self.conflicting_txids.len() != conflicts_len;
+		}
+
+		// Each funding-record write passes the candidate history as of its own round, so a
+		// non-empty update replaces the stored list. An empty update (e.g. a non-funding
+		// payment) leaves it untouched. Dropping an abandoned round, the only writer that
+		// shrinks it, goes through the store's `mutate` instead.
+		if !update.candidates.is_empty() && self.candidates != update.candidates {
+			self.candidates = update.candidates;
+			updated = true;
+		}
+
+		if let Some(new_splice_intent) = update.splice_intent {
+			if self.splice_intent != new_splice_intent {
+				self.splice_intent = new_splice_intent;
+				updated = true;
+			}
+		}
+
+		updated
 	}
 
 	fn to_update(&self) -> Self::Update {
@@ -365,36 +364,31 @@ impl StorableObjectUpdate<PendingPaymentDetails> for PendingPaymentDetailsUpdate
 
 impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 	fn from(value: &PendingPaymentDetails) -> Self {
-		match value {
-			PendingPaymentDetails::PendingSplice { id, intent } => Self {
-				id: *id,
+		match &value.details {
+			// An entry with no record yet carries nothing a payment-tracking merge could apply
+			// beyond its intent, which the entry that holds it owns outright.
+			None => Self {
+				id: value.id,
 				payment_update: None,
 				conflicting_txids: None,
-				candidates: Vec::new(),
-				splice_intent: Some(Some(intent.clone())),
+				candidates: value.candidates.clone(),
+				splice_intent: value.splice_intent.clone().map(Some),
 			},
-			PendingPaymentDetails::Tracked {
-				details,
-				conflicting_txids,
-				candidates,
-				splice_intent,
-				..
-			} => {
-				let conflicting_txids = if conflicting_txids.is_empty() {
+			Some(details) => {
+				let conflicting_txids = if value.conflicting_txids.is_empty() {
 					None
 				} else {
-					Some(conflicting_txids.clone())
+					Some(value.conflicting_txids.clone())
 				};
 				// Leave the splice intent unchanged: it is owned by the splice entry points and the
 				// splice tracker, never by a payment-tracking merge. Emitting the current value
 				// here would let an `insert_or_update` of a payment record (e.g. from wallet sync,
 				// built without an intent) clobber a live intent to `None`.
-				let _ = splice_intent;
 				Self {
 					id: details.id,
 					payment_update: Some(details.to_update()),
 					conflicting_txids,
-					candidates: candidates.clone(),
+					candidates: value.candidates.clone(),
 					splice_intent: None,
 				}
 			},
@@ -817,7 +811,7 @@ mod tests {
 			contribution: test_funding_contribution(),
 			kind: SpliceKind::In { amount_sats: 500_000 },
 		};
-		let record = PendingPaymentDetails::PendingSplice { id, intent };
+		let record = PendingPaymentDetails::pending_splice(id, intent);
 
 		let encoded = record.encode();
 		let decoded = PendingPaymentDetails::read(&mut &encoded[..]).unwrap();
@@ -895,21 +889,19 @@ mod tests {
 			contribution,
 			kind: SpliceKind::Rbf {},
 		};
-		let record = PendingPaymentDetails::PendingSplice { id: PaymentId([10u8; 32]), intent };
+		let record = PendingPaymentDetails::pending_splice(PaymentId([10u8; 32]), intent);
 
 		let encoded = record.encode();
 		let decoded = PendingPaymentDetails::read(&mut &encoded[..]).unwrap();
 		assert_eq!(record, decoded);
-		let PendingPaymentDetails::PendingSplice { intent, .. } = decoded else {
-			panic!("a pending splice decoded as something else");
-		};
+		let intent = decoded.splice_intent.expect("a pending splice decoded without its intent");
 		assert_eq!(reserved(&intent.contribution), expected);
 	}
 
 	#[test]
 	fn tracked_payment_round_trips() {
-		// The `PendingSplice` variant round-trips in `pending_splice_round_trips`; here we cover
-		// the `Tracked` variant and its enum discriminant.
+		// An entry without a payment record round-trips in `pending_splice_round_trips`; here we
+		// cover one carrying the record and its candidate history.
 		let payment_id = PaymentId([7u8; 32]);
 		let txid = Txid::from_byte_array([8u8; 32]);
 		let record = PendingPaymentDetails::new(

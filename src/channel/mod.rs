@@ -511,14 +511,9 @@ impl SpliceTracker {
 	/// Clears the persisted intent behind a splice that settled — it locked, its failure was
 	/// surfaced, or its channel closed — but only while `still_applies` holds for the stored
 	/// intent: a mismatch means a fee bump took over the record in the meantime, and its intent
-	/// must stay. A tracked record stays, with the intent cleared, so its payment keeps
-	/// graduating. A bare intent record is removed, along with any payment record under its id:
-	/// the signing-time recording of a splice round files a payment under an intent's id and
-	/// promotes the entry in the same write, so a payment record found under a bare intent is the
-	/// first half of a write that never completed, of a round whose signatures never left the
-	/// node, so nothing can broadcast it and no entry would ever drive the record
-	/// ([`Wallet::drop_unindexed_record_of_settled_intent`]). The record goes first: a bare intent
-	/// left behind is found and settled again, an orphaned record would not be.
+	/// must stay. A record that tracks anything else stays, with the intent cleared, so its
+	/// payment keeps graduating and the rounds signed under the splice keep their place. A record
+	/// left with nothing to track is removed.
 	async fn clear_persisted_intent<F: Fn(&SpliceIntent) -> bool>(
 		&self, payment_id: PaymentId, still_applies: F,
 	) {
@@ -542,10 +537,11 @@ impl SpliceTracker {
 				})
 				.await?;
 			if remove_bare_record {
-				self.wallet.drop_unindexed_record_of_settled_intent(payment_id).await?;
 				self.pending_payment_store
 					.remove_if(&payment_id, |record| {
 						record.details().is_none()
+							&& record.candidates().is_empty()
+							&& record.locked_rounds().is_empty()
 							&& record.splice_intent().is_some_and(still_applies)
 					})
 					.await?;
@@ -1000,27 +996,21 @@ fn decide_on_lock(
 	}
 }
 
-/// The replacement for a pending record whose splice intent is being dropped. A tracked record
-/// keeps its payment details with just the intent cleared. A bare intent record has nothing to
-/// keep and is left for the caller to remove — never promoted over a payment record found under
-/// its id, which is the first half of a write — for a round of ours, the signing write — that
-/// never completed rather than a payment to keep graduating (see
-/// [`SpliceTracker::clear_persisted_intent`]).
+/// The replacement for a pending record whose splice intent is being dropped. A record that still
+/// tracks something else — a payment, the rounds signed under the splice, or a round LDK promoted
+/// — keeps it with just the intent cleared. A record left with nothing to track has nothing to
+/// keep and is left for the caller to remove (see [`SpliceTracker::clear_persisted_intent`]).
 fn record_with_intent_cleared(existing: &PendingPaymentDetails) -> Option<PendingPaymentDetails> {
-	match existing {
-		PendingPaymentDetails::PendingSplice { .. } => None,
-		PendingPaymentDetails::Tracked { .. } => {
-			let mut tracked = existing.clone();
-			let update = PendingPaymentDetailsUpdate {
-				id: tracked.id(),
-				payment_update: None,
-				conflicting_txids: None,
-				candidates: Vec::new(),
-				splice_intent: Some(None),
-			};
-			tracked.update(update).then_some(tracked)
-		},
-	}
+	let mut record = existing.clone();
+	let update = PendingPaymentDetailsUpdate {
+		id: record.id(),
+		payment_update: None,
+		conflicting_txids: None,
+		candidates: Vec::new(),
+		splice_intent: Some(None),
+	};
+	record.update(update);
+	(!record.is_empty()).then_some(record)
 }
 
 /// What [`SpliceTracker::reconcile`] should do with a persisted intent whose channel and funding
