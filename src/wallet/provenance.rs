@@ -14,21 +14,23 @@
 //! pending — so records are merged rather than replaced, and a producer reporting a different
 //! value for something already recorded is rejected instead of overwriting it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::sync::{Arc, Weak};
 
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{Sequence, Transaction, Txid};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
+use lightning::util::persist::PageToken;
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 
 use crate::data_store::{StorableObject, StorableObjectId};
 use crate::hex_utils;
 use crate::payment::store::{Channel, TransactionType};
 use crate::payment::PaymentDirection;
-use crate::types::UserChannelId;
+use crate::types::{ChainMonitor, ChannelManager, Sweeper, UserChannelId};
 
 /// The part a transaction output plays in a channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +113,10 @@ pub(crate) struct ChannelTxFacts {
 	/// This node's share of an interactive-funding candidate, and the funding record it belongs
 	/// to.
 	pub local_figures: Option<LocalFundingFigures>,
+	/// The chain tip this node was at when it last learned something new about the transaction.
+	/// It dates the record for retention; it is not a fact about the transaction, and so is the
+	/// one part of a record a later report may move.
+	pub recorded_at_height: u32,
 }
 
 impl_writeable_tlv_based!(ChannelTxFacts, {
@@ -118,12 +124,25 @@ impl_writeable_tlv_based!(ChannelTxFacts, {
 	(2, outputs, optional_vec),
 	(4, self_role, option),
 	(6, local_figures, option),
+	(8, recorded_at_height, required),
 });
 
 impl ChannelTxFacts {
 	/// Facts about the transaction `txid`, to be filled in with what a producer reported.
 	pub(crate) fn new(txid: Txid) -> Self {
-		Self { txid, outputs: Vec::new(), self_role: None, local_figures: None }
+		Self {
+			txid,
+			outputs: Vec::new(),
+			self_role: None,
+			local_figures: None,
+			recorded_at_height: 0,
+		}
+	}
+
+	/// Dates these facts at the chain tip the node is at while reporting them.
+	pub(crate) fn reported_at_height(mut self, height: u32) -> Self {
+		self.recorded_at_height = height;
+		self
 	}
 
 	/// Records `vouts` of this transaction as controlled by `channel` in `role`.
@@ -186,6 +205,9 @@ impl ChannelTxFacts {
 	/// where they are still absent. Re-reporting a fact is therefore a no-op, which is what lets
 	/// a producer replay its event without consequence. Reporting a *different* value for
 	/// something already recorded is rejected, leaving the recorded facts as they were.
+	///
+	/// A merge that changes something dates the record at the incoming report's height, so that
+	/// retention measures how long ago this node last learned anything about the transaction.
 	pub(crate) fn merged_with(
 		mut self, incoming: &ChannelTxFacts,
 	) -> Result<Option<Self>, ChannelTxFactsConflict> {
@@ -241,7 +263,149 @@ impl ChannelTxFacts {
 			_ => {},
 		}
 
-		Ok(changed.then_some(self))
+		if !changed {
+			return Ok(None);
+		}
+		self.recorded_at_height = self.recorded_at_height.max(incoming.recorded_at_height);
+		Ok(Some(self))
+	}
+}
+
+/// The channels this node still holds on-chain state for, as the retention of recorded facts
+/// consults them.
+pub(crate) trait ChannelLiveness: Send + Sync {
+	/// The channels the node's channel manager, chain monitor or output sweeper still knows
+	/// about, or `None` when that state cannot be consulted at all. Nothing is dropped while the
+	/// answer is `None`: without it there is no way to tell which facts are still needed.
+	fn live_channels(&self) -> Option<HashSet<ChannelId>>;
+}
+
+/// The node's own channel state, as [`ChannelLiveness`].
+///
+/// The handles are weak because the node's channel state holds the wallet in turn, through the
+/// keys manager, so strong ones here would keep both alive for good. A handle that no longer
+/// upgrades means the node is being torn down, which is no time to be dropping records.
+pub(crate) struct NodeChannelLiveness {
+	channel_manager: Weak<ChannelManager>,
+	chain_monitor: Weak<ChainMonitor>,
+	output_sweeper: Weak<Sweeper>,
+}
+
+impl NodeChannelLiveness {
+	pub(crate) fn new(
+		channel_manager: &Arc<ChannelManager>, chain_monitor: &Arc<ChainMonitor>,
+		output_sweeper: &Arc<Sweeper>,
+	) -> Self {
+		Self {
+			channel_manager: Arc::downgrade(channel_manager),
+			chain_monitor: Arc::downgrade(chain_monitor),
+			output_sweeper: Arc::downgrade(output_sweeper),
+		}
+	}
+}
+
+impl ChannelLiveness for NodeChannelLiveness {
+	fn live_channels(&self) -> Option<HashSet<ChannelId>> {
+		let channel_manager = self.channel_manager.upgrade()?;
+		let chain_monitor = self.chain_monitor.upgrade()?;
+		let output_sweeper = self.output_sweeper.upgrade()?;
+
+		Some(live_channels_of(
+			channel_manager.list_channels().into_iter().map(|channel| channel.channel_id),
+			chain_monitor.list_monitors(),
+			output_sweeper.tracked_spendable_outputs().into_iter().map(|output| output.channel_id),
+		))
+	}
+}
+
+/// The channels named by a node's open channels, by the monitors it holds and by the spendable
+/// outputs its sweeper tracks, each named once.
+///
+/// A channel counts as held if any one of the three names it: an open channel can still produce
+/// transactions, a monitor can still claim from one, and a tracked output has yet to be swept.
+/// A tracked output that names no channel — one the sweeper was given without one — says nothing
+/// about which channel is held and is left out.
+pub(crate) fn live_channels_of(
+	channels: impl IntoIterator<Item = ChannelId>, monitors: impl IntoIterator<Item = ChannelId>,
+	tracked_outputs: impl IntoIterator<Item = Option<ChannelId>>,
+) -> HashSet<ChannelId> {
+	let mut live: HashSet<ChannelId> = channels.into_iter().collect();
+	live.extend(monitors);
+	live.extend(tracked_outputs.into_iter().flatten());
+	live
+}
+
+/// How far the pruning of recorded facts has walked the store.
+///
+/// The walk visits every record over consecutive chain tips rather than in one pass, so a batch
+/// costs one page however large the store is.
+pub(crate) struct FactsRetention {
+	/// Where the walk resumes, held by the pruning pass alone.
+	walk: tokio::sync::Mutex<FactsWalk>,
+}
+
+/// The pruning pass's place in its walk of the store.
+pub(crate) struct FactsWalk {
+	/// Where the next batch resumes, or `None` to walk the store from the start.
+	pub cursor: Option<PageToken>,
+}
+
+impl FactsRetention {
+	pub(crate) fn new() -> Self {
+		Self { walk: tokio::sync::Mutex::new(FactsWalk { cursor: None }) }
+	}
+
+	/// Takes the pruning pass's place in its walk, for as long as the guard lives.
+	pub(crate) async fn walk(&self) -> tokio::sync::MutexGuard<'_, FactsWalk> {
+		self.walk.lock().await
+	}
+}
+
+/// What deciding whether a transaction's facts are still needed takes, beyond the facts
+/// themselves.
+pub(crate) struct RetentionCheck<'a> {
+	/// The height of the chain tip the decision is taken at.
+	pub tip_height: u32,
+	/// How many blocks a record outlives the last thing this node learned about its transaction.
+	pub retention_blocks: u32,
+	/// The channels this node still holds on-chain state for.
+	pub live_channels: &'a HashSet<ChannelId>,
+	/// The transactions the pending payment store still refers to — its records' own
+	/// transactions, their interactive-funding candidates, the rounds that locked and the
+	/// conflicts wallet sync listed. A payment is pending exactly while its classification can
+	/// still be written onto it, so a transaction named here has yet to reach its record.
+	pub pending_txids: &'a HashSet<Txid>,
+	/// Whether every funding output the facts record has been spent by a transaction confirmed
+	/// at least `2 * ANTI_REORG_DELAY` deep whose own payment has settled. `true` for facts
+	/// recording no funding output, which nothing closes.
+	pub funding_spends_settled: bool,
+}
+
+impl ChannelTxFacts {
+	/// Whether these facts have outlived every use this node has for them.
+	///
+	/// All of it must hold at once, and the age cap is what makes the answer bounded for facts
+	/// the other checks are blind to — a transaction for a channel that never reached the
+	/// channel manager, the chain monitor or the sweeper satisfies them vacuously.
+	pub(crate) fn is_prunable(&self, check: &RetentionCheck<'_>) -> bool {
+		if check.tip_height < self.recorded_at_height.saturating_add(check.retention_blocks) {
+			return false;
+		}
+		if self.outputs.iter().any(|output| check.live_channels.contains(&output.channel_id)) {
+			return false;
+		}
+		if check.pending_txids.contains(&self.txid) {
+			return false;
+		}
+		check.funding_spends_settled
+	}
+
+	/// The outputs of this transaction a channel holds its funds in.
+	pub(crate) fn funding_vouts(&self) -> impl Iterator<Item = u32> + '_ {
+		self.outputs
+			.iter()
+			.filter(|output| output.role == ChannelOutputRole::Funding)
+			.map(|output| output.vout)
 	}
 }
 
@@ -1040,5 +1204,123 @@ mod tests {
 			})
 		);
 		assert_eq!(provenance.local_figures(), Some(&figures));
+	}
+
+	/// Facts about a funding transaction of `channel` whose age is measured from `height`.
+	fn funding_facts(channel: &Channel, height: u32) -> ChannelTxFacts {
+		ChannelTxFacts::new(test_txid(20))
+			.with_outputs(channel, None, ChannelOutputRole::Funding, [0])
+			.reported_at_height(height)
+	}
+
+	/// A retention check that would drop the facts it is given: nothing is held, nothing is
+	/// pending, the funding is spent and settled, and the age cap has long passed.
+	fn everything_resolved<'a>(
+		live_channels: &'a HashSet<ChannelId>, pending_txids: &'a HashSet<Txid>,
+	) -> RetentionCheck<'a> {
+		RetentionCheck {
+			tip_height: 100_000,
+			retention_blocks: 52_560,
+			live_channels,
+			pending_txids,
+			funding_spends_settled: true,
+		}
+	}
+
+	#[test]
+	fn facts_of_a_resolved_channel_are_prunable() {
+		let channel = test_channel(1);
+		let (live, pending) = (HashSet::new(), HashSet::new());
+		assert!(funding_facts(&channel, 10).is_prunable(&everything_resolved(&live, &pending)));
+	}
+
+	#[test]
+	fn facts_are_kept_until_the_age_cap_has_passed() {
+		let channel = test_channel(1);
+		let (live, pending) = (HashSet::new(), HashSet::new());
+		let facts = funding_facts(&channel, 50_000);
+
+		let mut check = everything_resolved(&live, &pending);
+		check.tip_height = 50_000 + 52_560 - 1;
+		assert!(!facts.is_prunable(&check), "a block short of the cap is short of it");
+
+		check.tip_height = 50_000 + 52_560;
+		assert!(facts.is_prunable(&check));
+	}
+
+	#[test]
+	fn facts_are_kept_while_the_node_still_holds_their_channel() {
+		let channel = test_channel(1);
+		let pending = HashSet::new();
+		let live: HashSet<ChannelId> = [channel.channel_id].into_iter().collect();
+		assert!(!funding_facts(&channel, 10).is_prunable(&everything_resolved(&live, &pending)));
+
+		// Another channel being held says nothing about this one.
+		let other: HashSet<ChannelId> = [test_channel(2).channel_id].into_iter().collect();
+		assert!(funding_facts(&channel, 10).is_prunable(&everything_resolved(&other, &pending)));
+	}
+
+	#[test]
+	fn facts_are_kept_while_a_pending_payment_names_their_transaction() {
+		let channel = test_channel(1);
+		let facts = funding_facts(&channel, 10);
+		let live = HashSet::new();
+		let pending: HashSet<Txid> = [facts.txid].into_iter().collect();
+		assert!(!facts.is_prunable(&everything_resolved(&live, &pending)));
+	}
+
+	#[test]
+	fn facts_are_kept_until_the_funding_they_record_is_spent_and_settled() {
+		let channel = test_channel(1);
+		let (live, pending) = (HashSet::new(), HashSet::new());
+		let mut check = everything_resolved(&live, &pending);
+		check.funding_spends_settled = false;
+
+		assert!(!funding_facts(&channel, 10).is_prunable(&check));
+
+		// Facts recording no funding of their own have no spend of one to wait for: what a
+		// commitment transaction's anchors and HTLCs say is answered by the age cap and by
+		// whether the channel is still held.
+		let no_funding = ChannelTxFacts::new(test_txid(21))
+			.with_outputs(&channel, None, ChannelOutputRole::Anchor, [0])
+			.reported_at_height(10);
+		let mut settled = check;
+		settled.funding_spends_settled = true;
+		assert!(no_funding.is_prunable(&settled));
+	}
+
+	#[test]
+	fn a_channel_any_of_the_three_sources_names_counts_as_held() {
+		let (open, monitored, swept) = (ChannelId([1; 32]), ChannelId([2; 32]), ChannelId([3; 32]));
+
+		assert_eq!(live_channels_of([], [], []), HashSet::new());
+		assert_eq!(live_channels_of([open], [], []), [open].into_iter().collect());
+		assert_eq!(live_channels_of([], [monitored], []), [monitored].into_iter().collect());
+		assert_eq!(live_channels_of([], [], [Some(swept)]), [swept].into_iter().collect());
+
+		// A tracked output without a channel names none, and a channel several sources name is
+		// named once.
+		assert_eq!(
+			live_channels_of([open], [open, monitored], [Some(swept), None]),
+			[open, monitored, swept].into_iter().collect(),
+		);
+	}
+
+	#[test]
+	fn a_record_is_dated_at_the_last_report_that_added_to_it() {
+		let channel = test_channel(1);
+		let first = ChannelTxFacts::new(test_txid(31))
+			.with_outputs(&channel, None, ChannelOutputRole::Funding, [0])
+			.reported_at_height(700);
+
+		// A replay adds nothing, so it writes nothing and cannot refresh the record's age.
+		let replay = first.clone().reported_at_height(900);
+		assert_eq!(first.clone().merged_with(&replay).unwrap(), None);
+
+		let later = ChannelTxFacts::new(test_txid(31))
+			.with_outputs(&channel, None, ChannelOutputRole::Anchor, [1])
+			.reported_at_height(900);
+		let merged = first.merged_with(&later).unwrap().expect("the anchor is new");
+		assert_eq!(merged.recorded_at_height, 900);
 	}
 }
