@@ -605,7 +605,7 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 				let blocks_to_go = confirmation_height - cur_height;
 				let new_height = generate_blocks_and_wait(bitcoind, electrsd, blocks_to_go as usize).await;
 				wait_for_node_tip(node, new_height).await.expect("node hasn't synced to the tip");
-				wait_for_node_tip(peer_node, new_height) .await .expect("node hasn't synced to the tip");
+				wait_for_node_tip(peer_node, new_height).await.expect("node hasn't synced to the tip");
 				node.sync_wallets().unwrap();
 				peer_node.sync_wallets().unwrap();
 			},
@@ -1889,27 +1889,42 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 			!node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
 			"node_b should be removed from node_a peer store after the recovery reconnect"
 		);
-		assert_all_nodes_have_onchain_tx_type(
-			&[("node_a", &node_a), ("node_b", &node_b)],
-			"no ",
-			"UnilateralClose",
-			|tx_type| !matches!(tx_type, TransactionType::UnilateralClose { .. }),
-		)
-		.unwrap();
-		assert_any_node_has_onchain_tx_type(
-			&[("node_a", &node_a), ("node_b", &node_b)],
-			"Sweep",
-			|tx_type| matches!(tx_type, TransactionType::Sweep { .. }),
-		)
-		.unwrap();
+		// A node's own broadcast-queue processing (e.g. an earlier CBF broadcast that hit the
+		// "no peer requested it" timeout) can lag behind what electrs/bitcoind already see, so
+		// retry rather than asserting once immediately.
+		exponential_backoff_poll(|| {
+			assert_all_nodes_have_onchain_tx_type(
+				&[("node_a", &node_a), ("node_b", &node_b)],
+				"no ",
+				"UnilateralClose",
+				|tx_type| !matches!(tx_type, TransactionType::UnilateralClose { .. }),
+			)
+			.ok()
+		})
+		.await
+		.expect("Expected no nodes to have on-chain payment with tx_type UnilateralClose");
+		exponential_backoff_poll(|| {
+			assert_any_node_has_onchain_tx_type(
+				&[("node_a", &node_a), ("node_b", &node_b)],
+				"Sweep",
+				|tx_type| matches!(tx_type, TransactionType::Sweep { .. }),
+			)
+			.ok()
+		})
+		.await
+		.expect("Expected on-chain payment with tx_type Sweep");
 	} else {
-		assert_all_nodes_have_onchain_tx_type(
-			&[("node_a", &node_a), ("node_b", &node_b)],
-			"all ",
-			"CooperativeClose",
-			|tx_type| matches!(tx_type, TransactionType::CooperativeClose { .. }),
-		)
-		.unwrap();
+		exponential_backoff_poll(|| {
+			assert_all_nodes_have_onchain_tx_type(
+				&[("node_a", &node_a), ("node_b", &node_b)],
+				"all ",
+				"CooperativeClose",
+				|tx_type| matches!(tx_type, TransactionType::CooperativeClose { .. }),
+			)
+			.ok()
+		})
+		.await
+		.expect("Expected all nodes to have on-chain payment with tx_type CooperativeClose");
 		// Peer removed after cooperative close — no further reason to reconnect.
 		assert!(
 			!node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
