@@ -403,6 +403,14 @@ impl_writeable_tlv_based!(Channel, {
 ///
 /// Names the channels involved; a transaction's amount and fee are tracked on the
 /// [`PaymentDetails`] itself.
+///
+/// The classification is written onto the payment when the transaction is observed, and what it
+/// is derived from is kept only for a bounded time after the channels that produced the
+/// transaction have resolved. The node therefore stops being able to classify transactions of
+/// channels it settled long ago: such a transaction, met for the first time after that point, is
+/// reported as [`PaymentKind::Onchain`] with no `tx_type` at all. A payment already classified
+/// keeps its classification — expiry never takes a label back, it only leaves a later one
+/// unwritten.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum TransactionType {
@@ -499,8 +507,10 @@ pub enum PaymentKind {
 		///
 		/// `None` for plain on-chain sends, for records written by versions of LDK Node that
 		/// predate on-chain transaction classification, for transactions of channels opened
-		/// before this node began recording what its channels' transactions are, and for a
-		/// transaction whose channel's report of it could not be recorded.
+		/// before this node began recording what its channels' transactions are, for a
+		/// transaction whose channel's report of it could not be recorded, and for a transaction
+		/// of a channel that resolved long enough ago for what would classify it to have expired;
+		/// see [`TransactionType`].
 		tx_type: Option<TransactionType>,
 	},
 	/// A [BOLT 11] payment.

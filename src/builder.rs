@@ -112,6 +112,7 @@ use crate::types::{
 	PeerManager, PendingPaymentStore,
 };
 use crate::wallet::persist::{read_address_pool, KVStoreWalletPersister};
+use crate::wallet::provenance::NodeChannelLiveness;
 use crate::wallet::Wallet;
 use crate::{Node, NodeMetrics, PersistedNodeMetrics};
 
@@ -2456,6 +2457,14 @@ fn build_with_store_internal(
 			}
 		},
 	};
+
+	// The wallet drops the facts it recorded for a channel once nothing holds that channel
+	// anymore, which it can only ask now that the node's channel state exists.
+	wallet.set_channel_liveness(Arc::new(NodeChannelLiveness::new(
+		&channel_manager,
+		&chain_monitor,
+		&output_sweeper,
+	)));
 
 	let event_queue = match event_queue_res {
 		Ok(event_queue) => Arc::new(event_queue),

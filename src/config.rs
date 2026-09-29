@@ -81,6 +81,26 @@ pub(crate) const CHANNEL_TX_FACTS_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::n
 // back individually as they are needed.
 pub(crate) const CHANNEL_TX_FACTS_CACHE_WARMUP_COUNT: NonZeroUsize = NonZeroUsize::new(50).unwrap();
 
+// The number of blocks a channel transaction provenance record outlives the last thing the node
+// learned about its transaction.
+//
+// Roughly a year at ten minutes a block. It is an absolute backstop rather than the usual reason
+// a record goes: a record is dropped only once the channels it names are gone from the node's
+// channel manager, chain monitor and output sweeper, and the funding it records has been spent
+// and settled. Those checks are blind to a transaction of a channel that never reached them, so
+// without the cap such a record would be kept forever.
+pub(crate) const CHANNEL_TX_FACTS_RETENTION_BLOCKS: u32 = 52_560;
+
+// The number of pages of channel transaction provenance records one chain tip change examines.
+//
+// Pruning shares the pass that graduates payments, so it has to leave promptly; it resumes where
+// it left off on the next tip and so walks the whole store over consecutive blocks. At the
+// built-in backends' page size this is a couple of hundred records a block: a store whose records
+// fit the cache is walked in a single tip and costs the backend nothing beyond listing its keys,
+// while one at the limit above takes a few hundred blocks — which is also how stale the record
+// count that walk maintains can get.
+pub(crate) const CHANNEL_TX_FACTS_PRUNE_PAGES_PER_TIP: usize = 4;
+
 // The default {Esplora,Electrum} client timeout we're using.
 const DEFAULT_PER_REQUEST_TIMEOUT_SECS: u8 = 10;
 
