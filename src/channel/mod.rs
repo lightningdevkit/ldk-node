@@ -513,7 +513,12 @@ impl SpliceTracker {
 	/// intent: a mismatch means a fee bump took over the record in the meantime, and its intent
 	/// must stay. A record that tracks anything else stays, with the intent cleared, so its
 	/// payment keeps graduating and the rounds signed under the splice keep their place. A record
-	/// left with nothing to track is removed.
+	/// left with nothing to track is removed, along with any payment record under its id: wallet
+	/// sync files a funding payment under the id of the intent its round belongs to and indexes it
+	/// in the same write, so a payment record found under a bare intent is the first half of a
+	/// write that never completed, which no entry would ever drive
+	/// ([`Wallet::drop_unindexed_record_of_settled_intent`]). The record goes first: a bare intent
+	/// left behind is found and settled again, an orphaned record would not be.
 	async fn clear_persisted_intent<F: Fn(&SpliceIntent) -> bool>(
 		&self, payment_id: PaymentId, still_applies: F,
 	) {
@@ -537,6 +542,7 @@ impl SpliceTracker {
 				})
 				.await?;
 			if remove_bare_record {
+				self.wallet.drop_unindexed_record_of_settled_intent(payment_id).await?;
 				self.pending_payment_store
 					.remove_if(&payment_id, |record| {
 						record.details().is_none()

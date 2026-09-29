@@ -2315,6 +2315,26 @@ impl Wallet {
 			return Ok(());
 		}
 
+		// A round this node signed is on record as an interactive funding of its channels, and
+		// that is what the transaction is however it is re-offered. Recording the re-offer would
+		// name the round a plain funding of the channel and give it the wallet's view of a funding
+		// output both parties own — the record wallet sync will create for it says both correctly
+		// — so leave the transaction to sync. A record the re-offer finds in place comes through
+		// unchanged either way (`funding_reclassification_update` declines the downgrade); this is
+		// what keeps a re-offer arriving before sync has seen the transaction from creating the
+		// record itself.
+		let named_interactive = self.channel_tx_facts(&txid).await.is_some_and(|facts| {
+			matches!(facts.self_role, Some(TransactionType::InteractiveFunding { .. }))
+		});
+		if named_interactive {
+			log_trace!(
+				self.logger,
+				"Keeping interactive-funding classification over funding-typed rebroadcast {}",
+				txid,
+			);
+			return Ok(());
+		}
+
 		// Resolution and the writes below must share one lock acquisition: resolved outside it,
 		// the id could go stale against a record wallet sync creates for the same transaction,
 		// and the write below would create a divergent record.
@@ -2993,6 +3013,62 @@ impl Wallet {
 				continue;
 			};
 			self.drop_abandoned_splice_rounds(channel_id, &held).await?;
+		}
+		Ok(())
+	}
+
+	/// Removes the payment record under `payment_id` — the id of a bare splice intent whose splice
+	/// settled — when it is the first half of a funding-record write that never completed.
+	///
+	/// Wallet sync files a funding payment under the id the round's recorded facts name, which for
+	/// a user-initiated splice is the id its intent was created with, and indexes it in the pending
+	/// store in the same write. A record found under a bare intent therefore lost that index to a
+	/// write that failed in between, and no entry would ever drive it: it neither graduates nor
+	/// maps its transaction back to itself. A record an entry does index stays, as does one that is
+	/// not a pending, unconfirmed interactive funding — a record that confirmed or succeeded was
+	/// driven to that state and is a payment of its own. The caller removes the bare entry
+	/// afterwards.
+	pub(crate) async fn drop_unindexed_record_of_settled_intent(
+		&self, payment_id: PaymentId,
+	) -> Result<(), Error> {
+		// Serialize with the funding-record writers, so that the check and the removal cannot
+		// interleave with a write completing the record.
+		let stores = self.payment_stores.lock().await;
+		let indexed = stores
+			.pending_payment(&payment_id)
+			.await?
+			.is_some_and(|entry| entry.details().is_some());
+		if indexed {
+			log_debug!(
+				self.logger,
+				"Keeping the funding record of payment {}: its pending entry indexes it",
+				payment_id,
+			);
+			return Ok(());
+		}
+		let half_written =
+			stores.payment(&payment_id).await?.and_then(|record| match &record.kind {
+				PaymentKind::Onchain {
+					txid,
+					status: ConfirmationStatus::Unconfirmed,
+					tx_type: Some(TransactionType::InteractiveFunding { .. }),
+				} if record.status == PaymentStatus::Pending => Some(*txid),
+				_ => None,
+			});
+		match half_written {
+			Some(recorded) => {
+				stores.remove_payment(&payment_id).await?;
+				log_info!(
+					self.logger,
+					"Dropped the half-written funding record of splice round {}",
+					recorded,
+				);
+			},
+			None => log_debug!(
+				self.logger,
+				"No half-written funding record to drop under payment {}",
+				payment_id,
+			),
 		}
 		Ok(())
 	}
@@ -7073,6 +7149,98 @@ mod tests {
 		assert!(wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().is_none());
 	}
 
+	/// Settling a bare splice intent removes the unindexed funding record under its id, if any:
+	/// it is the first half of a write that never completed, and no entry would ever drive it. The
+	/// bare entry itself is left to the settlement, and a record an entry indexes stays.
+	#[tokio::test]
+	async fn settling_a_bare_intent_drops_its_half_written_record() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let pre_splice_funding = LdkOutPoint { txid: Txid::from_byte_array([0xAA; 32]), index: 0 };
+
+		let id = PaymentId([31u8; 32]);
+		let intent = splice_intent_for(counterparty_node_id, channel_id, pre_splice_funding);
+		let bare = PendingPaymentDetails::pending_splice(id, intent);
+		wallet.payment_stores.pending_payment_store().insert(bare.clone()).await.unwrap();
+		let txid = Txid::from_byte_array([0xBB; 32]);
+		let half_written = interactive_funding_details(id, txid, Some(500_300_000), Some(300_000));
+		wallet.payment_stores.payment_store().insert_or_update(half_written).await.unwrap();
+
+		wallet.drop_unindexed_record_of_settled_intent(id).await.unwrap();
+
+		assert!(wallet.payment_stores.payment_store().get(&id).await.unwrap().is_none());
+		assert_eq!(
+			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap(),
+			Some(bare)
+		);
+
+		// The same record with an entry indexing it is a funding payment wallet sync recorded in
+		// full, and stays.
+		let indexed_txid = Txid::from_byte_array([0xCC; 32]);
+		let record =
+			interactive_funding_details(id, indexed_txid, Some(400_700_000), Some(700_000));
+		wallet.payment_stores.payment_store().insert_or_update(record.clone()).await.unwrap();
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert(PendingPaymentDetails::new(record.clone(), Vec::new(), Vec::new()))
+			.await
+			.unwrap();
+
+		wallet.drop_unindexed_record_of_settled_intent(id).await.unwrap();
+
+		assert_eq!(wallet.payment_stores.payment_store().get(&id).await.unwrap(), Some(record));
+		assert_eq!(wallet.find_payment_by_txid(indexed_txid).await.unwrap(), Some(id));
+	}
+
+	/// Settling a bare splice intent leaves alone a record under its id that is not the
+	/// half-written record of a funding round: a payment that succeeded, or whose transaction
+	/// confirmed, was broadcast and driven to that state, and is a payment of its own.
+	#[tokio::test]
+	async fn settling_a_bare_intent_leaves_a_settled_record_alone() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let pre_splice_funding = LdkOutPoint { txid: Txid::from_byte_array([0xAA; 32]), index: 0 };
+
+		let id = PaymentId([31u8; 32]);
+		let intent = splice_intent_for(counterparty_node_id, channel_id, pre_splice_funding);
+		let bare = PendingPaymentDetails::pending_splice(id, intent);
+		wallet.payment_stores.pending_payment_store().insert(bare.clone()).await.unwrap();
+		let txid = Txid::from_byte_array([0xBB; 32]);
+		let settled = [
+			(confirmed_status(), PaymentStatus::Succeeded),
+			(confirmed_status(), PaymentStatus::Pending),
+			(ConfirmationStatus::Unconfirmed, PaymentStatus::Succeeded),
+		];
+		for (confirmation, status) in settled {
+			let kind = PaymentKind::Onchain {
+				txid,
+				status: confirmation,
+				tx_type: Some(TransactionType::InteractiveFunding { channels: vec![] }),
+			};
+			let record = PaymentDetails::new(
+				id,
+				kind,
+				Some(500_300_000),
+				Some(300_000),
+				PaymentDirection::Outbound,
+				status,
+			);
+			wallet.payment_stores.payment_store().insert_or_update(record.clone()).await.unwrap();
+
+			wallet.drop_unindexed_record_of_settled_intent(id).await.unwrap();
+
+			assert_eq!(wallet.payment_stores.payment_store().get(&id).await.unwrap(), Some(record));
+			assert_eq!(
+				wallet.payment_stores.pending_payment_store().get(&id).await.unwrap(),
+				Some(bare.clone())
+			);
+			wallet.payment_stores.payment_store().remove(&id).await.unwrap();
+		}
+	}
+
 	/// LDK abandoned a signed fee bump of a counterparty-initiated round this node did not
 	/// contribute to: no remaining round is this node's payment, so the record goes as a first
 	/// round's does, and the bump's intent stays behind as a bare intent.
@@ -9143,6 +9311,54 @@ mod tests {
 			PaymentKind::Onchain { tx_type: Some(TransactionType::InteractiveFunding { .. }), .. }
 		));
 		assert_eq!(payments[0].amount_msat, Some(1_000_000));
+	}
+
+	/// The same re-broadcast arriving before wallet sync has seen the transaction finds no record
+	/// to be declined against. The round is on record as an interactive funding of its channel,
+	/// which is what the transaction is whichever path re-offers it, so the re-offer must record
+	/// nothing and leave the transaction to sync.
+	#[tokio::test]
+	async fn a_funding_rebroadcast_of_a_named_round_records_nothing() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let channels = vec![(counterparty_node_id, channel_id)];
+
+		let script_pubkey = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::External)
+			.address
+			.script_pubkey();
+		let funded_tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: Vec::new(),
+			output: vec![TxOut { value: Amount::from_sat(10_000), script_pubkey }],
+		};
+		let txid = funded_tx.compute_txid();
+
+		wallet
+			.record_channel_tx_facts(ChannelTxFacts::new(txid).with_self_role(
+				TransactionType::InteractiveFunding {
+					channels: vec![Channel { counterparty_node_id, channel_id }],
+				},
+			))
+			.await
+			.unwrap();
+
+		wallet
+			.classify_funding(&funded_tx, &channels, TransactionType::Funding { channels: vec![] })
+			.await
+			.unwrap();
+
+		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
+		assert!(
+			payments.is_empty(),
+			"the re-offer recorded the round as a plain funding: {:?}",
+			payments,
+		);
 	}
 
 	/// LDK re-broadcasts a promoted-but-unconfirmed 0conf splice through its generic funding
