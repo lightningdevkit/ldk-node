@@ -3359,9 +3359,9 @@ impl Wallet {
 		let leftover = &mut leftover_intent_to_remove;
 		stores
 			.mutate_pending_payment_async(&id, move |existing| async move {
-				// Only `Pending` payments belong in the pending store. Like in
-				// [`Self::upsert_pending_payment`], the authoritative status is re-read inside
-				// the store's critical section, where it cannot go stale against graduation.
+				// Only `Pending` payments belong in the pending store. The authoritative
+				// status is re-read inside the store's critical section, where it cannot go
+				// stale against graduation.
 				let is_pending = stores
 					.payment(&id)
 					.await?
@@ -11059,7 +11059,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn facts_are_kept_until_the_age_cap_has_passed() {
+	async fn the_facts_of_a_channel_are_kept_until_the_age_cap() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
 		let channel = Channel { counterparty_node_id, channel_id };
