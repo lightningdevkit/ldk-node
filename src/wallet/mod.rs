@@ -5068,7 +5068,7 @@ mod tests {
 
 	/// An in-memory store whose writes can be made to park until aborted or released,
 	/// signalling when a write has entered the gate, and whose writes can be made to fail,
-	/// counting the failures. Records the keys it wrote, in order.
+	/// counting the failures.
 	#[derive(Clone)]
 	struct GatedStore {
 		inner: Arc<InMemoryStore>,
@@ -5077,7 +5077,6 @@ mod tests {
 		failed_writes: Arc<AtomicUsize>,
 		write_entered: Arc<tokio::sync::Notify>,
 		release: Arc<tokio::sync::Notify>,
-		writes: Arc<Mutex<Vec<(String, String)>>>,
 	}
 
 	impl GatedStore {
@@ -5089,19 +5088,7 @@ mod tests {
 				failed_writes: Arc::new(AtomicUsize::new(0)),
 				write_entered: Arc::new(tokio::sync::Notify::new()),
 				release: Arc::new(tokio::sync::Notify::new()),
-				writes: Arc::new(Mutex::new(Vec::new())),
 			}
-		}
-
-		/// The keys written to `primary_namespace`, in write order.
-		fn written_keys(&self, primary_namespace: &str) -> Vec<String> {
-			self.writes
-				.lock()
-				.unwrap()
-				.iter()
-				.filter(|(namespace, _)| namespace == primary_namespace)
-				.map(|(_, key)| key.clone())
-				.collect()
 		}
 	}
 
@@ -5121,7 +5108,6 @@ mod tests {
 			let failed_writes = Arc::clone(&self.failed_writes);
 			let write_entered = Arc::clone(&self.write_entered);
 			let release = Arc::clone(&self.release);
-			let writes = Arc::clone(&self.writes);
 			let primary_namespace = primary_namespace.to_string();
 			let secondary_namespace = secondary_namespace.to_string();
 			let key = key.to_string();
@@ -5134,10 +5120,7 @@ mod tests {
 					failed_writes.fetch_add(1, Ordering::AcqRel);
 					return Err(io::Error::new(io::ErrorKind::Other, "write failed"));
 				}
-				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf)
-					.await?;
-				writes.lock().unwrap().push((primary_namespace, key));
-				Ok(())
+				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
 			}
 		}
 
@@ -5563,81 +5546,6 @@ mod tests {
 		);
 	}
 
-	/// A pass-through [`KVStore`] that parks writes to one namespace: a matching writer first
-	/// signals `parked`, then waits until the test drops its `gate` write guard. Writes to every
-	/// other namespace pass straight through.
-	#[derive(Clone)]
-	struct NamespaceGatedStore {
-		inner: Arc<InMemoryStore>,
-		gated_namespace: String,
-		parked: Arc<tokio::sync::Notify>,
-		gate: Arc<tokio::sync::RwLock<()>>,
-	}
-
-	impl NamespaceGatedStore {
-		fn new(gated_namespace: &str) -> Self {
-			Self {
-				inner: Arc::new(InMemoryStore::new()),
-				gated_namespace: gated_namespace.to_string(),
-				parked: Arc::new(tokio::sync::Notify::new()),
-				gate: Arc::new(tokio::sync::RwLock::new(())),
-			}
-		}
-	}
-
-	impl KVStore for NamespaceGatedStore {
-		fn read(
-			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
-			KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
-		}
-
-		fn write(
-			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
-		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
-			let inner = Arc::clone(&self.inner);
-			let gated = primary_namespace == self.gated_namespace;
-			let parked = Arc::clone(&self.parked);
-			let gate = Arc::clone(&self.gate);
-			let primary_namespace = primary_namespace.to_string();
-			let secondary_namespace = secondary_namespace.to_string();
-			let key = key.to_string();
-			async move {
-				if gated {
-					parked.notify_one();
-					let _guard = gate.read().await;
-				}
-				KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
-			}
-		}
-
-		fn remove(
-			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
-		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
-			KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
-		}
-
-		fn list(
-			&self, primary_namespace: &str, secondary_namespace: &str,
-		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
-			KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
-		}
-	}
-
-	impl PaginatedKVStore for NamespaceGatedStore {
-		fn list_paginated(
-			&self, primary_namespace: &str, secondary_namespace: &str,
-			page_token: Option<PageToken>,
-		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
-			PaginatedKVStore::list_paginated(
-				&*self.inner,
-				primary_namespace,
-				secondary_namespace,
-				page_token,
-			)
-		}
-	}
-
 	fn dummy_tx() -> Transaction {
 		Transaction {
 			version: bitcoin::transaction::Version::TWO,
@@ -5667,17 +5575,6 @@ mod tests {
 			kind,
 			amount_msat,
 			fee_paid_msat,
-			PaymentDirection::Outbound,
-			PaymentStatus::Pending,
-		)
-	}
-
-	fn onchain_details(txid: Txid, status: ConfirmationStatus) -> PaymentDetails {
-		PaymentDetails::new(
-			PaymentId([42u8; 32]),
-			PaymentKind::Onchain { txid, status, tx_type: None },
-			Some(1_000_000),
-			Some(500),
 			PaymentDirection::Outbound,
 			PaymentStatus::Pending,
 		)
