@@ -2204,20 +2204,66 @@ impl Wallet {
 			Error::InvalidPaymentId
 		})?;
 
-		// Funding transactions (channel opens and splices) are driven by LDK's funding/splice
-		// lifecycle, not the on-chain wallet. Replacing one via on-chain RBF would broadcast a
-		// transaction LDK isn't tracking (and, for splices, can't sign). Fee-bumping a pending
-		// splice goes through `bump_channel_funding_fee` instead.
-		if let PaymentKind::Onchain {
-			tx_type:
-				Some(TransactionType::Funding { .. } | TransactionType::InteractiveFunding { .. }),
-			..
-		} = &payment.kind
-		{
+		let txid = match &payment.kind {
+			PaymentKind::Onchain { txid, .. } => *txid,
+			_ => {
+				log_error!(
+					self.logger,
+					"Payment {} is not an on-chain payment, cannot be replaced via RBF",
+					payment_id
+				);
+				return Err(Error::InvalidPaymentId);
+			},
+		};
+
+		// The transaction and whether the wallet owns every input it spends, read before the
+		// persister lock so what this node recorded about the transaction can be consulted
+		// without holding it. `list_output` rather than `get_utxo`, so an output this very
+		// transaction spends still counts as the wallet's.
+		let owned_inputs = {
+			let locked_wallet = self.inner.lock().expect("lock");
+			let tx = locked_wallet.tx_details(txid).map(|details| details.tx.deref().clone());
+			tx.map(|tx| {
+				let owned: HashSet<OutPoint> =
+					locked_wallet.list_output().map(|output| output.outpoint).collect();
+				let all_owned = tx.input.iter().all(|input| owned.contains(&input.previous_output));
+				(tx, all_owned)
+			})
+		};
+		let Some((old_tx, all_inputs_owned)) = owned_inputs else {
+			log_error!(self.logger, "Transaction {} not found in wallet", txid);
+			return Err(Error::InvalidPaymentId);
+		};
+
+		// Only an ordinary payment of this wallet's may be replaced, decided positively rather
+		// than by exclusion: what this node recorded must make nothing of the transaction, and
+		// every input must be an output this wallet owns and can re-sign. A transaction absent
+		// from every recorded fact is therefore still refused when it reaches beyond the
+		// wallet's own coins, rather than passing for want of a reason to reject it.
+		//
+		// Anything a channel of this node's has a claim on is driven by LDK's funding, splice and
+		// close lifecycle rather than by the on-chain wallet: replacing it would broadcast a
+		// transaction LDK isn't tracking, and an interactively negotiated funding cannot be
+		// re-signed by this node alone. Fee-bumping a pending splice goes through
+		// `bump_channel_funding_fee` instead. A fact that cannot be read is no answer about the
+		// transaction, and refuses the replacement with the error.
+		let provenance = self.read_tx_provenance(txid, &old_tx).await?;
+		if let Some(tx_type) = provenance.classify(&old_tx) {
 			log_error!(
 				self.logger,
-				"Cannot RBF funding payment {} via bump_fee_rbf; use bump_channel_funding_fee instead",
+				"Cannot RBF payment {} via bump_fee_rbf: {} is {:?}; a pending splice is fee-bumped with bump_channel_funding_fee",
 				payment_id,
+				txid,
+				tx_type,
+			);
+			return Err(Error::InvalidPaymentId);
+		}
+		if !all_inputs_owned {
+			log_error!(
+				self.logger,
+				"Cannot RBF payment {}: transaction {} spends inputs this wallet does not own",
+				payment_id,
+				txid,
 			);
 			return Err(Error::InvalidPaymentId);
 		}
@@ -2245,35 +2291,8 @@ impl Wallet {
 			return Err(Error::InvalidPaymentId);
 		}
 
-		let txid = match &payment.kind {
-			PaymentKind::Onchain { txid, .. } => *txid,
-			_ => {
-				log_error!(
-					self.logger,
-					"Payment {} is not an on-chain payment, cannot be replaced via RBF",
-					payment_id
-				);
-				return Err(Error::InvalidPaymentId);
-			},
-		};
-
 		let mut locked_persister = self.persister.lock().await;
 		let mut locked_wallet = self.inner.lock().expect("lock");
-
-		debug_assert!(
-			locked_wallet.tx_details(txid).is_some(),
-			"Transaction {} expected in wallet but not found",
-			txid,
-		);
-		let old_tx = locked_wallet
-			.tx_details(txid)
-			.ok_or_else(|| {
-				log_error!(self.logger, "Transaction {} not found in wallet", txid);
-				Error::InvalidPaymentId
-			})?
-			.tx
-			.deref()
-			.clone();
 
 		let old_fee_rate = locked_wallet.calculate_fee_rate(&old_tx).map_err(|e| {
 			log_error!(self.logger, "Failed to calculate fee rate of transaction {}: {}", txid, e);
@@ -5254,6 +5273,106 @@ mod tests {
 			"the graduated record is classified as the facts arrive: {:?}",
 			classified.kind,
 		);
+	}
+
+	/// A coin of the wallet's and an unconfirmed, replaceable spend of it, plus `foreign_input`
+	/// when given, recorded as the wallet's outbound payment with nothing reported about it.
+	async fn replaceable_spend(
+		wallet: &Wallet, coin_byte: u8, foreign_input: Option<OutPoint>,
+	) -> (Transaction, PaymentId) {
+		let coin = wallet_paying_tx(wallet, coin_byte);
+		let coin_txid = coin.compute_txid();
+		insert_confirmed_tx(wallet, coin, 5);
+
+		let spending = |previous_output| bitcoin::TxIn {
+			previous_output,
+			sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+			..Default::default()
+		};
+		let mut input = vec![spending(OutPoint { txid: coin_txid, vout: 0 })];
+		input.extend(foreign_input.map(spending));
+		let spend = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input,
+			output: vec![TxOut {
+				value: Amount::from_sat(80_000),
+				script_pubkey: bitcoin::ScriptBuf::new_op_return(&[]),
+			}],
+		};
+		let txid = spend.compute_txid();
+		insert_unconfirmed_tx(wallet, spend.clone());
+		let seen =
+			WalletEvent::TxUnconfirmed { txid, tx: Arc::new(spend.clone()), old_block_time: None };
+		wallet.update_payment_store(vec![seen]).await.unwrap();
+
+		let payment_id = PaymentId(txid.to_byte_array());
+		let recorded = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
+		assert_eq!(recorded.direction, PaymentDirection::Outbound);
+		assert!(matches!(
+			recorded.kind,
+			PaymentKind::Onchain { tx_type: None, status: ConfirmationStatus::Unconfirmed, .. }
+		));
+		(spend, payment_id)
+	}
+
+	/// A transaction a channel reported is driven by LDK's funding and close lifecycle, whatever
+	/// its payment record says of it: the fee bump refuses it from the facts.
+	#[tokio::test]
+	async fn an_on_chain_fee_bump_refuses_a_transaction_a_channel_reported() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (spend, payment_id) = replaceable_spend(&wallet, 0x21, None).await;
+
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel = Channel { counterparty_node_id, channel_id: ChannelId([7u8; 32]) };
+		wallet
+			.record_channel_tx_facts(ChannelTxFacts::new(spend.compute_txid()).with_outputs(
+				&channel,
+				Some(crate::UserChannelId(1)),
+				ChannelOutputRole::Funding,
+				[0],
+			))
+			.await
+			.unwrap();
+
+		assert!(matches!(
+			wallet.bump_fee_rbf(payment_id, None, 0).await,
+			Err(Error::InvalidPaymentId)
+		));
+	}
+
+	/// A transaction reaching beyond the wallet's own coins is refused although no channel
+	/// reported it: this node alone cannot re-sign it.
+	#[tokio::test]
+	async fn an_on_chain_fee_bump_refuses_a_transaction_spending_a_coin_the_wallet_does_not_own() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let foreign = OutPoint { txid: Txid::from_byte_array([0x31; 32]), vout: 1 };
+		let (_spend, payment_id) = replaceable_spend(&wallet, 0x22, Some(foreign)).await;
+
+		assert!(matches!(
+			wallet.bump_fee_rbf(payment_id, None, 0).await,
+			Err(Error::InvalidPaymentId)
+		));
+	}
+
+	/// A fact that cannot be read is no answer about the transaction: the fee bump refuses it
+	/// with the error rather than passing it for want of a reason to refuse.
+	#[tokio::test]
+	async fn an_on_chain_fee_bump_refuses_a_transaction_whose_facts_cannot_be_read() {
+		let fail_store =
+			FailSwitchStore::failing_only(CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE);
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_spend, payment_id) = replaceable_spend(&wallet, 0x23, None).await;
+
+		fail_store.fail_reads.store(true, Ordering::Release);
+		let result = wallet.bump_fee_rbf(payment_id, None, 0).await;
+		assert!(matches!(result, Err(Error::PersistenceFailed)), "{:?}", result);
 	}
 
 	#[tokio::test]
