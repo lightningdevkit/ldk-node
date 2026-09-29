@@ -10894,6 +10894,95 @@ mod tests {
 		}
 	}
 
+	/// The funding output a channel reports is what names the transaction that opens it: nothing
+	/// else has to say so.
+	#[tokio::test]
+	async fn a_funding_transaction_is_named_by_the_output_it_creates() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let channel = Channel { counterparty_node_id, channel_id };
+		let funding = wallet_paying_tx(&wallet, 5);
+		let funding_txid = funding.compute_txid();
+		insert_unconfirmed_tx(&wallet, funding.clone());
+
+		wallet
+			.record_channel_tx_facts(ChannelTxFacts::new(funding_txid).with_outputs(
+				&channel,
+				None,
+				ChannelOutputRole::Funding,
+				[0],
+			))
+			.await
+			.unwrap();
+		observe_unconfirmed(&wallet, &funding).await;
+
+		let payment = wallet
+			.payment_stores
+			.payment_store()
+			.get(&PaymentId(funding_txid.to_byte_array()))
+			.await
+			.unwrap()
+			.expect("wallet sync records the funding transaction");
+		match payment.kind {
+			PaymentKind::Onchain {
+				tx_type: Some(TransactionType::Funding { channels }), ..
+			} => {
+				assert_eq!(channels, vec![channel]);
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
+	}
+
+	/// One transaction can open several channels, each of which reports only the output that
+	/// funds it. The reports of one transaction are held together, so the payment names every
+	/// channel opened — which a report naming the transaction outright could not do, as the
+	/// second channel's would contradict the first's.
+	#[tokio::test]
+	async fn a_batched_funding_names_every_channel_it_opens() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let first = Channel { counterparty_node_id, channel_id };
+		let second = Channel { counterparty_node_id, channel_id: ChannelId([8u8; 32]) };
+
+		let mut funding = wallet_paying_tx(&wallet, 6);
+		funding.output.push(funding.output[0].clone());
+		let funding_txid = funding.compute_txid();
+		insert_unconfirmed_tx(&wallet, funding.clone());
+
+		for (vout, channel) in [(0u32, &first), (1, &second)] {
+			wallet
+				.record_channel_tx_facts(ChannelTxFacts::new(funding_txid).with_outputs(
+					channel,
+					None,
+					ChannelOutputRole::Funding,
+					[vout],
+				))
+				.await
+				.unwrap();
+		}
+		observe_unconfirmed(&wallet, &funding).await;
+
+		let payment = wallet
+			.payment_stores
+			.payment_store()
+			.get(&PaymentId(funding_txid.to_byte_array()))
+			.await
+			.unwrap()
+			.expect("wallet sync records the funding transaction");
+		match payment.kind {
+			PaymentKind::Onchain {
+				tx_type: Some(TransactionType::Funding { channels }), ..
+			} => {
+				assert_eq!(channels, vec![first, second]);
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
+	}
+
 	/// The node's channel state as a test dictates it: the channels its channel manager lists,
 	/// the monitors its chain monitor holds, and the outputs its sweeper tracks.
 	#[derive(Default)]
