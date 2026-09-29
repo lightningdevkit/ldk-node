@@ -3311,6 +3311,10 @@ impl Wallet {
 		conflicting_txids: Vec<Txid>,
 	) -> Result<(), Error> {
 		let id = payment.id;
+		let mut leftover_intent_to_remove = None;
+		// The `move` closure would capture the `Option` by value, so hand it a reference; the
+		// borrow ends with the mutate's future, before the leftover is read below.
+		let leftover = &mut leftover_intent_to_remove;
 		stores
 			.mutate_pending_payment_async(&id, move |existing| async move {
 				// Only `Pending` payments belong in the pending store. Like in
@@ -3323,6 +3327,15 @@ impl Wallet {
 						recorded.status == PaymentStatus::Pending
 					});
 				if !is_pending {
+					// A bare splice intent under an advanced payment's id is the leftover of the
+					// splice that payment settles. Taking it back is left to the removal below,
+					// so that it happens under a check of what the entry still is; leaving it
+					// would have the next restart act on a splice that is long over.
+					if let Some(entry) = existing {
+						if entry.details().is_none() {
+							*leftover = entry.splice_intent;
+						}
+					}
 					return Ok(None);
 				}
 				Ok(match existing {
@@ -3345,6 +3358,19 @@ impl Wallet {
 				})
 			})
 			.await?;
+
+		if let Some(intent) = leftover_intent_to_remove {
+			// Only while the entry still is the bare intent the closure saw: a round signed or a
+			// fee bump submitted in between joins the entry, and what those track must stay.
+			stores
+				.remove_pending_payment_if(&id, |entry| {
+					entry.details().is_none()
+						&& entry.candidates().is_empty()
+						&& entry.locked_rounds().is_empty()
+						&& entry.splice_intent() == Some(&intent)
+				})
+				.await?;
+		}
 		Ok(())
 	}
 
@@ -10980,5 +11006,88 @@ mod tests {
 			"unexpected kind {:?}",
 			payment.kind,
 		);
+	}
+
+	#[tokio::test]
+	async fn recording_a_transaction_of_an_advanced_payment_removes_its_leftover_intent() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let id = PaymentId([23u8; 32]);
+		let txid = Txid::from_byte_array([24u8; 32]);
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert(PendingPaymentDetails::pending_splice(id, test_splice_intent()))
+			.await
+			.unwrap();
+		// Wallet sync confirmed the payment through `ANTI_REORG_DELAY` before it got to write the
+		// entry: the payment graduated, so no entry belongs in the pending store...
+		wallet
+			.payment_stores
+			.payment_store()
+			.insert(funding_payment(id, txid, PaymentStatus::Succeeded))
+			.await
+			.unwrap();
+
+		let stores = wallet.payment_stores.lock().await;
+		wallet
+			.upsert_pending_payment(
+				&stores,
+				funding_payment(id, txid, PaymentStatus::Pending),
+				Vec::new(),
+			)
+			.await
+			.unwrap();
+		drop(stores);
+
+		// ...and the splice behind the intent confirmed, so the leftover intent record is removed
+		// rather than left to look like a splice still in flight after a restart.
+		assert!(wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().is_none());
+	}
+
+	#[tokio::test]
+	async fn a_leftover_intent_that_tracks_a_signed_round_is_kept() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let id = PaymentId([23u8; 32]);
+		let txid = Txid::from_byte_array([24u8; 32]);
+		let mut entry = PendingPaymentDetails::pending_splice(id, test_splice_intent());
+		entry.candidates = vec![FundingTxCandidate {
+			txid: Txid::from_byte_array([25u8; 32]),
+			amount_msat: Some(1_000),
+			fee_paid_msat: Some(10),
+			awaiting_broadcast: true,
+		}];
+		wallet.payment_stores.pending_payment_store().insert(entry).await.unwrap();
+		wallet
+			.payment_stores
+			.payment_store()
+			.insert(funding_payment(id, txid, PaymentStatus::Succeeded))
+			.await
+			.unwrap();
+
+		let stores = wallet.payment_stores.lock().await;
+		wallet
+			.upsert_pending_payment(
+				&stores,
+				funding_payment(id, txid, PaymentStatus::Pending),
+				Vec::new(),
+			)
+			.await
+			.unwrap();
+		drop(stores);
+
+		// A round this node signed is live state of its own: the entry is what
+		// `drop_abandoned_splice_rounds` takes it back through, so it is not a leftover.
+		let kept = wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&id)
+			.await
+			.unwrap()
+			.expect("the entry stays");
+		assert_eq!(kept.candidates().len(), 1);
 	}
 }
