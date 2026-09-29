@@ -2194,15 +2194,16 @@ where
 					"LDK Node has only ever persisted ChannelPending events from rust-lightning 0.0.115 or later",
 				);
 
+				// The funding output alone says what the transaction is, and says it for every
+				// channel a batched funding opens: each channel reports its own output, and the
+				// reports of one transaction are held together.
 				let channel = Channel { counterparty_node_id, channel_id };
-				let facts = ChannelTxFacts::new(funding_txo.txid)
-					.with_outputs(
-						&channel,
-						Some(UserChannelId(user_channel_id)),
-						ChannelOutputRole::Funding,
-						[funding_txo.vout],
-					)
-					.with_self_role(TransactionType::Funding { channels: vec![channel.clone()] });
+				let facts = ChannelTxFacts::new(funding_txo.txid).with_outputs(
+					&channel,
+					Some(UserChannelId(user_channel_id)),
+					ChannelOutputRole::Funding,
+					[funding_txo.vout],
+				);
 				self.record_channel_tx_facts(facts).await;
 
 				let event = Event::ChannelPending {
