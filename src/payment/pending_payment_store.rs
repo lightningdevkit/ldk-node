@@ -5,9 +5,13 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use bitcoin::Txid;
-use lightning::impl_writeable_tlv_based;
+use bitcoin::secp256k1::PublicKey;
+use bitcoin::{TxOut, Txid};
+use lightning::chain::transaction::OutPoint as LdkOutPoint;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::FundingContribution;
+use lightning::ln::types::ChannelId;
+use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 
 use crate::data_store::{StorableObject, StorableObjectUpdate, UpdatableObject};
 use crate::payment::store::{Channel, PaymentDetailsUpdate, TransactionType};
@@ -44,14 +48,76 @@ impl_writeable_tlv_based!(FundingTxCandidate, {
 	(6, awaiting_broadcast, required),
 });
 
+/// The parameters of the API call that initiated a splice, recording what was attempted
+/// independently of the contribution built from them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SpliceKind {
+	/// [`Node::splice_in`] with a resolved amount.
+	///
+	/// [`Node::splice_in`]: crate::Node::splice_in
+	In { amount_sats: u64 },
+	/// [`Node::splice_out`] to the given outputs.
+	///
+	/// [`Node::splice_out`]: crate::Node::splice_out
+	Out { outputs: Vec<TxOut> },
+	/// [`Node::bump_channel_funding_fee`] of a pending splice.
+	///
+	/// [`Node::bump_channel_funding_fee`]: crate::Node::bump_channel_funding_fee
+	Rbf {},
+}
+
+impl_writeable_tlv_based_enum!(SpliceKind,
+	(0, In) => {
+		(0, amount_sats, required),
+	},
+	(2, Out) => {
+		(0, outputs, required_vec),
+	},
+	(4, Rbf) => {},
+);
+
+/// A user-initiated splice that has been handed to LDK but is not yet guaranteed to survive a
+/// restart. LDK only persists a splice once its negotiation reaches `AwaitingSignatures`, and it
+/// abandons an in-progress negotiation whenever the peer disconnects (which includes stopping the
+/// node). Until the new funding transaction locks we keep enough state to recognize a splice LDK
+/// no longer knows about and to describe events about it in terms of the original request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SpliceIntent {
+	/// The channel counterparty.
+	pub counterparty_node_id: PublicKey,
+	/// The channel being spliced.
+	pub channel_id: ChannelId,
+	/// The channel's funding outpoint when the splice was initiated. It only changes once a splice
+	/// locks, so a mismatch with the channel's current funding outpoint means the splice (or a
+	/// replacement) completed and the intent is stale.
+	pub pre_splice_funding_txo: LdkOutPoint,
+	/// The contribution handed to [`ChannelManager::funding_contributed`], kept to match later
+	/// events about the splice back to this intent.
+	///
+	/// [`ChannelManager::funding_contributed`]: lightning::ln::channelmanager::ChannelManager::funding_contributed
+	pub contribution: FundingContribution,
+	/// The parameters of the originating API call.
+	pub kind: SpliceKind,
+}
+
+impl_writeable_tlv_based!(SpliceIntent, {
+	(0, counterparty_node_id, required),
+	(2, channel_id, required),
+	(4, pre_splice_funding_txo, required),
+	(6, contribution, required),
+	(8, kind, required),
+});
+
 /// A pending payment tracked by LDK Node, keyed by [`PaymentId`].
 ///
 /// Each part of an entry is written by a different subsystem and is present on its own schedule,
-/// so all of them are optional. Signing a round of an interactive funding adds the round to
-/// `candidates` and names the `funding_channels` it belongs to, still without a transaction anyone
-/// has seen; wallet sync adds `details` once it observes the transaction, and records
-/// `conflicting_txids` for any wallet transaction. A splice uses all of them; the fields do not
-/// partition by payment type. An entry holding none of them tracks nothing and is removed.
+/// so all of them are optional. A user-initiated splice is persisted with nothing but its
+/// [`SpliceIntent`] before its contribution is handed to LDK; signing a round of it adds the
+/// round to `candidates` and names the `funding_channels` it belongs to, still without a
+/// transaction anyone has seen; wallet sync adds `details` once it observes the transaction, and
+/// records `conflicting_txids` for any wallet transaction; the `ChannelReady` arm records
+/// `locked_rounds`. A splice uses all of them; the fields do not partition by payment type. An
+/// entry holding none of them tracks nothing and is removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PendingPaymentDetails {
 	/// The payment this entry tracks.
@@ -73,6 +139,12 @@ pub(crate) struct PendingPaymentDetails {
 	/// RBF history, keyed by each candidate's txid and recorded as each round is signed.
 	/// Empty for non-funding payments.
 	pub candidates: Vec<FundingTxCandidate>,
+	/// The live splice intent, or `None` for a non-splice payment or a splice that has
+	/// locked. Persisted at splice initiation and cleared once the splice locks or its failure
+	/// is surfaced, it outlives the rounds negotiated under it, because a fee bump is a fresh
+	/// negotiation LDK likewise abandons if the peer disconnects before signing, and shares the
+	/// bumped round's record rather than getting one of its own.
+	pub splice_intent: Option<SpliceIntent>,
 	/// The candidates LDK promoted to the channel's funding, as `ChannelReady` reported them.
 	/// A zero-conf splice locks before its transaction confirms, and every later splice builds
 	/// on it, so such a round can still confirm once the channel's funding has moved on from
@@ -85,12 +157,33 @@ impl PendingPaymentDetails {
 	pub(crate) fn new(
 		details: PaymentDetails, conflicting_txids: Vec<Txid>, candidates: Vec<FundingTxCandidate>,
 	) -> Self {
+		Self::tracked(details, conflicting_txids, candidates, None)
+	}
+
+	pub(crate) fn tracked(
+		details: PaymentDetails, conflicting_txids: Vec<Txid>, candidates: Vec<FundingTxCandidate>,
+		splice_intent: Option<SpliceIntent>,
+	) -> Self {
 		Self {
 			id: details.id,
 			details: Some(details),
 			conflicting_txids,
 			funding_channels: Vec::new(),
 			candidates,
+			splice_intent,
+			locked_rounds: Vec::new(),
+		}
+	}
+
+	#[cfg(test)]
+	pub(crate) fn pending_splice(id: PaymentId, intent: SpliceIntent) -> Self {
+		Self {
+			id,
+			details: None,
+			conflicting_txids: Vec::new(),
+			funding_channels: Vec::new(),
+			candidates: Vec::new(),
+			splice_intent: Some(intent),
 			locked_rounds: Vec::new(),
 		}
 	}
@@ -100,6 +193,7 @@ impl PendingPaymentDetails {
 	/// record for it exists.
 	pub(crate) fn signed_rounds(
 		id: PaymentId, funding_channels: Vec<Channel>, candidates: Vec<FundingTxCandidate>,
+		splice_intent: Option<SpliceIntent>,
 	) -> Self {
 		Self {
 			id,
@@ -107,6 +201,7 @@ impl PendingPaymentDetails {
 			conflicting_txids: Vec::new(),
 			funding_channels,
 			candidates,
+			splice_intent,
 			locked_rounds: Vec::new(),
 		}
 	}
@@ -164,7 +259,10 @@ impl PendingPaymentDetails {
 
 	/// Whether this entry tracks nothing anymore and can be dropped.
 	pub(crate) fn is_empty(&self) -> bool {
-		self.details.is_none() && self.candidates.is_empty() && self.locked_rounds.is_empty()
+		self.details.is_none()
+			&& self.splice_intent.is_none()
+			&& self.candidates.is_empty()
+			&& self.locked_rounds.is_empty()
 	}
 }
 
@@ -174,6 +272,7 @@ impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(4, conflicting_txids, optional_vec),
 	(6, funding_channels, optional_vec),
 	(8, candidates, optional_vec),
+	(10, splice_intent, option),
 	(12, locked_rounds, optional_vec),
 });
 
@@ -183,6 +282,10 @@ pub(crate) struct PendingPaymentDetailsUpdate {
 	pub payment_update: Option<PaymentDetailsUpdate>,
 	pub conflicting_txids: Option<Vec<Txid>>,
 	pub candidates: Vec<FundingTxCandidate>,
+	/// The splice intent to set (`Some(Some(..))`) or clear (`Some(None)`), or `None` to leave it
+	/// unchanged. Clearing the intent of an entry that tracks nothing else is done by removing the
+	/// entry, not through this field.
+	pub splice_intent: Option<Option<SpliceIntent>>,
 }
 
 impl StorableObject for PendingPaymentDetails {
@@ -233,6 +336,13 @@ impl UpdatableObject for PendingPaymentDetails {
 			updated = true;
 		}
 
+		if let Some(new_splice_intent) = update.splice_intent {
+			if self.splice_intent != new_splice_intent {
+				self.splice_intent = new_splice_intent;
+				updated = true;
+			}
+		}
+
 		updated
 	}
 
@@ -250,12 +360,14 @@ impl StorableObjectUpdate<PendingPaymentDetails> for PendingPaymentDetailsUpdate
 impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 	fn from(value: &PendingPaymentDetails) -> Self {
 		match &value.details {
-			// An entry with no record yet carries nothing a payment-tracking merge could apply.
+			// An entry with no record yet carries nothing a payment-tracking merge could apply
+			// beyond its intent, which the entry that holds it owns outright.
 			None => Self {
 				id: value.id,
 				payment_update: None,
 				conflicting_txids: None,
 				candidates: value.candidates.clone(),
+				splice_intent: value.splice_intent.clone().map(Some),
 			},
 			Some(details) => {
 				let conflicting_txids = if value.conflicting_txids.is_empty() {
@@ -263,11 +375,16 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 				} else {
 					Some(value.conflicting_txids.clone())
 				};
+				// Leave the splice intent unchanged: it is owned by the writers that persist and
+				// settle splices, never by a payment-tracking merge. Emitting the current value
+				// here would let an `insert_or_update` of a payment record (e.g. from wallet sync,
+				// built without an intent) clobber a live intent to `None`.
 				Self {
 					id: details.id,
 					payment_update: Some(details.to_update()),
 					conflicting_txids,
 					candidates: value.candidates.clone(),
+					splice_intent: None,
 				}
 			},
 		}
@@ -297,6 +414,27 @@ pub(crate) fn test_funding_contribution_with_outputs(
 pub(crate) fn test_funding_contribution_with_parts(
 	estimated_fee_sat: u64, feerate: u64, prevtxs: &[bitcoin::Transaction],
 	outputs: &[bitcoin::TxOut], change_output: Option<&bitcoin::TxOut>,
+) -> lightning::ln::funding::FundingContribution {
+	test_funding_contribution_inheriting(
+		estimated_fee_sat,
+		feerate,
+		prevtxs,
+		outputs,
+		change_output,
+		&[],
+		&[],
+	)
+}
+
+/// Like [`test_funding_contribution_with_parts`], but recording `inherited_inputs` and
+/// `inherited_output_scripts` as parts a still-pending splice attempt reserved before this
+/// contribution, as LDK records them at the hand-off of a fee bump built from the round it
+/// replaces: the contribution's `reserved_inputs` and `reserved_outputs` leave them out.
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_inheriting(
+	estimated_fee_sat: u64, feerate: u64, prevtxs: &[bitcoin::Transaction],
+	outputs: &[bitcoin::TxOut], change_output: Option<&bitcoin::TxOut>,
+	inherited_inputs: &[bitcoin::OutPoint], inherited_output_scripts: &[bitcoin::ScriptBuf],
 ) -> lightning::ln::funding::FundingContribution {
 	use lightning::util::ser::{BigSize, Writeable};
 	use lightning::util::wallet_utils::ConfirmedUtxo;
@@ -340,12 +478,65 @@ pub(crate) fn test_funding_contribution_with_parts(
 	records.extend_from_slice(&[11, 8]); // (11, max_feerate)
 	records.extend_from_slice(&feerate.to_be_bytes());
 	records.extend_from_slice(&[13, 1, 1]); // (13, is_splice: true)
+	if !inherited_inputs.is_empty() || !inherited_output_scripts.is_empty() {
+		// (17, pending_components): a length-prefixed TLV stream of its own.
+		let mut components = Vec::new();
+		if !inherited_inputs.is_empty() {
+			let mut bytes = Vec::new();
+			for outpoint in inherited_inputs {
+				outpoint.write(&mut bytes).expect("in-memory write must succeed");
+			}
+			components.push(1); // (1, inputs)
+			BigSize(bytes.len() as u64)
+				.write(&mut components)
+				.expect("in-memory write must succeed");
+			components.extend(bytes);
+		}
+		if !inherited_output_scripts.is_empty() {
+			let mut bytes = Vec::new();
+			for script in inherited_output_scripts {
+				script.write(&mut bytes).expect("in-memory write must succeed");
+			}
+			components.push(3); // (3, output_scripts)
+			BigSize(bytes.len() as u64)
+				.write(&mut components)
+				.expect("in-memory write must succeed");
+			components.extend(bytes);
+		}
+		let mut component_bytes = Vec::new();
+		BigSize(components.len() as u64)
+			.write(&mut component_bytes)
+			.expect("in-memory write must succeed");
+		component_bytes.extend(components);
+		records.push(17);
+		BigSize(component_bytes.len() as u64)
+			.write(&mut records)
+			.expect("in-memory write must succeed");
+		records.extend(component_bytes);
+	}
 	let mut tlv_bytes = Vec::new();
 	// BigSize length prefix over the TLV records above.
 	BigSize(records.len() as u64).write(&mut tlv_bytes).expect("in-memory write must succeed");
 	tlv_bytes.extend(records);
 	lightning::util::ser::Readable::read(&mut &tlv_bytes[..])
 		.expect("hand-built TLV stream must decode")
+}
+
+/// Builds a [`FundingContribution`] for tests carrying just the required TLV records: a zero
+/// estimated fee, the default feerate, and no contributed outputs.
+///
+/// [`FundingContribution`]: lightning::ln::funding::FundingContribution
+#[cfg(test)]
+pub(crate) fn test_funding_contribution() -> lightning::ln::funding::FundingContribution {
+	test_funding_contribution_with_feerate(253)
+}
+
+/// Like [`test_funding_contribution`], but with the given input-selection feerate in sat/kwu.
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_with_feerate(
+	feerate: u64,
+) -> lightning::ln::funding::FundingContribution {
+	test_funding_contribution_with_outputs(0, feerate, &[])
 }
 
 #[cfg(test)]
@@ -455,6 +646,150 @@ mod tests {
 			Vec::<Txid>::new(),
 			"current txid must not remain in its own conflict list"
 		);
+	}
+
+	#[test]
+	fn splice_kind_round_trips() {
+		for kind in [
+			SpliceKind::In { amount_sats: 500_000 },
+			SpliceKind::Out {
+				outputs: vec![TxOut {
+					value: bitcoin::Amount::from_sat(400_000),
+					script_pubkey: bitcoin::ScriptBuf::new(),
+				}],
+			},
+			SpliceKind::Rbf {},
+		] {
+			let encoded = kind.encode();
+			let decoded = SpliceKind::read(&mut &encoded[..]).unwrap();
+			assert_eq!(kind, decoded);
+		}
+	}
+
+	#[test]
+	fn pending_splice_round_trips() {
+		use std::str::FromStr;
+
+		let id = PaymentId([10u8; 32]);
+		let intent = SpliceIntent {
+			counterparty_node_id: PublicKey::from_str(
+				"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+			)
+			.unwrap(),
+			channel_id: ChannelId([11u8; 32]),
+			pre_splice_funding_txo: LdkOutPoint { txid: test_txid(12), index: 0 },
+			contribution: test_funding_contribution(),
+			kind: SpliceKind::In { amount_sats: 500_000 },
+		};
+		let record = PendingPaymentDetails::pending_splice(id, intent);
+
+		let encoded = record.encode();
+		let decoded = PendingPaymentDetails::read(&mut &encoded[..]).unwrap();
+		assert_eq!(record, decoded);
+		assert_eq!(decoded.id(), id);
+		assert!(decoded.details().is_none());
+	}
+
+	/// A fee bump's contribution inherits the inputs and change of the round it replaces, which
+	/// LDK records in the contribution at the hand-off so that `reserved_inputs` and
+	/// `reserved_outputs` leave them out: what a failure of the bump releases, and what a retry
+	/// must reserve again. That record is a private field the contribution's `PartialEq` ignores,
+	/// so a persisted intent's round trip is checked through those accessors.
+	#[test]
+	fn pending_splice_keeps_the_contribution_reserved_parts() {
+		use std::str::FromStr;
+
+		use bitcoin::{Amount, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, WPubkeyHash};
+
+		let prevtx = |seed: u8| Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: bitcoin::absolute::LockTime::ZERO,
+			input: vec![TxIn::default()],
+			output: vec![TxOut {
+				value: Amount::from_sat(10_000),
+				script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([seed; 20])),
+			}],
+		};
+		let prevtxs = [prevtx(1), prevtx(2)];
+		let outpoint = |tx: &Transaction| OutPoint { txid: tx.compute_txid(), vout: 0 };
+		let script = |seed: u8| ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([seed; 20]));
+		let change = TxOut { value: Amount::from_sat(21_000), script_pubkey: script(9) };
+		let splice_out = TxOut { value: Amount::from_sat(50_000), script_pubkey: script(8) };
+		let reserved = |contribution: &FundingContribution| {
+			(
+				contribution.reserved_inputs().map(|input| input.outpoint()).collect::<Vec<_>>(),
+				contribution.reserved_outputs().cloned().collect::<Vec<_>>(),
+			)
+		};
+
+		// Without the record, every part counts as reserved.
+		let plain = test_funding_contribution_with_parts(
+			0,
+			300,
+			&prevtxs,
+			&[splice_out.clone()],
+			Some(&change),
+		);
+		assert_eq!(
+			reserved(&plain),
+			(prevtxs.iter().map(outpoint).collect(), vec![splice_out.clone(), change.clone()])
+		);
+
+		// The bump reuses the first input and the change address of the round it replaces; the
+		// second input and the splice-out output are its own.
+		let contribution = test_funding_contribution_inheriting(
+			0,
+			300,
+			&prevtxs,
+			&[splice_out.clone()],
+			Some(&change),
+			&[outpoint(&prevtxs[0])],
+			&[change.script_pubkey.clone()],
+		);
+		let expected = (vec![outpoint(&prevtxs[1])], vec![splice_out]);
+		assert_eq!(reserved(&contribution), expected);
+
+		let intent = SpliceIntent {
+			counterparty_node_id: PublicKey::from_str(
+				"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+			)
+			.unwrap(),
+			channel_id: ChannelId([11u8; 32]),
+			pre_splice_funding_txo: LdkOutPoint { txid: test_txid(12), index: 0 },
+			contribution,
+			kind: SpliceKind::Rbf {},
+		};
+		let record = PendingPaymentDetails::pending_splice(PaymentId([10u8; 32]), intent);
+
+		let encoded = record.encode();
+		let decoded = PendingPaymentDetails::read(&mut &encoded[..]).unwrap();
+		assert_eq!(record, decoded);
+		let intent = decoded.splice_intent.expect("a pending splice decoded without its intent");
+		assert_eq!(reserved(&intent.contribution), expected);
+	}
+
+	#[test]
+	fn tracked_payment_round_trips() {
+		// An entry without a payment record round-trips in `pending_splice_round_trips`; here we
+		// cover one carrying the record and its candidate history.
+		let payment_id = PaymentId([7u8; 32]);
+		let txid = Txid::from_byte_array([8u8; 32]);
+		let record = PendingPaymentDetails::new(
+			pending_onchain_payment(payment_id, txid),
+			vec![Txid::from_byte_array([9u8; 32])],
+			vec![FundingTxCandidate {
+				txid,
+				amount_msat: Some(1_000),
+				fee_paid_msat: Some(100),
+				awaiting_broadcast: false,
+			}],
+		);
+
+		let encoded = record.encode();
+		let decoded = PendingPaymentDetails::read(&mut &encoded[..]).unwrap();
+		assert_eq!(record, decoded);
+		assert_eq!(decoded.id(), payment_id);
+		assert!(decoded.details().is_some());
 	}
 
 	/// A candidate with the given txid byte, with a stake of ours in it if `ours`.

@@ -635,8 +635,8 @@ impl Wallet {
 					let pending_payments: Vec<PendingPaymentDetails> = self
 						.payment_stores
 						.pending_payments(|p| match p.details() {
-							// An entry of signed rounds whose transaction nothing has observed
-							// yet carries no payment and cannot graduate.
+							// A pre-broadcast splice intent carries no payment yet and cannot
+							// graduate.
 							None => false,
 							Some(details) => {
 								debug_assert!(
@@ -2777,7 +2777,7 @@ impl Wallet {
 			.mutate_pending_payment(&payment_id, |existing| {
 				let mut changed = existing.is_none();
 				let mut entry = existing.cloned().unwrap_or_else(|| {
-					PendingPaymentDetails::signed_rounds(payment_id, Vec::new(), Vec::new())
+					PendingPaymentDetails::signed_rounds(payment_id, Vec::new(), Vec::new(), None)
 				});
 				if entry.funding_channels.is_empty() && !funding_channels.is_empty() {
 					entry.funding_channels = funding_channels.clone();
@@ -3093,7 +3093,7 @@ impl Wallet {
 			stores
 				.mutate_pending_payment(&id, |existing| {
 					let mut entry = existing.cloned().unwrap_or_else(|| {
-						PendingPaymentDetails::signed_rounds(id, Vec::new(), Vec::new())
+						PendingPaymentDetails::signed_rounds(id, Vec::new(), Vec::new(), None)
 					});
 					entry.candidates = candidates.clone();
 					Some(entry)
@@ -3175,22 +3175,37 @@ impl Wallet {
 	) -> Result<(), Error> {
 		let id = payment.id;
 		stores
-			.mutate_pending_payment(&id, |existing| match existing {
-				None => Some(PendingPaymentDetails::new(payment, conflicting_txids, Vec::new())),
-				// Promote an entry that has no record yet: wallet sync saw the splice
-				// transaction before this node recorded a payment for it. The entry keeps the
-				// rounds signed under it, and gains the record.
-				Some(entry) if entry.details().is_none() => {
-					let mut entry = entry.clone();
-					entry.details = Some(payment);
-					entry.conflicting_txids = conflicting_txids;
-					Some(entry)
-				},
-				Some(tracked) => {
-					let mut tracked = tracked.clone();
-					let fresh = PendingPaymentDetails::new(payment, conflicting_txids, Vec::new());
-					tracked.update(fresh.to_update()).then_some(tracked)
-				},
+			.mutate_pending_payment_async(&id, move |existing| async move {
+				// Only `Pending` payments belong in the pending store. The authoritative
+				// status is re-read inside the store's critical section, where it cannot go
+				// stale against graduation.
+				let is_pending = stores
+					.payment(&id)
+					.await?
+					.map_or(payment.status == PaymentStatus::Pending, |recorded| {
+						recorded.status == PaymentStatus::Pending
+					});
+				if !is_pending {
+					return Ok(None);
+				}
+				Ok(match existing {
+					None => {
+						Some(PendingPaymentDetails::new(payment, conflicting_txids, Vec::new()))
+					},
+					// Promote an entry that has no record yet: wallet sync saw the splice
+					// transaction before this node recorded a payment for it. The entry keeps
+					// the splice intent and the rounds signed under it, and gains the record.
+					Some(mut entry) if entry.details().is_none() => {
+						entry.details = Some(payment);
+						entry.conflicting_txids = conflicting_txids;
+						Some(entry)
+					},
+					Some(mut tracked) => {
+						let fresh =
+							PendingPaymentDetails::new(payment, conflicting_txids, Vec::new());
+						tracked.update(fresh.to_update()).then_some(tracked)
+					},
+				})
 			})
 			.await?;
 		Ok(())
@@ -7047,6 +7062,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7263,6 +7279,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7347,6 +7364,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7429,6 +7447,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![bumped_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7482,6 +7501,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7549,6 +7569,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![conflict_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7845,6 +7866,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -9915,5 +9937,36 @@ mod tests {
 			"unexpected kind {:?}",
 			payment.kind,
 		);
+	}
+
+	#[tokio::test]
+	async fn a_payment_that_already_advanced_gets_no_pending_entry() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let id = PaymentId([23u8; 32]);
+		let txid = Txid::from_byte_array([24u8; 32]);
+		// Wallet sync confirmed the payment through `ANTI_REORG_DELAY` before a writer holding a
+		// `Pending` copy read earlier got to the pending store: the payment graduated, so no
+		// entry belongs there.
+		wallet
+			.payment_stores
+			.payment_store()
+			.insert(funding_payment(id, txid, PaymentStatus::Succeeded))
+			.await
+			.unwrap();
+
+		let stores = wallet.payment_stores.lock().await;
+		wallet
+			.upsert_pending_payment(
+				&stores,
+				funding_payment(id, txid, PaymentStatus::Pending),
+				Vec::new(),
+			)
+			.await
+			.unwrap();
+		drop(stores);
+
+		assert!(wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().is_none());
 	}
 }

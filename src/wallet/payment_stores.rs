@@ -8,6 +8,7 @@
 //! The wallet's payment stores behind one API, so that every write the wallet makes to them
 //! happens under the lock that keeps a payment record and its pending-store entry consistent.
 
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -155,5 +156,17 @@ impl PaymentStoresGuard<'_> {
 		F: FnOnce(Option<&PendingPaymentDetails>) -> Option<PendingPaymentDetails>,
 	{
 		self.stores.pending_payment_store.mutate(id, f).await
+	}
+
+	/// [`Self::mutate_pending_payment`] with a transformation that awaits fallible reads; see
+	/// [`DataStore::mutate_async`](crate::data_store::DataStore::mutate_async).
+	pub(super) async fn mutate_pending_payment_async<F, Fut>(
+		&self, id: &PaymentId, f: F,
+	) -> Result<Option<PendingPaymentDetails>, Error>
+	where
+		F: FnOnce(Option<PendingPaymentDetails>) -> Fut,
+		Fut: Future<Output = Result<Option<PendingPaymentDetails>, Error>>,
+	{
+		self.stores.pending_payment_store.mutate_async(id, f).await
 	}
 }
