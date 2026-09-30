@@ -32,7 +32,7 @@ pub use forwarding::{
 #[cfg(feature = "unified-payments")]
 pub(crate) use hrn::HRNResolver;
 pub use onchain::OnchainPayment;
-pub(crate) use pending_payment_store::PendingPaymentDetails;
+pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
 pub use spontaneous::SpontaneousPayment;
 pub use store::{
 	Channel, ConfirmationStatus, LSPS2Parameters, PageToken, PaymentDetails, PaymentDetailsPage,
