@@ -231,6 +231,11 @@ impl PendingPaymentDetails {
 		true
 	}
 
+	/// The splice intent this record carries, if it is a splice that has not yet locked.
+	pub(crate) fn splice_intent(&self) -> Option<&SpliceIntent> {
+		self.splice_intent.as_ref()
+	}
+
 	/// Returns this node's recorded funding figures for the candidate with the given txid, if any.
 	pub(crate) fn candidate(&self, txid: Txid) -> Option<&FundingTxCandidate> {
 		self.candidates.iter().find(|candidate| candidate.txid == txid)
