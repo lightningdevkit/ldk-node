@@ -1108,6 +1108,21 @@ impl Builder {
 	}
 }
 
+#[cfg(all(feature = "uniffi", feature = "chain-cbf"))]
+#[uniffi::export]
+impl Builder {
+	/// Configures the [`Node`] instance to source chain data via compact block filters
+	/// (BIP157/BIP158), connecting to the given peers (`ip:port`).
+	///
+	/// `fee_source_config` optionally delegates fee estimation to an Esplora or Electrum server;
+	/// if `None`, fee rates are derived from recent blocks.
+	pub fn set_chain_source_cbf(
+		&self, peers: Vec<String>, fee_source_config: Option<CbfFeeSourceConfig>,
+	) {
+		self.inner.write().expect("lock").set_chain_source_cbf(peers, fee_source_config);
+	}
+}
+
 #[cfg(all(feature = "uniffi", feature = "chain-bitcoind"))]
 #[uniffi::export]
 impl Builder {
