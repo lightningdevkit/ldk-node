@@ -335,7 +335,8 @@ impl ChannelTxFacts {
 	/// A record is written whole, so its size is the one resource a producer drives without
 	/// creating a record of its own: every channel-controlled output of a transaction lands on
 	/// that transaction's record, and a counterparty decides how many HTLCs a commitment
-	/// transaction carries. What a refused report would have described stays unclassifiable.
+	/// transaction carries. What a refused report would have described stays undescribed, and
+	/// what that costs is for the producer that reported it to weigh.
 	pub(crate) fn size_checked(self) -> Result<Self, ChannelTxFactsRejection> {
 		let bytes = self.serialized_length();
 		if bytes > CHANNEL_TX_FACTS_MAX_RECORD_BYTES {
@@ -354,9 +355,32 @@ pub(crate) enum FactsRecordOutcome {
 	/// Everything reported is on record.
 	Recorded,
 	/// Part of what was reported is not on record, because recording it would have taken the
-	/// facts past the resources they are allowed. Transactions that would have been classified
-	/// from the missing part are reported without a classification instead.
+	/// facts past the resources they are allowed. Nothing was lost, so what the refusal costs
+	/// is the reporting producer's to weigh: a transaction reported without a classification
+	/// for a producer that has nothing left to withhold, a round left unsigned for one that
+	/// will not release a transaction it cannot measure.
 	Incomplete,
+}
+
+/// Whether a report about a transaction this node holds no record of at all is subject to the
+/// number of records the store may hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FactsAdmission {
+	/// Refused once the store holds as many records as it is allowed to.
+	///
+	/// This is what bounds the store: a counterparty opening and closing channels, or replacing
+	/// a negotiated funding again and again, drives records about transactions this node only
+	/// reports on, and each of them costs nothing to refuse beyond a transaction going
+	/// unclassified.
+	Capped,
+	/// Admitted beside however many records the store holds, and counted like any other, so that
+	/// capped reports are refused the sooner.
+	///
+	/// This is for the one report whose refusal costs more than the record: a round this node is
+	/// about to sign, which it will not release without its own share of it on record. How many
+	/// such records there can be is a question of how many rounds this node signs, which is its
+	/// own decision, and each carries no outputs.
+	Exempt,
 }
 
 /// An output the node's channel state holds: the funding output of a channel the channel manager

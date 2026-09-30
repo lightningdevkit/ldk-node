@@ -75,8 +75,8 @@ use crate::payment::{
 use crate::runtime::Runtime;
 use crate::types::{Broadcaster, ChannelTxFactsStore, PaymentStore, PendingPaymentStore};
 use crate::wallet::provenance::{
-	ChannelLiveness, ChannelTxFacts, ChannelTxFactsRejection, FactsRecordOutcome, FactsRetention,
-	LocalFundingFigures, RetentionCheck, TxProvenance,
+	ChannelLiveness, ChannelTxFacts, ChannelTxFactsRejection, FactsAdmission, FactsRecordOutcome,
+	FactsRetention, LocalFundingFigures, RetentionCheck, TxProvenance,
 };
 use crate::{ChainSource, Error};
 
@@ -89,6 +89,20 @@ pub(crate) enum OnchainSendAmount {
 pub(crate) enum FundingAmount {
 	Exact { amount_sats: u64 },
 	Max,
+}
+
+/// What recording an interactive funding round this node is about to sign came to, as it decides
+/// whether the round may be signed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SignedFundingRecord {
+	/// This node's share of the round is on record, or the round needs nothing recorded. The
+	/// round may be signed.
+	Recorded,
+	/// This node's share of the round is not on record, and nothing this node does later puts it
+	/// there. Signing would release a transaction whoever first observes it records with the
+	/// wallet's view of a funding output both parties own — the whole of it read as this node's
+	/// spend, a figure nothing later corrects — so the round is cancelled instead.
+	Unmeasurable,
 }
 
 mod payment_stores;
@@ -263,12 +277,21 @@ impl Wallet {
 	/// overwriting it: one of the two producers is wrong, and the recorded facts came first.
 	///
 	/// A report the store has no room for is likewise refused, and reported as
-	/// [`FactsRecordOutcome::Incomplete`] rather than as a failure: there is nothing to retry,
-	/// and the consequence is a transaction this node cannot say anything about, not a lost
-	/// write. Only what this node has no record of at all is refused that way — a transaction it
+	/// [`FactsRecordOutcome::Incomplete`] rather than as a failure: nothing was lost, and what
+	/// the refusal costs the reporting producer is a transaction this node cannot say anything
+	/// about. Only what this node has no record of at all is refused that way — a transaction it
 	/// already describes goes on being described, however full the store is.
 	pub(crate) async fn record_channel_tx_facts(
 		&self, facts: ChannelTxFacts,
+	) -> Result<FactsRecordOutcome, Error> {
+		self.record_channel_tx_facts_admitted(facts, FactsAdmission::Capped).await
+	}
+
+	/// Records what a producer reported, as [`Self::record_channel_tx_facts`] does, with
+	/// `admission` deciding whether the number of records the store may hold applies to a
+	/// transaction it holds no record of at all.
+	async fn record_channel_tx_facts_admitted(
+		&self, facts: ChannelTxFacts, admission: FactsAdmission,
 	) -> Result<FactsRecordOutcome, Error> {
 		let txid = facts.txid;
 		// Dated by the chain tip the report arrives at, which is what retention measures from.
@@ -286,10 +309,11 @@ impl Wallet {
 						None
 					},
 				},
-				// A transaction nothing is recorded of yet needs room of its own; one already on
-				// record is merged into above however full the store is, so an obligation this
-				// node took on is never half-kept.
-				None if !self.facts_retention.has_room() => {
+				// A transaction nothing is recorded of yet needs room of its own, unless the
+				// producer is exempt from the cap; one already on record is merged into above
+				// however full the store is, so an obligation this node took on is never
+				// half-kept.
+				None if admission == FactsAdmission::Capped && !self.facts_retention.has_room() => {
 					rejection = Some(ChannelTxFactsRejection::NoRoom {
 						limit: CHANNEL_TX_FACTS_MAX_RECORDS,
 					});
@@ -313,12 +337,7 @@ impl Wallet {
 
 		match rejection {
 			Some(e) if e.is_resource_limit() => {
-				log_error!(
-					self.logger,
-					"Not recording what transaction {} is: {}. It will be reported without a classification",
-					txid,
-					e,
-				);
+				log_error!(self.logger, "Not recording what transaction {} is: {}", txid, e,);
 				Ok(FactsRecordOutcome::Incomplete)
 			},
 			Some(e) => {
@@ -2845,10 +2864,16 @@ impl Wallet {
 	/// the candidate is live in the channel's splice details, and both writes are idempotent, so
 	/// the replay completes whichever of them was lost.
 	///
+	/// The round's facts are admitted however many records the store holds, so that a store full
+	/// of other transactions cannot leave this node signing a round it has no measure of. A
+	/// refusal that a replay would only meet again reports the round
+	/// [`SignedFundingRecord::Unmeasurable`], having written nothing, for the caller to cancel
+	/// the round rather than sign it.
+	///
 	/// [`ChannelManager::funding_transaction_signed`]: lightning::ln::channelmanager::ChannelManager::funding_transaction_signed
 	pub(crate) async fn record_signed_funding(
 		&self, tx: &Transaction, candidates: &[FundingCandidate],
-	) -> Result<(), Error> {
+	) -> Result<SignedFundingRecord, Error> {
 		let txid = tx.compute_txid();
 		let signed_round = match candidates.iter().find(|candidate| candidate.txid == txid) {
 			Some(round) => round,
@@ -2858,7 +2883,7 @@ impl Wallet {
 					"Not recording signed funding {}: not among the channel's pending splice rounds",
 					txid,
 				);
-				return Ok(());
+				return Ok(SignedFundingRecord::Recorded);
 			},
 		};
 		let funding_channels: Vec<Channel> = signed_round
@@ -2887,7 +2912,7 @@ impl Wallet {
 		let (figures, mut history) =
 			match self.interactive_funding_figures(payment_id, candidates, signed_round, tx) {
 				Some(record) => record,
-				None => return Ok(()),
+				None => return Ok(SignedFundingRecord::Recorded),
 			};
 		let figures = recorded_figures.unwrap_or(figures);
 		// Only the signed round awaits broadcast: LDK broadcast the others once their signatures
@@ -2899,7 +2924,7 @@ impl Wallet {
 		let prior_pending = stores.pending_payment(&payment_id).await?;
 		// A replayed signing event re-offers a transaction already recorded; nothing to add.
 		if prior_pending.as_ref().is_some_and(|entry| entry.candidate(txid).is_some()) {
-			return Ok(());
+			return Ok(SignedFundingRecord::Recorded);
 		}
 		// Merge LDK's history into the recorded one — refreshing the rounds both list, appending
 		// the new ones — rather than replace it: LDK's history omits a recorded round it has since
@@ -2923,14 +2948,28 @@ impl Wallet {
 		// The fact goes first: it is what ties the transaction to this payment, so a failure
 		// afterwards leaves the round attributable rather than a history pointing at a payment
 		// nothing would ever file the transaction under.
-		self.record_channel_tx_facts(
-			ChannelTxFacts::new(txid)
-				.with_self_role(TransactionType::InteractiveFunding {
-					channels: funding_channels.clone(),
-				})
-				.with_local_figures(figures),
-		)
-		.await?;
+		//
+		// The round is admitted whatever the store's count: this node decides whether to sign
+		// it, and a record naming a round and this node's share of it carries no outputs, so
+		// it is among the smallest the store holds. What can still refuse it is a record
+		// already as large as one record may be, which nothing shrinks — so the round is
+		// reported unmeasurable for the caller to cancel, rather than released with the
+		// wallet's view of a funding output both parties own standing in for this node's
+		// share.
+		let facts = ChannelTxFacts::new(txid)
+			.with_self_role(TransactionType::InteractiveFunding {
+				channels: funding_channels.clone(),
+			})
+			.with_local_figures(figures);
+		let outcome = self.record_channel_tx_facts_admitted(facts, FactsAdmission::Exempt).await?;
+		if outcome == FactsRecordOutcome::Incomplete {
+			log_error!(
+				self.logger,
+				"Not signing interactive funding {}: this node's share of it is not on record",
+				txid,
+			);
+			return Ok(SignedFundingRecord::Unmeasurable);
+		}
 
 		stores
 			.mutate_pending_payment(&payment_id, |existing| {
@@ -2969,7 +3008,7 @@ impl Wallet {
 				e,
 			);
 		}
-		Ok(())
+		Ok(SignedFundingRecord::Recorded)
 	}
 
 	/// Marks a splice round recorded when signing ([`Self::record_signed_funding`]) as broadcast
@@ -4532,7 +4571,9 @@ mod tests {
 	use crate::config::ElectrumSyncConfig;
 	#[cfg(feature = "chain-esplora")]
 	use crate::config::EsploraSyncConfig;
-	use crate::config::{CHANNEL_TX_FACTS_CACHE_CAPACITY, PAYMENT_CACHE_CAPACITY};
+	use crate::config::{
+		CHANNEL_TX_FACTS_CACHE_CAPACITY, CHANNEL_TX_FACTS_MAX_RECORD_BYTES, PAYMENT_CACHE_CAPACITY,
+	};
 	use crate::io::test_utils::InMemoryStore;
 	use crate::io::{
 		BDK_WALLET_ADDRESS_POOL_KEY, BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
@@ -6077,6 +6118,148 @@ mod tests {
 			figures.direction,
 			PaymentDirection::Inbound,
 			"a splice-out returns funds to the wallet"
+		);
+	}
+
+	/// A round this node is about to sign is measured however full the store is. The number of
+	/// records the store admits bounds what a counterparty drives; a round this node chose to
+	/// sign is admitted beside them, because without this node's share on record whoever first
+	/// observes the transaction records it with the wallet's view of a funding output both
+	/// parties own — the whole of it read as this node's spend, a figure nothing later corrects.
+	#[tokio::test]
+	async fn a_full_store_still_measures_a_round_this_node_signs() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
+
+		// The store holds as many records as it may, so a transaction a capped producer reports
+		// on is refused room.
+		wallet.facts_retention.walk_completed(CHANNEL_TX_FACTS_MAX_RECORDS);
+		assert_eq!(
+			wallet
+				.record_channel_tx_facts(ChannelTxFacts::new(Txid::from_byte_array([77u8; 32])))
+				.await
+				.unwrap(),
+			FactsRecordOutcome::Incomplete,
+		);
+
+		assert_eq!(
+			wallet.record_signed_funding(&tx, &candidates).await.unwrap(),
+			SignedFundingRecord::Recorded,
+			"a round this node signs is measured however full the store is",
+		);
+		let id =
+			wallet.find_payment_by_txid(txid).await.unwrap().expect("the round names its payment");
+		assert!(
+			wallet
+				.payment_stores
+				.pending_payment_store()
+				.get(&id)
+				.await
+				.unwrap()
+				.expect("entry")
+				.candidate(txid)
+				.is_some(),
+			"the signed round is in the channel's candidate history",
+		);
+
+		// Our signatures leave the node and the counterparty broadcasts: wallet sync is the first
+		// to see the transaction, and files it under this node's share of the round rather than
+		// under the wallet's view of a funding output both parties own.
+		observe_unconfirmed(&wallet, &tx).await;
+
+		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
+		assert_eq!(payments.len(), 1);
+		assert_eq!(payments[0].id, id);
+		assert_eq!(payments[0].amount_msat, Some(500_300_000));
+		assert_eq!(payments[0].fee_paid_msat, Some(300_000));
+	}
+
+	/// A round whose facts are refused for a reason nothing later undoes is not signed, and is
+	/// reported unmeasurable so the caller cancels it. The record this round would merge into is
+	/// already as large as one record may be, which no later report shrinks, so replaying the
+	/// signing event would meet the same refusal forever while every event queued behind it
+	/// waited.
+	#[tokio::test]
+	async fn a_round_this_node_cannot_measure_is_not_signed() {
+		use lightning::util::ser::Writeable;
+
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let channel = Channel { counterparty_node_id, channel_id };
+
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
+
+		// How large the transaction's record would be once the signing added what the round is
+		// and this node's share of it.
+		let signed_length = |facts: &ChannelTxFacts| {
+			facts
+				.clone()
+				.with_self_role(TransactionType::InteractiveFunding {
+					channels: vec![channel.clone()],
+				})
+				.with_local_figures(LocalFundingFigures {
+					funding_payment_id: PaymentId([0u8; 32]),
+					amount_msat: Some(500_300_000),
+					fee_paid_msat: Some(300_000),
+					direction: PaymentDirection::Inbound,
+				})
+				.serialized_length()
+		};
+		// Grow the transaction's record to the largest one that may be stored, in coarse steps
+		// first and single outputs after so the search stays cheap.
+		let mut crowded = ChannelTxFacts::new(txid);
+		let mut vout = 0u32;
+		for step in [128u32, 1] {
+			loop {
+				let grown = crowded.clone().with_outputs(
+					&channel,
+					None,
+					ChannelOutputRole::Htlc,
+					vout..vout + step,
+				);
+				if grown.serialized_length() > CHANNEL_TX_FACTS_MAX_RECORD_BYTES {
+					break;
+				}
+				crowded = grown;
+				vout += step;
+			}
+		}
+		assert!(
+			signed_length(&crowded) > CHANNEL_TX_FACTS_MAX_RECORD_BYTES,
+			"the record must leave no room for what the signing adds",
+		);
+		assert_eq!(
+			wallet.record_channel_tx_facts(crowded).await.unwrap(),
+			FactsRecordOutcome::Recorded,
+		);
+
+		assert_eq!(
+			wallet.record_signed_funding(&tx, &candidates).await.unwrap(),
+			SignedFundingRecord::Unmeasurable,
+			"a round this node cannot measure must be cancelled rather than replayed",
+		);
+		assert!(
+			wallet.channel_tx_facts(&txid).await.expect("the record stays").local_figures.is_none(),
+			"nothing was recorded, which is what the refusal means",
+		);
+		assert!(
+			wallet
+				.payment_stores
+				.pending_payment_store()
+				.list_filter(|entry| entry.candidate(txid).is_some())
+				.await
+				.is_empty(),
+			"a round the signing refused must not be left in a candidate history",
 		);
 	}
 

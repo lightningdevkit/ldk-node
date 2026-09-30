@@ -29,7 +29,7 @@ use crate::payment::pending_payment_store::{
 };
 use crate::payment::{PaymentKind, TransactionType};
 use crate::types::{ChannelManager, PendingPaymentStore};
-use crate::wallet::{funding_candidates, random_payment_id, Wallet};
+use crate::wallet::{funding_candidates, random_payment_id, SignedFundingRecord, Wallet};
 use crate::Error;
 
 /// Whether two contributions describe the same splice attempt. LDK may adjust a contribution
@@ -694,12 +694,13 @@ impl SpliceTracker {
 	/// [`ChannelManager::funding_transaction_signed`] releases. The payment record itself is left
 	/// to wallet sync. Holding the submit lock keeps the channel's intent records — one of which
 	/// the round's entry adopts — from changing mid-write: a concurrent [`Self::submit`] adding or
-	/// replacing an intent, or a lock or failure event settling one.
+	/// replacing an intent, or a lock or failure event settling one. Reports whether the round may
+	/// be signed, as [`Wallet::record_signed_funding`] decides it.
 	///
 	/// [`ChannelManager::funding_transaction_signed`]: lightning::ln::channelmanager::ChannelManager::funding_transaction_signed
 	pub(crate) async fn on_funding_ready_for_signing(
 		&self, tx: &Transaction, candidates: &[FundingCandidate],
-	) -> Result<(), Error> {
+	) -> Result<SignedFundingRecord, Error> {
 		let _guard = self.submit_lock.lock().await;
 		self.wallet.record_signed_funding(tx, candidates).await
 	}
