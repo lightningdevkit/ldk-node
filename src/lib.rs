@@ -365,6 +365,11 @@ impl Node {
 		// against them.
 		self.runtime.block_on(self.wallet.record_channel_outputs());
 
+		// Release whatever the wallet still reserves for splices that did not survive the restart —
+		// before background syncing and broadcasting start below, so the stale reservations are
+		// gone before anything can act on them.
+		self.runtime.block_on(self.splice_tracker.reconcile());
+
 		// A splice round recorded when this node signed it is taken back once LDK reports the
 		// negotiation failed or the channel closed. LDK reports the loss of a negotiation its last
 		// channel manager write carried mid-way, but a round committed, negotiated and signed
@@ -740,6 +745,15 @@ impl Node {
 				run_prober(prober, stop_rx).await;
 			});
 		}
+
+		// Consume any events LDK replays from its last persisted state (e.g. a `DiscardFunding`
+		// for a splice that died before the node stopped) before the node is running: a replayed
+		// event describes pre-restart state and must act before new user operations build on it.
+		let replay_handler = &event_handler;
+		self.runtime.block_on(
+			self.channel_manager
+				.process_pending_events_async(|event| replay_handler.handle_event(event)),
+		);
 
 		// Setup background processing
 		let background_persister = Arc::clone(&self.kv_store);
@@ -1962,7 +1976,12 @@ impl Node {
 	///
 	/// A splice that fails during negotiation (e.g. because the peer disconnected) is reported
 	/// through [`Event::SpliceNegotiationFailed`] and is not retried automatically; a new splice
-	/// may be initiated once the cause of the failure is addressed.
+	/// may be initiated once the cause of the failure is addressed. A splice still pending when the
+	/// node stops is resumed by LDK when possible; otherwise it is dropped at the next startup,
+	/// releasing anything reserved for it. A splice LDK was still queueing or negotiating when the
+	/// node stopped is reported through [`Event::SpliceNegotiationFailed`] at startup, with its
+	/// parameters only if a splice this node contributed to is still pending on the channel; one
+	/// lost earlier is dropped without a failure event.
 	///
 	/// # Experimental API
 	///
@@ -2003,7 +2022,12 @@ impl Node {
 	///
 	/// A splice that fails during negotiation (e.g. because the peer disconnected) is reported
 	/// through [`Event::SpliceNegotiationFailed`] and is not retried automatically; a new splice
-	/// may be initiated once the cause of the failure is addressed.
+	/// may be initiated once the cause of the failure is addressed. A splice still pending when the
+	/// node stops is resumed by LDK when possible; otherwise it is dropped at the next startup,
+	/// releasing anything reserved for it. A splice LDK was still queueing or negotiating when the
+	/// node stopped is reported through [`Event::SpliceNegotiationFailed`] at startup, with its
+	/// parameters only if a splice this node contributed to is still pending on the channel; one
+	/// lost earlier is dropped without a failure event.
 	///
 	/// # Experimental API
 	///
@@ -2038,7 +2062,12 @@ impl Node {
 	///
 	/// A splice that fails during negotiation (e.g. because the peer disconnected) is reported
 	/// through [`Event::SpliceNegotiationFailed`] and is not retried automatically; a new splice
-	/// may be initiated once the cause of the failure is addressed.
+	/// may be initiated once the cause of the failure is addressed. A splice still pending when the
+	/// node stops is resumed by LDK when possible; otherwise it is dropped at the next startup,
+	/// releasing anything reserved for it. A splice LDK was still queueing or negotiating when the
+	/// node stopped is reported through [`Event::SpliceNegotiationFailed`] at startup, with its
+	/// parameters only if a splice this node contributed to is still pending on the channel; one
+	/// lost earlier is dropped without a failure event.
 	///
 	/// # Experimental API
 	///
@@ -2152,8 +2181,13 @@ impl Node {
 	/// times this feerate: if replacing it requires more, the bump fails.
 	///
 	/// A fee bump that fails during negotiation (e.g. because the peer disconnected) is reported
-	/// through [`Event::SpliceNegotiationFailed`] and is not retried automatically; the fee may
-	/// be bumped again once the cause of the failure is addressed.
+	/// through [`Event::SpliceNegotiationFailed`] and is not retried automatically; the fee may be
+	/// bumped again once the cause of the failure is addressed. A fee bump still pending when the
+	/// node stops is resumed by LDK when possible; otherwise it is dropped at the next startup,
+	/// releasing anything reserved for it. A fee bump LDK was still queueing or negotiating when
+	/// the node stopped is reported through [`Event::SpliceNegotiationFailed`] at startup, with its
+	/// parameters only if this node contributed to the splice it bumps; one lost earlier is dropped
+	/// without a failure event.
 	pub fn bump_channel_funding_fee(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		min_fee_rate: Option<FfiFeeRate>,
