@@ -12,7 +12,9 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use lightning::ln::channelmanager::PaymentId;
+use lightning::util::persist::PageToken;
 
+use crate::data_store::DataStorePage;
 use crate::payment::{PaymentDetails, PendingPaymentDetails};
 use crate::types::{PaymentStore, PendingPaymentStore};
 use crate::Error;
@@ -67,6 +69,14 @@ impl PaymentStores {
 		&self, id: &PaymentId,
 	) -> Result<Option<PendingPaymentDetails>, Error> {
 		self.pending_payment_store.get(id).await
+	}
+
+	/// A page of payment records, ordered from most recently created to least recently created;
+	/// see [`DataStore::list_page`](crate::data_store::DataStore::list_page).
+	pub(super) async fn payments_page(
+		&self, page_token: Option<PageToken>,
+	) -> Result<DataStorePage<PaymentDetails>, Error> {
+		self.payment_store.list_page(page_token).await
 	}
 
 	/// Whether the pending store has an entry under `id`.
