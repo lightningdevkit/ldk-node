@@ -1977,8 +1977,6 @@ fn build_with_store_internal(
 		BuildError::WalletSetupFailed
 	})?;
 
-	tx_broadcaster.set_wallet(Arc::downgrade(&wallet));
-
 	// Initialize the KeysManager
 	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
 		log_error!(logger, "Failed to get current time: {}", e);

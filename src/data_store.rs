@@ -432,19 +432,6 @@ where
 		Ok(Some(new_object))
 	}
 
-	/// Like [`Self::mutate`], but allows the transformation to await fallible reads.
-	///
-	/// The mutation lock remains held while `f` runs. This is useful when the new state must be
-	/// decided from an async read of another store without letting a concurrent writer invalidate
-	/// that decision. Callers must keep cross-store lock ordering consistent to avoid deadlocks.
-	pub(crate) async fn mutate_async<F, Fut>(&self, id: &SO::Id, f: F) -> Result<Option<SO>, Error>
-	where
-		F: FnOnce(Option<SO>) -> Fut,
-		Fut: Future<Output = Result<Option<SO>, Error>>,
-	{
-		self.mutate_with(id, f).await
-	}
-
 	/// Returns whether an object is stored under `id`.
 	pub(crate) async fn contains_key(&self, id: &SO::Id) -> Result<bool, Error> {
 		let _guard = self.mutation_lock.read().await;
@@ -1187,43 +1174,6 @@ mod tests {
 			})
 			.await;
 		let expected = TestObject::new(id, [24u8, 23u8, 23u8]);
-		assert_eq!(Ok(Some(expected)), result);
-		assert_eq!(Some(expected), data_store.get(&id).await.unwrap());
-	}
-
-	#[tokio::test]
-	async fn mutate_async_awaits_fallible_reads() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let logger = Arc::new(TestLogger::new());
-		let id = TestObjectId { id: [42u8; 4] };
-		let other_id = TestObjectId { id: [43u8; 4] };
-		let existing_object = TestObject::new(id, [23u8; 3]);
-		let other_object = TestObject::new(other_id, [24u8; 3]);
-		let data_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
-			vec![existing_object],
-			KeepAllEntries,
-			TEST_PRIMARY_NAMESPACE.to_string(),
-			TEST_SECONDARY_NAMESPACE.to_string(),
-			Arc::clone(&store),
-			Arc::clone(&logger),
-		);
-		let other_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
-			vec![other_object],
-			KeepAllEntries,
-			"other_datastore_test_primary".to_string(),
-			"other_datastore_test_secondary".to_string(),
-			store,
-			logger,
-		);
-
-		let result = data_store
-			.mutate_async(&id, |existing| async move {
-				let mut updated = existing.unwrap();
-				updated.data = other_store.get(&other_id).await?.unwrap().data;
-				Ok(Some(updated))
-			})
-			.await;
-		let expected = TestObject::new(id, [24u8; 3]);
 		assert_eq!(Ok(Some(expected)), result);
 		assert_eq!(Some(expected), data_store.get(&id).await.unwrap());
 	}
