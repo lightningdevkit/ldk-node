@@ -245,3 +245,27 @@ harness = false
 #lightning-liquidity = { path = "../rust-lightning/lightning-liquidity" }
 #lightning-macros = { path = "../rust-lightning/lightning-macros" }
 #lightning-dns-resolver = { path = "../rust-lightning/lightning-dns-resolver" }
+
+# TEMPORARY - this section must not reach a proposed branch.
+#
+# Overrides the revision pinned above with a local checkout of the rust-lightning branch
+# `2026-09-restore-tx-only-broadcasting-0.3`, which restores
+# `BroadcasterInterface::broadcast_transactions` to taking `&[&Transaction]`. The paths below
+# exist only on the machine this was developed on, so the tree builds nowhere else while they
+# are in place.
+#
+# Before this work is proposed, delete this whole section and move the `rev` of every crate
+# above to an accessible, reviewed revision carrying the same revert.
+[patch."https://github.com/lightningdevkit/rust-lightning"]
+lightning = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning" }
+lightning-types = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-types" }
+lightning-invoice = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-invoice" }
+lightning-net-tokio = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-net-tokio" }
+lightning-persister = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-persister" }
+lightning-background-processor = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-background-processor" }
+lightning-rapid-gossip-sync = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-rapid-gossip-sync" }
+lightning-block-sync = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-block-sync" }
+lightning-transaction-sync = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-transaction-sync" }
+lightning-liquidity = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-liquidity" }
+lightning-macros = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-macros" }
+lightning-dns-resolver = { path = "/home/tnull/worktrees/rust-lightning/2026-09-restore-tx-only-broadcasting-0.3/lightning-dns-resolver" }

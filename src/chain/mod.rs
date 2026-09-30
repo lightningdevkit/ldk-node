@@ -35,8 +35,9 @@ use crate::config::ElectrumSyncConfig;
 use crate::config::EsploraSyncConfig;
 use crate::config::{BackgroundSyncConfig, Config, WALLET_SYNC_INTERVAL_MINIMUM_SECS};
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
+use crate::tx_broadcaster::BroadcastPackage;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
 
@@ -562,52 +563,44 @@ impl ChainSource {
 		}
 	}
 
+	/// Hands the package to the configured chain source, parents before their child so a CPFP
+	/// package a chain source submits one transaction at a time is still accepted.
+	async fn broadcast(&self, package: BroadcastPackage) {
+		let package = package.into_sorted_transactions();
+		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
+			ChainSourceKind::Esplora(esplora_chain_source) => {
+				esplora_chain_source.process_transaction_broadcast(package).await
+			},
+			#[cfg(feature = "chain-electrum")]
+			ChainSourceKind::Electrum(electrum_chain_source) => {
+				electrum_chain_source.process_transaction_broadcast(package).await
+			},
+			#[cfg(feature = "chain-bitcoind")]
+			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+				bitcoind_chain_source.process_transaction_broadcast(package).await
+			},
+		}
+	}
+
 	pub(crate) async fn continuously_process_broadcast_queue(
 		&self, mut stop_tx_bcast_receiver: tokio::sync::watch::Receiver<()>,
 	) {
-		let mut receiver = self.tx_broadcaster.get_broadcast_queue().await;
 		loop {
-			let tx_bcast_logger = Arc::clone(&self.logger);
-			tokio::select! {
+			let package = tokio::select! {
+				// A stop request is polled first, so a queue that always has a package ready
+				// cannot starve it.
+				biased;
 				_ = stop_tx_bcast_receiver.changed() => {
 					log_debug!(
-						tx_bcast_logger,
+						self.logger,
 						"Stopping broadcasting transactions.",
 					);
 					return;
 				}
-				Some(next_package) = receiver.recv() => {
-					// Classify funding broadcasts into payment records before sending. If
-					// classification fails we skip the broadcast, since broadcasting a tx we
-					// failed to record would leave it on-chain without a payment.
-					let package = match self.tx_broadcaster.classify_package(next_package).await {
-						Ok(package) => package,
-						Err(e) => {
-							log_error!(
-								tx_bcast_logger,
-								"Skipping broadcast: failed to persist payment records: {:?}",
-								e,
-							);
-							continue;
-						},
-					};
-					let package = package.into_sorted_transactions();
-					match &self.kind {
-						#[cfg(feature = "chain-esplora")]
-						ChainSourceKind::Esplora(esplora_chain_source) => {
-							esplora_chain_source.process_transaction_broadcast(package).await
-						},
-						#[cfg(feature = "chain-electrum")]
-						ChainSourceKind::Electrum(electrum_chain_source) => {
-							electrum_chain_source.process_transaction_broadcast(package).await
-						},
-						#[cfg(feature = "chain-bitcoind")]
-						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
-							bitcoind_chain_source.process_transaction_broadcast(package).await
-						},
-					}
-				}
-			}
+				package = self.tx_broadcaster.next_package() => package,
+			};
+			self.broadcast(package).await;
 		}
 	}
 }
