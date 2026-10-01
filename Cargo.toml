@@ -30,6 +30,7 @@ panic = 'abort'     # Abort on panic
 [features]
 default = [
 	"ldk-std",
+	"net-tokio",
 	"chain-esplora",
 	"chain-electrum",
 	"chain-bitcoind",
@@ -49,6 +50,9 @@ ldk-std = [
 	"lightning-background-processor/std",
 	"lightning-rapid-gossip-sync/std",
 ]
+# Tokio TCP transport for peer connections. Without it, connecting to peers fails and listening
+# addresses are rejected.
+net-tokio = ["dep:lightning-net-tokio"]
 chain-esplora = [
 	"ldk-std",
 	"dep:bdk_esplora",
@@ -78,6 +82,7 @@ unified-payments = [
 uniffi = ["dep:uniffi"]
 uniffi-default = [
 	"uniffi",
+	"net-tokio",
 	"chain-esplora",
 	"chain-electrum",
 	"storage-sqlite",
@@ -102,7 +107,7 @@ uniffi-default = [
 lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false, features = ["grind_signatures"] }
 lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457" }
 lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false }
-lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457" }
+lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", optional = true }
 lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", features = ["tokio"], optional = true }
 lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false }
 lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false }

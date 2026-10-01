@@ -126,6 +126,15 @@ jobs:
         run: |
           cargo clippy --lib --verbose --color always -- -A warnings -D clippy::disallowed_methods
           cargo clippy --lib --no-default-features --features uniffi-default --verbose --color always -- -A warnings -D clippy::disallowed_methods
+          cargo clippy --lib --no-default-features --features chain-esplora,storage-sqlite --verbose --color always -- -A warnings -D clippy::disallowed_methods
+      # LDK's `std` and `time` features read the system clock internally.
+      - name: Check LDK clock features are disabled without ldk-std
+        run: |
+          features=$(cargo tree --target wasm32-unknown-unknown --no-default-features -e normal --prefix none --format '{p} {f}')
+          if grep -E '^lightning' <<< "$features" | grep -E '\b(std|time)\b'; then
+            echo "LDK std or time features are enabled without ldk-std"
+            exit 1
+          fi
 
   doc:
     name: Documentation
