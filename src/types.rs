@@ -30,12 +30,15 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
+#[cfg(feature = "net-tokio")]
 use lightning_net_tokio::SocketDescriptor;
 #[cfg(not(feature = "uniffi"))]
 use lightning_types::features::ChannelTypeFeatures;
 
 use crate::chain::ChainSource;
 use crate::config::{AnchorChannelsConfig, ChannelConfig};
+#[cfg(not(feature = "net-tokio"))]
+use crate::connection::SocketDescriptor;
 use crate::data_store::{DataStore, KeepAllEntries, KeepLeastRecentlyUsed, KeepNoEntries};
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
