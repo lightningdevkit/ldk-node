@@ -15,7 +15,6 @@ use std::net::ToSocketAddrs;
 #[cfg(feature = "storage-filesystem")]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once, RwLock};
-use std::time::SystemTime;
 
 use bdk_wallet::template::Bip84;
 use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
@@ -102,6 +101,7 @@ use crate::probing::{
 	RandomWalkStrategy,
 };
 use crate::runtime::{Runtime, RuntimeSpawner};
+use crate::time;
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
@@ -1938,8 +1938,8 @@ fn build_with_store_internal(
 	tx_broadcaster.set_wallet(Arc::downgrade(&wallet));
 
 	// Initialize the KeysManager
-	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
-		log_error!(logger, "Failed to get current time: {}", e);
+	let cur_time = time::duration_since_epoch().ok_or_else(|| {
+		log_error!(logger, "Failed to get current time: system time is before the Unix epoch");
 		BuildError::InvalidSystemTime
 	})?;
 
@@ -2361,8 +2361,8 @@ fn build_with_store_internal(
 		},
 	};
 
-	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
-		log_error!(logger, "Failed to get current time: {}", e);
+	let cur_time = time::duration_since_epoch().ok_or_else(|| {
+		log_error!(logger, "Failed to get current time: system time is before the Unix epoch");
 		BuildError::InvalidSystemTime
 	})?;
 
