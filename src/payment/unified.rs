@@ -402,7 +402,7 @@ impl UnifiedPayment {
 	/// [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 	pub fn set_test_offer(&self, offer: Offer) {
 		let _ = self.test_offer.lock().map(|mut guard| *guard = Some(offer)).map_err(|e| {
-			log_error!(self.logger, "Failed to set test offer due to poisoned lock: {:?}", e)
+			log_error!(self.logger, "Failed to set test offer due to poisoned lock: {:?}", e);
 		});
 	}
 }

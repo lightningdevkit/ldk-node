@@ -415,7 +415,7 @@ impl Node {
 										gossip_sync_logger,
 										"Background sync of RGS gossip data failed: {}",
 										e
-									)
+									);
 								}
 							}
 						}
@@ -1336,7 +1336,7 @@ impl Node {
 		match self.runtime.block_on(self.peer_store.remove_peer(&counterparty_node_id)) {
 			Ok(()) => {},
 			Err(e) => {
-				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e)
+				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e);
 			},
 		}
 
@@ -2604,9 +2604,11 @@ async fn connect_and_discover_lsp(
 	}
 	match liquidity_source.discover_lsp_protocols(&node_id).await {
 		Ok(protocols) => {
-			log_info!(logger, "Discovered protocols for LSP {}: {:?}", node_id, protocols)
+			log_info!(logger, "Discovered protocols for LSP {}: {:?}", node_id, protocols);
 		},
-		Err(e) => log_debug!(logger, "Protocol discovery failed for LSP {}: {:?}", node_id, e),
+		Err(e) => {
+			log_debug!(logger, "Protocol discovery failed for LSP {}: {:?}", node_id, e);
+		},
 	}
 }
 
