@@ -21,7 +21,7 @@ use native_tls::TlsConnector;
 use postgres_native_tls::MakeTlsConnector;
 use tokio_postgres::config::SslMode;
 use tokio_postgres::types::ToSql;
-use tokio_postgres::{Config, Error as PgError, GenericClient};
+use tokio_postgres::{Config, Error as PgError};
 
 use self::pool::{make_config_connection, ClientConnection, PgTlsConnector, SmallPool};
 use crate::io::utils::check_namespace_key_validity;
@@ -136,7 +136,8 @@ fn handle_runtime_task_result<T>(
 ///
 /// Maintains an internal runtime for the underlying tokio-postgres connection drivers.
 /// Each instance exclusively leases its configured KV table and checks the lease within each KV
-/// mutation transaction. Lease rejection panics in the calling task; a failed or timed-out
+/// mutation transaction. Only the background renewal task extends the lease.
+/// Lease rejection panics in the calling task; a failed or timed-out
 /// background renewal panics in the renewal task. Applications must set `panic = "abort"` in their
 /// own Cargo profiles so these panics terminate the process. Recovery requires restarting the
 /// process and constructing a fresh node from persisted state.
@@ -152,7 +153,7 @@ pub struct PostgresStore {
 	// A store-internal runtime that drives PostgreSQL I/O independently from the node runtime.
 	internal_runtime: Option<Arc<StoreRuntime>>,
 
-	lease_renewal_task: Option<tokio::task::JoinHandle<()>>,
+	lease_renewal_task: tokio::task::JoinHandle<()>,
 	lease_shutdown_sender: Option<tokio::sync::oneshot::Sender<()>>,
 	lease_shutdown_complete: Mutex<std::sync::mpsc::Receiver<io::Result<()>>>,
 }
@@ -216,42 +217,55 @@ impl PostgresStore {
 		let inner = Arc::new(inner);
 
 		let inner_ref = Arc::clone(&inner);
-		let (lease_shutdown_sender, mut shutdown_rx) = tokio::sync::oneshot::channel();
+		let (lease_shutdown_sender, shutdown_rx) = tokio::sync::oneshot::channel();
 		let (completion_sender, lease_shutdown_complete) = std::sync::mpsc::channel();
 		let lease_renewal_task = internal_runtime.spawn(async move {
 			let mut interval = tokio::time::interval(NODE_LEASE_RENEWAL_INTERVAL);
 			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				// The first tick is immediate; later attempts follow the renewal interval.
-				tokio::select! {
-					biased;
-					_ = &mut shutdown_rx => break,
-					_ = interval.tick() => {},
-				}
-				let renewal = async {
-					let mut locked = inner_ref.locked_client().await?;
-					let err_map = |e| {
-						io::Error::new(
-							io::ErrorKind::Other,
-							format!("Failed to renew node lease: {e}"),
+			let lease_duration_secs = NODE_LEASE_DURATION.as_secs() as i64;
+			let lease_table = &inner_ref.node_lease_table_name_sql;
+			let update_sql = format!(
+				"UPDATE {lease_table}
+				SET expires_at = clock_timestamp() + ($2::bigint * interval '1 second')
+				WHERE id = 1 AND owner_id = $1 AND expires_at > clock_timestamp()"
+			);
+			let renewal_loop = async {
+				loop {
+					// The first tick is immediate; later attempts follow the renewal interval.
+					interval.tick().await;
+					let renewal = async {
+						let mut locked = inner_ref.locked_client().await?;
+						let err_map = |e| {
+							io::Error::new(
+								io::ErrorKind::Other,
+								format!("Failed to renew node lease: {e}"),
+							)
+						};
+						query_with_retry!(
+							inner_ref,
+							locked,
+							err_map,
+							locked.execute(
+								&update_sql,
+								&[&inner_ref.lease_owner_id.as_slice(), &lease_duration_secs]
+							)
 						)
 					};
-					query_with_retry!(
-						inner_ref,
-						locked,
-						err_map,
-						inner_ref.renew_node_lease(&**locked)
-					)
-				};
-				// Bound both the pool wait and query, but allow shutdown to cancel either.
-				let result = tokio::select! {
-					biased;
-					_ = &mut shutdown_rx => break,
-					result = tokio::time::timeout(NODE_LEASE_RENEWAL_TIMEOUT, renewal) => result,
-				};
-				result
-					.expect("PostgreSQL node lease renewal timed out")
-					.expect("Failed to renew PostgreSQL node lease");
+					// Bound both the pool wait and query.
+					match tokio::time::timeout(NODE_LEASE_RENEWAL_TIMEOUT, renewal).await {
+						Ok(Ok(1)) => {},
+						Ok(Ok(_)) => panic!(
+							"PostgreSQL node lease was lost; continuing may corrupt node state"
+						),
+						Ok(Err(e)) => panic!("Failed to renew PostgreSQL node lease: {e}"),
+						Err(_) => panic!("PostgreSQL node lease renewal timed out"),
+					}
+				}
+			};
+			tokio::select! {
+				biased;
+				_ = shutdown_rx => {},
+				_ = renewal_loop => {},
 			}
 
 			let result = inner_ref.release_node_lease().await;
@@ -262,7 +276,7 @@ impl PostgresStore {
 			inner,
 			next_write_version: AtomicU64::new(1),
 			internal_runtime: Some(internal_runtime),
-			lease_renewal_task: Some(lease_renewal_task),
+			lease_renewal_task,
 			lease_shutdown_sender: Some(lease_shutdown_sender),
 			lease_shutdown_complete: Mutex::new(lease_shutdown_complete),
 		})
@@ -333,10 +347,8 @@ impl Drop for PostgresStore {
 				Err(e) => log_error!(logger, "PostgreSQL lease shutdown did not complete: {e}"),
 			}
 		}
-		if let Some(task) = self.lease_renewal_task.take() {
-			// Cancel any remaining work if shutdown failed or timed out.
-			task.abort();
-		}
+		// Cancel any remaining work if shutdown failed or timed out.
+		self.lease_renewal_task.abort();
 
 		if let Some(internal_runtime) = self.internal_runtime.take() {
 			if let Ok(internal_runtime) = Arc::try_unwrap(internal_runtime) {
@@ -616,10 +628,11 @@ impl PostgresStoreInner {
 			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 
+		// A unique owner ID makes takeover conflict with mutation key-share locks.
 		let sql = format!(
 			"CREATE TABLE IF NOT EXISTS {node_lease_table_name_sql} (
 			id SMALLINT PRIMARY KEY CHECK (id = 1),
-			owner_id BYTEA NOT NULL,
+			owner_id BYTEA NOT NULL UNIQUE,
 			expires_at TIMESTAMPTZ NOT NULL
 			)"
 		);
@@ -636,16 +649,15 @@ impl PostgresStoreInner {
 			ON CONFLICT (id) DO UPDATE SET
 			owner_id = EXCLUDED.owner_id,
 			expires_at = EXCLUDED.expires_at
-			WHERE {node_lease_table_name_sql}.expires_at <= clock_timestamp()
-			RETURNING id"
+			WHERE {node_lease_table_name_sql}.expires_at <= clock_timestamp()"
 		);
-		let row = transaction
-			.query_opt(&acquire_sql, &[&lease_owner_id.as_slice(), &lease_duration_secs])
+		let acquired = transaction
+			.execute(&acquire_sql, &[&lease_owner_id.as_slice(), &lease_duration_secs])
 			.await
 			.map_err(|e| {
 				io::Error::new(io::ErrorKind::Other, format!("Failed to acquire node lease: {e}"))
 			})?;
-		if row.is_none() {
+		if acquired != 1 {
 			return Err(io::Error::new(
 				io::ErrorKind::AlreadyExists,
 				"PostgreSQL node lease is unavailable",
@@ -658,9 +670,6 @@ impl PostgresStoreInner {
 				format!("Failed to commit PostgreSQL schema setup transaction: {e}"),
 			)
 		})?;
-
-		// Drop the setup client; the pool has its own connections.
-		drop(client);
 
 		let write_version_locks = Mutex::new(HashMap::new());
 		Ok(Self {
@@ -772,23 +781,6 @@ impl PostgresStoreInner {
 		Ok(())
 	}
 
-	async fn renew_node_lease(&self, client: &impl GenericClient) -> Result<(), PgError> {
-		let lease_duration_secs = NODE_LEASE_DURATION.as_secs() as i64;
-		let lease_table = &self.node_lease_table_name_sql;
-		let update_sql = format!(
-			"UPDATE {lease_table}
-			SET expires_at = clock_timestamp() + ($2::bigint * interval '1 second')
-			WHERE id = 1 AND owner_id = $1 AND expires_at > clock_timestamp()"
-		);
-		let updated = client
-			.execute(&update_sql, &[&self.lease_owner_id.as_slice(), &lease_duration_secs])
-			.await?;
-		if updated != 1 {
-			panic!("PostgreSQL node lease was lost; continuing may corrupt node state");
-		}
-		Ok(())
-	}
-
 	async fn execute_mutation<F: FnOnce(PgError) -> io::Error>(
 		&self, sql: &str, params: &[&(dyn ToSql + Sync)], err_map: F,
 	) -> io::Result<()> {
@@ -814,11 +806,23 @@ impl PostgresStoreInner {
 			)
 		})?;
 		transaction.execute(sql, params).await.map_err(err_map)?;
-		// Renew after the mutation to give the lease a later expiry. Rejection rolls back the
-		// mutation; success holds the lease row lock until commit.
-		self.renew_node_lease(&transaction).await.map_err(|e| {
-			io::Error::new(io::ErrorKind::Other, format!("Failed to renew node lease: {e}"))
-		})?;
+		// Check after the mutation to match setup's lock order. The key-share lock allows concurrent
+		// mutations and renewal, but blocks changes to the unique owner ID until commit.
+		// Rejection rolls back the mutation.
+		let lease_table = &self.node_lease_table_name_sql;
+		let check_sql = format!(
+			"SELECT 1 FROM {lease_table}
+			WHERE id = 1 AND owner_id = $1 AND expires_at > clock_timestamp() FOR KEY SHARE"
+		);
+		let lease = transaction
+			.query_opt(&check_sql, &[&self.lease_owner_id.as_slice()])
+			.await
+			.map_err(|e| {
+				io::Error::new(io::ErrorKind::Other, format!("Failed to check node lease: {e}"))
+			})?;
+		if lease.is_none() {
+			panic!("PostgreSQL node lease was lost; continuing may corrupt node state");
+		}
 		// A connection failure can hide a successful COMMIT if its response is lost. Return the
 		// error without retrying, since the mutation may already be committed.
 		transaction.commit().await.map_err(|e| {
@@ -1139,9 +1143,13 @@ mod tests {
 	}
 
 	async fn cleanup_store(store: &PostgresStore) {
+		// Stop renewal before removing its table.
+		store.lease_renewal_task.abort();
 		let kv_table = store.inner.kv_table_name_sql.clone();
+		let lease_table = &store.inner.node_lease_table_name_sql;
 		let client = store.inner.pool.connections[0].lock().await;
-		let _ = client.execute(&format!("DROP TABLE IF EXISTS {kv_table}"), &[]).await;
+		let _ =
+			client.execute(&format!("DROP TABLE IF EXISTS {kv_table}, {lease_table}"), &[]).await;
 	}
 
 	#[test]
@@ -1170,7 +1178,8 @@ mod tests {
 		let table_name = "test_pg_lease";
 		let store = create_test_store(table_name).await;
 		let kv_table = &store.inner.kv_table_name_sql;
-		let client = store.inner.pool.connections[0].lock().await;
+		let mut client =
+			make_config_connection(&store.inner.config, &store.inner.tls).await.unwrap();
 		// Make the second store attempt a schema change before its lease is rejected.
 		client.execute(&format!("COMMENT ON TABLE {kv_table} IS NULL"), &[]).await.unwrap();
 
@@ -1185,26 +1194,60 @@ mod tests {
 			.await
 			.unwrap();
 		assert_eq!(row.get::<_, Option<&str>>(0), None);
-		drop(client);
 
+		// A write must complete while another transaction holds renewal's non-key update lock.
+		let transaction = client.transaction().await.unwrap();
+		let lease_table = &store.inner.node_lease_table_name_sql;
+		transaction
+			.query_one(&format!("SELECT 1 FROM {lease_table} WHERE id = 1 FOR NO KEY UPDATE"), &[])
+			.await
+			.unwrap();
+		tokio::time::timeout(
+			Duration::from_secs(5),
+			KVStore::write(&store, "test_ns", "", "key", vec![1]),
+		)
+		.await
+		.expect("renewal's row lock must not block writes")
+		.unwrap();
+		transaction.commit().await.unwrap();
+
+		// Changing the owner must wait for a mutation's key-share lock to be released.
+		let transaction = client.transaction().await.unwrap();
+		transaction
+			.query_one(&format!("SELECT 1 FROM {lease_table} WHERE id = 1 FOR KEY SHARE"), &[])
+			.await
+			.unwrap();
+		let mut contender =
+			make_config_connection(&store.inner.config, &store.inner.tls).await.unwrap();
+		contender.batch_execute("SET lock_timeout = '1s'").await.unwrap();
+		let takeover_sql = format!("UPDATE {lease_table} SET owner_id = $1 WHERE id = 1");
+		let new_owner_id = [42u8; 32];
+		let err = contender.execute(&takeover_sql, &[&new_owner_id.as_slice()]).await.unwrap_err();
+		assert_eq!(err.code(), Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE));
+		transaction.commit().await.unwrap();
+
+		let takeover = contender.transaction().await.unwrap();
+		assert_eq!(takeover.execute(&takeover_sql, &[&new_owner_id.as_slice()]).await.unwrap(), 1);
+		takeover.rollback().await.unwrap();
 		cleanup_store(&store).await;
 	}
 
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_background_renewal_and_lease_loss() {
 		let mut store = create_test_store("test_pg_background_lease_loss").await;
-		let client = store.inner.pool.connections[0].lock().await;
+		let mut client = store.inner.pool.connections[0].lock().await;
+		let transaction = client.transaction().await.unwrap();
 		let lease_table = &store.inner.node_lease_table_name_sql;
-		let sql = format!("SELECT expires_at FROM {lease_table} WHERE id = 1");
+		let sql = format!("SELECT expires_at FROM {lease_table} WHERE id = 1 FOR KEY SHARE");
 		let mut expires_at =
-			client.query_one(&sql, &[]).await.unwrap().get::<_, std::time::SystemTime>(0);
-		// Observe two extensions without KV writes, so a single renewal at startup is insufficient.
+			transaction.query_one(&sql, &[]).await.unwrap().get::<_, std::time::SystemTime>(0);
+		// Observe two renewals while holding a mutation fence, without KV writes.
 		tokio::time::timeout(
 			NODE_LEASE_RENEWAL_INTERVAL * 2 + NODE_LEASE_RENEWAL_TIMEOUT + Duration::from_secs(5),
 			async {
 				for _ in 0..2 {
 					loop {
-						let renewed_until = client
+						let renewed_until = transaction
 							.query_one(&sql, &[])
 							.await
 							.unwrap()
@@ -1219,14 +1262,14 @@ mod tests {
 			},
 		)
 		.await
-		.expect("background renewal must extend the lease while the store is idle");
+		.expect("background renewal must extend the lease while a mutation fence is held");
+		transaction.commit().await.unwrap();
 		drop(client);
 
 		expire_lease(&store).await;
-		let renewal_task = store.lease_renewal_task.take().unwrap();
 		let error = tokio::time::timeout(
 			NODE_LEASE_RENEWAL_INTERVAL + NODE_LEASE_RENEWAL_TIMEOUT + Duration::from_secs(5),
-			renewal_task,
+			&mut store.lease_renewal_task,
 		)
 		.await
 		.expect("background renewal must detect lease loss without another store operation")
@@ -1239,20 +1282,19 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn test_background_renewal_panics_on_timeout() {
 		let mut store = create_test_store("test_pg_background_lease_timeout").await;
-		let renewal_task = store.lease_renewal_task.take().unwrap();
 		// Exhaust the pool to verify the renewal timeout includes waiting for a connection.
 		let first = store.inner.pool.connections[0].lock().await;
 		let second = store.inner.pool.connections[1].lock().await;
 		let error = tokio::time::timeout(
 			NODE_LEASE_RENEWAL_INTERVAL + NODE_LEASE_RENEWAL_TIMEOUT + Duration::from_secs(5),
-			renewal_task,
+			&mut store.lease_renewal_task,
 		)
 		.await
 		.expect("background renewal must time out while waiting for the pool")
 		.expect_err("background renewal must panic on timeout");
 		let panic = error.into_panic();
 		assert!(panic
-			.downcast_ref::<String>()
+			.downcast_ref::<&str>()
 			.unwrap()
 			.contains("PostgreSQL node lease renewal timed out"));
 		drop(first);
@@ -1290,6 +1332,7 @@ mod tests {
 		let table_name = "test_pg_schema_setup_rollback";
 		let store = create_test_store(table_name).await;
 		let kv_table = store.inner.kv_table_name_sql.clone();
+		let lease_table = store.inner.node_lease_table_name_sql.clone();
 		let client = make_config_connection(&store.inner.config, &store.inner.tls).await.unwrap();
 		drop(store);
 
@@ -1311,7 +1354,7 @@ mod tests {
 			.query_one("SELECT obj_description(to_regclass($1), 'pg_class')", &[&kv_table])
 			.await
 			.unwrap();
-		client.execute(&format!("DROP TABLE {kv_table}"), &[]).await.unwrap();
+		client.execute(&format!("DROP TABLE {kv_table}, {lease_table}"), &[]).await.unwrap();
 		assert_eq!(row.get::<_, Option<&str>>(0), None);
 	}
 
