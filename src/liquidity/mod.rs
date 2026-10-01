@@ -36,6 +36,7 @@ use crate::liquidity::client::lsps2::LSPS2Client;
 use crate::liquidity::service::lsps2::{LSPS2Service, LSPS2ServiceLiquiditySource};
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
+use crate::time::LdkTimeProvider;
 use crate::types::{Broadcaster, ChannelManager, DynStore, KeysManager, LiquidityManager, Wallet};
 use crate::{Config, Error};
 
@@ -309,14 +310,15 @@ where
 		});
 
 		let liquidity_manager = Arc::new(
-			LiquidityManager::new(
+			LiquidityManager::new_with_custom_time_provider(
 				Arc::clone(&self.keys_manager),
 				Arc::clone(&self.keys_manager),
 				Arc::clone(&self.channel_manager),
-				Arc::clone(&self.kv_store),
 				Arc::clone(&self.tx_broadcaster),
+				Arc::clone(&self.kv_store),
 				liquidity_service_config,
 				liquidity_client_config,
+				Arc::new(LdkTimeProvider),
 			)
 			.await
 			.map_err(|_| BuildError::ReadFailed)?,

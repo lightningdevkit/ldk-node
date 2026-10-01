@@ -66,6 +66,7 @@ use crate::payment::{
 	PendingPaymentDetails, TransactionType,
 };
 use crate::runtime::Runtime;
+use crate::time;
 use crate::types::{Broadcaster, PaymentStore, PendingPaymentStore};
 use crate::{ChainSource, Error};
 
@@ -202,11 +203,15 @@ impl Wallet {
 	}
 
 	pub(crate) fn get_full_scan_request(&self) -> FullScanRequest<KeychainKind> {
-		self.inner.lock().expect("lock").start_full_scan().build()
+		let start_time =
+			time::unix_time_secs().expect("current time should not be earlier than the Unix epoch");
+		self.inner.lock().expect("lock").start_full_scan_at(start_time).build()
 	}
 
 	pub(crate) fn get_incremental_sync_request(&self) -> SyncRequest<(KeychainKind, u32)> {
-		self.inner.lock().expect("lock").start_sync_with_revealed_spks().build()
+		let start_time =
+			time::unix_time_secs().expect("current time should not be earlier than the Unix epoch");
+		self.inner.lock().expect("lock").start_sync_with_revealed_spks_at(start_time).build()
 	}
 
 	pub(crate) fn get_cached_txs(&self) -> Vec<Arc<Transaction>> {

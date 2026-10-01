@@ -17,6 +17,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use lightning_liquidity::utils::time::TimeProvider as LiquidityTimeProvider;
 
 /// Supplies wall and monotonic time for LDK-Node and its explicit-time dependency calls.
 ///
@@ -130,6 +131,16 @@ impl Instant {
 
 	pub(crate) fn elapsed(&self) -> Duration {
 		Self::now().duration_since(*self)
+	}
+}
+
+/// Supplies our clock to LDK components that take a [`LiquidityTimeProvider`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LdkTimeProvider;
+
+impl LiquidityTimeProvider for LdkTimeProvider {
+	fn duration_since_epoch(&self) -> Duration {
+		duration_since_epoch().expect("current time should not be earlier than the Unix epoch")
 	}
 }
 
