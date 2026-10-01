@@ -1542,6 +1542,12 @@ fn build_with_store_internal(
 		}
 	}
 
+	#[cfg(not(feature = "net-tokio"))]
+	if config.listening_addresses.is_some() {
+		log_error!(logger, "Listening addresses were set but no network transport is enabled.");
+		return Err(BuildError::InvalidListeningAddresses);
+	}
+
 	let tx_broadcaster = Arc::new(TransactionBroadcaster::new(Arc::clone(&logger)));
 	let fee_estimator = Arc::new(OnchainFeeEstimator::new());
 

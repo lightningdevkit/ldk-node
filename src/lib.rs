@@ -438,6 +438,7 @@ impl Node {
 			);
 		}
 
+		#[cfg(feature = "net-tokio")]
 		if let Some(listening_addresses) = &self.config.listening_addresses {
 			// Setup networking
 			let peer_manager_connection_handler = Arc::clone(&self.peer_manager);
