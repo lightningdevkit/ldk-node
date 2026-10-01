@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Transaction;
-use chrono::Utc;
 use lightning::events::HTLCHandlingFailureType;
 use lightning::ln::channelmanager::InterceptId;
 use lightning::ln::types::ChannelId;
@@ -23,6 +22,7 @@ use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceCo
 use lightning_types::payment::PaymentHash;
 
 use crate::logger::{log_error, LdkLogger};
+use crate::time;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
 use crate::{total_anchor_channels_reserve_sats, Config};
 
@@ -296,7 +296,7 @@ where
 						}
 					}
 
-					let valid_until = LSPSDateTime(Utc::now() + LSPS2_GETINFO_REQUEST_EXPIRY);
+					let valid_until = LSPSDateTime(time::now_utc() + LSPS2_GETINFO_REQUEST_EXPIRY);
 					let opening_fee_params = LSPS2RawOpeningFeeParams {
 						min_fee_msat: service_config.min_channel_opening_fee_msat,
 						proportional: service_config.channel_opening_fee_ppm,

@@ -112,6 +112,7 @@ mod peer_store;
 pub mod probing;
 mod runtime;
 mod scoring;
+mod time;
 mod tx_broadcaster;
 mod types;
 mod util;
@@ -119,7 +120,7 @@ mod wallet;
 
 use std::default::Default;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 #[cfg(cycle_tests)]
 use std::{any::Any, sync::Weak};
 
@@ -188,6 +189,7 @@ use peer_store::{PeerInfo, PeerStore};
 pub use probing::ArcedProbingConfigBuilder as ProbingConfigBuilder;
 use probing::{run_prober, Prober};
 use runtime::Runtime;
+pub use time::TimeProvider;
 pub use tokio;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
@@ -203,6 +205,7 @@ use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY
 use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
+use crate::time::Instant;
 use crate::wallet::FundingAmount;
 
 #[cfg(not(feature = "uniffi"))]
@@ -595,8 +598,8 @@ impl Node {
 							let skip_broadcast = match bcast_node_metrics.read().expect("lock").latest_node_announcement_broadcast_timestamp {
 								Some(latest_bcast_time_secs) => {
 									// Skip if the time hasn't elapsed yet.
-									let next_bcast_unix_time = SystemTime::UNIX_EPOCH + Duration::from_secs(latest_bcast_time_secs) + NODE_ANN_BCAST_INTERVAL;
-									next_bcast_unix_time.elapsed().is_err()
+									let next_bcast_time = Duration::from_secs(latest_bcast_time_secs) + NODE_ANN_BCAST_INTERVAL;
+									time::duration_since_epoch().map_or(true, |now| now < next_bcast_time)
 								}
 								None => {
 									// Don't skip if we haven't broadcasted before.
@@ -630,8 +633,7 @@ impl Node {
 							if let Some(node_alias) = node_alias.as_ref() {
 								bcast_pm.broadcast_node_announcement([0; 3], node_alias.0, addresses);
 
-								let unix_time_secs_opt =
-									SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+								let unix_time_secs_opt = time::unix_time_secs();
 								update_and_persist_node_metrics(
 									&bcast_node_metrics,
 									&*bcast_store,
@@ -760,8 +762,7 @@ impl Node {
 				true,
 				|| {
 					Some(
-						SystemTime::now()
-							.duration_since(SystemTime::UNIX_EPOCH)
+						time::duration_since_epoch()
 							.expect("current time should not be earlier than the Unix epoch"),
 					)
 				},

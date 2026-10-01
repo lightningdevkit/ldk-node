@@ -10,7 +10,7 @@ use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
@@ -42,6 +42,7 @@ use crate::fee_estimator::{
 };
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::time::{self, Instant};
 use crate::tx_broadcaster::SortedTransactions;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
@@ -236,7 +237,7 @@ impl BitcoindChainSource {
 				));
 			}
 
-			let now = SystemTime::now();
+			let now = Instant::now();
 			match synchronize_listeners(
 				self.api_client.as_ref(),
 				self.config.network,
@@ -255,15 +256,14 @@ impl BitcoindChainSource {
 					);
 					*self.spv_client.lock().await = Some(spv_client);
 					{
-						let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
+						let elapsed_ms = now.elapsed().as_millis();
 						log_info!(
 							self.logger,
 							"Finished synchronizing listeners in {}ms",
 							elapsed_ms,
 						);
 						*self.latest_chain_tip.write().expect("lock") = Some(chain_tip);
-						let unix_time_secs_opt =
-							SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+						let unix_time_secs_opt = time::unix_time_secs();
 						update_and_persist_node_metrics(
 							&self.node_metrics,
 							&*self.kv_store,
@@ -479,10 +479,10 @@ impl BitcoindChainSource {
 		}
 		let spv_client = spv_client_lock.as_mut().expect("initialized above");
 
-		let now = SystemTime::now();
+		let now = Instant::now();
 		match spv_client.poll_best_tip().await {
 			Ok((ChainTip::Better(tip), true)) => {
-				let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
+				let elapsed_ms = now.elapsed().as_millis();
 				log_trace!(self.logger, "Finished polling best tip in {}ms", elapsed_ms);
 				*self.latest_chain_tip.write().expect("lock") = Some(tip);
 			},
@@ -496,7 +496,7 @@ impl BitcoindChainSource {
 
 		let cur_height = channel_manager.current_best_block().height;
 
-		let now = SystemTime::now();
+		let now = Instant::now();
 		let bdk_unconfirmed_txids = onchain_wallet.get_unconfirmed_txids();
 		match self
 			.api_client
@@ -504,7 +504,7 @@ impl BitcoindChainSource {
 			.await
 		{
 			Ok((unconfirmed_txs, evicted_txids)) => {
-				let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
+				let elapsed_ms = now.elapsed().as_millis();
 				log_trace!(
 					self.logger,
 					"Finished polling mempool of size {} and {} evicted transactions in {}ms",
@@ -525,8 +525,7 @@ impl BitcoindChainSource {
 			},
 		}
 
-		let unix_time_secs_opt =
-			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+		let unix_time_secs_opt = time::unix_time_secs();
 		update_and_persist_node_metrics(&self.node_metrics, &*self.kv_store, &*self.logger, |m| {
 			m.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
 			m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
@@ -654,8 +653,7 @@ impl BitcoindChainSource {
 			);
 		}
 
-		let unix_time_secs_opt =
-			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+		let unix_time_secs_opt = time::unix_time_secs();
 		update_and_persist_node_metrics(&self.node_metrics, &*self.kv_store, &*self.logger, |m| {
 			m.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt
 		})

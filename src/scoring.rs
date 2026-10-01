@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
 
 use lightning::routing::scoring::ChannelLiquidities;
 use lightning::util::ser::Readable;
@@ -12,6 +11,7 @@ use crate::config::{
 use crate::io::utils::write_external_pathfinding_scores_to_cache;
 use crate::logger::LdkLogger;
 use crate::runtime::Runtime;
+use crate::time;
 use crate::types::DynStore;
 use crate::{update_and_persist_node_metrics, Logger, PersistedNodeMetrics, Scorer};
 
@@ -82,9 +82,8 @@ async fn sync_external_scores(
 				log_error!(logger, "Failed to persist external scores to cache: {}", e);
 			}
 
-			let duration_since_epoch = SystemTime::now()
-				.duration_since(SystemTime::UNIX_EPOCH)
-				.expect("system time must be after Unix epoch");
+			let duration_since_epoch =
+				time::duration_since_epoch().expect("system time must be after Unix epoch");
 			scorer.lock().expect("lock").merge(liquidities, duration_since_epoch);
 			update_and_persist_node_metrics(node_metrics, &*kv_store, logger, |m| {
 				m.latest_pathfinding_scores_sync_timestamp = Some(duration_since_epoch.as_secs());
