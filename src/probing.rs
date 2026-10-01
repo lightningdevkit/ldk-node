@@ -66,7 +66,7 @@ use std::fmt;
 #[cfg(feature = "uniffi")]
 use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::channelmanager::{PaymentId, RecentPaymentDetails};
@@ -83,6 +83,7 @@ use crate::config::{
 	DEFAULT_PROBING_INTERVAL_SECS, MIN_PROBING_INTERVAL,
 };
 use crate::logger::{log_debug, LdkLogger, Logger};
+use crate::time::Instant;
 use crate::types::{ChannelManager, Graph, Router};
 use crate::util::random_range;
 

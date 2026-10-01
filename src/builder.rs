@@ -15,7 +15,6 @@ use std::net::ToSocketAddrs;
 #[cfg(feature = "storage-filesystem")]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once, RwLock};
-use std::time::SystemTime;
 
 use bdk_wallet::template::Bip84;
 use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
@@ -105,6 +104,7 @@ use crate::probing::{
 	RandomWalkStrategy,
 };
 use crate::runtime::{Runtime, RuntimeSpawner};
+use crate::time::{self, TimeProvider};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, ChannelTxFactsStore, DynStore, DynStoreRef,
@@ -190,6 +190,9 @@ impl std::fmt::Debug for LogWriterConfig {
 pub enum BuildError {
 	/// The current system time is invalid, clocks might have gone backwards.
 	InvalidSystemTime,
+	/// A different [`TimeProvider`] is already in use by this process, e.g. because another node
+	/// was built with one or the clock was read before this node was built.
+	TimeProviderAlreadySet,
 	/// The a read channel monitor is invalid.
 	InvalidChannelMonitor,
 	/// The given listening addresses are invalid, e.g. too many were passed.
@@ -246,6 +249,9 @@ impl fmt::Display for BuildError {
 		match *self {
 			Self::InvalidSystemTime => {
 				write!(f, "System time is invalid. Clocks might have gone back in time.")
+			},
+			Self::TimeProviderAlreadySet => {
+				write!(f, "A different time provider is already in use.")
 			},
 			Self::InvalidChannelMonitor => {
 				write!(f, "Failed to watch a deserialized ChannelMonitor")
@@ -341,6 +347,7 @@ pub struct NodeBuilder {
 	runtime_handle: Option<tokio::runtime::Handle>,
 	pathfinding_scores_sync_config: Option<PathfindingScoresSyncConfig>,
 	probing_config: Option<ProbingConfig>,
+	time_provider: Option<Arc<dyn TimeProvider>>,
 }
 
 #[cfg(not(feature = "uniffi"))]
@@ -372,6 +379,7 @@ impl NodeBuilder {
 			async_payments_role: None,
 			pathfinding_scores_sync_config,
 			probing_config,
+			time_provider: None,
 		}
 	}
 
@@ -391,6 +399,29 @@ impl NodeBuilder {
 
 		self.runtime_handle = Some(runtime_handle);
 		Ok(self)
+	}
+
+	/// Configures the [`Node`] instance to read wall-clock and monotonic time from the given
+	/// [`TimeProvider`].
+	///
+	/// If not provided, the node uses the system clocks. Hosts without them, such as
+	/// `wasm32-unknown-unknown`, must set one.
+	///
+	/// The provider is shared by every node in the process and can't be replaced once in use, so
+	/// building fails with [`BuildError::TimeProviderAlreadySet`] if a different provider is already
+	/// in use. Building several nodes with the same provider is fine.
+	#[cfg_attr(feature = "uniffi", allow(dead_code))]
+	pub fn set_time_provider(&mut self, time_provider: Arc<dyn TimeProvider>) -> &mut Self {
+		self.time_provider = Some(time_provider);
+		self
+	}
+
+	fn install_time_provider(&self) -> Result<(), BuildError> {
+		if let Some(time_provider) = &self.time_provider {
+			time::set_time_provider(Arc::clone(time_provider))
+				.map_err(|_| BuildError::TimeProviderAlreadySet)?;
+		}
+		Ok(())
 	}
 
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
@@ -710,6 +741,7 @@ impl NodeBuilder {
 	/// previously configured.
 	#[cfg(feature = "storage-sqlite")]
 	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
+		self.install_time_provider()?;
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let storage_dir_path = self.config.storage_dir_path.clone();
 		create_dir_all_private(storage_dir_path.as_ref())
@@ -764,6 +796,7 @@ impl NodeBuilder {
 		&self, node_entropy: NodeEntropy, connection_string: String, db_name: Option<String>,
 		kv_table_name: Option<String>, certificate_pem: Option<String>,
 	) -> Result<Node, BuildError> {
+		self.install_time_provider()?;
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let runtime = self.setup_runtime(&logger)?;
 		let kv_store = runtime
@@ -793,6 +826,7 @@ impl NodeBuilder {
 	/// [`FilesystemStoreV2`]: lightning_persister::fs_store::v2::FilesystemStoreV2
 	#[cfg(feature = "storage-filesystem")]
 	pub fn build_with_fs_store(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
+		self.install_time_provider()?;
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let runtime = self.setup_runtime(&logger)?;
 		let mut storage_dir_path: PathBuf = self.config.storage_dir_path.clone().into();
@@ -824,6 +858,7 @@ impl NodeBuilder {
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
+		self.install_time_provider()?;
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
 		let vss_store = builder.build_with_sigs_auth(fixed_headers).map_err(|e| {
@@ -861,6 +896,7 @@ impl NodeBuilder {
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		lnurl_auth_server_url: String, fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
+		self.install_time_provider()?;
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
 		let vss_store =
@@ -890,6 +926,7 @@ impl NodeBuilder {
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		fixed_headers: HashMap<String, String>,
 	) -> Result<Node, BuildError> {
+		self.install_time_provider()?;
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
 		let vss_store = builder.build_with_fixed_headers(fixed_headers).map_err(|e| {
@@ -916,6 +953,7 @@ impl NodeBuilder {
 		&self, node_entropy: NodeEntropy, vss_url: String, store_id: String,
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> Result<Node, BuildError> {
+		self.install_time_provider()?;
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let builder = VssStoreBuilder::new(node_entropy, vss_url, store_id, self.config.network);
 		let vss_store = builder.build_with_header_provider(header_provider).map_err(|e| {
@@ -930,6 +968,7 @@ impl NodeBuilder {
 	pub fn build_with_store<S: PaginatedKVStore + Send + Sync + 'static>(
 		&self, node_entropy: NodeEntropy, kv_store: S,
 	) -> Result<Node, BuildError> {
+		self.install_time_provider()?;
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 
 		self.build_with_store_and_logger(node_entropy, kv_store, logger)
@@ -1979,8 +2018,8 @@ fn build_with_store_internal(
 	})?;
 
 	// Initialize the KeysManager
-	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
-		log_error!(logger, "Failed to get current time: {}", e);
+	let cur_time = time::duration_since_epoch().ok_or_else(|| {
+		log_error!(logger, "Failed to get current time: system time is before the Unix epoch");
 		BuildError::InvalidSystemTime
 	})?;
 
@@ -2402,8 +2441,8 @@ fn build_with_store_internal(
 		},
 	};
 
-	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
-		log_error!(logger, "Failed to get current time: {}", e);
+	let cur_time = time::duration_since_epoch().ok_or_else(|| {
+		log_error!(logger, "Failed to get current time: system time is before the Unix epoch");
 		BuildError::InvalidSystemTime
 	})?;
 
@@ -2706,7 +2745,9 @@ mod tests {
 		CHANNEL_MANAGER_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
 
-	use super::{sanitize_alias, BuildError, NodeAlias, NodeBuilder};
+	use std::time::Duration;
+
+	use super::{sanitize_alias, BuildError, NodeAlias, NodeBuilder, TimeProvider};
 	use crate::entropy::NodeEntropy;
 	use crate::io::test_utils::InMemoryStore;
 	use crate::logger::Logger;
@@ -2873,6 +2914,35 @@ mod tests {
 			let res = node.runtime.block_on(node.unified_payment().send("not a uri", None, None));
 			assert_eq!(res.err(), Some(Error::NotRunning));
 		}
+	}
+
+	#[test]
+	fn different_time_provider_fails_build() {
+		struct FixedClock;
+
+		impl TimeProvider for FixedClock {
+			fn duration_since_epoch(&self) -> Option<Duration> {
+				Some(Duration::from_secs(1_700_000_000))
+			}
+
+			fn monotonic_time(&self) -> Duration {
+				Duration::ZERO
+			}
+		}
+
+		// Reading the clock selects the system clock for this process.
+		assert!(crate::time::unix_time_secs().is_some());
+
+		let mut builder = NodeBuilder::new();
+		builder.set_time_provider(Arc::new(FixedClock));
+		#[cfg(not(feature = "uniffi"))]
+		let node_entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let node_entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+
+		let result = builder.build_with_store(node_entropy, InMemoryStore::new());
+
+		assert!(matches!(result, Err(BuildError::TimeProviderAlreadySet)));
 	}
 
 	#[test]

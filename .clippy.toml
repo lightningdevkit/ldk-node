@@ -1,1 +1,14 @@
 msrv = "1.63.0"
+
+# Keep library clock reads behind src/time.rs so they work on wasm32. Tokio's runtime timers
+# are separate.
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "use crate::time instead" },
+    { path = "std::time::SystemTime::elapsed", reason = "use crate::time instead" },
+    { path = "std::time::Instant::now", reason = "use crate::time::Instant instead" },
+    { path = "std::time::Instant::elapsed", reason = "use crate::time::Instant instead" },
+    { path = "tokio::time::Instant::now", reason = "use crate::time::Instant for clock reads; runtime timers remain separate" },
+    { path = "tokio::time::Instant::elapsed", reason = "use crate::time::Instant for elapsed measurements" },
+    { path = "chrono::Utc::now", reason = "use crate::time::now_utc instead", allow-invalid = true },
+    { path = "chrono::Local::now", reason = "use crate::time::now_utc instead", allow-invalid = true },
+]

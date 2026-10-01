@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::PublicKey;
@@ -34,6 +34,7 @@ use crate::io::{
 	FORWARDED_PAYMENT_REPLAY_MARKER_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_debug, log_error, Logger};
+use crate::time;
 use crate::types::{
 	ChannelForwardingStatsStore, ChannelPairForwardingStatsStore, DynStore, ForwardedPaymentStore,
 };
@@ -241,10 +242,8 @@ impl ForwardingStore {
 		}
 		let details_id = matches!(self.tracking_mode, ForwardedPaymentTrackingMode::Detailed)
 			.then_some(forward_id);
-		let forwarded_at_timestamp = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.expect("current time should not be earlier than the Unix epoch")
-			.as_secs();
+		let forwarded_at_timestamp =
+			time::unix_time_secs().expect("current time should not be earlier than the Unix epoch");
 		let inbound_amount_msat =
 			forward.outbound_amount_forwarded_msat.saturating_add(fee_earned_msat);
 
@@ -384,10 +383,7 @@ impl ForwardingStore {
 	}
 
 	async fn prune_stale_replay_markers(&self) -> Result<u64, Error> {
-		let now = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap_or(Duration::from_secs(0))
-			.as_secs();
+		let now = time::unix_time_secs().unwrap_or(0);
 		prune_expired_replay_markers(
 			&self.details,
 			&self.replay_markers,
@@ -575,18 +571,19 @@ pub(crate) async fn run_forwarded_payment_aggregation(
 	mut stop_receiver: tokio::sync::watch::Receiver<()>, forwarding_store: Arc<ForwardingStore>,
 	retention_secs: u64,
 ) {
-	let started_at = tokio::time::Instant::now();
+	let started_at = time::Instant::now();
 	let prune_delay = Duration::from_secs(FORWARDED_PAYMENT_AGGREGATION_BUCKET_SIZE_SECS);
 
 	aggregate_forwarded_payments_and_log(&forwarding_store, retention_secs, false).await;
 
 	let period = Duration::from_secs(FORWARDED_PAYMENT_AGGREGATION_BUCKET_SIZE_SECS);
-	let now =
-		SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs();
+	let now = time::unix_time_secs().unwrap_or(0);
 	let secs_until_next_bucket = seconds_until_next_forwarding_aggregation(
 		now,
 		FORWARDED_PAYMENT_AGGREGATION_BUCKET_SIZE_SECS,
 	);
+	// Tokio deadlines must use the runtime clock, whose origin may differ from our provider.
+	#[allow(clippy::disallowed_methods)]
 	let first_tick = tokio::time::Instant::now() + Duration::from_secs(secs_until_next_bucket);
 	let mut interval = tokio::time::interval_at(first_tick, period);
 	interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -632,8 +629,7 @@ async fn aggregate_expired_forwarded_payments(
 	channel_pair_stats_store: &ChannelPairForwardingStatsStore, retention_secs: u64,
 	remove_markers: bool, logger: &Arc<Logger>,
 ) -> Result<(u64, u64), Error> {
-	let now =
-		SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs();
+	let now = time::unix_time_secs().unwrap_or(0);
 	aggregate_expired_forwarded_payments_at(
 		forwarded_payment_store,
 		replay_marker_store,
@@ -914,8 +910,7 @@ pub fn aggregate_channel_pair_stats(
 			next_node_id = bucket.next_node_id;
 		}
 	}
-	let now =
-		SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0)).as_secs();
+	let now = time::unix_time_secs().unwrap_or(0);
 	Some(ChannelPairForwardingStats {
 		id: channel_pair_stats_id(
 			&first.prev_channel_id,
@@ -953,6 +948,7 @@ pub fn aggregate_channel_pair_stats(
 #[cfg(test)]
 mod forwarding_stats_tests {
 	use std::str::FromStr;
+	use std::time::{SystemTime, UNIX_EPOCH};
 
 	use lightning::io;
 	use lightning::util::persist::{
