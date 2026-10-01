@@ -601,14 +601,14 @@ where
 									self.logger,
 									"Failed to process funding transaction as channel went away before we could fund it: {}",
 									err
-								)
+								);
 							},
 							Err(err) => {
 								log_error!(
 									self.logger,
 									"Failed to process funding transaction: {:?}",
 									err
-								)
+								);
 							},
 						}
 					},
@@ -1151,7 +1151,7 @@ where
 								"Channel request rejected".to_string(),
 							)
 							.unwrap_or_else(|e| {
-								log_error!(self.logger, "Failed to reject channel: {:?}", e)
+								log_error!(self.logger, "Failed to reject channel: {:?}", e);
 							});
 						return Ok(());
 					}
@@ -1195,7 +1195,7 @@ where
 									"Channel request rejected".to_string(),
 								)
 								.unwrap_or_else(|e| {
-									log_error!(self.logger, "Failed to reject channel: {:?}", e)
+									log_error!(self.logger, "Failed to reject channel: {:?}", e);
 								});
 							return Ok(());
 						}
@@ -1212,7 +1212,7 @@ where
 								"Channel request rejected".to_string(),
 							)
 							.unwrap_or_else(|e| {
-								log_error!(self.logger, "Failed to reject channel: {:?}", e)
+								log_error!(self.logger, "Failed to reject channel: {:?}", e);
 							});
 						return Ok(());
 					}
@@ -1704,7 +1704,9 @@ where
 						},
 					}
 				},
-				Err(()) => log_error!(self.logger, "Failed signing funding transaction"),
+				Err(()) => {
+					log_error!(self.logger, "Failed signing funding transaction");
+				},
 			},
 			LdkEvent::SplicePending {
 				channel_id,
