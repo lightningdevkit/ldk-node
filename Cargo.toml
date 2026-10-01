@@ -43,7 +43,6 @@ chain-esplora = [
 	"dep:ldk-esplora-client",
 	"dep:lightning-transaction-sync",
 	"lightning-transaction-sync/esplora-async-https",
-	"lightning-transaction-sync/time",
 ]
 chain-electrum = [
 	"dep:bdk_electrum",
@@ -94,7 +93,8 @@ lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning
 lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457" }
 lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457" }
 lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", features = ["rest-client", "rpc-client", "tokio"], optional = true }
-lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", optional = true }
+# Measure sync durations in the node's time module, not the dependency's `time` feature.
+lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false, optional = true }
 lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", features = ["std"] }
 lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457" }
 lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", optional = true }

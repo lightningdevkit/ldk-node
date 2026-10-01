@@ -32,6 +32,7 @@ use crate::liquidity::{
 use crate::logger::{log_debug, log_error, log_info, LdkLogger};
 use crate::payment::store::LSPS2Parameters;
 use crate::payment::PaymentMetadata;
+use crate::time;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
 
@@ -394,11 +395,18 @@ where
 		}]);
 
 		let currency = self.config.network.into();
+		let timestamp = time::duration_since_epoch().ok_or_else(|| {
+			log_error!(
+				self.logger,
+				"Failed to create invoice: system time is before the Unix epoch"
+			);
+			Error::InvoiceCreationFailed
+		})?;
 		let mut invoice_builder = InvoiceBuilder::new(currency)
 			.invoice_description(description.clone())
 			.payment_hash(payment_hash)
 			.payment_secret(payment_secret)
-			.current_timestamp()
+			.duration_since_epoch(timestamp)
 			.min_final_cltv_expiry_delta(min_final_cltv_expiry_delta.into())
 			.expiry_time(Duration::from_secs(expiry_secs.into()))
 			.private_route(route_hint);

@@ -17,6 +17,7 @@ use crate::logger::{log_error, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 #[cfg(feature = "chain-bitcoind")]
 use crate::runtime::RuntimeSpawner;
+use crate::time;
 use crate::types::{GossipSync, Graph, P2PGossipSync, RapidGossipSync, UtxoLookup};
 use crate::Error;
 
@@ -89,8 +90,11 @@ impl GossipSource {
 
 				match response.status_code {
 					200 => {
-						let new_latest_sync_timestamp =
-							gossip_sync.update_network_graph(response.as_bytes()).map_err(|e| {
+						let now = time::unix_time_secs()
+							.expect("current time should not be earlier than the Unix epoch");
+						let new_latest_sync_timestamp = gossip_sync
+							.update_network_graph_no_std(response.as_bytes(), Some(now))
+							.map_err(|e| {
 								log_trace!(
 									logger,
 									"Failed to update network graph with RGS data: {:?}",
