@@ -28,12 +28,20 @@ pub(crate) struct FundingTxCandidate {
 	/// This node's share of the on-chain fee for this candidate, in millisatoshis, or `None` if
 	/// this node did not contribute to it.
 	pub fee_paid_msat: Option<u64>,
+	/// Whether this node signed the candidate but LDK has yet to report the round negotiated. Set
+	/// when the round is recorded at signing time, cleared when LDK reports the splice negotiated
+	/// (`SpliceNegotiated`, emitted only once our `tx_signatures` for the round are ready to send).
+	/// Such a round may be abandoned without a trace — the counterparty aborts, or the channel
+	/// closes, before the signatures are exchanged — so only such a round may be dropped from the
+	/// history, and only once LDK no longer holds it.
+	pub awaiting_broadcast: bool,
 }
 
 impl_writeable_tlv_based!(FundingTxCandidate, {
 	(0, txid, required),
 	(2, amount_msat, option),
 	(4, fee_paid_msat, option),
+	(6, awaiting_broadcast, required),
 });
 
 /// Represents a pending payment
@@ -47,13 +55,19 @@ pub struct PendingPaymentDetails {
 	/// RBF history, keyed by each candidate's txid. Empty for non-funding payments and for
 	/// records written before per-candidate tracking existed.
 	pub(crate) candidates: Vec<FundingTxCandidate>,
+	/// The candidates LDK promoted to the channel's funding, as `ChannelReady` reported them. A
+	/// zero-conf splice locks before its transaction confirms, and every later splice builds on
+	/// it, so such a round can still confirm once the channel's funding has moved on from it and
+	/// once the channel has closed, when LDK holds it no longer. Kept apart from the candidates,
+	/// which each funding-record write replaces as a whole.
+	pub(crate) locked_rounds: Vec<Txid>,
 }
 
 impl PendingPaymentDetails {
 	pub(crate) fn new(
 		details: PaymentDetails, conflicting_txids: Vec<Txid>, candidates: Vec<FundingTxCandidate>,
 	) -> Self {
-		Self { details, conflicting_txids, candidates }
+		Self { details, conflicting_txids, candidates, locked_rounds: Vec::new() }
 	}
 
 	/// Returns this node's recorded funding figures for the candidate with the given txid, if any.
@@ -66,6 +80,7 @@ impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(0, details, required),
 	(2, conflicting_txids, optional_vec),
 	(4, candidates, optional_vec),
+	(6, locked_rounds, optional_vec),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,8 +123,10 @@ impl UpdatableObject for PendingPaymentDetails {
 			updated |= self.conflicting_txids.len() != conflicts_len;
 		}
 
-		// Each classify passes the complete candidate history, so a non-empty update replaces the
-		// stored list. An empty update (e.g. a non-funding payment) leaves it untouched.
+		// Each funding-record write passes the candidate history as of its own round, so a
+		// non-empty update replaces the stored list. An empty update (e.g. a non-funding payment)
+		// leaves it untouched. Dropping an abandoned round, the only writer that shrinks it, goes
+		// through the store's `mutate` instead.
 		if !update.candidates.is_empty() && self.candidates != update.candidates {
 			self.candidates = update.candidates;
 			updated = true;
@@ -145,9 +162,84 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 	}
 }
 
+/// Builds a [`FundingContribution`] for tests through its `Readable` impl — the only path open
+/// outside `rust-lightning`, which keeps its builder private. The length-prefixed stream holds
+/// the required TLV records (the given estimated fee in satoshis, feerate, max feerate, and the
+/// is-splice flag) plus the given contributed outputs.
+///
+/// [`FundingContribution`]: lightning::ln::funding::FundingContribution
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_with_outputs(
+	estimated_fee_sat: u64, feerate: u64, outputs: &[bitcoin::TxOut],
+) -> lightning::ln::funding::FundingContribution {
+	test_funding_contribution_with_parts(estimated_fee_sat, feerate, &[], outputs, None)
+}
+
+/// Builds a [`FundingContribution`] for tests from its parts: the given estimated fee, an input
+/// spending output 0 — which must be P2WPKH — of each given previous transaction, the given
+/// contributed outputs and change output, and the given input-selection feerate (also used as
+/// the maximum), with the is-splice flag set.
+///
+/// [`FundingContribution`]: lightning::ln::funding::FundingContribution
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_with_parts(
+	estimated_fee_sat: u64, feerate: u64, prevtxs: &[bitcoin::Transaction],
+	outputs: &[bitcoin::TxOut], change_output: Option<&bitcoin::TxOut>,
+) -> lightning::ln::funding::FundingContribution {
+	use lightning::util::ser::{BigSize, Writeable};
+	use lightning::util::wallet_utils::ConfirmedUtxo;
+	let mut records = vec![1, 8]; // (1, estimated_fee)
+	records.extend_from_slice(&estimated_fee_sat.to_be_bytes());
+	if !prevtxs.is_empty() {
+		let mut input_bytes = Vec::new();
+		for prevtx in prevtxs {
+			ConfirmedUtxo::new_p2wpkh(prevtx.clone(), 0)
+				.expect("test prevtx output 0 must be P2WPKH")
+				.write(&mut input_bytes)
+				.expect("in-memory write must succeed");
+		}
+		records.push(3); // (3, inputs)
+		BigSize(input_bytes.len() as u64)
+			.write(&mut records)
+			.expect("in-memory write must succeed");
+		records.extend_from_slice(&input_bytes);
+	}
+	if !outputs.is_empty() {
+		let mut output_bytes = Vec::new();
+		for output in outputs {
+			output.write(&mut output_bytes).expect("in-memory write must succeed");
+		}
+		records.push(5); // (5, outputs)
+		BigSize(output_bytes.len() as u64)
+			.write(&mut records)
+			.expect("in-memory write must succeed");
+		records.extend_from_slice(&output_bytes);
+	}
+	if let Some(change_output) = change_output {
+		let change_bytes = change_output.encode();
+		records.push(7); // (7, change_output)
+		BigSize(change_bytes.len() as u64)
+			.write(&mut records)
+			.expect("in-memory write must succeed");
+		records.extend_from_slice(&change_bytes);
+	}
+	records.extend_from_slice(&[9, 8]); // (9, feerate)
+	records.extend_from_slice(&feerate.to_be_bytes());
+	records.extend_from_slice(&[11, 8]); // (11, max_feerate)
+	records.extend_from_slice(&feerate.to_be_bytes());
+	records.extend_from_slice(&[13, 1, 1]); // (13, is_splice: true)
+	let mut tlv_bytes = Vec::new();
+	// BigSize length prefix over the TLV records above.
+	BigSize(records.len() as u64).write(&mut tlv_bytes).expect("in-memory write must succeed");
+	tlv_bytes.extend(records);
+	lightning::util::ser::Readable::read(&mut &tlv_bytes[..])
+		.expect("hand-built TLV stream must decode")
+}
+
 #[cfg(test)]
 mod tests {
 	use bitcoin::hashes::Hash;
+	use lightning::util::ser::{Readable, Writeable};
 
 	use super::*;
 	use crate::payment::store::ConfirmationStatus;
@@ -163,16 +255,23 @@ mod tests {
 		// original and RBF candidates.
 		let counterparty_txid = Txid::from_byte_array([4u8; 32]);
 		let candidates = vec![
-			FundingTxCandidate { txid: counterparty_txid, amount_msat: None, fee_paid_msat: None },
+			FundingTxCandidate {
+				txid: counterparty_txid,
+				amount_msat: None,
+				fee_paid_msat: None,
+				awaiting_broadcast: false,
+			},
 			FundingTxCandidate {
 				txid: first_txid,
 				amount_msat: Some(1_000_000),
 				fee_paid_msat: Some(1_000),
+				awaiting_broadcast: false,
 			},
 			FundingTxCandidate {
 				txid: rbf_txid,
 				amount_msat: Some(1_000_000),
 				fee_paid_msat: Some(5_000),
+				awaiting_broadcast: false,
 			},
 		];
 
@@ -282,6 +381,7 @@ mod tests {
 			txid,
 			amount_msat: fresh.amount_msat,
 			fee_paid_msat: fresh.fee_paid_msat,
+			awaiting_broadcast: false,
 		}];
 
 		// The old fresh-insert path merged the full fresh record, downgrading the mirrored
@@ -319,5 +419,41 @@ mod tests {
 		assert_eq!(merged.candidates, candidates);
 		assert_eq!(merged.details.amount_msat, Some(1_000));
 		assert_eq!(merged.details.fee_paid_msat, Some(100));
+	}
+
+	/// A candidate with the given txid byte, with a stake of ours in it if `ours`.
+	fn candidate(txid_byte: u8, ours: bool) -> FundingTxCandidate {
+		FundingTxCandidate {
+			txid: test_txid(txid_byte),
+			amount_msat: ours.then_some(1_000),
+			fee_paid_msat: ours.then_some(100),
+			awaiting_broadcast: false,
+		}
+	}
+
+	fn entry(candidates: Vec<FundingTxCandidate>) -> PendingPaymentDetails {
+		let payment_id = PaymentId([1u8; 32]);
+		let txid = candidates.last().expect("at least one candidate").txid;
+		PendingPaymentDetails::new(pending_onchain_payment(payment_id, txid), vec![], candidates)
+	}
+
+	/// The rounds LDK promoted round-trip with the entry, absent or present, and the merge of a
+	/// record's full update, as wallet sync writes it, leaves them.
+	#[test]
+	fn locked_rounds_round_trip_and_survive_a_merge() {
+		let mut stored = entry(vec![candidate(2, false)]);
+		let decoded: PendingPaymentDetails =
+			Readable::read(&mut &stored.encode()[..]).expect("encoding must round-trip");
+		assert_eq!(decoded.locked_rounds, Vec::<Txid>::new());
+
+		stored.locked_rounds.push(test_txid(2));
+		let decoded: PendingPaymentDetails =
+			Readable::read(&mut &stored.encode()[..]).expect("encoding must round-trip");
+		assert_eq!(decoded, stored);
+
+		let synced = entry(vec![candidate(2, false), candidate(3, false)]);
+		assert!(stored.update(synced.to_update()));
+		assert_eq!(stored.candidates.len(), 2);
+		assert_eq!(stored.locked_rounds, vec![test_txid(2)]);
 	}
 }
