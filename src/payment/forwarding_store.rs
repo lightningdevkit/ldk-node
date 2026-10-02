@@ -542,7 +542,7 @@ async fn aggregate_forwarded_payments_and_log(
 			);
 		},
 		Err(e) => {
-			log_error!(forwarding_store.logger, "Forwarded payment aggregation failed: {}", e)
+			log_error!(forwarding_store.logger, "Forwarded payment aggregation failed: {}", e);
 		},
 		_ => {},
 	}
@@ -556,11 +556,13 @@ pub(crate) async fn run_forwarded_payment_aggregation(
 		match forwarding_store.details.is_empty().await {
 			Ok(true) => return,
 			Ok(false) => {},
-			Err(e) => log_error!(
-				forwarding_store.logger,
-				"Failed to check forwarded payment store: {}",
-				e
-			),
+			Err(e) => {
+				log_error!(
+					forwarding_store.logger,
+					"Failed to check forwarded payment store: {}",
+					e
+				);
+			},
 		}
 	}
 
@@ -570,11 +572,13 @@ pub(crate) async fn run_forwarded_payment_aggregation(
 		match forwarding_store.details.is_empty().await {
 			Ok(true) => return,
 			Ok(false) => {},
-			Err(e) => log_error!(
-				forwarding_store.logger,
-				"Failed to check forwarded payment store: {}",
-				e
-			),
+			Err(e) => {
+				log_error!(
+					forwarding_store.logger,
+					"Failed to check forwarded payment store: {}",
+					e
+				);
+			},
 		}
 	}
 
@@ -597,7 +601,7 @@ pub(crate) async fn run_forwarded_payment_aggregation(
 					match forwarding_store.details.is_empty().await {
 						Ok(true) => break,
 						Ok(false) => {},
-						Err(e) => log_error!(forwarding_store.logger, "Failed to check forwarded payment store: {}", e),
+						Err(e) => { log_error!(forwarding_store.logger, "Failed to check forwarded payment store: {}", e); },
 					}
 				}
 			}

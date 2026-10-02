@@ -234,10 +234,10 @@ where
 			match join_result {
 				Ok((lsp, Ok(fees))) => all_offers.push((lsp, fees)),
 				Ok((lsp, Err(e))) => {
-					log_warn!(self.logger, "Failed to get fees from LSP {}: {}", lsp.node_id, e)
+					log_warn!(self.logger, "Failed to get fees from LSP {}: {}", lsp.node_id, e);
 				},
 				Err(e) => {
-					log_warn!(self.logger, "Failed to get fees from LSP: {}", e)
+					log_warn!(self.logger, "Failed to get fees from LSP: {}", e);
 				},
 			}
 		}
