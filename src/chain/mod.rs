@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bitcoin::{Script, Txid};
+use bitcoin::{Script, Transaction, Txid};
 use lightning::chain::{BlockLocator, Filter};
 
 #[cfg(feature = "chain-bitcoind")]
@@ -608,6 +608,26 @@ impl ChainSource {
 					}
 				}
 			}
+		}
+	}
+
+	pub(crate) async fn can_broadcast_transaction(&self, tx: &Transaction) -> Result<bool, Error> {
+		match &self.kind {
+			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+				bitcoind_chain_source.can_broadcast_transaction(tx).await
+			},
+			ChainSourceKind::Esplora { .. } | ChainSourceKind::Electrum { .. } => {
+				// Neither supports a `testmempoolaccept` equivalent.
+				Err(Error::ChainSourceNotSupported)
+			},
+		}
+	}
+
+	pub(crate) async fn get_transaction(&self, txid: &Txid) -> Result<Option<Transaction>, Error> {
+		match &self.kind {
+			ChainSourceKind::Bitcoind(bitcoind) => bitcoind.get_transaction(txid).await,
+			ChainSourceKind::Esplora(esplora) => esplora.get_transaction(txid).await,
+			ChainSourceKind::Electrum(electrum) => electrum.get_transaction(txid).await,
 		}
 	}
 }
