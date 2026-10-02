@@ -42,6 +42,9 @@ pub(crate) enum ChannelOutputRole {
 	Htlc,
 	/// An output a channel resolved to this node, spendable by the on-chain wallet.
 	Spendable,
+	/// An output a channel paid straight to a script of this wallet's own: the proceeds of a
+	/// claim, or the shutdown output of a cooperative close.
+	Direct,
 }
 
 impl_writeable_tlv_based_enum!(ChannelOutputRole,
@@ -49,6 +52,7 @@ impl_writeable_tlv_based_enum!(ChannelOutputRole,
 	(2, Anchor) => {},
 	(4, Htlc) => {},
 	(6, Spendable) => {},
+	(8, Direct) => {},
 );
 
 /// One output of a transaction that a channel controls, and the channel controlling it.
@@ -104,7 +108,8 @@ impl_writeable_tlv_based!(LocalFundingFigures, {
 pub(crate) struct ChannelTxFacts {
 	/// The transaction these facts are about.
 	pub txid: Txid,
-	/// Outputs of this transaction controlled by a channel rather than by the wallet.
+	/// Outputs of this transaction a channel laid claim to: ones it controls rather than the
+	/// wallet, and ones it paid straight to the wallet.
 	pub outputs: Vec<ChannelOutputFact>,
 	/// What this transaction is, when a producer identified it directly.
 	pub self_role: Option<TransactionType>,
@@ -402,6 +407,21 @@ pub(crate) fn classify(
 
 	if !funds.is_empty() {
 		return Some(TransactionType::Funding { channels: channels_of(funds) });
+	}
+
+	// A channel that paid its funds straight to this wallet without spending its funding output
+	// did so through a claim its monitor made: an HTLC resolved on the counterparty's commitment,
+	// or a revoked commitment punished. A cooperative close pays its shutdown output the same
+	// way; with its funding on record it was named above, and without it is left alone rather
+	// than called a claim.
+	let mut direct = created.iter().filter(|output| output.role == ChannelOutputRole::Direct);
+	if let Some(paid) = direct.next() {
+		if !is_cooperative_close(tx) {
+			return Some(TransactionType::Claim {
+				counterparty_node_id: paid.counterparty_node_id,
+				channel_id: paid.channel_id,
+			});
+		}
 	}
 
 	None
@@ -1020,6 +1040,59 @@ mod tests {
 		let channel = test_channel(1);
 		let recorded = parents([parent_outputs(&channel, ChannelOutputRole::Spendable, [7])]);
 		assert_eq!(classify(&tx, None, &recorded), None);
+	}
+
+	#[test]
+	fn paying_a_channels_funds_straight_to_the_wallet_is_a_claim() {
+		let channel = test_channel(1);
+		// A claim the channel monitor made: replaceable, spending outputs of a commitment this
+		// node holds no facts about, and paying this wallet's destination script.
+		let tx = spending_tx(
+			&[(test_txid(PARENT + 30), 0), (test_txid(PARENT + 30), 1)],
+			Sequence(0xff_ff_ff_fd),
+			0,
+		);
+		let self_facts = ChannelTxFacts::new(tx.compute_txid()).with_outputs(
+			&channel,
+			None,
+			ChannelOutputRole::Direct,
+			[0],
+		);
+
+		assert_eq!(
+			classify(&tx, Some(&self_facts), &HashMap::new()),
+			Some(TransactionType::Claim {
+				counterparty_node_id: channel.counterparty_node_id,
+				channel_id: channel.channel_id,
+			})
+		);
+	}
+
+	#[test]
+	fn a_cooperative_close_paying_the_wallet_directly_is_not_a_claim() {
+		let channel = test_channel(1);
+		let tx = cooperative_close_shaped();
+		// LDK reports the shutdown output of a cooperative close the way it reports the
+		// proceeds of a claim: as paid straight to the wallet.
+		let self_facts = ChannelTxFacts::new(tx.compute_txid()).with_outputs(
+			&channel,
+			None,
+			ChannelOutputRole::Direct,
+			[0],
+		);
+
+		// With the funding it spends on record, the transaction is the close it is.
+		let recorded = parents([parent_outputs(&channel, ChannelOutputRole::Funding, [0])]);
+		assert_eq!(
+			classify(&tx, Some(&self_facts), &recorded),
+			Some(TransactionType::CooperativeClose {
+				counterparty_node_id: channel.counterparty_node_id,
+				channel_id: channel.channel_id,
+			})
+		);
+
+		// Without it, the close is left unnamed rather than called a claim.
+		assert_eq!(classify(&tx, Some(&self_facts), &HashMap::new()), None);
 	}
 
 	#[test]

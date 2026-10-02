@@ -248,6 +248,36 @@ impl Wallet {
 		}
 	}
 
+	/// Names the record of `txid`, if one exists and is still unnamed, from the facts recorded
+	/// about it. The event handler calls this once a channel's report is recorded: the chain-tip
+	/// pass reaches only records still pending, and a report can land after the record of its
+	/// transaction graduated, as a claim's does: LDK reports the outputs a claim paid this wallet
+	/// at the very depth the claim's record graduates at. Not for the wallet's own writers, which
+	/// hold its locks: the naming takes them. A failure costs the name and is logged.
+	pub(crate) async fn name_recorded_transaction(&self, txid: Txid) {
+		let payment_id = match self.find_payment_by_txid(txid).await {
+			Ok(Some(payment_id)) => payment_id,
+			Ok(None) => PaymentId(txid.to_byte_array()),
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to look up the payment of transaction {} to name it: {}",
+					txid,
+					e
+				);
+				return;
+			},
+		};
+		if let Err(e) = self.name_recorded_transactions(vec![(payment_id, txid)]).await {
+			log_error!(
+				self.logger,
+				"Failed to name transaction {} from what was recorded of it: {}",
+				txid,
+				e
+			);
+		}
+	}
+
 	/// Everything this node recorded about `tx` and about the transactions its inputs spend, as
 	/// classifying `tx` needs it.
 	///
@@ -781,10 +811,11 @@ impl Wallet {
 	/// them, for records that do not say what their transaction is.
 	///
 	/// This is how a record written before the producing channel reported its transaction picks
-	/// that report up: the facts are durable, so a report arriving after the record does reach it
-	/// on a later chain tip. A transaction the facts still cannot account for leaves its record
-	/// as it is, and so does a record that names its transaction already: whoever named it knew
-	/// more than the facts alone say.
+	/// that report up: the facts are durable, so a report arriving after the record does reach it,
+	/// on the next chain tip while the record is pending and as the report is recorded otherwise.
+	/// A transaction the facts still cannot account for leaves its record as it is, and so does a
+	/// record that names its transaction already: whoever named it knew more than the facts alone
+	/// say.
 	async fn name_recorded_transactions(
 		&self, payments: Vec<(PaymentId, Txid)>,
 	) -> Result<(), Error> {
@@ -4806,6 +4837,82 @@ mod tests {
 			},
 			kind => panic!("unexpected kind {:?}", kind),
 		}
+	}
+
+	/// The chain-tip pass names only records still pending, and a channel's report can land
+	/// after its record graduated: LDK matures a claim's outputs at the tip the claim's record
+	/// graduates at. The event handler names the record as it records the report.
+	#[tokio::test]
+	async fn a_graduated_record_is_named_as_its_facts_arrive() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let counterparty_node_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let channel_id = ChannelId([7u8; 32]);
+		let channel = Channel { counterparty_node_id, channel_id };
+		// A claim the channel monitor made is replaceable, which is what tells it apart from a
+		// cooperative close paying the wallet directly.
+		let mut claim = wallet_paying_tx(&wallet, 4);
+		claim.input[0].sequence = Sequence::ENABLE_RBF_NO_LOCKTIME;
+		let claim_txid = claim.compute_txid();
+		insert_confirmed_tx(&wallet, claim.clone(), 5);
+
+		// Wallet sync records the claim and graduates it before the channel reports it.
+		let confirmed = WalletEvent::TxConfirmed {
+			txid: claim_txid,
+			tx: Arc::new(claim.clone()),
+			block_time: confirmed_block_time(5),
+			old_block_time: None,
+		};
+		wallet.update_payment_store(vec![confirmed]).await.unwrap();
+		let block_id =
+			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
+		let graduated = WalletEvent::ChainTipChanged {
+			old_tip: block_id(5),
+			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
+		};
+		wallet.update_payment_store(vec![graduated]).await.unwrap();
+
+		let payment_id = PaymentId(claim_txid.to_byte_array());
+		let unnamed = wallet
+			.payment_store
+			.get(&payment_id)
+			.await
+			.unwrap()
+			.expect("wallet sync records the transaction");
+		assert_eq!(unnamed.status, PaymentStatus::Succeeded);
+		assert!(
+			matches!(unnamed.kind, PaymentKind::Onchain { tx_type: None, .. }),
+			"no channel has reported the transaction yet, so it cannot be named: {:?}",
+			unnamed.kind,
+		);
+
+		wallet
+			.record_channel_tx_facts(ChannelTxFacts::new(claim_txid).with_outputs(
+				&channel,
+				None,
+				ChannelOutputRole::Direct,
+				[0],
+			))
+			.await
+			.unwrap();
+		wallet.name_recorded_transaction(claim_txid).await;
+
+		let named = wallet.payment_store.get(&payment_id).await.unwrap().expect("the record stays");
+		assert!(
+			matches!(
+				named.kind,
+				PaymentKind::Onchain {
+					tx_type: Some(TransactionType::Claim { counterparty_node_id: cp, channel_id: ch }),
+					..
+				} if cp == counterparty_node_id && ch == channel_id
+			),
+			"the graduated record is named as the facts arrive: {:?}",
+			named.kind,
+		);
 	}
 
 	#[tokio::test]

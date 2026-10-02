@@ -736,15 +736,24 @@ where
 		Ok((payment_id, None))
 	}
 
-	/// Records what one of this node's channels reported about a transaction it produced.
+	/// Records what one of this node's channels reported about a transaction it produced, and
+	/// names the transaction's payment record from it if wallet sync wrote that record first.
 	///
 	/// A failure is logged rather than reported: these facts accompany a transaction this node
 	/// has already released or a claim it has already made, so there is nothing left to withhold,
 	/// and the producing event is re-offered until the claim resolves.
 	async fn record_channel_tx_facts(&self, facts: ChannelTxFacts) {
 		let txid = facts.txid;
-		if let Err(e) = self.wallet.record_channel_tx_facts(facts).await {
-			log_error!(self.logger, "Failed to record what channel transaction {} is: {}", txid, e);
+		match self.wallet.record_channel_tx_facts(facts).await {
+			Ok(()) => self.wallet.name_recorded_transaction(txid).await,
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to record what channel transaction {} is: {}",
+					txid,
+					e
+				);
+			},
 		}
 	}
 
@@ -1619,9 +1628,11 @@ where
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id, counterparty_node_id } => {
 				let spendable_outpoints = sweepable_outpoints(&outputs);
+				let directly_paid_outpoints = direct_outpoints(&outputs);
 
-				// Static outputs are excluded from the sweeper, as `sweepable_outpoints` excludes
-				// them from the record below.
+				// Static outputs are excluded from the sweeper; `sweepable_outpoints` leaves them
+				// out of the spendable record below, and `direct_outpoints` has them recorded as
+				// paid straight to the wallet instead.
 				match self
 					.output_sweeper
 					.track_spendable_outputs(outputs, channel_id, counterparty_node_id, true, None)
@@ -1641,12 +1652,19 @@ where
 					(counterparty_node_id, channel_id)
 				{
 					let channel = Channel { counterparty_node_id, channel_id };
-					for facts in ChannelTxFacts::per_transaction(
+					let spendable = ChannelTxFacts::per_transaction(
 						&channel,
 						None,
 						ChannelOutputRole::Spendable,
 						spendable_outpoints,
-					) {
+					);
+					let directly_paid = ChannelTxFacts::per_transaction(
+						&channel,
+						None,
+						ChannelOutputRole::Direct,
+						directly_paid_outpoints,
+					);
+					for facts in spendable.into_iter().chain(directly_paid) {
 						self.record_channel_tx_facts(facts).await;
 					}
 				}
@@ -2471,12 +2489,28 @@ where
 /// The outpoints among `outputs` that the sweeper takes charge of, which are the ones a sweep
 /// will spend. LDK reports an output paying a script of this wallet's own — its destination
 /// script, or the shutdown script of a cooperative close — as a `StaticOutput`; the sweeper is
-/// told to leave those alone, and so is the record: whatever spends such an output next is an
-/// ordinary wallet transaction, not a sweep.
+/// told to leave those alone, and the record does not call them spendable: whatever spends such
+/// an output next is an ordinary wallet transaction, not a sweep. See `direct_outpoints` for
+/// what is recorded about them instead.
 fn sweepable_outpoints(outputs: &[SpendableOutputDescriptor]) -> Vec<(Txid, u32)> {
 	outputs
 		.iter()
 		.filter(|output| !matches!(output, SpendableOutputDescriptor::StaticOutput { .. }))
+		.map(|output| {
+			let outpoint = output.spendable_outpoint();
+			(outpoint.txid, outpoint.index as u32)
+		})
+		.collect()
+}
+
+/// The outpoints among `outputs` that LDK reports as `StaticOutput`s: those paying a script of
+/// this wallet's own, which are the proceeds of a claim or the shutdown output of a cooperative
+/// close. They are recorded as the channel's payment straight to the wallet, which is what names
+/// a claim.
+fn direct_outpoints(outputs: &[SpendableOutputDescriptor]) -> Vec<(Txid, u32)> {
+	outputs
+		.iter()
+		.filter(|output| matches!(output, SpendableOutputDescriptor::StaticOutput { .. }))
 		.map(|output| {
 			let outpoint = output.spendable_outpoint();
 			(outpoint.txid, outpoint.index as u32)
@@ -2843,8 +2877,9 @@ mod tests {
 	}
 
 	/// A `StaticOutput` pays a script of this wallet's own, so the sweeper is told to leave it
-	/// alone and nothing about it is recorded: the transaction that spends it next is an
-	/// ordinary wallet transaction, not a sweep. The outputs the sweeper does take are recorded.
+	/// alone and it is recorded as the channel's payment straight to the wallet rather than as
+	/// spendable: the transaction that spends it next is an ordinary wallet transaction, not a
+	/// sweep. The outputs the sweeper does take are the ones recorded as spendable.
 	#[test]
 	fn static_outputs_are_not_recorded_as_spendable() {
 		use bitcoin::hashes::Hash;
@@ -2872,5 +2907,6 @@ mod tests {
 		];
 
 		assert_eq!(sweepable_outpoints(&outputs), vec![(outpoint(2).txid, 2)]);
+		assert_eq!(direct_outpoints(&outputs), vec![(outpoint(1).txid, 1)]);
 	}
 }
