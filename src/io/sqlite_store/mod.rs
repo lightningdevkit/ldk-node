@@ -14,7 +14,7 @@ use std::fs::OpenOptions;
 use std::future::Future;
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -23,7 +23,7 @@ use lightning::util::persist::{
 	KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
 };
 use lightning_types::string::PrintableString;
-use rusqlite::{named_params, Connection};
+use rusqlite::{named_params, Connection, DatabaseName};
 
 use crate::io::utils::{check_namespace_key_validity, create_dir_all_private};
 
@@ -69,7 +69,30 @@ impl SqliteStore {
 	pub fn new(
 		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
 	) -> io::Result<Self> {
-		let inner = Arc::new(SqliteStoreInner::new(data_dir, db_file_name, kv_table_name)?);
+		Self::new_with_backup(data_dir, db_file_name, kv_table_name, None)
+	}
+
+	/// Constructs a new [`SqliteStore`], continuously replicating to `backup_path`.
+	///
+	/// After opening (including schema setup/migration) and after every successful
+	/// [`KVStore::write`] / [`KVStore::remove`], the primary database is copied to `backup_path`
+	/// via SQLite's [Online Backup API]. A failed replica update fails the persist.
+	///
+	/// `backup_path` must be a filesystem path to a database *file* (parent directories are
+	/// created if missing). SQLite's `:memory:` database name and `file:` URI filenames are not
+	/// supported. The replica must not be the same file as the primary database.
+	///
+	/// The replica is a complete SQLite database and may later be opened as a primary
+	/// [`SqliteStore`]. It is a hot-spare file, not a second live node: do not open it with
+	/// another store while this one is running.
+	///
+	/// [Online Backup API]: https://www.sqlite.org/backup.html
+	pub fn new_with_backup(
+		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
+		backup_path: Option<PathBuf>,
+	) -> io::Result<Self> {
+		let inner =
+			Arc::new(SqliteStoreInner::new(data_dir, db_file_name, kv_table_name, backup_path)?);
 
 		let next_write_version = AtomicU64::new(1);
 		Ok(Self { inner, next_write_version })
@@ -230,25 +253,66 @@ struct SqliteStoreInner {
 	connection: Arc<Mutex<Connection>>,
 	data_dir: PathBuf,
 	kv_table_name: String,
+	backup_path: Option<PathBuf>,
 	write_version_locks: Mutex<HashMap<String, Arc<Mutex<u64>>>>,
 	next_sort_order: AtomicI64,
+}
+
+fn backup_connection(src: &Connection, backup_path: &Path) -> io::Result<()> {
+	src.backup(DatabaseName::Main, backup_path, None).map_err(|e| {
+		let msg = format!("Failed to backup SQLite database to {}: {}", backup_path.display(), e);
+		io::Error::new(io::ErrorKind::Other, msg)
+	})
+}
+
+fn reject_sqlite_uri_path(path: &Path, name: &str) -> io::Result<()> {
+	let path_str = path.to_string_lossy();
+	if name == ":memory:" || name.starts_with("file:") || path_str.starts_with("file:") {
+		return Err(io::Error::new(
+			io::ErrorKind::InvalidInput,
+			"SQLite :memory: and file: database names are not supported",
+		));
+	}
+	Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_private_sqlite_file(path: &Path) -> io::Result<()> {
+	match OpenOptions::new().create_new(true).write(true).mode(0o600).open(path) {
+		Ok(_) => Ok(()),
+		Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+		Err(e) => {
+			let msg = format!("Failed to create database file {}: {}", path.display(), e);
+			Err(io::Error::new(io::ErrorKind::Other, msg))
+		},
+	}
 }
 
 impl SqliteStoreInner {
 	fn new(
 		data_dir: PathBuf, db_file_name: Option<String>, kv_table_name: Option<String>,
+		backup_path: Option<PathBuf>,
 	) -> io::Result<Self> {
 		let db_file_name = db_file_name.unwrap_or(DEFAULT_SQLITE_DB_FILE_NAME.to_string());
 		let mut db_file_path = data_dir.clone();
 		db_file_path.push(&db_file_name);
-		if db_file_name == ":memory:"
-			|| db_file_name.starts_with("file:")
-			|| db_file_path.to_string_lossy().starts_with("file:")
-		{
-			return Err(io::Error::new(
-				io::ErrorKind::InvalidInput,
-				"SQLite :memory: and file: database names are not supported",
-			));
+		reject_sqlite_uri_path(&db_file_path, &db_file_name)?;
+		if let Some(backup_path) = backup_path.as_ref() {
+			let backup_name = backup_path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+			reject_sqlite_uri_path(backup_path, backup_name)?;
+			if backup_path.is_dir() {
+				let msg = format!(
+					"SQLite backup path must be a database file, not a directory: {}",
+					backup_path.display()
+				);
+				return Err(io::Error::new(io::ErrorKind::InvalidInput, msg));
+			}
+			if backup_path == &db_file_path {
+				return Err(io::Error::new(
+					io::ErrorKind::InvalidInput,
+					"SQLite backup path must differ from the primary database file",
+				));
+			}
 		}
 		let kv_table_name = kv_table_name.unwrap_or(DEFAULT_KV_TABLE_NAME.to_string());
 
@@ -261,15 +325,7 @@ impl SqliteStoreInner {
 			io::Error::new(io::ErrorKind::Other, msg)
 		})?;
 		#[cfg(unix)]
-		match OpenOptions::new().create_new(true).write(true).mode(0o600).open(&db_file_path) {
-			Ok(_) => {},
-			Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
-			Err(e) => {
-				let msg =
-					format!("Failed to create database file {}: {}", db_file_path.display(), e);
-				return Err(io::Error::new(io::ErrorKind::Other, msg));
-			},
-		}
+		ensure_private_sqlite_file(&db_file_path)?;
 
 		let mut connection = Connection::open(db_file_path.clone()).map_err(|e| {
 			let msg =
@@ -351,9 +407,41 @@ impl SqliteStoreInner {
 			})?;
 		let next_sort_order = AtomicI64::new(max_sort_order + 1);
 
+		if let Some(backup_path) = backup_path.as_ref() {
+			if let Some(parent) = backup_path.parent() {
+				if !parent.as_os_str().is_empty() {
+					create_dir_all_private(parent).map_err(|e| {
+						let msg = format!(
+							"Failed to create SQLite backup directory {}: {}",
+							parent.display(),
+							e
+						);
+						io::Error::new(io::ErrorKind::Other, msg)
+					})?;
+				}
+			}
+			#[cfg(unix)]
+			ensure_private_sqlite_file(backup_path)?;
+			backup_connection(&connection, backup_path)?;
+		}
+
 		let connection = Arc::new(Mutex::new(connection));
 		let write_version_locks = Mutex::new(HashMap::new());
-		Ok(Self { connection, data_dir, kv_table_name, write_version_locks, next_sort_order })
+		Ok(Self {
+			connection,
+			data_dir,
+			kv_table_name,
+			backup_path,
+			write_version_locks,
+			next_sort_order,
+		})
+	}
+
+	fn backup_to_replica(&self, connection: &Connection) -> io::Result<()> {
+		if let Some(backup_path) = self.backup_path.as_ref() {
+			backup_connection(connection, backup_path)?;
+		}
+		Ok(())
 	}
 
 	fn get_inner_lock_ref(&self, locking_key: String) -> Arc<Mutex<u64>> {
@@ -449,7 +537,9 @@ impl SqliteStoreInner {
 					e
 				);
 				io::Error::new(io::ErrorKind::Other, msg)
-			})
+			})?;
+			drop(stmt);
+			self.backup_to_replica(&locked_conn)
 		})
 	}
 
@@ -484,7 +574,8 @@ impl SqliteStoreInner {
 				);
 				io::Error::new(io::ErrorKind::Other, msg)
 			})?;
-			Ok(())
+			drop(stmt);
+			self.backup_to_replica(&locked_conn)
 		})
 	}
 
@@ -1133,6 +1224,94 @@ mod tests {
 
 			assert_eq!(response.keys, vec!["key_c", "key_b", "key_a"]);
 		}
+	}
+
+	#[tokio::test]
+	async fn test_sqlite_store_continuous_backup() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_continuous_backup");
+		let backup_dir = temp_path.join("backup");
+		let backup_path = backup_dir.join("replica.sqlite");
+		let db_file_name = "test_db".to_string();
+		let kv_table_name = "test_table".to_string();
+
+		let primary_namespace = "test_ns";
+		let secondary_namespace = "test_sub";
+		let key = "test_key";
+		let value = vec![7u8; 16];
+
+		{
+			let store = SqliteStore::new_with_backup(
+				temp_path.clone(),
+				Some(db_file_name.clone()),
+				Some(kv_table_name.clone()),
+				Some(backup_path.clone()),
+			)
+			.unwrap();
+
+			KVStore::write(&store, primary_namespace, secondary_namespace, key, value.clone())
+				.await
+				.unwrap();
+
+			std::mem::forget(store);
+		}
+
+		let restored = SqliteStore::new(
+			backup_dir.clone(),
+			Some("replica.sqlite".to_string()),
+			Some(kv_table_name),
+		)
+		.unwrap();
+		let restored_value =
+			KVStore::read(&restored, primary_namespace, secondary_namespace, key).await.unwrap();
+		assert_eq!(restored_value, value);
+
+		std::mem::forget(restored);
+
+		{
+			let store = SqliteStore::new_with_backup(
+				temp_path.clone(),
+				Some(db_file_name),
+				Some("test_table".to_string()),
+				Some(backup_path.clone()),
+			)
+			.unwrap();
+			KVStore::remove(&store, primary_namespace, secondary_namespace, key, false)
+				.await
+				.unwrap();
+			std::mem::forget(store);
+		}
+
+		let restored = SqliteStore::new(
+			backup_dir.clone(),
+			Some("replica.sqlite".to_string()),
+			Some("test_table".to_string()),
+		)
+		.unwrap();
+		let missing = KVStore::read(&restored, primary_namespace, secondary_namespace, key)
+			.await
+			.unwrap_err();
+		assert_eq!(missing.kind(), io::ErrorKind::NotFound);
+
+		std::mem::forget(restored);
+		let _ = fs::remove_dir_all(&temp_path);
+	}
+
+	#[tokio::test]
+	async fn test_sqlite_store_backup_rejects_primary_path() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("test_sqlite_store_backup_same_path");
+		let backup_path = temp_path.join("test_db");
+		let err = match SqliteStore::new_with_backup(
+			temp_path,
+			Some("test_db".to_string()),
+			Some("test_table".to_string()),
+			Some(backup_path),
+		) {
+			Ok(_) => panic!("expected backup path coinciding with the primary database to fail"),
+			Err(e) => e,
+		};
+		assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
 	}
 }
 
