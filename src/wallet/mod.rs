@@ -2706,7 +2706,9 @@ mod tests {
 	use bitcoin::hashes::Hash;
 	use bitcoin::Network;
 	use lightning::io;
-	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+	use lightning::util::persist::{
+		KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
+	};
 
 	use super::*;
 	#[cfg(all(not(feature = "chain-esplora"), feature = "chain-electrum"))]
@@ -2791,6 +2793,15 @@ mod tests {
 				secondary_namespace,
 				page_token,
 			)
+		}
+	}
+
+	impl MigratableKVStore for FailSwitchStore {
+		fn list_all_keys(
+			&self,
+		) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+		{
+			MigratableKVStore::list_all_keys(&*self.inner)
 		}
 	}
 
@@ -3088,6 +3099,16 @@ mod tests {
 		}
 	}
 
+	impl MigratableKVStore for SnapshotStore {
+		fn list_all_keys(
+			&self,
+		) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+		{
+			let keys = self.data.lock().unwrap().keys().cloned().collect();
+			async move { Ok(keys) }
+		}
+	}
+
 	#[tokio::test]
 	async fn pool_survives_a_crash_at_any_point_during_refill() {
 		let snapshot_store = SnapshotStore::new();
@@ -3199,6 +3220,15 @@ mod tests {
 				secondary_namespace,
 				page_token,
 			)
+		}
+	}
+
+	impl MigratableKVStore for GatedStore {
+		fn list_all_keys(
+			&self,
+		) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+		{
+			MigratableKVStore::list_all_keys(&*self.inner)
 		}
 	}
 
@@ -3410,6 +3440,15 @@ mod tests {
 		}
 	}
 
+	impl MigratableKVStore for RecordOnlyStore {
+		fn list_all_keys(
+			&self,
+		) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+		{
+			MigratableKVStore::list_all_keys(&*self.inner)
+		}
+	}
+
 	#[tokio::test]
 	async fn failed_get_new_address_leaves_the_pool_record_covering_the_pool() {
 		let record_store = RecordOnlyStore::new();
@@ -3523,6 +3562,15 @@ mod tests {
 				secondary_namespace,
 				page_token,
 			)
+		}
+	}
+
+	impl MigratableKVStore for RecordFailStore {
+		fn list_all_keys(
+			&self,
+		) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+		{
+			MigratableKVStore::list_all_keys(&*self.inner)
 		}
 	}
 
@@ -3669,6 +3717,15 @@ mod tests {
 				secondary_namespace,
 				page_token,
 			)
+		}
+	}
+
+	impl MigratableKVStore for NamespaceGatedStore {
+		fn list_all_keys(
+			&self,
+		) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+		{
+			MigratableKVStore::list_all_keys(&*self.inner)
 		}
 	}
 
