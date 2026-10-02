@@ -47,6 +47,8 @@ use ldk_node::config::{AsyncPaymentsRole, Config};
 #[cfg(hrn_tests)]
 use ldk_node::config::{HRNResolverConfig, HumanReadableNamesConfig};
 use ldk_node::entropy::NodeEntropy;
+#[cfg(feature = "storage-postgres")]
+use ldk_node::io::postgres_store::POSTGRES_TEST_URL_ENV_VAR;
 #[cfg(feature = "storage-sqlite")]
 use ldk_node::io::sqlite_store::SqliteStore;
 use ldk_node::payment::{
@@ -58,6 +60,7 @@ use ldk_node::{
 	PendingSweepBalance, UserChannelId,
 };
 use lightning::io;
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
@@ -343,6 +346,24 @@ macro_rules! expect_payment_successful_event {
 }
 
 pub(crate) use expect_payment_successful_event;
+
+pub async fn wait_for_payment_success(node: &Node, expected_payment_id: PaymentId) {
+	loop {
+		match node.next_event_async().await {
+			Event::PaymentSuccessful { payment_id, .. } if payment_id == expected_payment_id => {
+				node.event_handled().unwrap();
+				break;
+			},
+			Event::PaymentFailed { payment_id, payment_hash, .. } => {
+				node.event_handled().unwrap();
+				panic!("Return payment {:?} failed with hash {:?}", payment_id, payment_hash);
+			},
+			_ => {
+				node.event_handled().unwrap();
+			},
+		}
+	}
+}
 
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
 	let bitcoind_exe =
@@ -656,6 +677,25 @@ pub(crate) enum TestStoreType {
 	Sqlite,
 	#[cfg(feature = "storage-filesystem")]
 	FilesystemStore,
+	#[cfg(feature = "storage-postgres")]
+	Postgres,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct StoreBenchConfig {
+	pub(crate) name: &'static str,
+	pub(crate) store_type: TestStoreType,
+}
+
+pub(crate) fn store_bench_configs() -> Vec<StoreBenchConfig> {
+	vec![
+		#[cfg(feature = "storage-sqlite")]
+		StoreBenchConfig { name: "sqlite", store_type: TestStoreType::Sqlite },
+		#[cfg(feature = "storage-filesystem")]
+		StoreBenchConfig { name: "filesystem", store_type: TestStoreType::FilesystemStore },
+		#[cfg(feature = "storage-postgres")]
+		StoreBenchConfig { name: "postgres", store_type: TestStoreType::Postgres },
+	]
 }
 
 impl Default for TestStoreType {
@@ -867,6 +907,31 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		#[cfg(feature = "storage-filesystem")]
 		TestStoreType::FilesystemStore => {
 			builder.build_with_fs_store(config.node_entropy.into()).unwrap()
+		},
+		#[cfg(feature = "storage-postgres")]
+		TestStoreType::Postgres => {
+			use ldk_node::io::postgres_store::POSTGRES_TEST_URL_ENV_VAR;
+
+			let table_name = format!(
+				"test_{}",
+				config
+					.node_config
+					.storage_dir_path
+					.chars()
+					.filter(|c| c.is_ascii_alphanumeric())
+					.collect::<String>()
+			);
+			let connection_string = std::env::var(POSTGRES_TEST_URL_ENV_VAR)
+				.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string());
+			builder
+				.build_with_postgres_store(
+					config.node_entropy.into(),
+					connection_string,
+					None,
+					Some(table_name),
+					None,
+				)
+				.unwrap()
 		},
 	};
 
@@ -1175,6 +1240,36 @@ pub async fn open_channel_push_amt(
 			.await;
 	wait_for_tx(&electrsd.client, funding_txo.txid).await;
 	funding_txo
+}
+
+pub async fn wait_for_channel_ready_events(
+	node: &Node, counterparty_node_id: PublicKey, count: u64,
+) {
+	let mut remaining_count = count;
+	while remaining_count > 0 {
+		let event = tokio::time::timeout(
+			Duration::from_secs(crate::common::INTEROP_TIMEOUT_SECS),
+			node.next_event_async(),
+		)
+		.await
+		.unwrap_or_else(|_| {
+			panic!("{} timed out waiting for ChannelReady event after 60s", node.node_id())
+		});
+
+		match event {
+			ref e @ Event::ChannelReady { counterparty_node_id: Some(node_id), .. }
+				if node_id == counterparty_node_id =>
+			{
+				println!("{} got event {:?}", node.node_id(), e);
+				remaining_count -= 1;
+			},
+			ref e @ Event::ChannelReady { .. } => {
+				panic!("{} got unexpected ChannelReady event: {:?}", node.node_id(), e);
+			},
+			_ => {},
+		}
+		node.event_handled().unwrap();
+	}
 }
 
 pub async fn open_channel_with_all(
@@ -2205,7 +2300,7 @@ impl TestSyncStoreInner {
 /// `TEST_POSTGRES_URL` environment variable.
 #[cfg(feature = "storage-postgres")]
 pub(crate) fn test_connection_string() -> String {
-	std::env::var("TEST_POSTGRES_URL")
+	std::env::var(POSTGRES_TEST_URL_ENV_VAR)
 		.unwrap_or_else(|_| "host=localhost user=postgres password=postgres".to_string())
 }
 
