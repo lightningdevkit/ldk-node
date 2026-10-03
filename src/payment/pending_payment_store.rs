@@ -808,10 +808,10 @@ mod tests {
 		PendingPaymentDetails::new(pending_onchain_payment(payment_id, txid), vec![], candidates)
 	}
 
-	/// An entry written by a node from before the rounds LDK promoted were kept on it reads as an
-	/// entry with none, everything else intact.
+	/// An entry written by a node from before the rounds LDK promoted and the splice's intent were
+	/// kept on it reads as an entry with neither, everything else intact.
 	#[test]
-	fn an_entry_written_without_locked_rounds_reads_with_none() {
+	fn an_entry_written_without_locked_rounds_or_an_intent_reads_with_neither() {
 		let mut stored = entry(vec![candidate(2, false), candidate(3, true)]);
 		stored.conflicting_txids = vec![test_txid(9)];
 
@@ -829,8 +829,9 @@ mod tests {
 		let written_before = write_as_before().unwrap();
 
 		let decoded: PendingPaymentDetails = Readable::read(&mut &written_before[..])
-			.expect("an entry written before the rounds were kept still reads");
+			.expect("an entry written before the rounds and the intent were kept still reads");
 		assert!(decoded.locked_rounds().is_empty());
+		assert!(decoded.splice_intent.is_none());
 		assert_eq!(decoded, stored);
 	}
 
