@@ -2260,6 +2260,23 @@ impl Wallet {
 			ConfirmationStatus::Unconfirmed,
 		);
 
+		let seen_at = std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap_or_default()
+			.as_secs();
+		let previous_seen_at = locked_wallet
+			.tx_details(txid)
+			.and_then(|details| match details.chain_position {
+				bdk_chain::ChainPosition::Unconfirmed { last_seen, .. } => last_seen,
+				_ => None,
+			})
+			.unwrap_or(0);
+		// BDK keeps the conflicting tx with the latest last-seen and breaks ties by txid, so a bump
+		// in the same second as the replaced round must still be seen strictly after it.
+		locked_wallet.apply_unconfirmed_txs([(
+			fee_bumped_tx.clone(),
+			seen_at.max(previous_seen_at.saturating_add(1)),
+		)]);
 		let change_set = locked_wallet.take_staged().unwrap_or_default();
 		drop(locked_wallet);
 		locked_persister.persist_changeset(change_set).await.map_err(|e| {
