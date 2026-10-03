@@ -665,6 +665,73 @@ async fn peer_removed_when_counterparty_force_closes_last_channel() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_close_is_classified_for_a_channel_whose_facts_were_never_recorded() {
+	// A node upgraded from a version that recorded no channel facts, or one whose report of a
+	// funding failed, holds a channel it has no facts for. Starting records what its channel
+	// state holds, so the close of that channel is classified like any other.
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let config_a = random_config();
+	let store_a = TestSyncStore::new(config_a.node_config.storage_dir_path.clone().into());
+	let node_a = setup_node_with_store(&chain_source, config_a.clone(), store_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	let funding_txo = open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Take node A back to the state of a node that never recorded the channel's facts.
+	node_a.stop().unwrap();
+	drop(node_a);
+	let facts_keys = KVStore::list(&store_a, "channel_tx_facts", "").await.unwrap();
+	assert!(!facts_keys.is_empty(), "opening the channel recorded its funding");
+	for key in facts_keys {
+		KVStore::remove(&store_a, "channel_tx_facts", "", &key, false).await.unwrap();
+	}
+
+	let node_a = setup_node_with_store(&chain_source, config_a, store_a.clone());
+	assert!(
+		!KVStore::list(&store_a, "channel_tx_facts", "").await.unwrap().is_empty(),
+		"starting recorded the channel's funding from the node's channel state"
+	);
+
+	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	node_a.connect(node_b.node_id(), node_addr_b, false).unwrap();
+	let user_channel_id_a = node_a.list_channels().first().unwrap().user_channel_id;
+	node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
+	expect_event!(node_a, ChannelClosed);
+	expect_event!(node_b, ChannelClosed);
+	wait_for_outpoint_spend(&electrsd.client, funding_txo).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let closes = node_a.list_payments_matching(|payment| {
+		matches!(
+			payment.kind,
+			PaymentKind::Onchain { tx_type: Some(TransactionType::CooperativeClose { .. }), .. }
+		)
+	});
+	assert_eq!(closes.len(), 1, "node_a classified the close of a channel it had no facts for");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle_0conf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);

@@ -83,6 +83,22 @@ impl_writeable_tlv_based!(ChannelOutputFact, {
 	(8, user_channel_id, option),
 });
 
+impl ChannelOutputFact {
+	/// Whether `other` describes the same output the same way. The local channel identifier
+	/// counts only where both carry one: a producer that does not know it, as the node's channel
+	/// state does not for a channel it no longer lists, contradicts nothing by leaving it out.
+	fn agrees_with(&self, other: &Self) -> bool {
+		self.vout == other.vout
+			&& self.role == other.role
+			&& self.counterparty_node_id == other.counterparty_node_id
+			&& self.channel_id == other.channel_id
+			&& match (self.user_channel_id, other.user_channel_id) {
+				(Some(recorded), Some(incoming)) => recorded == incoming,
+				_ => true,
+			}
+	}
+}
+
 /// This node's share of an interactively negotiated funding transaction, and the funding payment
 /// the transaction belongs to.
 ///
@@ -192,6 +208,35 @@ impl ChannelTxFacts {
 			.collect()
 	}
 
+	/// Facts about the outputs the node's channel state holds, as one record per transaction.
+	///
+	/// An output listed by more than one part of that state, as an open channel's funding
+	/// output is by the channel manager and by its monitor, is taken from the listing that
+	/// knows the channel's local identifier.
+	pub(crate) fn of_held_outputs(mut held: Vec<HeldChannelOutput>) -> Vec<Self> {
+		held.sort_by_key(|output| (output.txid, output.vout, output.user_channel_id.is_none()));
+		held.dedup_by_key(|output| (output.txid, output.vout));
+
+		let mut records: Vec<Self> = Vec::new();
+		for output in held {
+			let index = match records.iter().position(|record| record.txid == output.txid) {
+				Some(index) => index,
+				None => {
+					records.push(Self::new(output.txid));
+					records.len() - 1
+				},
+			};
+			records[index].outputs.push(ChannelOutputFact {
+				vout: output.vout,
+				role: output.role,
+				counterparty_node_id: output.channel.counterparty_node_id,
+				channel_id: output.channel.channel_id,
+				user_channel_id: output.user_channel_id,
+			});
+		}
+		records
+	}
+
 	/// Records what this transaction is.
 	pub(crate) fn with_self_role(mut self, self_role: TransactionType) -> Self {
 		self.self_role = Some(self_role);
@@ -208,11 +253,12 @@ impl ChannelTxFacts {
 	/// Merges `incoming` into these facts, returning the result, or `None` when `incoming` adds
 	/// nothing to what is already recorded.
 	///
-	/// Outputs are unioned by `vout`, while `self_role` and `local_figures` are filled in only
-	/// where they are still absent. Re-reporting a fact is therefore a no-op, which is what lets
-	/// a producer replay its event without consequence. Reporting a *different* value for
-	/// something already recorded is rejected, leaving the recorded facts as they were, and so is
-	/// a report that would take the record past the size a single record is allowed.
+	/// Outputs are unioned by `vout`, while `self_role`, `local_figures` and an output's local
+	/// channel identifier are filled in only where they are still absent. Re-reporting a fact is
+	/// therefore a no-op, which is what lets a producer replay its event without consequence.
+	/// Reporting a *different* value for something already recorded is rejected, leaving the
+	/// recorded facts as they were, and so is a report that would take the record past the size
+	/// a single record is allowed.
 	///
 	/// A merge that changes something dates the record at the incoming report's height, so that
 	/// retention measures how long ago this node last learned anything about the transaction.
@@ -228,8 +274,13 @@ impl ChannelTxFacts {
 
 		let mut changed = false;
 		for output in &incoming.outputs {
-			match self.outputs.iter().find(|recorded| recorded.vout == output.vout) {
-				Some(recorded) if recorded == output => {},
+			match self.outputs.iter_mut().find(|recorded| recorded.vout == output.vout) {
+				Some(recorded) if recorded.agrees_with(output) => {
+					if recorded.user_channel_id.is_none() && output.user_channel_id.is_some() {
+						recorded.user_channel_id = output.user_channel_id;
+						changed = true;
+					}
+				},
 				Some(recorded) => {
 					return Err(ChannelTxFactsRejection::Output {
 						recorded: recorded.clone(),
@@ -308,13 +359,36 @@ pub(crate) enum FactsRecordOutcome {
 	Incomplete,
 }
 
-/// The channels this node still holds on-chain state for, as the retention of recorded facts
-/// consults them.
+/// An output the node's channel state holds: the funding output of a channel the channel manager
+/// lists or the chain monitor watches, or an output a channel resolved to this node that the
+/// sweeper has yet to spend.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HeldChannelOutput {
+	/// The channel the output belongs to.
+	pub channel: Channel,
+	/// The channel's local identifier, where the state holding the output knows it: the channel
+	/// manager does, a monitor and the sweeper do not.
+	pub user_channel_id: Option<UserChannelId>,
+	/// What the output is for.
+	pub role: ChannelOutputRole,
+	/// The transaction the output is of.
+	pub txid: Txid,
+	/// The index of the output within that transaction.
+	pub vout: u32,
+}
+
+/// The node's channel state, as the recorded facts consult it: for which channels are still
+/// held, which decides what retention may drop, and for which outputs they hold, which the
+/// startup pass records where no producer did.
 pub(crate) trait ChannelLiveness: Send + Sync {
 	/// The channels the node's channel manager, chain monitor or output sweeper still knows
 	/// about, or `None` when that state cannot be consulted at all. Nothing is dropped while the
 	/// answer is `None`: without it there is no way to tell which facts are still needed.
 	fn live_channels(&self) -> Option<HashSet<ChannelId>>;
+
+	/// The outputs that state holds, or `None` when it cannot be consulted at all. An output may
+	/// be listed more than once, by each part of the state holding it.
+	fn held_outputs(&self) -> Option<Vec<HeldChannelOutput>>;
 }
 
 /// The node's own channel state, as [`ChannelLiveness`].
@@ -352,6 +426,62 @@ impl ChannelLiveness for NodeChannelLiveness {
 			chain_monitor.list_monitors(),
 			output_sweeper.tracked_spendable_outputs().into_iter().map(|output| output.channel_id),
 		))
+	}
+
+	fn held_outputs(&self) -> Option<Vec<HeldChannelOutput>> {
+		let channel_manager = self.channel_manager.upgrade()?;
+		let chain_monitor = self.chain_monitor.upgrade()?;
+		let output_sweeper = self.output_sweeper.upgrade()?;
+
+		let mut held = Vec::new();
+		for channel in channel_manager.list_channels() {
+			// A channel still negotiating its funding holds no output yet; its producer reports
+			// the funding once there is one.
+			let Some(funding_txo) = channel.funding_txo else { continue };
+			held.push(HeldChannelOutput {
+				channel: Channel {
+					counterparty_node_id: channel.counterparty.node_id,
+					channel_id: channel.channel_id,
+				},
+				user_channel_id: Some(UserChannelId(channel.user_channel_id)),
+				role: ChannelOutputRole::Funding,
+				txid: funding_txo.txid,
+				vout: funding_txo.index as u32,
+			});
+		}
+		for channel_id in chain_monitor.list_monitors() {
+			let Ok(monitor) = chain_monitor.get_monitor(channel_id) else { continue };
+			let funding_txo = monitor.get_funding_txo();
+			held.push(HeldChannelOutput {
+				channel: Channel {
+					counterparty_node_id: monitor.get_counterparty_node_id(),
+					channel_id,
+				},
+				user_channel_id: None,
+				role: ChannelOutputRole::Funding,
+				txid: funding_txo.txid,
+				vout: funding_txo.index as u32,
+			});
+		}
+		// The sweeper spends what it tracks, so each is an output a channel resolved to this
+		// node, whatever its descriptor. One tracked without its channel says nothing about
+		// which channel resolved it and is left out, as it is for retention.
+		for output in output_sweeper.tracked_spendable_outputs() {
+			let (Some(channel_id), Some(counterparty_node_id)) =
+				(output.channel_id, output.counterparty_node_id)
+			else {
+				continue;
+			};
+			let outpoint = output.descriptor.spendable_outpoint();
+			held.push(HeldChannelOutput {
+				channel: Channel { counterparty_node_id, channel_id },
+				user_channel_id: None,
+				role: ChannelOutputRole::Spendable,
+				txid: outpoint.txid,
+				vout: outpoint.index as u32,
+			});
+		}
+		Some(held)
 	}
 }
 
@@ -852,6 +982,56 @@ mod tests {
 	}
 
 	#[test]
+	fn held_outputs_become_one_record_per_transaction() {
+		let channel = test_channel(1);
+		let other = test_channel(2);
+		let funding = |channel: &Channel, user_channel_id, txid, vout| HeldChannelOutput {
+			channel: channel.clone(),
+			user_channel_id,
+			role: ChannelOutputRole::Funding,
+			txid,
+			vout,
+		};
+		let records = ChannelTxFacts::of_held_outputs(vec![
+			// An open channel's funding output, held by its monitor and listed by the channel
+			// manager, which alone knows the channel's local identifier.
+			funding(&channel, None, test_txid(1), 0),
+			funding(&channel, Some(UserChannelId(7)), test_txid(1), 0),
+			// A closed channel's funding output, held by its monitor alone.
+			funding(&other, None, test_txid(2), 1),
+			// An output the closed channel resolved to this node, tracked by the sweeper.
+			HeldChannelOutput {
+				channel: other.clone(),
+				user_channel_id: None,
+				role: ChannelOutputRole::Spendable,
+				txid: test_txid(2),
+				vout: 2,
+			},
+		]);
+
+		assert_eq!(records.len(), 2);
+		let open = records.iter().find(|facts| facts.txid == test_txid(1)).expect("recorded");
+		assert_eq!(
+			open.outputs,
+			vec![ChannelOutputFact {
+				vout: 0,
+				role: ChannelOutputRole::Funding,
+				counterparty_node_id: channel.counterparty_node_id,
+				channel_id: channel.channel_id,
+				user_channel_id: Some(UserChannelId(7)),
+			}]
+		);
+		let closed = records.iter().find(|facts| facts.txid == test_txid(2)).expect("recorded");
+		assert_eq!(
+			closed.outputs.iter().map(|output| (output.vout, output.role)).collect::<Vec<_>>(),
+			vec![(1, ChannelOutputRole::Funding), (2, ChannelOutputRole::Spendable)]
+		);
+		assert!(closed.outputs.iter().all(|output| {
+			output.channel_id == other.channel_id && output.user_channel_id.is_none()
+		}));
+	}
+
+	#[test]
 	fn facts_key_round_trips_through_its_hex_encoding() {
 		let txid = test_txid(3);
 		let encoded = txid.encode_to_hex_str();
@@ -940,6 +1120,38 @@ mod tests {
 			recorded.merged_with(&reattributed),
 			Err(ChannelTxFactsRejection::Output { .. })
 		));
+	}
+
+	#[test]
+	fn an_output_reported_without_its_user_channel_id_agrees_with_one_reported_with_it() {
+		let channel = test_channel(1);
+		let txid = test_txid(7);
+		let known = ChannelTxFacts::new(txid).with_outputs(
+			&channel,
+			Some(UserChannelId(42)),
+			ChannelOutputRole::Funding,
+			[0],
+		);
+		let unknown =
+			ChannelTxFacts::new(txid).with_outputs(&channel, None, ChannelOutputRole::Funding, [0]);
+
+		// The node's channel state reports a closed channel's funding output without the
+		// identifier the event that first recorded it carried: that adds nothing and contradicts
+		// nothing.
+		assert_eq!(known.clone().merged_with(&unknown), Ok(None));
+
+		// Reported the other way round, the identifier fills in.
+		let merged = unknown.merged_with(&known).expect("the same output").expect("filled in");
+		assert_eq!(merged.outputs[0].user_channel_id, Some(UserChannelId(42)));
+
+		// Two identifiers for one output are still a contradiction.
+		let other = ChannelTxFacts::new(txid).with_outputs(
+			&channel,
+			Some(UserChannelId(43)),
+			ChannelOutputRole::Funding,
+			[0],
+		);
+		assert!(matches!(known.merged_with(&other), Err(ChannelTxFactsRejection::Output { .. })));
 	}
 
 	#[test]

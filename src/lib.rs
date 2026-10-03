@@ -369,6 +369,12 @@ impl Node {
 			)
 		})?;
 
+		// Record the outputs the node's channel state holds, for channels no producer reported:
+		// ones opened before this node recorded channel facts, and ones whose report failed in an
+		// earlier session. Before anything syncs, so that a close or a sweep the first sync finds
+		// is classified against them.
+		self.runtime.block_on(self.wallet.record_held_channel_outputs());
+
 		// A splice round recorded when this node signed it is taken back once LDK reports the
 		// negotiation failed or the channel closed. LDK reports the loss of a negotiation its last
 		// channel manager write carried mid-way, but a round committed, negotiated and signed

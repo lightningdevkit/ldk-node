@@ -224,6 +224,37 @@ impl Wallet {
 		}
 	}
 
+	/// Records the outputs the node's channel state holds, for channels no producer reported:
+	/// ones opened before this node recorded channel facts at all, and ones whose report failed
+	/// in an earlier session. What that state holds for a channel is its funding output and the
+	/// outputs the sweeper has yet to spend, so a close or a sweep of such a channel is
+	/// classified like any other.
+	///
+	/// A node whose producers reported everything finds each held output on record already and
+	/// writes nothing. An output this pass fails to record stays unclassified until the next
+	/// start repeats the pass, which is no reason to fail this one.
+	pub(crate) async fn record_held_channel_outputs(&self) {
+		let Some(held) = self.channel_liveness.get().and_then(|liveness| liveness.held_outputs())
+		else {
+			log_error!(
+				self.logger,
+				"Failed to consult the node's channel state for the outputs it holds; what no producer reported stays unclassified until the next start"
+			);
+			return;
+		};
+		for facts in ChannelTxFacts::of_held_outputs(held) {
+			let txid = facts.txid;
+			if let Err(e) = self.record_channel_tx_facts(facts).await {
+				log_error!(
+					self.logger,
+					"Failed to record what channel transaction {} is from the node's channel state: {}",
+					txid,
+					e
+				);
+			}
+		}
+	}
+
 	/// Records what a producer reported about the transaction `facts` describes, merging it into
 	/// whatever this node already knows about that transaction.
 	///
@@ -4094,8 +4125,11 @@ mod tests {
 	use crate::payment::pending_payment_store::{
 		test_funding_contribution_with_outputs, test_funding_contribution_with_parts,
 	};
-	use crate::types::{DynStore, DynStoreWrapper};
-	use crate::wallet::provenance::{live_channels_of, ChannelOutputRole, LocalFundingFigures};
+	use crate::types::{DynStore, DynStoreWrapper, UserChannelId};
+	use crate::wallet::provenance::{
+		live_channels_of, ChannelOutputFact, ChannelOutputRole, HeldChannelOutput,
+		LocalFundingFigures,
+	};
 	use crate::{NodeMetrics, PersistedNodeMetrics};
 
 	const EXTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/0/*)";
@@ -9116,12 +9150,14 @@ mod tests {
 	}
 
 	/// The node's channel state as a test dictates it: the channels its channel manager lists,
-	/// the monitors its chain monitor holds, and the outputs its sweeper tracks.
+	/// the monitors its chain monitor holds, and the outputs its sweeper tracks, for retention;
+	/// and the outputs all of those hold, for the startup pass.
 	#[derive(Default)]
 	struct TestChannelState {
 		channels: Vec<ChannelId>,
 		monitors: Vec<ChannelId>,
 		tracked_outputs: Vec<Option<ChannelId>>,
+		held_outputs: Vec<HeldChannelOutput>,
 	}
 
 	/// A stand-in for the node's channel state. `None` stands for the state being unreachable,
@@ -9151,6 +9187,11 @@ mod tests {
 				state.monitors.iter().copied(),
 				state.tracked_outputs.iter().copied(),
 			))
+		}
+
+		fn held_outputs(&self) -> Option<Vec<HeldChannelOutput>> {
+			let locked = self.0.lock().unwrap();
+			Some(locked.as_ref()?.held_outputs.clone())
 		}
 	}
 
@@ -9216,6 +9257,109 @@ mod tests {
 
 	/// A chain tip far enough past both the age cap and the burial of the spend above.
 	const LONG_AFTER: u32 = 100_000;
+
+	#[tokio::test]
+	async fn startup_records_the_held_outputs_no_producer_reported() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let open = Channel { counterparty_node_id, channel_id };
+		let closed = Channel { counterparty_node_id, channel_id: ChannelId([8u8; 32]) };
+		let open_funding_txid = Txid::from_byte_array([41u8; 32]);
+		let closed_funding_txid = Txid::from_byte_array([42u8; 32]);
+		let resolved_txid = Txid::from_byte_array([43u8; 32]);
+
+		// The open channel's funding was reported when the channel was opened, as every
+		// channel's is on a node that recorded facts all along.
+		let reported = ChannelTxFacts::new(open_funding_txid).with_outputs(
+			&open,
+			Some(UserChannelId(7)),
+			ChannelOutputRole::Funding,
+			[0],
+		);
+		wallet.record_channel_tx_facts(reported.clone()).await.unwrap();
+
+		let funding = |channel: &Channel, user_channel_id, txid, vout| HeldChannelOutput {
+			channel: channel.clone(),
+			user_channel_id,
+			role: ChannelOutputRole::Funding,
+			txid,
+			vout,
+		};
+		wallet.set_channel_liveness(TestLiveness::holding(TestChannelState {
+			held_outputs: vec![
+				// The open channel, listed by the channel manager and held by its monitor.
+				funding(&open, Some(UserChannelId(7)), open_funding_txid, 0),
+				funding(&open, None, open_funding_txid, 0),
+				// A channel closed before this node recorded facts, which only its monitor still
+				// holds, and an output it resolved to this node that the sweeper tracks.
+				funding(&closed, None, closed_funding_txid, 1),
+				HeldChannelOutput {
+					channel: closed.clone(),
+					user_channel_id: None,
+					role: ChannelOutputRole::Spendable,
+					txid: resolved_txid,
+					vout: 2,
+				},
+			],
+			..Default::default()
+		}));
+
+		wallet.record_held_channel_outputs().await;
+
+		let open_facts = wallet.channel_tx_facts(&open_funding_txid).await.expect("kept");
+		assert_eq!(open_facts.outputs, reported.outputs, "what was reported stays as it was");
+		let closed_facts =
+			wallet.channel_tx_facts(&closed_funding_txid).await.expect("recorded at startup");
+		assert_eq!(
+			closed_facts.outputs,
+			vec![ChannelOutputFact {
+				vout: 1,
+				role: ChannelOutputRole::Funding,
+				counterparty_node_id,
+				channel_id: closed.channel_id,
+				user_channel_id: None,
+			}]
+		);
+		let resolved_facts =
+			wallet.channel_tx_facts(&resolved_txid).await.expect("recorded at startup");
+		assert_eq!(
+			resolved_facts
+				.outputs
+				.iter()
+				.map(|output| (output.vout, output.role))
+				.collect::<Vec<_>>(),
+			vec![(2, ChannelOutputRole::Spendable)]
+		);
+
+		// Which is what lets the wallet say what the closed channel's closing transaction is.
+		let close = tx_spending(&wallet, OutPoint { txid: closed_funding_txid, vout: 1 });
+		assert_eq!(
+			wallet.tx_provenance(close.compute_txid(), &close).await.classify(&close),
+			Some(TransactionType::CooperativeClose {
+				counterparty_node_id,
+				channel_id: closed.channel_id,
+			})
+		);
+	}
+
+	#[tokio::test]
+	async fn startup_records_nothing_while_the_channel_state_is_unreachable() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		wallet.set_channel_liveness(TestLiveness::unreachable());
+
+		wallet.record_held_channel_outputs().await;
+
+		let keys = store
+			.list_async(
+				CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE,
+			)
+			.await
+			.unwrap();
+		assert!(keys.is_empty());
+	}
 
 	#[tokio::test]
 	async fn the_facts_of_a_resolved_channel_are_reclaimed() {
