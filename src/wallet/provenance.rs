@@ -994,6 +994,22 @@ mod tests {
 	}
 
 	#[test]
+	fn spending_a_resolved_output_into_a_funding_output_is_a_sweep() {
+		let closed = test_channel(1);
+		let opened = test_channel(2);
+		let tx = unrecognised_shaped();
+		let self_facts = funds(&tx, &opened, 0);
+		let recorded = parents([parent_outputs(&closed, ChannelOutputRole::Spendable, [0])]);
+
+		// What a transaction spends settles its type before what it creates: moving a channel's
+		// resolved output is that channel's sweep, whatever the output it lands in.
+		assert_eq!(
+			classify(&tx, Some(&self_facts), &recorded),
+			Some(TransactionType::Sweep { channels: vec![closed] })
+		);
+	}
+
+	#[test]
 	fn an_ordinary_wallet_spend_is_left_unnamed() {
 		let tx = spending_tx(&[(test_txid(PARENT), 0)], Sequence(0xff_ff_ff_fd), 0);
 
