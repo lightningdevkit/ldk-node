@@ -2459,7 +2459,8 @@ fn build_with_store_internal(
 	};
 
 	// The wallet drops the facts it recorded for a channel once that channel is not live
-	// anymore, which it can only ask now that the node's channel state exists.
+	// anymore, and records on start what a live channel's producers never reported. Both need the
+	// node's channel state, which exists from this point on.
 	wallet.set_channel_liveness(Arc::new(NodeChannelLiveness::new(
 		&channel_manager,
 		&chain_monitor,

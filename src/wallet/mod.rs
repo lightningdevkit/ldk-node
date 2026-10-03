@@ -225,6 +225,37 @@ impl Wallet {
 		}
 	}
 
+	/// Records the node's channel outputs for channels not reported by a producer: ones opened
+	/// before this node recorded channel facts at all, and ones whose report failed in an earlier
+	/// session. A channel's outputs are its funding output and the outputs the sweeper tracks for
+	/// it, so a close or a sweep of such a channel is classified like any other.
+	///
+	/// A node whose producers reported everything finds each output on record already and
+	/// writes nothing. An output this pass fails to record stays unclassified until the next
+	/// start repeats the pass, which is no reason to fail this one.
+	pub(crate) async fn record_channel_outputs(&self) {
+		let Some(channel_outputs) =
+			self.channel_liveness.get().and_then(|liveness| liveness.channel_outputs())
+		else {
+			log_error!(
+				self.logger,
+				"Failed to consult the node's channel state for its channel outputs; outputs not reported by a producer stay unclassified until the next start"
+			);
+			return;
+		};
+		for facts in ChannelTxFacts::of_channel_outputs(channel_outputs) {
+			let txid = facts.txid;
+			if let Err(e) = self.record_channel_tx_facts(facts).await {
+				log_error!(
+					self.logger,
+					"Failed to record what channel transaction {} is from the node's channel state: {}",
+					txid,
+					e
+				);
+			}
+		}
+	}
+
 	/// Records what a producer reported about the transaction `facts` describes, merging it into
 	/// whatever this node already knows about that transaction.
 	///
@@ -3399,6 +3430,34 @@ impl Wallet {
 			);
 			return Err(Error::InvalidPaymentId);
 		}
+
+		// The recorded facts can miss a channel's funding transaction: a report the facts store
+		// had no room for, or failed to write, is dropped, and wallet sync then records the
+		// transaction as an ordinary outbound payment. The node's channel outputs include the
+		// funding output of every channel it has, so check them as well. If the channel state
+		// cannot be consulted, refuse, since whether the transaction funds a channel is then
+		// unknown.
+		let Some(channel_outputs) =
+			self.channel_liveness.get().and_then(|liveness| liveness.channel_outputs())
+		else {
+			log_error!(
+				self.logger,
+				"Cannot RBF payment {}: the node's channel state cannot be consulted for whether {} funds a channel",
+				payment_id,
+				txid,
+			);
+			return Err(Error::WalletOperationFailed);
+		};
+		if channel_outputs.iter().any(|output| output.txid == txid) {
+			log_error!(
+				self.logger,
+				"Cannot RBF payment {} via bump_fee_rbf: an output of {} belongs to a channel of this node's; a pending splice is fee-bumped with bump_channel_funding_fee",
+				payment_id,
+				txid,
+			);
+			return Err(Error::InvalidPaymentId);
+		}
+
 		if !all_inputs_owned {
 			log_error!(
 				self.logger,
@@ -4143,8 +4202,10 @@ mod tests {
 	use crate::payment::pending_payment_store::{
 		test_funding_contribution_with_outputs, test_funding_contribution_with_parts,
 	};
-	use crate::types::{DynStore, DynStoreWrapper};
-	use crate::wallet::provenance::{live_channels_of, ChannelOutputRole, LocalFundingFigures};
+	use crate::types::{DynStore, DynStoreWrapper, UserChannelId};
+	use crate::wallet::provenance::{
+		live_channels_of, ChannelOutput, ChannelOutputFact, ChannelOutputRole, LocalFundingFigures,
+	};
 	use crate::{NodeMetrics, PersistedNodeMetrics};
 
 	const EXTERNAL_DESCRIPTOR: &str = "wpkh(tprv8ZgxMBicQKsPdy6LMhUtFHAgpocR8GC6QmwMSFpZs7h6Eziw3SpThFfczTDh5rW2krkqffa11UpX3XkeTTB2FvzZKWXqPY54Y6Rq4AQ5R8L/84'/1'/0'/0/*)";
@@ -9371,11 +9432,12 @@ mod tests {
 	}
 
 	/// A transaction reaching beyond the wallet's own coins is refused although no channel
-	/// reported it: this node alone cannot re-sign it.
+	/// reported it or owns an output of it: this node alone cannot re-sign it.
 	#[tokio::test]
 	async fn an_on_chain_fee_bump_refuses_a_transaction_spending_a_coin_the_wallet_does_not_own() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		wallet.set_channel_liveness(TestLiveness::empty());
 		let foreign = OutPoint { txid: Txid::from_byte_array([0x31; 32]), vout: 1 };
 		let (_spend, payment_id) = replaceable_spend(&wallet, 0x22, Some(foreign)).await;
 
@@ -9398,6 +9460,95 @@ mod tests {
 		fail_store.fail_reads.store(true, Ordering::Release);
 		let result = wallet.bump_fee_rbf(payment_id, None, 0).await;
 		assert!(matches!(result, Err(Error::PersistenceFailed)), "{:?}", result);
+	}
+
+	/// The facts store had no room for a channel's report of its funding transaction, so the
+	/// transaction is on record as an ordinary outbound payment. The node's channel state still
+	/// lists the channel's funding output, and the fee bump refuses the transaction on that
+	/// ground.
+	#[tokio::test]
+	async fn an_on_chain_fee_bump_refuses_a_transaction_whose_output_belongs_to_a_channel() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (spend, payment_id) = replaceable_spend(&wallet, 0x24, None).await;
+		let txid = spend.compute_txid();
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let channel = Channel { counterparty_node_id, channel_id };
+
+		// The store was found full before the channel reported its funding, so the report left
+		// no record of the transaction.
+		wallet.facts_retention.walk_completed(CHANNEL_TX_FACTS_MAX_RECORDS);
+		assert_eq!(
+			wallet
+				.record_channel_tx_facts(ChannelTxFacts::new(txid).with_outputs(
+					&channel,
+					Some(UserChannelId(1)),
+					ChannelOutputRole::Funding,
+					[0],
+				))
+				.await
+				.unwrap(),
+			FactsRecordOutcome::Incomplete,
+		);
+		assert!(wallet.channel_tx_facts(&txid).await.is_none());
+
+		wallet.set_channel_liveness(TestLiveness::of(TestChannelState {
+			channel_outputs: vec![ChannelOutput {
+				channel,
+				user_channel_id: Some(UserChannelId(1)),
+				role: ChannelOutputRole::Funding,
+				txid,
+				vout: 0,
+			}],
+			..Default::default()
+		}));
+
+		assert!(matches!(
+			wallet.bump_fee_rbf(payment_id, None, 0).await,
+			Err(Error::InvalidPaymentId)
+		));
+	}
+
+	/// The node's channel state lists an output of some transaction other than the one the fee
+	/// bump is asked to replace. That is no reason to refuse: the fee bump goes on to attempt
+	/// the replacement.
+	#[tokio::test]
+	async fn an_on_chain_fee_bump_passes_a_transaction_that_funds_no_channel() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_spend, payment_id) = replaceable_spend(&wallet, 0x26, None).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		wallet.set_channel_liveness(TestLiveness::of(TestChannelState {
+			channel_outputs: vec![ChannelOutput {
+				channel: Channel { counterparty_node_id, channel_id },
+				user_channel_id: Some(UserChannelId(1)),
+				role: ChannelOutputRole::Funding,
+				txid: Txid::from_byte_array([0x36; 32]),
+				vout: 0,
+			}],
+			..Default::default()
+		}));
+
+		let result = wallet.bump_fee_rbf(payment_id, None, 0).await;
+		assert!(
+			!matches!(result, Err(Error::InvalidPaymentId) | Err(Error::WalletOperationFailed)),
+			"the replacement itself must be attempted: {:?}",
+			result
+		);
+	}
+
+	/// While the node's channel state cannot be consulted, whether the transaction the fee bump
+	/// is asked to replace funds a channel is unknown: the fee bump refuses rather than
+	/// proceeding for want of an answer.
+	#[tokio::test]
+	async fn an_on_chain_fee_bump_refuses_while_the_channel_state_cannot_be_consulted() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (_spend, payment_id) = replaceable_spend(&wallet, 0x25, None).await;
+		wallet.set_channel_liveness(TestLiveness::unreachable());
+
+		let result = wallet.bump_fee_rbf(payment_id, None, 0).await;
+		assert!(matches!(result, Err(Error::WalletOperationFailed)), "{:?}", result);
 	}
 
 	#[tokio::test]
@@ -9465,41 +9616,64 @@ mod tests {
 	}
 
 	/// The node's channel state as a test dictates it: the channels its channel manager lists,
-	/// the monitors its chain monitor holds, and the outputs its sweeper tracks.
+	/// the monitors its chain monitor has, and the outputs its sweeper tracks, for retention; and
+	/// its channel outputs, for the startup pass.
 	#[derive(Default)]
 	struct TestChannelState {
 		channels: Vec<ChannelId>,
 		monitors: Vec<ChannelId>,
 		tracked_outputs: Vec<Option<ChannelId>>,
+		channel_outputs: Vec<ChannelOutput>,
 	}
 
-	/// A stand-in for the node's channel state. `None` stands for the state being unreachable,
-	/// as it is while the node is built and while it is torn down.
-	struct TestLiveness(Mutex<Option<TestChannelState>>);
+	/// A stand-in for the node's channel state. Its contents are set whether or not it can be
+	/// consulted; it cannot be while the node is built and while it is torn down.
+	struct TestLiveness {
+		state: Mutex<TestChannelState>,
+		reachable: AtomicBool,
+	}
 
 	impl TestLiveness {
-		fn holding(state: TestChannelState) -> Arc<Self> {
-			Arc::new(Self(Mutex::new(Some(state))))
+		fn of(state: TestChannelState) -> Arc<Self> {
+			Arc::new(Self { state: Mutex::new(state), reachable: AtomicBool::new(true) })
 		}
 
-		fn holding_nothing() -> Arc<Self> {
-			Self::holding(TestChannelState::default())
+		fn empty() -> Arc<Self> {
+			Self::of(TestChannelState::default())
+		}
+
+		/// Has `state` but does not answer for it until [`Self::reach`] is called.
+		fn unreachable_of(state: TestChannelState) -> Arc<Self> {
+			Arc::new(Self { state: Mutex::new(state), reachable: AtomicBool::new(false) })
 		}
 
 		fn unreachable() -> Arc<Self> {
-			Arc::new(Self(Mutex::new(None)))
+			Self::unreachable_of(TestChannelState::default())
+		}
+
+		fn reach(&self) {
+			self.reachable.store(true, Ordering::Release);
 		}
 	}
 
 	impl ChannelLiveness for TestLiveness {
 		fn live_channels(&self) -> Option<HashSet<ChannelId>> {
-			let locked = self.0.lock().unwrap();
-			let state = locked.as_ref()?;
+			if !self.reachable.load(Ordering::Acquire) {
+				return None;
+			}
+			let state = self.state.lock().unwrap();
 			Some(live_channels_of(
 				state.channels.iter().copied(),
 				state.monitors.iter().copied(),
 				state.tracked_outputs.iter().copied(),
 			))
+		}
+
+		fn channel_outputs(&self) -> Option<Vec<ChannelOutput>> {
+			if !self.reachable.load(Ordering::Acquire) {
+				return None;
+			}
+			Some(self.state.lock().unwrap().channel_outputs.clone())
 		}
 	}
 
@@ -9549,13 +9723,16 @@ mod tests {
 		(wallet, funding_txid)
 	}
 
+	/// Moves the wallet's chain tip to `height` without running the chain tip pass.
+	fn set_chain_tip(wallet: &Wallet, height: u32) {
+		let mut locked = wallet.inner.lock().unwrap();
+		let chain = locked.latest_checkpoint().insert(block_id_at(height));
+		locked.apply_update(Update { chain: Some(chain), ..Default::default() }).unwrap();
+	}
+
 	/// Runs the chain tip pass at `height`, which is where recorded facts are dropped.
 	async fn chain_tip_changed(wallet: &Wallet, height: u32) {
-		{
-			let mut locked = wallet.inner.lock().unwrap();
-			let chain = locked.latest_checkpoint().insert(block_id_at(height));
-			locked.apply_update(Update { chain: Some(chain), ..Default::default() }).unwrap();
-		}
+		set_chain_tip(wallet, height);
 		let event = WalletEvent::ChainTipChanged {
 			old_tip: block_id_at(height - 1),
 			new_tip: block_id_at(height),
@@ -9567,13 +9744,138 @@ mod tests {
 	const LONG_AFTER: u32 = 100_000;
 
 	#[tokio::test]
+	async fn startup_records_the_channel_outputs_not_reported_by_a_producer() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let open = Channel { counterparty_node_id, channel_id };
+		let closed = Channel { counterparty_node_id, channel_id: ChannelId([8u8; 32]) };
+		let open_funding_txid = Txid::from_byte_array([41u8; 32]);
+		let closed_funding_txid = Txid::from_byte_array([42u8; 32]);
+		let resolved_txid = Txid::from_byte_array([43u8; 32]);
+
+		// The open channel's funding was reported when the channel was opened, as every
+		// channel's is on a node that recorded facts all along.
+		let reported = ChannelTxFacts::new(open_funding_txid).with_outputs(
+			&open,
+			Some(UserChannelId(7)),
+			ChannelOutputRole::Funding,
+			[0],
+		);
+		wallet.record_channel_tx_facts(reported).await.unwrap();
+		let reported = wallet.channel_tx_facts(&open_funding_txid).await.expect("reported");
+		// The pass runs at a later tip, at which a rewrite of the report would re-date it.
+		set_chain_tip(&wallet, reported.recorded_at_height + 7);
+
+		let funding = |channel: &Channel, user_channel_id, txid, vout| ChannelOutput {
+			channel: channel.clone(),
+			user_channel_id,
+			role: ChannelOutputRole::Funding,
+			txid,
+			vout,
+		};
+		wallet.set_channel_liveness(TestLiveness::of(TestChannelState {
+			channel_outputs: vec![
+				// The open channel, listed by the channel manager and by its monitor.
+				funding(&open, Some(UserChannelId(7)), open_funding_txid, 0),
+				funding(&open, None, open_funding_txid, 0),
+				// A channel closed before this node recorded facts, which only its monitor still
+				// watches, and an output it resolved to this node that the sweeper tracks.
+				funding(&closed, None, closed_funding_txid, 1),
+				ChannelOutput {
+					channel: closed.clone(),
+					user_channel_id: None,
+					role: ChannelOutputRole::Spendable,
+					txid: resolved_txid,
+					vout: 2,
+				},
+			],
+			..Default::default()
+		}));
+
+		wallet.record_channel_outputs().await;
+
+		let open_facts = wallet.channel_tx_facts(&open_funding_txid).await.expect("kept");
+		assert_eq!(open_facts, reported, "what was reported stays as it was, dated as it was");
+		let closed_facts =
+			wallet.channel_tx_facts(&closed_funding_txid).await.expect("recorded at startup");
+		assert_eq!(closed_facts.recorded_at_height, reported.recorded_at_height + 7);
+		assert_eq!(
+			closed_facts.outputs,
+			vec![ChannelOutputFact {
+				vout: 1,
+				role: ChannelOutputRole::Funding,
+				counterparty_node_id,
+				channel_id: closed.channel_id,
+				user_channel_id: None,
+			}]
+		);
+		let resolved_facts =
+			wallet.channel_tx_facts(&resolved_txid).await.expect("recorded at startup");
+		assert_eq!(
+			resolved_facts
+				.outputs
+				.iter()
+				.map(|output| (output.vout, output.role))
+				.collect::<Vec<_>>(),
+			vec![(2, ChannelOutputRole::Spendable)]
+		);
+
+		// Which is what lets the wallet say what the closed channel's closing transaction is.
+		let close = tx_spending(&wallet, OutPoint { txid: closed_funding_txid, vout: 1 });
+		assert_eq!(
+			wallet.tx_provenance(close.compute_txid(), &close).await.classify(&close),
+			Some(TransactionType::CooperativeClose {
+				counterparty_node_id,
+				channel_id: closed.channel_id,
+			})
+		);
+	}
+
+	/// The channel state has an output not reported by a producer, but cannot be consulted: nothing
+	/// is recorded, and the output is recorded by the pass once the state can be.
+	#[tokio::test]
+	async fn startup_records_nothing_while_the_channel_state_is_unreachable() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let funding_txid = Txid::from_byte_array([44u8; 32]);
+		let liveness = TestLiveness::unreachable_of(TestChannelState {
+			channel_outputs: vec![ChannelOutput {
+				channel: Channel { counterparty_node_id, channel_id },
+				user_channel_id: None,
+				role: ChannelOutputRole::Funding,
+				txid: funding_txid,
+				vout: 0,
+			}],
+			..Default::default()
+		});
+		wallet.set_channel_liveness(liveness.clone());
+
+		wallet.record_channel_outputs().await;
+
+		let keys = store
+			.list_async(
+				CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE,
+			)
+			.await
+			.unwrap();
+		assert!(keys.is_empty(), "the state was not consulted");
+
+		liveness.reach();
+		wallet.record_channel_outputs().await;
+		assert!(wallet.channel_tx_facts(&funding_txid).await.is_some());
+	}
+
+	#[tokio::test]
 	async fn the_facts_of_a_resolved_channel_are_reclaimed() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
 		let channel = Channel { counterparty_node_id, channel_id };
 		let (wallet, funding_txid) =
 			wallet_with_a_spent_funding(Arc::clone(&store), &channel).await;
-		wallet.set_channel_liveness(TestLiveness::holding_nothing());
+		wallet.set_channel_liveness(TestLiveness::empty());
 
 		chain_tip_changed(&wallet, LONG_AFTER).await;
 
@@ -9609,7 +9911,7 @@ mod tests {
 			let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 			let (wallet, funding_txid) =
 				wallet_with_a_spent_funding(Arc::clone(&store), &channel).await;
-			wallet.set_channel_liveness(TestLiveness::holding(state));
+			wallet.set_channel_liveness(TestLiveness::of(state));
 
 			chain_tip_changed(&wallet, LONG_AFTER).await;
 
@@ -9649,7 +9951,7 @@ mod tests {
 		let channel = Channel { counterparty_node_id, channel_id };
 		let (wallet, funding_txid) =
 			wallet_with_a_spent_funding(Arc::clone(&store), &channel).await;
-		wallet.set_channel_liveness(TestLiveness::holding_nothing());
+		wallet.set_channel_liveness(TestLiveness::empty());
 
 		// The facts were recorded at height 0, before the spend moved the wallet's tip.
 		chain_tip_changed(&wallet, CHANNEL_TX_FACTS_RETENTION_BLOCKS - 1).await;
@@ -9693,10 +9995,8 @@ mod tests {
 
 		// While the chain monitor still watches the channel, the channel may yet produce a
 		// transaction to classify.
-		let liveness = TestLiveness::holding(TestChannelState {
-			monitors: vec![channel_id],
-			..Default::default()
-		});
+		let liveness =
+			TestLiveness::of(TestChannelState { monitors: vec![channel_id], ..Default::default() });
 		wallet.set_channel_liveness(liveness.clone());
 		chain_tip_changed(&wallet, LONG_AFTER).await;
 		assert!(
@@ -9704,7 +10004,7 @@ mod tests {
 			"the channel is still live",
 		);
 
-		*liveness.0.lock().unwrap() = Some(TestChannelState::default());
+		*liveness.state.lock().unwrap() = TestChannelState::default();
 		chain_tip_changed(&wallet, LONG_AFTER + 1).await;
 		assert!(
 			wallet.channel_tx_facts(&funding_txid).await.is_none(),
@@ -9719,7 +10019,7 @@ mod tests {
 		let channel = Channel { counterparty_node_id, channel_id };
 		let (wallet, funding_txid) =
 			wallet_with_an_unspent_funding(Arc::clone(&store), &channel).await;
-		wallet.set_channel_liveness(TestLiveness::holding_nothing());
+		wallet.set_channel_liveness(TestLiveness::empty());
 
 		// A spend that has yet to be buried twice over may still be reorganized out.
 		let close = tx_spending(&wallet, OutPoint { txid: funding_txid, vout: 0 });
@@ -9741,7 +10041,7 @@ mod tests {
 		let channel = Channel { counterparty_node_id, channel_id };
 		let (wallet, funding_txid) =
 			wallet_with_a_spent_funding(Arc::clone(&store), &channel).await;
-		wallet.set_channel_liveness(TestLiveness::holding_nothing());
+		wallet.set_channel_liveness(TestLiveness::empty());
 
 		// The spend is long buried, but its payment is still pending: the facts of what it
 		// spends are kept for as long as the pending store refers to it, whatever its record
@@ -9778,7 +10078,7 @@ mod tests {
 		let channel = Channel { counterparty_node_id, channel_id };
 		let (wallet, funding_txid) =
 			wallet_with_a_spent_funding(Arc::clone(&store), &channel).await;
-		wallet.set_channel_liveness(TestLiveness::holding_nothing());
+		wallet.set_channel_liveness(TestLiveness::empty());
 
 		// A pending record listing the funding transaction among its candidates: its
 		// classification can still be written, and these facts are what would write it.

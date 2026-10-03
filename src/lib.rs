@@ -355,6 +355,12 @@ impl Node {
 			|| monitor_owns_any_0fc_channels
 			|| self.config.anchor_channels_config.enable_zero_fee_commitments;
 
+		// Record the node's channel outputs for channels not reported by a producer: ones opened
+		// before this node recorded channel facts, and ones whose report failed in an earlier session.
+		// Before anything syncs, so that a close or a sweep the first sync finds is classified
+		// against them.
+		self.runtime.block_on(self.wallet.record_channel_outputs());
+
 		// A splice round recorded when this node signed it is taken back once LDK reports the
 		// negotiation failed or the channel closed. LDK reports the loss of a negotiation its last
 		// channel manager write carried mid-way, but a round committed, negotiated and signed

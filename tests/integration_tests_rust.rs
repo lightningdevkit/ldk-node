@@ -18,6 +18,7 @@ use bitcoin::address::NetworkUnchecked;
 use bitcoin::hashes::hex::FromHex;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
+use bitcoin::hex::DisplayHex;
 use bitcoin::{Address, Amount, ScriptBuf, Transaction, Txid};
 use common::logging::{
 	init_log_logger, validate_log_entry, CollectingLogWriter, MultiNodeLogger, TestLogWriter,
@@ -664,6 +665,185 @@ async fn peer_removed_when_counterparty_force_closes_last_channel() {
 		!node_a.list_peers().iter().any(|p| p.node_id == node_b.node_id() && p.is_persisted),
 		"node_a should drop node_b from its peer store after node_b force-closed the last channel"
 	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_close_is_classified_for_a_channel_whose_facts_were_never_recorded() {
+	// A node upgraded from a version that did not record channel facts, or one whose report of a
+	// funding failed, has a live channel without facts on record. On start the node records the
+	// outputs of its live channels, so the close of that channel is classified like any other.
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let config_a = random_config();
+	let store_a = TestSyncStore::new(config_a.node_config.storage_dir_path.clone().into());
+	let node_a = setup_node_with_store(&chain_source, config_a.clone(), store_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	let funding_txo = open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Take node A back to the state of a node that never recorded the channel's facts.
+	node_a.stop().unwrap();
+	drop(node_a);
+	let facts_keys = KVStore::list(&store_a, "channel_tx_facts", "").await.unwrap();
+	assert!(!facts_keys.is_empty(), "opening the channel recorded its funding");
+	for key in facts_keys {
+		KVStore::remove(&store_a, "channel_tx_facts", "", &key, false).await.unwrap();
+	}
+
+	let node_a = setup_node_with_store(&chain_source, config_a, store_a.clone());
+	assert!(
+		!KVStore::list(&store_a, "channel_tx_facts", "").await.unwrap().is_empty(),
+		"starting recorded the channel's funding from the node's channel state"
+	);
+
+	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	node_a.connect(node_b.node_id(), node_addr_b, false).unwrap();
+	let user_channel_id_a = node_a.list_channels().first().unwrap().user_channel_id;
+	node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
+	expect_event!(node_a, ChannelClosed);
+	expect_event!(node_b, ChannelClosed);
+	wait_for_outpoint_spend(&electrsd.client, funding_txo).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let closes = node_a.list_payments_matching(|payment| {
+		matches!(
+			payment.kind,
+			PaymentKind::Onchain { tx_type: Some(TransactionType::CooperativeClose { .. }), .. }
+		)
+	});
+	assert_eq!(closes.len(), 1, "node_a classified the close of a channel it had no facts for");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+// Polling Bitcoin Core connects the blocks a node missed while it was down to its wallet as part
+// of starting, before any background task runs. A sweep that confirmed in those blocks is
+// classified then, so the node's channel outputs must be on record by then.
+#[cfg(feature = "chain-bitcoind")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_sweep_confirmed_while_down_is_classified_for_a_channel_whose_facts_were_never_recorded()
+{
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
+	let config_a = random_config();
+	let store_a = TestSyncStore::new(config_a.node_config.storage_dir_path.clone().into());
+	let node_a = setup_node_with_store(&chain_source, config_a.clone(), store_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	let funding_txo = open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Node B force-closes, and node A's balance comes back to it through its sweeper.
+	let user_channel_id_b = node_b.list_channels().first().unwrap().user_channel_id;
+	node_b.force_close_channel(&user_channel_id_b, node_a.node_id(), None).unwrap();
+	expect_event!(node_a, ChannelClosed);
+	expect_event!(node_b, ChannelClosed);
+	wait_for_outpoint_spend(&electrsd.client, funding_txo).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	node_a.sync_wallets().unwrap();
+	if let Some(ldk_node::LightningBalance::ClaimableAwaitingConfirmations {
+		confirmation_height,
+		..
+	}) = node_a.list_balances().lightning_balances.first()
+	{
+		let blocks_to_go = confirmation_height - node_a.status().current_best_block.height;
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, blocks_to_go as usize).await;
+		node_a.sync_wallets().unwrap();
+	}
+	for _ in 0..6 {
+		if node_a.list_balances().lightning_balances.is_empty() {
+			break;
+		}
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+		node_a.sync_wallets().unwrap();
+	}
+	let mut sweep_txid = None;
+	for _ in 0..20 {
+		node_a.sync_wallets().unwrap();
+		match node_a.list_balances().pending_balances_from_channel_closures.first() {
+			Some(ldk_node::PendingSweepBalance::BroadcastAwaitingConfirmation {
+				latest_spending_txid,
+				..
+			}) => {
+				sweep_txid = Some(*latest_spending_txid);
+				break;
+			},
+			Some(ldk_node::PendingSweepBalance::PendingBroadcast { .. }) | None => {
+				tokio::time::sleep(Duration::from_millis(500)).await;
+			},
+			Some(balance) => panic!("Unexpected balance state: {:?}", balance),
+		}
+	}
+	let sweep_txid = sweep_txid.expect("the sweep was broadcast");
+	wait_for_tx(&electrsd.client, sweep_txid).await;
+
+	// Stop node A before the sweep confirms, and take it back to the state of a node that never
+	// recorded the channel's facts and went down before its wallet saw the sweep. The wallet
+	// polls every couple of seconds, so a poll may have caught the sweep in the moment between
+	// broadcasting and stopping; such a node has no record of it, so that record goes with the
+	// facts.
+	node_a.stop().unwrap();
+	drop(node_a);
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 8).await;
+	let facts_keys = KVStore::list(&store_a, "channel_tx_facts", "").await.unwrap();
+	assert!(!facts_keys.is_empty(), "the channel's funding and swept output were recorded");
+	for key in facts_keys {
+		KVStore::remove(&store_a, "channel_tx_facts", "", &key, false).await.unwrap();
+	}
+	let sweep_record_key = sweep_txid.to_byte_array().as_hex().to_string();
+	for namespace in ["payments", "pending_payments"] {
+		if KVStore::list(&store_a, namespace, "").await.unwrap().contains(&sweep_record_key) {
+			KVStore::remove(&store_a, namespace, "", &sweep_record_key, false).await.unwrap();
+		}
+	}
+
+	// Starting connects the blocks node A missed to its wallet, the sweep among them.
+	let node_a = setup_node_with_store(&chain_source, config_a, store_a.clone());
+	node_a.sync_wallets().unwrap();
+
+	let sweeps = node_a.list_payments_matching(|payment| {
+		matches!(
+			payment.kind,
+			PaymentKind::Onchain { txid, tx_type: Some(TransactionType::Sweep { .. }), .. }
+				if txid == sweep_txid
+		)
+	});
+	assert_eq!(sweeps.len(), 1, "node_a classified the sweep that confirmed while it was down");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
