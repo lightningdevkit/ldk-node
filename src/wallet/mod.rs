@@ -608,9 +608,11 @@ impl Wallet {
 	#[allow(deprecated)]
 	pub(crate) async fn create_funding_transaction(
 		&self, output_script: ScriptBuf, amount: Amount, confirmation_target: ConfirmationTarget,
-		locktime: LockTime,
+		locktime: LockTime, fee_rate: Option<FeeRate>,
 	) -> Result<Transaction, Error> {
-		let fee_rate = self.fee_estimator.estimate_fee_rate(confirmation_target);
+		// Use the set fee_rate or default to fee estimation.
+		let fee_rate =
+			fee_rate.unwrap_or_else(|| self.fee_estimator.estimate_fee_rate(confirmation_target));
 		let mut locked_persister = self.persister.lock().await;
 		let (psbt, change_set) = {
 			let mut locked_wallet = self.inner.lock().expect("lock");
