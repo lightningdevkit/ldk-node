@@ -29,6 +29,8 @@ panic = 'abort'     # Abort on panic
 
 [features]
 default = [
+	"ldk-std",
+	"net-tokio",
 	"chain-esplora",
 	"chain-electrum",
 	"chain-bitcoind",
@@ -37,23 +39,38 @@ default = [
 	"storage-vss",
 	"unified-payments",
 ]
+# LDK's `std` feature reads the system clock internally. Disable it for wasm32, where clock reads
+# must go through `crate::time` and LDK's explicit-time APIs instead. Features whose LDK crates
+# require `std` enable this.
+ldk-std = [
+	"lightning/std",
+	"lightning-invoice/std",
+	"lightning-liquidity/std",
+	"lightning-liquidity/time",
+	"lightning-background-processor/std",
+	"lightning-rapid-gossip-sync/std",
+]
+# Tokio TCP transport for peer connections. Without it, connecting to peers fails and listening
+# addresses are rejected.
+net-tokio = ["dep:lightning-net-tokio"]
 chain-esplora = [
+	"ldk-std",
 	"dep:bdk_esplora",
 	"dep:esplora-client",
 	"dep:ldk-esplora-client",
 	"dep:lightning-transaction-sync",
 	"lightning-transaction-sync/esplora-async-https",
-	"lightning-transaction-sync/time",
 ]
 chain-electrum = [
+	"ldk-std",
 	"dep:bdk_electrum",
 	"dep:electrum-client",
 	"dep:lightning-transaction-sync",
 	"lightning-transaction-sync/electrum-rustls-ring",
 ]
-chain-bitcoind = ["dep:lightning-block-sync"]
+chain-bitcoind = ["ldk-std", "dep:lightning-block-sync"]
 storage-sqlite = ["dep:rusqlite"]
-storage-filesystem = ["dep:lightning-persister"]
+storage-filesystem = ["ldk-std", "dep:lightning-persister"]
 storage-vss = ["dep:vss-client", "dep:prost"]
 storage-postgres = ["dep:tokio-postgres", "dep:native-tls", "dep:postgres-native-tls"]
 storage-postgres-vendored-tls = ["storage-postgres", "native-tls/vendored"]
@@ -65,6 +82,7 @@ unified-payments = [
 uniffi = ["dep:uniffi"]
 uniffi-default = [
 	"uniffi",
+	"net-tokio",
 	"chain-esplora",
 	"chain-electrum",
 	"storage-sqlite",
@@ -86,16 +104,17 @@ uniffi-default = [
 #lightning-macros = { version = "0.2.0" }
 #lightning-dns-resolver = { version = "0.3.0" }
 
-lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", features = ["std"] }
+lightning = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false, features = ["grind_signatures"] }
 lightning-types = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457" }
-lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", features = ["std"] }
-lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457" }
+lightning-invoice = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false }
+lightning-net-tokio = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", optional = true }
 lightning-persister = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", features = ["tokio"], optional = true }
-lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457" }
-lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457" }
+lightning-background-processor = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false }
+lightning-rapid-gossip-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false }
 lightning-block-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", features = ["rest-client", "rpc-client", "tokio"], optional = true }
-lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", optional = true }
-lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", features = ["std"] }
+# Measure sync durations in the node's time module, not the dependency's `time` feature.
+lightning-transaction-sync = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false, optional = true }
+lightning-liquidity = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", default-features = false }
 lightning-macros = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457" }
 lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightning", rev = "2985bd95fdbce06bf9f25f684772b0ba9903e457", optional = true }
 
@@ -113,7 +132,7 @@ bip21 = { version = "0.5", features = ["std"], default-features = false, optiona
 
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 getrandom = { version = "0.3", default-features = false }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
 tokio = { version = "1.39", default-features = false, features = [ "rt-multi-thread", "time", "sync", "macros", "net" ] }
 tokio-util = { version = "0.7.10", default-features = false, features = ["rt"] }
 esplora-client = { version = "0.12", default-features = false, features = ["tokio", "async-https-rustls"], optional = true }

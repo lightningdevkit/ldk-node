@@ -1,1 +1,35 @@
 msrv = "1.63.0"
+
+# Keep library clock reads behind src/time.rs so they work on wasm32. Tokio's runtime timers
+# are separate.
+disallowed-methods = [
+    { path = "std::time::SystemTime::now", reason = "use crate::time instead" },
+    { path = "std::time::SystemTime::elapsed", reason = "use crate::time instead" },
+    { path = "std::time::Instant::now", reason = "use crate::time::Instant instead" },
+    { path = "std::time::Instant::elapsed", reason = "use crate::time::Instant instead" },
+    { path = "tokio::time::Instant::now", reason = "use crate::time::Instant for clock reads; runtime timers remain separate" },
+    { path = "tokio::time::Instant::elapsed", reason = "use crate::time::Instant for elapsed measurements" },
+    { path = "chrono::Utc::now", reason = "use crate::time::now_utc instead", allow-invalid = true },
+    { path = "chrono::Local::now", reason = "use crate::time::now_utc instead", allow-invalid = true },
+    # Dependency APIs that read the platform clock internally. Use their explicit-time variants.
+    { path = "bdk_wallet::Wallet::start_full_scan", reason = "use start_full_scan_at with crate::time" },
+    { path = "bdk_wallet::Wallet::start_sync_with_revealed_spks", reason = "use start_sync_with_revealed_spks_at with crate::time" },
+    { path = "lightning_liquidity::LiquidityManager::new", reason = "use new_with_custom_time_provider with crate::time::LdkTimeProvider" },
+    { path = "lightning_invoice::InvoiceBuilder::current_timestamp", reason = "use duration_since_epoch with crate::time" },
+    { path = "lightning_invoice::Bolt11Invoice::is_expired", reason = "use would_expire with crate::time" },
+    { path = "lightning_invoice::Bolt11Invoice::duration_until_expiry", reason = "use expiration_remaining_from_epoch with crate::time" },
+    { path = "lightning::offers::offer::Offer::is_expired", reason = "use is_expired_no_std with crate::time" },
+    { path = "lightning::offers::refund::Refund::is_expired", reason = "use is_expired_no_std with crate::time" },
+    { path = "lightning::offers::invoice::Bolt12Invoice::is_expired", reason = "use is_expired_no_std with crate::time" },
+    { path = "lightning::offers::static_invoice::StaticInvoice::is_expired", reason = "use is_expired_no_std with crate::time" },
+    { path = "lightning::offers::invoice_request::InvoiceRequest::respond_with", reason = "use respond_with_no_std with crate::time" },
+    { path = "lightning::offers::invoice_request::VerifiedInvoiceRequest::respond_with", reason = "use respond_with_no_std with crate::time" },
+    { path = "lightning::offers::invoice_request::VerifiedInvoiceRequest::respond_using_derived_keys", reason = "use respond_using_derived_keys_no_std with crate::time" },
+    { path = "lightning::offers::refund::Refund::respond_with", reason = "use respond_with_no_std with crate::time" },
+    { path = "lightning::offers::refund::Refund::respond_using_derived_keys", reason = "use respond_using_derived_keys_no_std with crate::time" },
+    { path = "lightning_rapid_gossip_sync::RapidGossipSync::update_network_graph", reason = "use update_network_graph_no_std with Some(crate::time::unix_time_secs().expect(...)) to retain freshness validation" },
+    { path = "lightning_rapid_gossip_sync::RapidGossipSync::sync_network_graph_with_file_path", reason = "read the snapshot and use update_network_graph_no_std with current time" },
+    { path = "lightning::routing::gossip::NetworkGraph::remove_stale_channels_and_tracking", reason = "use remove_stale_channels_and_tracking_with_time with crate::time" },
+    { path = "bdk_chain::bdk_core::spk_client::SyncRequest::builder", reason = "use builder_at with crate::time" },
+    { path = "bdk_chain::bdk_core::spk_client::FullScanRequest::builder", reason = "use builder_at with crate::time" },
+]

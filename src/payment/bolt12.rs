@@ -11,7 +11,7 @@
 
 use std::num::NonZeroU64;
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use lightning::blinded_path::message::BlindedMessagePath;
 use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId};
@@ -34,6 +34,7 @@ use crate::ffi::{maybe_deref, maybe_wrap};
 use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::runtime::Runtime;
+use crate::time;
 use crate::types::{ChannelManager, KeysManager, PaymentStore};
 
 #[cfg(not(feature = "uniffi"))]
@@ -243,9 +244,9 @@ impl Bolt12Payment {
 		})?;
 
 		if let Some(expiry_secs) = expiry_secs {
-			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
-				.duration_since(UNIX_EPOCH)
-				.expect("system time must be after Unix epoch");
+			let absolute_expiry = time::duration_since_epoch()
+				.expect("system time must be after Unix epoch")
+				+ Duration::from_secs(expiry_secs as u64);
 			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
 		}
 
@@ -524,9 +525,9 @@ impl Bolt12Payment {
 		})?;
 
 		if let Some(expiry_secs) = expiry_secs {
-			let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
-				.duration_since(UNIX_EPOCH)
-				.expect("system time must be after Unix epoch");
+			let absolute_expiry = time::duration_since_epoch()
+				.expect("system time must be after Unix epoch")
+				+ Duration::from_secs(expiry_secs as u64);
 			offer_builder = offer_builder.absolute_expiry(absolute_expiry);
 		}
 
@@ -571,9 +572,9 @@ impl Bolt12Payment {
 	) -> Result<Refund, Error> {
 		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
 
-		let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
-			.duration_since(UNIX_EPOCH)
-			.expect("system time must be after Unix epoch");
+		let absolute_expiry = time::duration_since_epoch()
+			.expect("system time must be after Unix epoch")
+			+ Duration::from_secs(expiry_secs as u64);
 		let retry_strategy = Retry::Timeout(LDK_PAYMENT_RETRY_TIMEOUT);
 		let route_parameters =
 			route_parameters.or(self.config.route_parameters).unwrap_or_default();

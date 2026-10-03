@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use bdk_chain::bdk_core::spk_client::{
 	FullScanRequest as BdkFullScanRequest, FullScanResponse as BdkFullScanResponse,
@@ -38,6 +38,7 @@ use crate::fee_estimator::{
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, log_warn, LdkLogger, Logger};
 use crate::runtime::Runtime;
+use crate::time::{self, Instant};
 use crate::tx_broadcaster::SortedTransactions;
 use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::PersistedNodeMetrics;
@@ -202,8 +203,7 @@ impl ElectrumChainSource {
 						if incremental_sync { "Incremental sync" } else { "Sync" },
 						now.elapsed().as_millis()
 					);
-					let unix_time_secs_opt =
-						SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+					let unix_time_secs_opt = time::unix_time_secs();
 					update_and_persist_node_metrics(
 						&self.node_metrics,
 						&*self.kv_store,
@@ -275,8 +275,7 @@ impl ElectrumChainSource {
 		let res = electrum_client.sync_confirmables(vec![confirmable]).await;
 
 		if let Ok(_) = res {
-			let unix_time_secs_opt =
-				SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+			let unix_time_secs_opt = time::unix_time_secs();
 			update_and_persist_node_metrics(
 				&self.node_metrics,
 				&*self.kv_store,
@@ -310,8 +309,7 @@ impl ElectrumChainSource {
 			now.elapsed().as_millis()
 		);
 
-		let unix_time_secs_opt =
-			SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+		let unix_time_secs_opt = time::unix_time_secs();
 		update_and_persist_node_metrics(&self.node_metrics, &*self.kv_store, &*self.logger, |m| {
 			m.latest_fee_rate_cache_update_timestamp = unix_time_secs_opt
 		})
