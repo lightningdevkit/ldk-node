@@ -203,6 +203,7 @@ impl Default for ForwardedPaymentTrackingMode {
 /// |----------------------------------------|--------------------------------------|
 /// | `storage_dir_path`                     | /tmp/ldk_node/                       |
 /// | `network`                              | Bitcoin                              |
+/// |`disable_outbound_lightning_connections`| false                                |
 /// | `listening_addresses`                  | None                                 |
 /// | `announcement_addresses`               | None                                 |
 /// | `node_alias`                           | None                                 |
@@ -227,6 +228,12 @@ pub struct Config {
 	pub storage_dir_path: String,
 	/// The used Bitcoin network.
 	pub network: Network,
+	/// Disables all outbound Lightning peer-to-peer (P2P) connections.
+	///
+	/// Inbound connections are controlled separately by
+	/// [`Config::listening_addresses`]; set it to `None` to prevent inbound connections as well.
+	/// Other networking, including chain synchronization, is unaffected.
+	pub disable_outbound_lightning_connections: bool,
 	/// The addresses on which the node will listen for incoming connections.
 	///
 	/// **Note**: We will only allow opening and accepting public channels if the `node_alias` and the
@@ -304,6 +311,7 @@ impl Default for Config {
 		Self {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
 			network: DEFAULT_NETWORK,
+			disable_outbound_lightning_connections: false,
 			listening_addresses: None,
 			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
