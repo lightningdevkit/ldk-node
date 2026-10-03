@@ -29,9 +29,9 @@ use common::{
 	generate_blocks_and_wait, generate_listening_addresses, invalidate_blocks, open_channel,
 	open_channel_no_wait, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_two_nodes, splice_in_with_all,
-	wait_for_block, wait_for_tx, InMemoryStore, NodePaymentExt, TestChainSource, TestConfig,
-	TestNode, TestStoreType, TestSyncStore,
+	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_node_with_store, setup_two_nodes,
+	splice_in_with_all, wait_for_block, wait_for_tx, InMemoryStore, NodePaymentExt,
+	TestChainSource, TestConfig, TestNode, TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
@@ -286,6 +286,85 @@ impl KVStore for WalletPersistGatedStore {
 }
 
 impl PaginatedKVStore for WalletPersistGatedStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, lightning::io::Error>> + 'static + Send
+	{
+		PaginatedKVStore::list_paginated(
+			&*self.inner,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		)
+	}
+}
+
+/// A store whose writes to one primary namespace fail while the test says so, for exercising how
+/// the node answers a failed write of one kind of record.
+#[derive(Clone)]
+struct NamespaceWriteFailingStore {
+	inner: Arc<InMemoryStore>,
+	primary_namespace: &'static str,
+	failing: Arc<AtomicBool>,
+}
+
+impl NamespaceWriteFailingStore {
+	fn new(primary_namespace: &'static str) -> Self {
+		Self {
+			inner: Arc::new(InMemoryStore::new()),
+			primary_namespace,
+			failing: Arc::new(AtomicBool::new(false)),
+		}
+	}
+
+	/// Makes every write to the namespace fail from now on, or lets them through again.
+	fn fail_writes(&self, fail: bool) {
+		self.failing.store(fail, Ordering::Release);
+	}
+}
+
+impl KVStore for NamespaceWriteFailingStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, lightning::io::Error>> + 'static + Send {
+		KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		// The inner store writes as soon as it is asked, not when its future is polled, so a
+		// failing write is never asked for.
+		let fail =
+			primary_namespace == self.primary_namespace && self.failing.load(Ordering::Acquire);
+		let write = (!fail).then(|| {
+			KVStore::write(&*self.inner, primary_namespace, secondary_namespace, key, buf)
+		});
+		async move {
+			match write {
+				Some(write) => write.await,
+				None => Err(lightning::io::Error::new(
+					lightning::io::ErrorKind::Other,
+					"write failed at the test's request",
+				)),
+			}
+		}
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send {
+		KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+	}
+}
+
+impl PaginatedKVStore for NamespaceWriteFailingStore {
 	fn list_paginated(
 		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
 	) -> impl Future<Output = Result<PaginatedListResponse, lightning::io::Error>> + 'static + Send
@@ -598,6 +677,64 @@ async fn channel_full_cycle_0conf_0reserve() {
 		false,
 	)
 	.await;
+}
+
+// The handler answers a failed write of a channel's facts two ways. The funding this node
+// generates is withheld from LDK until its facts are on record, since nothing may broadcast a
+// transaction this node could not classify: the event is replayed. Every other report accompanies
+// a transaction already released, so its failure is logged and the event proceeds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_funding_is_withheld_until_its_facts_are_recorded() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let store_a = NamespaceWriteFailingStore::new("channel_tx_facts");
+	let node_a = setup_node_with_store(&chain_source, random_config(), store_a.clone());
+	let store_b = NamespaceWriteFailingStore::new("channel_tx_facts");
+	let node_b = setup_node_with_store(&chain_source, random_config(), store_b.clone());
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	store_a.fail_writes(true);
+	store_b.fail_writes(true);
+	let address_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	node_a.open_channel(node_b.node_id(), address_b, 1_000_000, None, None).unwrap();
+
+	// While node A cannot record what the funding transaction is, the transaction stays with
+	// node A: the channel becomes pending for neither node.
+	let withheld = tokio::time::timeout(Duration::from_secs(3), node_a.next_event_async()).await;
+	assert!(
+		withheld.is_err(),
+		"node_a released a funding transaction it holds no facts for: {:?}",
+		withheld
+	);
+	assert!(KVStore::list(&store_a, "channel_tx_facts", "").await.unwrap().is_empty());
+
+	// Once the facts can be recorded, the replayed event records them and hands the funding over.
+	store_a.fail_writes(false);
+	let funding_txo = expect_channel_pending_event!(node_a, node_b.node_id());
+	assert_eq!(KVStore::list(&store_a, "channel_tx_facts", "").await.unwrap().len(), 1);
+
+	// Node B's reports of the funding output fail throughout and are only logged: the channel
+	// becomes pending and ready for it all the same.
+	expect_channel_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	assert!(KVStore::list(&store_b, "channel_tx_facts", "").await.unwrap().is_empty());
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
