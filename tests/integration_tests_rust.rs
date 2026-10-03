@@ -28,8 +28,8 @@ use common::{
 	open_channel_no_wait, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
 	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_node_with_store, setup_two_nodes,
-	splice_in_with_all, wait_for_block, wait_for_tx, InMemoryStore, NodePaymentExt,
-	TestChainSource, TestConfig, TestNode, TestStoreType, TestSyncStore,
+	splice_in_with_all, wait_for_block, wait_for_outpoint_spend, wait_for_tx, InMemoryStore,
+	NodePaymentExt, TestChainSource, TestConfig, TestNode, TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
 use electrsd::ElectrsD;
@@ -728,6 +728,132 @@ async fn a_funding_is_withheld_until_its_facts_are_recorded() {
 	expect_channel_ready_event!(node_a, node_b.node_id());
 	expect_channel_ready_event!(node_b, node_a.node_id());
 	assert!(KVStore::list(&store_b, "channel_tx_facts", "").await.unwrap().is_empty());
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+// LDK reports the output a claim paid this wallet at the very depth the claim's payment record
+// graduates at. Polling Bitcoin Core connects each block to the wallet before the channel monitor,
+// so the record graduates unnamed, and only the naming the event handler runs after recording the
+// report gives the claim its type.
+#[cfg(feature = "chain-bitcoind")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_claim_is_named_after_its_record_graduated() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a, addr_b],
+		Amount::from_sat(2_125_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let funding_txo = open_channel(&node_a, &node_b, 1_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	let channel_id = node_b.list_channels()[0].channel_id;
+
+	// Node B holds the payment node A makes it, so the HTLC is still outstanding when node A
+	// force-closes. Supplying the preimage then has node B's monitor claim the HTLC output of
+	// node A's commitment transaction straight to node B's wallet.
+	let preimage = PaymentPreimage([7u8; 32]);
+	let payment_hash = PaymentHash(Sha256Hash::hash(&preimage.0).to_byte_array());
+	let amount_msat = 50_000_000;
+	let description =
+		Bolt11InvoiceDescription::Direct(Description::new("held".to_string()).unwrap());
+	let invoice = node_b
+		.bolt11_payment()
+		.receive_for_hash(amount_msat, &description, 9217, payment_hash)
+		.unwrap();
+	node_a.bolt11_payment().send(&invoice, None).unwrap();
+	let (payment_id, claimable_amount_msat) =
+		expect_payment_claimable_event!(node_b, payment_hash, amount_msat);
+
+	node_a.force_close_channel(&user_channel_id_a, node_b.node_id(), None).unwrap();
+	expect_event!(node_a, ChannelClosed);
+	expect_event!(node_b, ChannelClosed);
+
+	node_b.bolt11_payment().claim_for_id(payment_id, claimable_amount_msat, preimage).unwrap();
+	expect_payment_received_event!(node_b, claimable_amount_msat);
+
+	let onchain_payments = |node: &TestNode| -> Vec<PaymentDetails> {
+		node.list_all_payments()
+			.into_iter()
+			.filter(|payment| matches!(payment.kind, PaymentKind::Onchain { .. }))
+			.collect()
+	};
+	let payment_of = |node: &TestNode, txid: Txid| -> PaymentDetails {
+		onchain_payments(node)
+			.into_iter()
+			.find(
+				|payment| matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == txid),
+			)
+			.unwrap()
+	};
+
+	// The claim is node B's first channel transaction on record: nothing of node A's commitment
+	// transaction pays node B's wallet. It is recorded once confirmed, unnamed.
+	let before: Vec<PaymentId> = onchain_payments(&node_b).iter().map(|p| p.id).collect();
+	wait_for_outpoint_spend(&electrsd.client, funding_txo).await;
+	let mut claim_txid = None;
+	for _ in 0..5 {
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+		let new: Vec<PaymentDetails> =
+			onchain_payments(&node_b).into_iter().filter(|p| !before.contains(&p.id)).collect();
+		if let Some(claim) = new.first() {
+			assert_eq!(new.len(), 1, "node_b recorded more than its claim: {:?}", new);
+			assert_eq!(claim.direction, PaymentDirection::Inbound);
+			match claim.kind {
+				PaymentKind::Onchain { txid, tx_type: None, .. } => claim_txid = Some(txid),
+				ref kind => panic!("node_b's claim was named before it was reported: {:?}", kind),
+			}
+			break;
+		}
+	}
+	let claim_txid = claim_txid.expect("node_b never recorded its claim");
+
+	// The block that graduates the record reaches the wallet first, so the record graduates
+	// before the report of what the claim paid is recorded and named from.
+	for _ in 0..6 {
+		if payment_of(&node_b, claim_txid).status == PaymentStatus::Succeeded {
+			break;
+		}
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+		node_a.sync_wallets().unwrap();
+		node_b.sync_wallets().unwrap();
+	}
+	assert_eq!(payment_of(&node_b, claim_txid).status, PaymentStatus::Succeeded);
+
+	let named = async {
+		loop {
+			if let PaymentKind::Onchain { tx_type: Some(tx_type), .. } =
+				payment_of(&node_b, claim_txid).kind
+			{
+				break tx_type;
+			}
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+	};
+	let tx_type = tokio::time::timeout(Duration::from_secs(10), named)
+		.await
+		.expect("node_b never named its claim from the report of what it paid");
+	assert_eq!(
+		tx_type,
+		TransactionType::Claim { counterparty_node_id: node_a.node_id(), channel_id }
+	);
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
