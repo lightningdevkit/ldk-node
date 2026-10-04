@@ -1851,7 +1851,8 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		+ invoice_amount_3_msat
 		+ determined_amount_msat
 		+ keysend_amount_msat)
-		/ 1000 - splice_out_sat;
+		/ 1000
+		- splice_out_sat;
 	let node_a_upper_bound_sat =
 		(premine_amount_sat - funding_amount_sat) + (funding_amount_sat - sum_of_all_payments_sat);
 	let node_a_lower_bound_sat = node_a_upper_bound_sat - onchain_fee_buffer_sat;
@@ -2005,7 +2006,8 @@ impl TestSyncStoreInner {
 	) -> lightning::io::Result<Vec<String>> {
 		let fs_res = KVStore::list(&self.fs_store, primary_namespace, secondary_namespace).await;
 		#[cfg(feature = "storage-sqlite")]
-		let sqlite_res = KVStore::list(&self.sqlite_store, primary_namespace, secondary_namespace).await;
+		let sqlite_res =
+			KVStore::list(&self.sqlite_store, primary_namespace, secondary_namespace).await;
 		let test_res =
 			KVStore::list(&self.test_store, primary_namespace, secondary_namespace).await;
 

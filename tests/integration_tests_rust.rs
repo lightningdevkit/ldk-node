@@ -3338,7 +3338,8 @@ async fn async_payment() {
 			.filter(|n| {
 				node.network_graph().node(n).map_or(false, |info| info.announcement_info.is_some())
 			})
-			.count() >= 2
+			.count()
+			>= 2
 	};
 
 	// Wait for everyone to see all channels and node announcements.

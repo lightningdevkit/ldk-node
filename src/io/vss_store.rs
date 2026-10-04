@@ -328,7 +328,8 @@ impl PaginatedKVStore for VssStore {
 impl MigratableKVStore for VssStore {
 	fn list_all_keys(
 		&self,
-	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send {
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+	{
 		let inner = Arc::clone(&self.inner);
 		let runtime = self.internal_runtime();
 		async move {
