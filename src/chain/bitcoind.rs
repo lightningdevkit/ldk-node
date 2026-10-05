@@ -791,14 +791,14 @@ pub enum BitcoindClient {
 		rpc_client: Arc<RpcClient>,
 		latest_mempool_timestamp: AtomicU64,
 		mempool_entries_cache: tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
-		mempool_txs_cache: tokio::sync::Mutex<HashMap<Txid, (Transaction, u64)>>,
+		mempool_txs_cache: tokio::sync::Mutex<HashMap<Txid, Transaction>>,
 	},
 	Rest {
 		rest_client: Arc<RestClient>,
 		rpc_client: Arc<RpcClient>,
 		latest_mempool_timestamp: AtomicU64,
 		mempool_entries_cache: tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
-		mempool_txs_cache: tokio::sync::Mutex<HashMap<Txid, (Transaction, u64)>>,
+		mempool_txs_cache: tokio::sync::Mutex<HashMap<Txid, Transaction>>,
 	},
 }
 
@@ -1238,9 +1238,12 @@ impl BitcoindClient {
 	async fn get_mempool_transactions_and_timestamp_at_height_inner(
 		&self, latest_mempool_timestamp: &AtomicU64,
 		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
-		mempool_txs_cache: &tokio::sync::Mutex<HashMap<Txid, (Transaction, u64)>>,
+		mempool_txs_cache: &tokio::sync::Mutex<HashMap<Txid, Transaction>>,
 		best_processed_height: u32,
 	) -> Result<Vec<(Transaction, u64)>, BitcoindClientError> {
+		// Date `last_seen` on our own clock: the entry-time watermark below resets on restart.
+		let observed_at =
+			SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 		let prev_mempool_time = latest_mempool_timestamp.load(Ordering::Relaxed);
 		let mut latest_time = prev_mempool_time;
 
@@ -1273,15 +1276,15 @@ impl BitcoindClient {
 				continue;
 			}
 
-			if let Some((cached_tx, cached_time)) = mempool_txs_cache.get(txid) {
-				txs_to_emit.push((cached_tx.clone(), *cached_time));
+			if let Some(cached_tx) = mempool_txs_cache.get(txid) {
+				txs_to_emit.push((cached_tx.clone(), observed_at));
 				continue;
 			}
 
 			match self.get_raw_transaction(&entry.txid).await {
 				Ok(Some(tx)) => {
-					mempool_txs_cache.insert(entry.txid, (tx.clone(), entry.time));
-					txs_to_emit.push((tx, entry.time));
+					mempool_txs_cache.insert(entry.txid, tx.clone());
+					txs_to_emit.push((tx, observed_at));
 				},
 				Ok(None) => {
 					continue;
@@ -1304,17 +1307,15 @@ impl BitcoindClient {
 		&self, bdk_unconfirmed_txids: Vec<Txid>,
 	) -> Result<Vec<(Txid, u64)>, BitcoindClientError> {
 		match self {
-			BitcoindClient::Rpc { latest_mempool_timestamp, mempool_entries_cache, .. } => {
+			BitcoindClient::Rpc { mempool_entries_cache, .. } => {
 				Self::get_evicted_mempool_txids_and_timestamp_inner(
-					latest_mempool_timestamp,
 					mempool_entries_cache,
 					bdk_unconfirmed_txids,
 				)
 				.await
 			},
-			BitcoindClient::Rest { latest_mempool_timestamp, mempool_entries_cache, .. } => {
+			BitcoindClient::Rest { mempool_entries_cache, .. } => {
 				Self::get_evicted_mempool_txids_and_timestamp_inner(
-					latest_mempool_timestamp,
 					mempool_entries_cache,
 					bdk_unconfirmed_txids,
 				)
@@ -1324,16 +1325,17 @@ impl BitcoindClient {
 	}
 
 	async fn get_evicted_mempool_txids_and_timestamp_inner(
-		latest_mempool_timestamp: &AtomicU64,
 		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
 		bdk_unconfirmed_txids: Vec<Txid>,
 	) -> Result<Vec<(Txid, u64)>, BitcoindClientError> {
-		let latest_mempool_timestamp = latest_mempool_timestamp.load(Ordering::Relaxed);
+		// BDK only drops the transaction once this reaches its persisted `last_seen`.
+		let observed_at =
+			SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
 		let mempool_entries_cache = mempool_entries_cache.lock().await;
 		let evicted_txids = bdk_unconfirmed_txids
 			.into_iter()
 			.filter(|txid| !mempool_entries_cache.contains_key(txid))
-			.map(|txid| (txid, latest_mempool_timestamp))
+			.map(|txid| (txid, observed_at))
 			.collect();
 		Ok(evicted_txids)
 	}
@@ -1618,9 +1620,9 @@ impl std::error::Error for BitcoindClientError {}
 
 #[cfg(test)]
 mod tests {
-	use std::collections::HashSet;
+	use std::collections::{HashMap, HashSet};
 	use std::sync::Mutex;
-	use std::time::Duration;
+	use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 	use bitcoin::hashes::Hash;
 	use bitcoin::{FeeRate, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
@@ -1631,11 +1633,41 @@ mod tests {
 	use serde_json::json;
 
 	use crate::chain::bitcoind::{
-		acquire_initial_wallet_sync_guard, FeeResponse, GetMempoolEntryResponse,
+		acquire_initial_wallet_sync_guard, BitcoindClient, FeeResponse, GetMempoolEntryResponse,
 		GetRawMempoolResponse, GetRawTransactionResponse, MempoolMinFeeResponse,
 	};
 	use crate::chain::{WalletSyncGuard, WalletSyncStatus};
 	use crate::Error;
+
+	/// An absence must be dated with when we observed it, not with the newest mempool entry
+	/// time we have seen. That watermark resets to zero on restart while the transaction's
+	/// `last_seen` persists, and BDK keeps an evicted transaction canonical while its
+	/// `evicted_at` predates its `last_seen`.
+	#[tokio::test]
+	async fn mempool_absence_is_dated_with_the_observation_time() {
+		let before = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+
+		// An empty mempool: nothing here could advance an entry-time watermark past the
+		// transaction's `last_seen`.
+		let mempool_entries_cache = tokio::sync::Mutex::new(HashMap::new());
+		let txid = Txid::from_byte_array([23u8; 32]);
+
+		let evicted = BitcoindClient::get_evicted_mempool_txids_and_timestamp_inner(
+			&mempool_entries_cache,
+			vec![txid],
+		)
+		.await
+		.unwrap();
+
+		assert_eq!(evicted.len(), 1);
+		assert_eq!(evicted[0].0, txid);
+		assert!(
+			evicted[0].1 >= before,
+			"an absence must be dated with when we observed it, got {} before {}",
+			evicted[0].1,
+			before,
+		);
+	}
 
 	#[tokio::test]
 	async fn initial_sync_waits_for_in_progress_sync() {
