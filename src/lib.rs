@@ -1442,6 +1442,12 @@ impl Node {
 				.expect("a 16-byte slice should convert into a [u8; 16]"),
 		);
 
+		// Register the fee-rate override before creating the channel, as the
+		// `FundingGenerationReady` event may be handled before `create_channel` returns.
+		if let Some(fee_rate) = fee_rate {
+			self.pending_funding_fee_rates.lock().expect("lock").insert(user_channel_id, fee_rate);
+		}
+
 		let result = if disable_counterparty_reserve {
 			self.channel_manager.create_channel_to_trusted_peer_0reserve(
 				peer_info.node_id,
@@ -1472,12 +1478,6 @@ impl Node {
 					zero_reserve_string,
 					peer_info.node_id
 				);
-				if let Some(fee_rate) = fee_rate {
-					self.pending_funding_fee_rates
-						.lock()
-						.expect("lock")
-						.insert(user_channel_id, fee_rate);
-				}
 				self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
 				Ok(UserChannelId(user_channel_id))
 			},
@@ -1488,6 +1488,7 @@ impl Node {
 					zero_reserve_string,
 					e
 				);
+				self.pending_funding_fee_rates.lock().expect("lock").remove(&user_channel_id);
 				Err(Error::ChannelCreationFailed)
 			},
 		}
