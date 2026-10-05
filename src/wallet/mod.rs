@@ -9160,28 +9160,42 @@ mod tests {
 		held_outputs: Vec<HeldChannelOutput>,
 	}
 
-	/// A stand-in for the node's channel state. `None` stands for the state being unreachable,
-	/// as it is while the node is built and while it is torn down.
-	struct TestLiveness(Mutex<Option<TestChannelState>>);
+	/// A stand-in for the node's channel state, which holds what it holds whether or not it can
+	/// be consulted: it cannot be while the node is built and while it is torn down.
+	struct TestLiveness {
+		state: Mutex<TestChannelState>,
+		reachable: AtomicBool,
+	}
 
 	impl TestLiveness {
 		fn holding(state: TestChannelState) -> Arc<Self> {
-			Arc::new(Self(Mutex::new(Some(state))))
+			Arc::new(Self { state: Mutex::new(state), reachable: AtomicBool::new(true) })
 		}
 
 		fn holding_nothing() -> Arc<Self> {
 			Self::holding(TestChannelState::default())
 		}
 
+		/// Holds `state` without answering for it until [`Self::reach`] is called.
+		fn unreachable_holding(state: TestChannelState) -> Arc<Self> {
+			Arc::new(Self { state: Mutex::new(state), reachable: AtomicBool::new(false) })
+		}
+
 		fn unreachable() -> Arc<Self> {
-			Arc::new(Self(Mutex::new(None)))
+			Self::unreachable_holding(TestChannelState::default())
+		}
+
+		fn reach(&self) {
+			self.reachable.store(true, Ordering::Release);
 		}
 	}
 
 	impl ChannelLiveness for TestLiveness {
 		fn live_channels(&self) -> Option<HashSet<ChannelId>> {
-			let locked = self.0.lock().unwrap();
-			let state = locked.as_ref()?;
+			if !self.reachable.load(Ordering::Acquire) {
+				return None;
+			}
+			let state = self.state.lock().unwrap();
 			Some(live_channels_of(
 				state.channels.iter().copied(),
 				state.monitors.iter().copied(),
@@ -9190,8 +9204,10 @@ mod tests {
 		}
 
 		fn held_outputs(&self) -> Option<Vec<HeldChannelOutput>> {
-			let locked = self.0.lock().unwrap();
-			Some(locked.as_ref()?.held_outputs.clone())
+			if !self.reachable.load(Ordering::Acquire) {
+				return None;
+			}
+			Some(self.state.lock().unwrap().held_outputs.clone())
 		}
 	}
 
@@ -9241,13 +9257,16 @@ mod tests {
 		(wallet, funding_txid)
 	}
 
+	/// Moves the wallet's chain tip to `height` without running the chain tip pass.
+	fn set_chain_tip(wallet: &Wallet, height: u32) {
+		let mut locked = wallet.inner.lock().unwrap();
+		let chain = locked.latest_checkpoint().insert(block_id_at(height));
+		locked.apply_update(Update { chain: Some(chain), ..Default::default() }).unwrap();
+	}
+
 	/// Runs the chain tip pass at `height`, which is where recorded facts are dropped.
 	async fn chain_tip_changed(wallet: &Wallet, height: u32) {
-		{
-			let mut locked = wallet.inner.lock().unwrap();
-			let chain = locked.latest_checkpoint().insert(block_id_at(height));
-			locked.apply_update(Update { chain: Some(chain), ..Default::default() }).unwrap();
-		}
+		set_chain_tip(wallet, height);
 		let event = WalletEvent::ChainTipChanged {
 			old_tip: block_id_at(height - 1),
 			new_tip: block_id_at(height),
@@ -9277,7 +9296,10 @@ mod tests {
 			ChannelOutputRole::Funding,
 			[0],
 		);
-		wallet.record_channel_tx_facts(reported.clone()).await.unwrap();
+		wallet.record_channel_tx_facts(reported).await.unwrap();
+		let reported = wallet.channel_tx_facts(&open_funding_txid).await.expect("reported");
+		// The pass runs at a later tip, at which a rewrite of the report would re-date it.
+		set_chain_tip(&wallet, reported.recorded_at_height + 7);
 
 		let funding = |channel: &Channel, user_channel_id, txid, vout| HeldChannelOutput {
 			channel: channel.clone(),
@@ -9308,9 +9330,10 @@ mod tests {
 		wallet.record_held_channel_outputs().await;
 
 		let open_facts = wallet.channel_tx_facts(&open_funding_txid).await.expect("kept");
-		assert_eq!(open_facts.outputs, reported.outputs, "what was reported stays as it was");
+		assert_eq!(open_facts, reported, "what was reported stays as it was, dated as it was");
 		let closed_facts =
 			wallet.channel_tx_facts(&closed_funding_txid).await.expect("recorded at startup");
+		assert_eq!(closed_facts.recorded_at_height, reported.recorded_at_height + 7);
 		assert_eq!(
 			closed_facts.outputs,
 			vec![ChannelOutputFact {
@@ -9343,11 +9366,25 @@ mod tests {
 		);
 	}
 
+	/// The channel state holds an output no producer reported, but cannot be consulted: nothing
+	/// is recorded, and the output is recorded by the pass once the state can be.
 	#[tokio::test]
 	async fn startup_records_nothing_while_the_channel_state_is_unreachable() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let wallet = new_test_wallet(Arc::clone(&store), false).await;
-		wallet.set_channel_liveness(TestLiveness::unreachable());
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let funding_txid = Txid::from_byte_array([44u8; 32]);
+		let liveness = TestLiveness::unreachable_holding(TestChannelState {
+			held_outputs: vec![HeldChannelOutput {
+				channel: Channel { counterparty_node_id, channel_id },
+				user_channel_id: None,
+				role: ChannelOutputRole::Funding,
+				txid: funding_txid,
+				vout: 0,
+			}],
+			..Default::default()
+		});
+		wallet.set_channel_liveness(liveness.clone());
 
 		wallet.record_held_channel_outputs().await;
 
@@ -9358,7 +9395,11 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		assert!(keys.is_empty());
+		assert!(keys.is_empty(), "the state was not consulted");
+
+		liveness.reach();
+		wallet.record_held_channel_outputs().await;
+		assert!(wallet.channel_tx_facts(&funding_txid).await.is_some());
 	}
 
 	#[tokio::test]
@@ -9498,7 +9539,7 @@ mod tests {
 			"the node still holds the channel",
 		);
 
-		*liveness.0.lock().unwrap() = Some(TestChannelState::default());
+		*liveness.state.lock().unwrap() = TestChannelState::default();
 		chain_tip_changed(&wallet, LONG_AFTER + 1).await;
 		assert!(
 			wallet.channel_tx_facts(&funding_txid).await.is_none(),
