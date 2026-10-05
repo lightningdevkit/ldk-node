@@ -30,8 +30,8 @@
   `Event::PaymentClaimable`.
 
 ## Feature and API updates
-- All `Node::open_channel` variants now take a trailing optional `FeeRate` that, when set, is
-  used for the channel's funding transaction instead of the internal fee estimation. For the
+- All `Node::open_channel` variants now take an optional `FeeRate` (after
+  `push_to_counterparty_msat`) that, when set, is used for the channel's funding transaction instead of the internal fee estimation. For the
   `_with_all` variants it also determines the rate at which the maximum funding amount is
   computed. When unset, behavior is unchanged.
 - Language-binding `Mnemonic` objects can be generated or constructed from entropy and expose

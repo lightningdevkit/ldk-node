@@ -1544,8 +1544,8 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		fee_rate: Option<FfiFeeRate>,
+		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
+		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
@@ -1586,8 +1586,8 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		fee_rate: Option<FfiFeeRate>,
+		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
+		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
@@ -1626,7 +1626,7 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
-		channel_config: Option<ChannelConfig>, fee_rate: Option<FfiFeeRate>,
+		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
@@ -1664,7 +1664,7 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
-		channel_config: Option<ChannelConfig>, fee_rate: Option<FfiFeeRate>,
+		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {err}");
@@ -1708,8 +1708,8 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_0reserve_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		fee_rate: Option<FfiFeeRate>,
+		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
+		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
@@ -1743,7 +1743,7 @@ impl Node {
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn open_0reserve_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
-		channel_config: Option<ChannelConfig>, fee_rate: Option<FfiFeeRate>,
+		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
