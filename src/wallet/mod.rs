@@ -9344,8 +9344,9 @@ mod tests {
 			wallet_with_a_spent_funding(Arc::clone(&store), &channel).await;
 		wallet.set_channel_liveness(TestLiveness::holding_nothing());
 
-		// The spend is long buried, but its own record is still pending: whatever it is has yet
-		// to be written onto that record, and these facts are what would decide it.
+		// The spend is long buried, but its payment is still pending: the facts of what it
+		// spends are kept for as long as the pending store refers to it, whatever its record
+		// already says of it.
 		let close_txid = {
 			let locked = wallet.inner.lock().unwrap();
 			*locked
