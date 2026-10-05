@@ -14,28 +14,11 @@ use lightning::ln::channelmanager::PaymentId;
 
 use crate::config::Config;
 use crate::error::Error;
+use crate::ffi::{maybe_map_fee_rate_opt, FfiFeeRate};
 use crate::logger::{log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{ChannelManager, Wallet};
 use crate::wallet::OnchainSendAmount;
-
-#[cfg(not(feature = "uniffi"))]
-type FeeRate = bitcoin::FeeRate;
-#[cfg(feature = "uniffi")]
-type FeeRate = Arc<bitcoin::FeeRate>;
-
-macro_rules! maybe_map_fee_rate_opt {
-	($fee_rate_opt:expr) => {{
-		#[cfg(not(feature = "uniffi"))]
-		{
-			$fee_rate_opt
-		}
-		#[cfg(feature = "uniffi")]
-		{
-			$fee_rate_opt.map(|f| *f)
-		}
-	}};
-}
 
 /// A payment handler allowing to send and receive on-chain payments.
 ///
@@ -94,9 +77,9 @@ impl OnchainPayment {
 	///
 	/// [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
 	pub fn send_to_address(
-		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FeeRate>,
+		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FfiFeeRate>,
 	) -> Result<Txid, Error> {
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.runtime.block_on(self.send_to_address_inner(address, amount_sats, fee_rate_opt))
 	}
 
@@ -116,7 +99,7 @@ impl OnchainPayment {
 	///
 	/// [`BalanceDetails::spendable_onchain_balance_sats`]: crate::balance::BalanceDetails::spendable_onchain_balance_sats
 	pub fn send_all_to_address(
-		&self, address: &bitcoin::Address, retain_reserves: bool, fee_rate: Option<FeeRate>,
+		&self, address: &bitcoin::Address, retain_reserves: bool, fee_rate: Option<FfiFeeRate>,
 	) -> Result<Txid, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
@@ -130,7 +113,7 @@ impl OnchainPayment {
 			OnchainSendAmount::AllDrainingReserve
 		};
 
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.runtime.block_on(self.wallet.send_to_address(address, send_amount, fee_rate_opt))
 	}
 
@@ -149,11 +132,11 @@ impl OnchainPayment {
 	///
 	/// [`BalanceDetails::total_anchor_channels_reserve_sats`]: crate::BalanceDetails::total_anchor_channels_reserve_sats
 	pub fn bump_fee_rbf(
-		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>,
+		&self, payment_id: PaymentId, fee_rate: Option<FfiFeeRate>,
 	) -> Result<Txid, Error> {
 		let cur_anchor_reserve_sats =
 			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.runtime.block_on(self.wallet.bump_fee_rbf(
 			payment_id,
 			fee_rate_opt,

@@ -200,7 +200,7 @@ pub use types::{
 pub use vss_client;
 
 use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY};
-use crate::ffi::{maybe_deref, maybe_wrap};
+use crate::ffi::{maybe_deref, maybe_map_fee_rate_opt, maybe_wrap, FfiFeeRate};
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
@@ -212,24 +212,6 @@ type NodeFeatures = Arc<crate::ffi::NodeFeatures>;
 
 #[cfg(feature = "uniffi")]
 uniffi::include_scaffolding!("ldk_node");
-
-#[cfg(not(feature = "uniffi"))]
-type FfiFeeRate = bitcoin::FeeRate;
-#[cfg(feature = "uniffi")]
-type FfiFeeRate = Arc<bitcoin::FeeRate>;
-
-macro_rules! maybe_map_fee_rate_opt {
-	($fee_rate_opt:expr) => {{
-		#[cfg(not(feature = "uniffi"))]
-		{
-			$fee_rate_opt
-		}
-		#[cfg(feature = "uniffi")]
-		{
-			$fee_rate_opt.map(|f| *f)
-		}
-	}};
-}
 
 #[cfg(cycle_tests)]
 /// A list of [`Weak`]s which can be used to check that a [`Node`]'s inner fields are being
@@ -1565,7 +1547,7 @@ impl Node {
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		fee_rate: Option<FfiFeeRate>,
 	) -> Result<UserChannelId, Error> {
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1612,7 +1594,7 @@ impl Node {
 			return Err(Error::ChannelCreationFailed);
 		}
 
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1646,7 +1628,7 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		channel_config: Option<ChannelConfig>, fee_rate: Option<FfiFeeRate>,
 	) -> Result<UserChannelId, Error> {
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1689,7 +1671,7 @@ impl Node {
 			return Err(Error::ChannelCreationFailed);
 		}
 
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1729,7 +1711,7 @@ impl Node {
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		fee_rate: Option<FfiFeeRate>,
 	) -> Result<UserChannelId, Error> {
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1763,7 +1745,7 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		channel_config: Option<ChannelConfig>, fee_rate: Option<FfiFeeRate>,
 	) -> Result<UserChannelId, Error> {
-		let fee_rate_opt = maybe_map_fee_rate_opt!(fee_rate);
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
