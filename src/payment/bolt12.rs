@@ -14,7 +14,9 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use lightning::blinded_path::message::BlindedMessagePath;
-use lightning::ln::channelmanager::{OptionalOfferPaymentParams, PaymentId, RecurrencePaymentParams};
+use lightning::ln::channelmanager::{
+	OptionalOfferPaymentParams, PaymentId, RecurrencePaymentParams,
+};
 use lightning::ln::outbound_payment::Retry;
 use lightning::offers::invoice_request::RecurrenceId;
 use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity, RecurrenceType};
@@ -196,9 +198,7 @@ impl Bolt12Payment {
 			params,
 			optional_params,
 		) {
-			Ok(()) => {
-				(PaymentStatus::Pending, Ok((recurrence_id, payment_id)))
-			},
+			Ok(()) => (PaymentStatus::Pending, Ok((recurrence_id, payment_id))),
 			Err(e) => {
 				log_error!(self.logger, "Failed to send invoice request: {:?}", e);
 				if matches!(e, Bolt12SemanticError::DuplicatePaymentId) {

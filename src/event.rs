@@ -721,7 +721,7 @@ where
 
 		let Some(invoice_recurrence) = invoice.invoice_recurrence() else {
 			debug_assert!(false, "Invoice that should be corresponding to recurrence according to our recurrence store doesn't?");
-			return Ok(())
+			return Ok(());
 		};
 
 		let offer = Offer::try_from(details.original_offer.clone()).map_err(|_| ReplayEvent())?;
@@ -756,6 +756,50 @@ where
 				Err(ReplayEvent())
 			},
 		}
+	}
+
+	/// Marks the unique recurrence with this active payment ID as failed.
+	///
+	/// Leaves unrelated or already-handled attempts unchanged and requests event
+	/// replay if the recurrence update cannot be persisted.
+	async fn update_recurrence_on_payment_failed(
+		&self, payment_id: PaymentId,
+	) -> Result<(), ReplayEvent> {
+		// Match only the current active attempt so replayed failures cannot overwrite
+		// a failed attempt or a newer payment. Check uniqueness before changing state.
+		let mut matches = self
+			.recurrence_store
+			.list_filter(|details| {
+				details.payment_state == RecurrencePaymentState::Active(payment_id)
+			})
+			.await;
+		match matches.as_mut_slice() {
+			// Ordinary payments and already-handled failures need no recurrence update.
+			[] => {},
+			[details] => {
+				details.payment_state = RecurrencePaymentState::Failed(payment_id);
+				match self.recurrence_store.update(details.to_update()).await {
+					Ok(DataStoreUpdateResult::Updated | DataStoreUpdateResult::Unchanged) => {},
+					Ok(DataStoreUpdateResult::NotFound) => {
+						log_error!(
+							self.logger,
+							"Recurrence disappeared before its failed payment update was stored"
+						);
+						return Err(ReplayEvent());
+					},
+					Err(e) => {
+						log_error!(self.logger, "Failed to store updated recurrence: {}", e);
+						return Err(ReplayEvent());
+					},
+				}
+			},
+			_ => {
+				debug_assert!(false, "multiple recurrences have the same active payment ID?");
+				return Ok(());
+			},
+		}
+
+		Ok(())
 	}
 
 	async fn resolve_inbound_payment_id(
@@ -1477,11 +1521,12 @@ where
 					..PaymentDetailsUpdate::new(payment_id)
 				};
 
-				if let Some(invoice) = bolt12_invoice
-					.as_ref()
-					.and_then(|paid_invoice| paid_invoice.bolt12_invoice())
+				if let Some(invoice) =
+					bolt12_invoice.as_ref().and_then(|paid_invoice| paid_invoice.bolt12_invoice())
 				{
-					if let Err(e) = self.advance_recurrence_on_payment_sent(payment_id, invoice).await {
+					if let Err(e) =
+						self.advance_recurrence_on_payment_sent(payment_id, invoice).await
+					{
 						log_error!(self.logger, "Failed to advance recurrence: replaying event");
 						return Err(e);
 					}
@@ -1545,6 +1590,8 @@ where
 					payment_id,
 					reason
 				);
+
+				self.update_recurrence_on_payment_failed(payment_id).await?;
 
 				let update = PaymentDetailsUpdate {
 					hash: Some(payment_hash),
