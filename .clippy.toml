@@ -1,4 +1,4 @@
-msrv = "1.63.0"
+msrv = "1.85.0"
 
 # Keep library clock reads behind src/time.rs so they work on wasm32. Tokio's runtime timers
 # are separate.
