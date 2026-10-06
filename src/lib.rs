@@ -2573,7 +2573,7 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 				.contains(&c.counterparty.node_id)
 				&& c.channel_shutdown_state
 					.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
-				&& c.channel_type.as_ref().map_or(false, requires_anchor_channel_type)
+				&& c.channel_type.as_ref().map_or(true, requires_anchor_channel_type)
 		})
 		.count() as u64
 		* config.anchor_channels_config.per_channel_reserve_sats
