@@ -88,7 +88,7 @@ use crate::io::{
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
-use crate::liquidity::{LSPS2ServiceConfig, LiquiditySourceBuilder, LspConfig};
+use crate::liquidity::{LSPS2ServiceConfig, LSPS5ServiceConfig, LiquiditySourceBuilder, LspConfig};
 use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
 use crate::message_handler::NodeCustomMessageHandler;
@@ -149,10 +149,14 @@ struct PathfindingScoresSyncConfig {
 
 #[derive(Debug, Clone, Default)]
 struct LiquiditySourceConfig {
-	// Acts for both LSPS1 and LSPS2 clients connecting to the given service.
+	// Acts for LSPS1, LSPS2 and LSPS5 clients connecting to the given service.
 	lsp_nodes: Vec<LspConfig>,
 	// Act as an LSPS2 service.
 	lsps2_service: Option<LSPS2ServiceConfig>,
+	// Act as an LSPS5 service.
+	lsps5_service: Option<LSPS5ServiceConfig>,
+	// Indicates whether the LSPS service will be announced via the gossip network.
+	advertise_service: bool,
 }
 
 #[derive(Clone)]
@@ -545,18 +549,30 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
-	/// channels to clients.
+	/// Configures the [`Node`] instance to provide [bLIP-52 / LSPS2] and/or [bLIP-55 / LSPS5]
+	/// services to clients.
+	///
+	/// [bLIP-52 / LSPS2] issues just-in-time channels to clients, [bLIP-55 / LSPS5] allows clients
+	/// to register webhooks for push notifications.
+	///
+	/// Passing `None` leaves the respective service disabled.
+	///
+	/// `advertise_service` indicates whether we'll announce LSPS support via the gossip network.
+	/// This signals that we act as an LSP, so it applies to every service enabled here.
 	///
 	/// **Caution**: LSP service support is in **alpha** and is considered an experimental feature.
 	///
-	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
+	/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
 	pub fn enable_liquidity_provider(
-		&mut self, lsps2_service_config: LSPS2ServiceConfig,
+		&mut self, lsps2_service_config: Option<LSPS2ServiceConfig>,
+		lsps5_service_config: Option<LSPS5ServiceConfig>, advertise_service: bool,
 	) -> &mut Self {
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		liquidity_source_config.lsps2_service = Some(lsps2_service_config);
+		liquidity_source_config.lsps2_service = lsps2_service_config;
+		liquidity_source_config.lsps5_service = lsps5_service_config;
+		liquidity_source_config.advertise_service = advertise_service;
 		self
 	}
 
@@ -1194,14 +1210,30 @@ impl Builder {
 
 #[cfg(feature = "uniffi")]
 impl ArcedNodeBuilder {
-	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
-	/// channels to clients.
+	/// Configures the [`Node`] instance to provide [bLIP-52 / LSPS2] and/or [bLIP-55 / LSPS5]
+	/// services to clients.
+	///
+	/// [bLIP-52 / LSPS2] issues just-in-time channels to clients, [bLIP-55 / LSPS5] allows clients
+	/// to register webhooks for push notifications.
+	///
+	/// Passing `None` leaves the respective service disabled.
+	///
+	/// `advertise_service` indicates whether we'll announce LSPS support via the gossip network.
+	/// This signals that we act as an LSP, so it applies to every service enabled here.
 	///
 	/// **Caution**: LSP service support is in **alpha** and is considered an experimental feature.
 	///
-	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	pub fn enable_liquidity_provider(&self, lsps2_service_config: LSPS2ServiceConfig) {
-		self.inner.write().expect("lock").enable_liquidity_provider(lsps2_service_config);
+	/// [bLIP-52 / LSPS2]: https://github.com/lightning/blips/blob/master/blip-0052.md
+	/// [bLIP-55 / LSPS5]: https://github.com/lightning/blips/blob/master/blip-0055.md
+	pub fn enable_liquidity_provider(
+		&self, lsps2_service_config: Option<LSPS2ServiceConfig>,
+		lsps5_service_config: Option<LSPS5ServiceConfig>, advertise_service: bool,
+	) {
+		self.inner.write().expect("lock").enable_liquidity_provider(
+			lsps2_service_config,
+			lsps5_service_config,
+			advertise_service,
+		);
 	}
 }
 
@@ -2097,12 +2129,27 @@ fn build_with_store_internal(
 
 	let mut user_config = default_user_config(&config);
 
-	if liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref()).is_some() {
+	let lsps2_service = liquidity_source_config.and_then(|lsc| lsc.lsps2_service.as_ref());
+	let lsps5_service = liquidity_source_config.and_then(|lsc| lsc.lsps5_service.as_ref());
+
+	if lsps2_service.is_some() || lsps5_service.is_some() {
+		let mut interception_flags = 0u8;
+
 		// If we act as an LSPS2 service, we need to be able to intercept HTLCs and forward the
 		// information to the service handler.
-		user_config.htlc_interception_flags = HTLCInterceptionFlags::ToInterceptSCIDs.into();
+		if lsps2_service.is_some() {
+			interception_flags |= HTLCInterceptionFlags::ToInterceptSCIDs as u8;
+		}
 
-		// If we act as an LSPS2 service, we allow forwarding to unannounced channels.
+		// As an LSPS5 service we intercept HTLCs destined for offline clients, so we can wake them
+		// and forward once they connect.
+		if lsps5_service.is_some() {
+			interception_flags |= HTLCInterceptionFlags::ToOfflinePrivateChannels as u8;
+		}
+
+		user_config.htlc_interception_flags = interception_flags;
+
+		// If we act as an LSPS2 or LSPS5 service, we allow forwarding to unannounced channels.
 		user_config.accept_forwards_to_priv_channels = true;
 	}
 
@@ -2247,33 +2294,36 @@ fn build_with_store_internal(
 		Arc::new(IgnoringMessageHandler {});
 
 	// Initialize the PeerManager
-	let onion_messenger: Arc<OnionMessenger> =
-		if let Some(AsyncPaymentsRole::Server) = async_payments_role {
-			Arc::new(OnionMessenger::new_with_offline_peer_interception(
-				Arc::clone(&keys_manager),
-				Arc::clone(&keys_manager),
-				Arc::clone(&logger),
-				Arc::clone(&channel_manager),
-				message_router,
-				Arc::clone(&channel_manager),
-				Arc::clone(&channel_manager),
-				Arc::clone(&om_resolver),
-				IgnoringMessageHandler {},
-				false,
-			))
-		} else {
-			Arc::new(OnionMessenger::new(
-				Arc::clone(&keys_manager),
-				Arc::clone(&keys_manager),
-				Arc::clone(&logger),
-				Arc::clone(&channel_manager),
-				message_router,
-				Arc::clone(&channel_manager),
-				Arc::clone(&channel_manager),
-				Arc::clone(&om_resolver),
-				IgnoringMessageHandler {},
-			))
-		};
+	// Async payments servers and LSPS5 services both hold onion messages for offline peers until
+	// they reconnect. LSPS5 services also wake the client up via their webhooks.
+	let intercept_offline_peer_messages =
+		matches!(async_payments_role, Some(AsyncPaymentsRole::Server)) || lsps5_service.is_some();
+	let onion_messenger: Arc<OnionMessenger> = if intercept_offline_peer_messages {
+		Arc::new(OnionMessenger::new_with_offline_peer_interception(
+			Arc::clone(&keys_manager),
+			Arc::clone(&keys_manager),
+			Arc::clone(&logger),
+			Arc::clone(&channel_manager),
+			message_router,
+			Arc::clone(&channel_manager),
+			Arc::clone(&channel_manager),
+			Arc::clone(&om_resolver),
+			IgnoringMessageHandler {},
+			false,
+		))
+	} else {
+		Arc::new(OnionMessenger::new(
+			Arc::clone(&keys_manager),
+			Arc::clone(&keys_manager),
+			Arc::clone(&logger),
+			Arc::clone(&channel_manager),
+			message_router,
+			Arc::clone(&channel_manager),
+			Arc::clone(&channel_manager),
+			Arc::clone(&om_resolver),
+			IgnoringMessageHandler {},
+		))
+	};
 	let ephemeral_bytes: [u8; 32] = keys_manager.get_secure_random_bytes();
 
 	// Initialize the GossipSource
@@ -2311,6 +2361,7 @@ fn build_with_store_internal(
 			Arc::clone(&tx_broadcaster),
 			Arc::clone(&kv_store),
 			Arc::clone(&config),
+			Arc::clone(&runtime),
 			Arc::clone(&logger),
 		);
 
@@ -2329,6 +2380,12 @@ fn build_with_store_internal(
 			lsc.lsps2_service.as_ref().map(|config| {
 				liquidity_source_builder.lsps2_service(promise_secret, config.clone())
 			});
+
+			lsc.lsps5_service
+				.as_ref()
+				.map(|config| liquidity_source_builder.lsps5_service(config.clone()));
+
+			liquidity_source_builder.set_advertise_service(lsc.advertise_service);
 		}
 
 		let liquidity_source = runtime
@@ -2389,6 +2446,8 @@ fn build_with_store_internal(
 
 	liquidity_source.lsps2_service().set_peer_manager(Arc::downgrade(&peer_manager));
 
+	liquidity_source.lsps5_service().set_peer_manager(Arc::downgrade(&peer_manager));
+
 	let connection_manager = Arc::new(ConnectionManager::new(
 		Arc::clone(&peer_manager),
 		config.tor_config.clone(),
@@ -2441,11 +2500,7 @@ fn build_with_store_internal(
 		},
 	};
 
-	let om_mailbox = if let Some(AsyncPaymentsRole::Server) = async_payments_role {
-		Some(Arc::new(OnionMessageMailbox::new()))
-	} else {
-		None
-	};
+	let om_mailbox = intercept_offline_peer_messages.then(|| Arc::new(OnionMessageMailbox::new()));
 
 	let lnurl_auth = Arc::new(LnurlAuth::new(xprv, Arc::clone(&logger)));
 

@@ -60,8 +60,6 @@ pub struct LSPS2ServiceConfig {
 	///
 	/// If set, only requests matching this token will be accepted.
 	pub require_token: Option<String>,
-	/// Indicates whether the LSPS service will be announced via the gossip network.
-	pub advertise_service: bool,
 	/// The fee we withhold for the channel open from the initial payment.
 	///
 	/// This fee is proportional to the client-requested amount, in parts-per-million.

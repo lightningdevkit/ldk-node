@@ -2024,20 +2024,39 @@ where
 				payment_hash,
 				..
 			} => {
-				self.liquidity_source
-					.lsps2_service()
-					.handle_htlc_intercepted(
-						requested_next_hop_scid,
-						intercept_id,
-						expected_outbound_amount_msat,
-						payment_hash,
-					)
-					.await;
+				// `ToOfflinePrivateChannels` interception points at one of our own channels, while
+				// LSPS2's JIT flow uses intercept SCIDs that match no channel of ours. Resolving
+				// the SCID against our channels tells the two apart, and gives us the client we'd
+				// be waking.
+				let lsps5_service = self.liquidity_source.lsps5_service();
+				match lsps5_service.resolve_client_channel(requested_next_hop_scid) {
+					Some((client_node_id, channel_id)) => {
+						lsps5_service.handle_htlc_intercepted(
+							client_node_id,
+							channel_id,
+							intercept_id,
+							expected_outbound_amount_msat,
+						);
+					},
+					None => {
+						self.liquidity_source
+							.lsps2_service()
+							.handle_htlc_intercepted(
+								requested_next_hop_scid,
+								intercept_id,
+								expected_outbound_amount_msat,
+								payment_hash,
+							)
+							.await;
+					},
+				}
 			},
 			LdkEvent::InvoiceReceived { .. } => {
 				debug_assert!(false, "We currently don't handle BOLT12 invoices manually, so this event should never be emitted.");
 			},
 			LdkEvent::ConnectionNeeded { node_id, addresses } => {
+				self.liquidity_source.lsps5_service().notify_onion_message_incoming(node_id);
+
 				let spawn_logger = self.logger.clone();
 				let spawn_cm = Arc::clone(&self.connection_manager);
 				let future = async move {
@@ -2096,6 +2115,9 @@ where
 							"Onion message intercepted, but no onion message mailbox available"
 						);
 					}
+					self.liquidity_source
+						.lsps5_service()
+						.notify_onion_message_incoming(peer_node_id);
 				} else {
 					log_error!(self.logger, "Onion message intercepted for unknown SCID");
 				}
