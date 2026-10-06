@@ -1837,7 +1837,7 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 						.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
 					&& c.channel_type
 						.as_ref()
-						.map_or(false, |t| t.requires_anchors_zero_fee_htlc_tx())
+						.map_or(true, |t| t.requires_anchors_zero_fee_htlc_tx())
 			})
 			.count() as u64
 			* anchor_channels_config.per_channel_reserve_sats
