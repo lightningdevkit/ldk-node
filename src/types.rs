@@ -30,13 +30,15 @@ use lightning::util::persist::{
 };
 use lightning::util::ser::{Readable, Writeable, Writer};
 use lightning::util::sweep::OutputSweeper;
-use lightning_liquidity::utils::time::DefaultTimeProvider;
+#[cfg(feature = "net-tokio")]
 use lightning_net_tokio::SocketDescriptor;
 #[cfg(not(feature = "uniffi"))]
 use lightning_types::features::ChannelTypeFeatures;
 
 use crate::chain::ChainSource;
 use crate::config::{AnchorChannelsConfig, ChannelConfig};
+#[cfg(not(feature = "net-tokio"))]
+use crate::connection::SocketDescriptor;
 use crate::data_store::{DataStore, KeepAllEntries, KeepLeastRecentlyUsed, KeepNoEntries};
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
@@ -46,6 +48,7 @@ use crate::payment::{
 	ChannelPairForwardingStats, ForwardedPaymentDetails, PaymentDetails, PendingPaymentDetails,
 };
 use crate::runtime::RuntimeSpawner;
+use crate::time::LdkTimeProvider;
 
 #[cfg(feature = "uniffi")]
 type ChannelTypeFeatures = Arc<crate::ffi::ChannelTypeFeatures>;
@@ -250,7 +253,7 @@ pub(crate) type LiquidityManager = lightning_liquidity::LiquidityManager<
 	Arc<KeysManager>,
 	Arc<ChannelManager>,
 	Arc<DynStore>,
-	DefaultTimeProvider,
+	Arc<LdkTimeProvider>,
 	Arc<Broadcaster>,
 >;
 

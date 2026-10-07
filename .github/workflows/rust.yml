@@ -109,6 +109,33 @@ jobs:
           cargo clippy --lib --verbose --color always -- -A warnings -D clippy::unwrap_used -A clippy::tabs_in_doc_comments
           cargo clippy --lib --no-default-features --features uniffi-default --verbose --color always -- -A warnings -D clippy::unwrap_used -A clippy::tabs_in_doc_comments
 
+  clock-boundary:
+    name: Clock boundary
+    timeout-minutes: 120
+    runs-on: self-hosted
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+      - name: Install Rust stable toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain stable
+      - name: Add clippy component
+        run: rustup component add clippy
+      # Clock reads must go through `src/time.rs` so they work on wasm32. See `.clippy.toml`.
+      - name: Ban direct clock reads in library code
+        run: |
+          cargo clippy --lib --verbose --color always -- -A warnings -D clippy::disallowed_methods
+          cargo clippy --lib --no-default-features --features uniffi-default --verbose --color always -- -A warnings -D clippy::disallowed_methods
+          cargo clippy --lib --no-default-features --features chain-esplora,storage-sqlite --verbose --color always -- -A warnings -D clippy::disallowed_methods
+      # LDK's `std` and `time` features read the system clock internally.
+      - name: Check LDK clock features are disabled without ldk-std
+        run: |
+          features=$(cargo tree --target wasm32-unknown-unknown --no-default-features -e normal --prefix none --format '{p} {f}')
+          if grep -E '^lightning' <<< "$features" | grep -E '\b(std|time)\b'; then
+            echo "LDK std or time features are enabled without ldk-std"
+            exit 1
+          fi
+
   doc:
     name: Documentation
     timeout-minutes: 120

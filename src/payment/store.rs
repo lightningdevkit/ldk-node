@@ -5,8 +5,6 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::{BlockHash, Txid};
 use lightning::chain::chaininterface::TransactionType as LdkTransactionType;
@@ -24,6 +22,7 @@ use lightning_types::string::UntrustedString;
 
 use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate, UpdatableObject};
 use crate::hex_utils;
+use crate::time;
 
 /// An opaque token used to continue a paginated listing.
 ///
@@ -90,10 +89,7 @@ impl PaymentDetails {
 		id: PaymentId, kind: PaymentKind, amount_msat: Option<u64>, fee_paid_msat: Option<u64>,
 		direction: PaymentDirection, status: PaymentStatus,
 	) -> Self {
-		let latest_update_timestamp = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap_or(Duration::from_secs(0))
-			.as_secs();
+		let latest_update_timestamp = time::unix_time_secs().unwrap_or(0);
 		Self { id, kind, amount_msat, fee_paid_msat, direction, status, latest_update_timestamp }
 	}
 }
@@ -121,10 +117,7 @@ impl Writeable for PaymentDetails {
 
 impl Readable for PaymentDetails {
 	fn read<R: lightning::io::Read>(reader: &mut R) -> Result<PaymentDetails, DecodeError> {
-		let unix_time_secs = SystemTime::now()
-			.duration_since(UNIX_EPOCH)
-			.unwrap_or(Duration::from_secs(0))
-			.as_secs();
+		let unix_time_secs = time::unix_time_secs().unwrap_or(0);
 		_init_and_read_len_prefixed_tlv_fields!(reader, {
 			(0, id, required), // Used to be `hash`
 			(2, preimage, required),
@@ -353,10 +346,7 @@ impl UpdatableObject for PaymentDetails {
 		}
 
 		if updated {
-			self.latest_update_timestamp = SystemTime::now()
-				.duration_since(UNIX_EPOCH)
-				.unwrap_or(Duration::from_secs(0))
-				.as_secs();
+			self.latest_update_timestamp = time::unix_time_secs().unwrap_or(0);
 		}
 
 		updated
