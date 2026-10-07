@@ -2020,6 +2020,7 @@ where
 			LdkEvent::HTLCIntercepted {
 				requested_next_hop_scid,
 				intercept_id,
+				inbound_amount_msat,
 				expected_outbound_amount_msat,
 				payment_hash,
 				..
@@ -2031,6 +2032,7 @@ where
 						intercept_id,
 						expected_outbound_amount_msat,
 						payment_hash,
+						inbound_amount_msat,
 					)
 					.await;
 			},

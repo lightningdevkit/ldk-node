@@ -208,7 +208,7 @@ where
 
 	pub(crate) async fn handle_htlc_intercepted(
 		&self, intercept_scid: u64, intercept_id: InterceptId, expected_outbound_amount_msat: u64,
-		payment_hash: PaymentHash,
+		payment_hash: PaymentHash, inbound_amount_msat: u64,
 	) {
 		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
 			if let Err(e) = lsps2_service_handler
@@ -217,6 +217,7 @@ where
 					intercept_id,
 					expected_outbound_amount_msat,
 					payment_hash,
+					inbound_amount_msat,
 				)
 				.await
 			{
