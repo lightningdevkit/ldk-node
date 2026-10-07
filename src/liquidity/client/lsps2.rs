@@ -359,7 +359,7 @@ where
 					.channel_manager
 					.create_inbound_payment_for_hash(
 						payment_hash,
-						None,
+						amount_msat,
 						expiry_secs,
 						Some(min_final_cltv_expiry_delta),
 						Some(encoded_payment_metadata),
@@ -373,7 +373,7 @@ where
 			None => self
 				.channel_manager
 				.create_inbound_payment(
-					None,
+					amount_msat,
 					expiry_secs,
 					Some(min_final_cltv_expiry_delta),
 					Some(encoded_payment_metadata),
