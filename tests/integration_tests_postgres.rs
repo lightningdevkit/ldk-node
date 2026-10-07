@@ -10,7 +10,7 @@
 mod common;
 
 use common::{configure_chain_source, drop_table, random_chain_source, test_connection_string};
-use ldk_node::Builder;
+use ldk_node::{BuildError, Builder};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn channel_full_cycle_with_postgres_store() {
@@ -32,6 +32,14 @@ async fn channel_full_cycle_with_postgres_store() {
 			None,
 		)
 		.unwrap();
+	let result = builder_a.build_with_postgres_store(
+		config_a.node_entropy.into(),
+		test_connection_string(),
+		None,
+		Some("channel_cycle_a".to_string()),
+		None,
+	);
+	assert!(matches!(result, Err(BuildError::KVStoreAlreadyInUse)));
 	node_a.start().unwrap();
 
 	println!("\n== Node B ==");

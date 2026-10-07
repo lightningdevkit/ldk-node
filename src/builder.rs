@@ -212,6 +212,8 @@ pub enum BuildError {
 	///
 	/// [`KVStore`]: lightning::util::persist::KVStore
 	KVStoreSetupFailed,
+	/// The configured [`KVStore`] is already in use by another node.
+	KVStoreAlreadyInUse,
 	/// We failed to setup the onchain wallet.
 	WalletSetupFailed,
 	/// We failed to setup the logger.
@@ -254,6 +256,7 @@ impl fmt::Display for BuildError {
 			Self::WriteFailed => write!(f, "Failed to write to store."),
 			Self::StoragePathAccessFailed => write!(f, "Failed to access the given storage path."),
 			Self::KVStoreSetupFailed => write!(f, "Failed to setup KVStore."),
+			Self::KVStoreAlreadyInUse => write!(f, "KVStore is already in use by another node."),
 			Self::WalletSetupFailed => write!(f, "Failed to setup onchain wallet."),
 			Self::LoggerSetupFailed => write!(f, "Failed to setup the logger."),
 			Self::ChainSourceSetupFailed => write!(f, "Failed to setup the chain source."),
@@ -735,6 +738,9 @@ impl NodeBuilder {
 	/// The given `kv_table_name` will be used or default to
 	/// [`DEFAULT_KV_TABLE_NAME`](io::postgres_store::DEFAULT_KV_TABLE_NAME).
 	///
+	/// Returns [`BuildError::KVStoreAlreadyInUse`] while another store holds the lease. Callers may
+	/// retry building after a delay.
+	///
 	/// # Warning
 	///
 	/// This acquires an exclusive lease for the selected KV table before reading persisted node
@@ -765,6 +771,9 @@ impl NodeBuilder {
 				Some(Arc::clone(&logger)),
 			))
 			.map_err(|e| {
+				if e.kind() == lightning::io::ErrorKind::AlreadyExists {
+					return BuildError::KVStoreAlreadyInUse;
+				}
 				log_error!(logger, "Failed to set up Postgres store: {e}");
 				BuildError::KVStoreSetupFailed
 			})?;
@@ -1331,6 +1340,9 @@ impl Builder {
 	///
 	/// The given `kv_table_name` will be used or default to
 	/// [`DEFAULT_KV_TABLE_NAME`](io::postgres_store::DEFAULT_KV_TABLE_NAME).
+	///
+	/// Returns [`BuildError::KVStoreAlreadyInUse`] while another store holds the lease. Callers may
+	/// retry building after a delay.
 	///
 	/// # Warning
 	///
