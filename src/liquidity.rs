@@ -1278,7 +1278,7 @@ where
 					.channel_manager
 					.create_inbound_payment_for_hash(
 						payment_hash,
-						None,
+						amount_msat,
 						expiry_secs,
 						Some(min_final_cltv_expiry_delta),
 					)
@@ -1290,7 +1290,7 @@ where
 			},
 			None => self
 				.channel_manager
-				.create_inbound_payment(None, expiry_secs, Some(min_final_cltv_expiry_delta))
+				.create_inbound_payment(amount_msat, expiry_secs, Some(min_final_cltv_expiry_delta))
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to register inbound payment: {:?}", e);
 					Error::InvoiceCreationFailed
