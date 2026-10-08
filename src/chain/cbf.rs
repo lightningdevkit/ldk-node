@@ -6,8 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bip157::chain::ChainState;
 use bip157::{
 	chain::BlockHeaderChanges, Builder as KyotoBuilder, Client, Event as KyotoEvent,
-	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Package, Requester, TrustedPeer,
-	Warning,
+	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Package,
+	Requester as KyotoRequester, TrustedPeer, Warning,
 };
 use bitcoin::{BlockHash, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder};
@@ -60,7 +60,7 @@ const ELECTRUM_FEE_TIMEOUT_SECS: u64 = 10;
 
 /// Runtime status of the underlying kyoto node.
 enum CbfRuntimeStatus {
-	Started { requester: Requester },
+	Started { requester: KyotoRequester },
 	Stopped,
 }
 
@@ -182,9 +182,10 @@ impl BlockApplicator {
 				},
 				ChainOp::Disconnect { fork_point } => {
 					self.chain_listener.blocks_disconnected(fork_point);
-					self.next_height = fork_point.height + 1;
+					let best_block_height = self.chain_listener.get_best_block().height;
+					self.next_height = best_block_height + 1;
 					self.sync_state_tx.send_replace(CbfSyncState::Active {
-						applied_tip: Some(fork_point.height),
+						applied_tip: Some(best_block_height),
 						synced_to_tip: false,
 					});
 				},
@@ -430,9 +431,19 @@ impl CbfChainSource {
 					Arc::clone(&restart_logger),
 				));
 
+				let (preprocessed_event_tx, preprocessed_event_rx) =
+					mpsc::unbounded_channel::<KyotoEvent>();
+				let _ = tokio::spawn(Self::preprocess_kyoto_events(
+					current_event_rx,
+					preprocessed_event_tx,
+					restart_listener.clone(),
+					Arc::clone(&restart_cbf_runtime_status),
+					ops_tx.clone(),
+				));
+
 				let event_handle = tokio::spawn(Self::process_kyoto_events(
 					Arc::clone(&restart_logger),
-					current_event_rx,
+					preprocessed_event_rx,
 					Arc::clone(&restart_registered_scripts),
 					Arc::clone(&restart_cbf_runtime_status),
 					ops_tx.clone(),
@@ -580,6 +591,39 @@ impl CbfChainSource {
 	) {
 		while let Some(warning) = warn_rx.recv().await {
 			log_debug!(logger, "CBF node warning: {}", warning);
+		}
+	}
+
+	//this function is called once per start before we really process the events
+	//we need it to decide if we have been reorganized during the time we were offline
+	async fn preprocess_kyoto_events(
+		mut kyoto_events_rx: mpsc::UnboundedReceiver<KyotoEvent>,
+		processed_events_tx: mpsc::UnboundedSender<KyotoEvent>, chain_listener: ChainListener,
+		cbf_runtime_status: Arc<Mutex<CbfRuntimeStatus>>, ops_tx: mpsc::UnboundedSender<ChainOp>,
+	) {
+		let mut checked_for_offline_reorg = false;
+		while let Some(event) = kyoto_events_rx.recv().await {
+			if !checked_for_offline_reorg {
+				match &event {
+					// if we received filter, we're in canonical chain and can check for forks occured
+					KyotoEvent::IndexedFilter(_) => {
+						checked_for_offline_reorg = true;
+						let requester = match &*cbf_runtime_status.lock().expect("lock") {
+							CbfRuntimeStatus::Started { requester } => requester.clone(),
+							CbfRuntimeStatus::Stopped => return,
+						};
+						if let Some(fork_point) =
+							startup_fork_point(&requester, &chain_listener).await
+						{
+							let _ = ops_tx.send(ChainOp::Disconnect { fork_point });
+						}
+					},
+					_ => {},
+				}
+			}
+			if processed_events_tx.send(event).is_err() {
+				return;
+			}
 		}
 	}
 
@@ -930,7 +974,7 @@ impl CbfChainSource {
 	/// means we have no recent data yet. The window therefore fills incrementally over successive
 	/// updates rather than requiring all [`FEE_WINDOW_BLOCKS`] downloads to succeed at once.
 	async fn refresh_block_fee_window(
-		&self, requester: &Requester, cache: &Mutex<BTreeMap<u32, (BlockHash, FeeRate)>>,
+		&self, requester: &KyotoRequester, cache: &Mutex<BTreeMap<u32, (BlockHash, FeeRate)>>,
 	) -> Vec<FeeRate> {
 		let tip_height = match requester.chain_tip().await {
 			Ok(tip) => tip.height,
@@ -1001,6 +1045,48 @@ impl CbfChainSource {
 		*cache.lock().expect("lock") = window;
 		samples
 	}
+}
+
+///Fork point which might have occured when we were offline
+async fn startup_fork_point(
+	requester: &KyotoRequester, chain_listener: &ChainListener,
+) -> Option<BlockLocator> {
+	let canonical_tip_height = requester.chain_tip().await.ok()?.height;
+
+	let mut fork_point: Option<BlockLocator> = None;
+	for best_block in chain_listener.best_blocks() {
+		// The consumer's tip followed by the hashes of the blocks right below it.
+		let mut known_blocks = vec![(best_block.height, best_block.block_hash)];
+		for (i, previous_hash) in best_block.previous_blocks.iter().enumerate() {
+			match (best_block.height.checked_sub(i as u32 + 1), previous_hash) {
+				(Some(height), Some(hash)) => known_blocks.push((height, *hash)),
+				_ => break,
+			}
+		}
+
+		for (height, hash) in known_blocks {
+			if height > canonical_tip_height {
+				continue;
+			}
+			let canonical_header = match requester.get_header(height).await.ok().flatten() {
+				Some(header) => header,
+				// Kyoto has no headers below its checkpoint.
+				None => break,
+			};
+			if canonical_header.block_hash() != hash {
+				continue;
+			}
+			// The consumer's last canonical block. If it is its tip, nothing needs disconnecting.
+			if height < best_block.height {
+				match fork_point {
+					Some(lowest) if lowest.height <= height => {},
+					_ => fork_point = Some(BlockLocator::new(hash, height)),
+				}
+			}
+			break;
+		}
+	}
+	fork_point
 }
 
 fn resume_checkpoint(logger: &Logger, chain_listener: &ChainListener) -> Option<HashCheckpoint> {

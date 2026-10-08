@@ -12,8 +12,8 @@ use serde_json::json;
 use crate::common::{
 	expect_event, exponential_backoff_poll, generate_blocks_and_wait, invalidate_blocks,
 	open_channel, premine_and_distribute_funds, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_node, wait_for_outpoint_spend, wait_for_tx, NodePaymentExt,
-	TestChainSource,
+	setup_bitcoind_and_electrsd, setup_node, wait_for_node_tip, wait_for_outpoint_spend,
+	wait_for_tx, NodePaymentExt, TestChainSource, TestStoreType,
 };
 
 #[cfg(feature = "chain-bitcoind")]
@@ -70,6 +70,41 @@ fn bitcoind_rest_follows_valid_reorg() {
 			"REST-backed node did not follow Bitcoin Core's replacement chain"
 		);
 	})
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn restart_follows_deep_reorg_that_happened_while_offline() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let mut config = random_config();
+	config.store_type = TestStoreType::Sqlite;
+	let node = setup_node(&chain_source, config.clone());
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 50).await;
+	node.sync_wallets().unwrap();
+	let old_tip = node.status().current_best_block;
+
+	node.stop().unwrap();
+	drop(node);
+
+	let reorg_depth = 5;
+	invalidate_blocks(&bitcoind.client, reorg_depth);
+	let new_tip_height =
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, reorg_depth + 20).await;
+	let new_tip_hash = bitcoind.client.best_block_hash().expect("failed to get new tip hash");
+	assert_ne!(old_tip.block_hash, new_tip_hash);
+
+	let node = setup_node(&chain_source, config);
+	wait_for_node_tip(&node, new_tip_height)
+		.await
+		.expect("restarted node did not reach the new tip after an offline reorg");
+	node.sync_wallets().unwrap();
+
+	let synced_tip = node.status().current_best_block;
+	assert_eq!(synced_tip.height as usize, new_tip_height);
+	assert_eq!(synced_tip.block_hash, new_tip_hash);
+
+	node.stop().unwrap();
 }
 
 async fn wait_for_pending_sweep_balance<F>(
