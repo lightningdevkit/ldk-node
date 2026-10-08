@@ -154,6 +154,7 @@ impl UnifiedPayment {
 			&invoice_description,
 			expiry_sec,
 			None,
+			None,
 		) {
 			Ok(invoice) => Some(invoice),
 			Err(e) => {
