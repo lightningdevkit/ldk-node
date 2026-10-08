@@ -157,7 +157,7 @@ where
 			request_id = client_handler.create_order(
 				&lsps1_node.node_id,
 				order_params.clone(),
-				Some(refund_address),
+				Some(refund_address.clone()),
 			);
 			PendingRequestGuard::insert(
 				&self.pending_create_order_requests,
@@ -185,6 +185,20 @@ where
 			log_error!(
 				self.logger,
 				"Aborting LSPS1 request as LSP-provided parameters don't match our order. Expected: {:?}, Received: {:?}", order_params, response.order_params
+			);
+			return Err(Error::LiquidityRequestFailed);
+		}
+
+		if let Some(received_refund_address) = response
+			.payment_options
+			.onchain
+			.as_ref()
+			.and_then(|o| o.refund_onchain_address.as_ref())
+			.filter(|addr| addr.script_pubkey() != refund_address.script_pubkey())
+		{
+			log_error!(
+				self.logger,
+				"Aborting LSPS1 request as LSP-provided refund address doesn't match our order. Expected: {}, Received: {}", refund_address, received_refund_address
 			);
 			return Err(Error::LiquidityRequestFailed);
 		}
