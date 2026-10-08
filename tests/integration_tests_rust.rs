@@ -3837,11 +3837,18 @@ async fn unified_send_receive_bip21_uri() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn lsps2_client_service_integration() {
-	do_lsps2_client_service_integration(true).await;
-	do_lsps2_client_service_integration(false).await;
+	do_lsps2_client_service_integration(true, 100_000_000).await;
+	do_lsps2_client_service_integration(false, 100_000_000).await;
 }
 
-async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_jit_channel_rounds_fractional_msat_up() {
+	// A forward amount that is not a whole number of satoshis must result in a channel large
+	// enough to carry it, i.e., the channel amount needs to be rounded up, not down.
+	do_lsps2_client_service_integration(false, 100_000_100).await;
+}
+
+async fn do_lsps2_client_service_integration(client_trusts_lsp: bool, jit_amount_msat: u64) {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
@@ -3918,7 +3925,6 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	let invoice_description =
 		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
-	let jit_amount_msat = 100_000_000;
 
 	println!("Generating JIT invoice!");
 	let jit_invoice = client_node
@@ -3951,7 +3957,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let expected_channel_overprovisioning_msat =
 		(expected_received_amount_msat * channel_over_provisioning_ppm as u64) / 1_000_000;
 	let expected_channel_size_sat =
-		(expected_received_amount_msat + expected_channel_overprovisioning_msat) / 1000;
+		(expected_received_amount_msat + expected_channel_overprovisioning_msat).div_ceil(1000);
 	let channel_value_sats = client_node.list_channels().first().unwrap().channel_value_sats;
 	assert_eq!(channel_value_sats, expected_channel_size_sat);
 
