@@ -21,9 +21,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bitcoin::{Script, Txid};
-use lightning::chain::{BlockLocator, Filter};
 #[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
 use lightning::chain::Listen;
+use lightning::chain::{BlockLocator, Filter};
 
 #[cfg(feature = "chain-bitcoind")]
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
@@ -207,27 +207,26 @@ impl ChainListener {
 
 #[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
 impl ChainListener {
-	pub(crate) fn get_best_block(&self) -> BlockLocator {
+	pub(crate) fn best_blocks(&self) -> Vec<BlockLocator> {
 		let (onchain_wallet, channel_manager, chain_monitor, output_sweeper) =
 			self.upgrade().expect("chain listener components dropped");
-		let candidates = [
+		let mut best_blocks = vec![
 			onchain_wallet.current_best_block(),
 			channel_manager.current_best_block(),
 			output_sweeper.current_best_block(),
 		];
-		let mut min = candidates.into_iter().min_by_key(|b| b.height).expect("non-empty");
-		if let Some(worst_monitor) = chain_monitor
-			.list_monitors()
-			.iter()
-			.flat_map(|id| chain_monitor.get_monitor(*id))
-			.map(|m| m.current_best_block())
-			.min_by_key(|b| b.height)
-		{
-			if worst_monitor.height < min.height {
-				min = worst_monitor;
-			}
-		}
-		min
+		best_blocks.extend(
+			chain_monitor
+				.list_monitors()
+				.iter()
+				.flat_map(|id| chain_monitor.get_monitor(*id))
+				.map(|m| m.current_best_block()),
+		);
+		best_blocks
+	}
+
+	pub(crate) fn get_best_block(&self) -> BlockLocator {
+		self.best_blocks().into_iter().min_by_key(|b| b.height).expect("non-empty")
 	}
 }
 
@@ -283,7 +282,20 @@ impl Listen for ChainListener {
 			if channel_manager.current_best_block().height > fork_point_block.height {
 				channel_manager.blocks_disconnected(fork_point_block);
 			}
-			chain_monitor.blocks_disconnected(fork_point_block);
+			// Monitors are persisted at different heights, and `ChainMonitor::blocks_disconnected`
+			// asserts every one of them is above the fork point, so disconnect them one by one.
+			for monitor in
+				chain_monitor.list_monitors().iter().flat_map(|id| chain_monitor.get_monitor(*id))
+			{
+				if monitor.current_best_block().height > fork_point_block.height {
+					monitor.blocks_disconnected(
+						fork_point_block,
+						onchain_wallet.broadcaster(),
+						onchain_wallet.fee_estimator(),
+						onchain_wallet.logger(),
+					);
+				}
+			}
 			if output_sweeper.current_best_block().height > fork_point_block.height {
 				output_sweeper.blocks_disconnected(fork_point_block);
 			}
@@ -730,9 +742,7 @@ impl ChainSource {
 				bitcoind_chain_source.update_fee_rate_estimates().await
 			},
 			#[cfg(feature = "chain-cbf")]
-			ChainSourceKind::Cbf(cbf_chain_source) => {
-				cbf_chain_source.update_fee_rate_estimates().await
-			},
+			ChainSourceKind::Cbf(cbf_chain_source) => cbf_chain_source.update_fee_rate_estimates().await,
 		}
 	}
 

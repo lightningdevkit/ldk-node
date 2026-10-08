@@ -236,6 +236,21 @@ impl Wallet {
 	}
 
 	#[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
+	pub(crate) fn broadcaster(&self) -> &Arc<Broadcaster> {
+		&self.broadcaster
+	}
+
+	#[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
+	pub(crate) fn fee_estimator(&self) -> &Arc<OnchainFeeEstimator> {
+		&self.fee_estimator
+	}
+
+	#[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
+	pub(crate) fn logger(&self) -> &Arc<Logger> {
+		&self.logger
+	}
+
+	#[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
 	pub(crate) fn current_best_block(&self) -> BlockLocator {
 		let checkpoint = self.inner.lock().expect("lock").latest_checkpoint();
 		let mut current_block = Some(checkpoint.clone());
@@ -469,8 +484,12 @@ impl Wallet {
 											let current = existing?;
 											match current.kind {
 												PaymentKind::Onchain {
-													status: ConfirmationStatus::Confirmed { height, .. }, ..
-												} if new_tip.height >= height + ANTI_REORG_DELAY - 1 => {
+													status:
+														ConfirmationStatus::Confirmed { height, .. },
+													..
+												} if new_tip.height
+													>= height + ANTI_REORG_DELAY - 1 =>
+												{
 													graduated = true;
 													let mut update =
 														PaymentDetailsUpdate::new(payment_id);
@@ -527,7 +546,8 @@ impl Wallet {
 							let mut locked_wallet = self.inner.lock().expect("lock");
 							locked_wallet.apply_evicted_txs_events(evicted_txids)
 						};
-						Box::pin(self.update_payment_store(eviction_events, reference_time)).await?;
+						Box::pin(self.update_payment_store(eviction_events, reference_time))
+							.await?;
 					}
 
 					if !unconfirmed_outbound_txids.is_empty() {
@@ -4576,9 +4596,9 @@ mod tests {
 			wallet.update_payment_store(vec![event], reference_time),
 		)
 		.await;
-		assert!(
-			result.expect("eviction must not wait on the persister lock held by its caller").is_ok()
-		);
+		assert!(result
+			.expect("eviction must not wait on the persister lock held by its caller")
+			.is_ok());
 
 		let payment = wallet.payment_store.get(&payment_id).await.unwrap().unwrap();
 		assert_eq!(payment.status, PaymentStatus::Failed);
