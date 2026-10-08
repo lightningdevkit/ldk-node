@@ -35,9 +35,11 @@ jobs:
       - name: Check all features
         run: cargo check --all-features --tests --verbose --color always
       - name: Check sparse feature sets
+        env:
+          TEST_POSTGRES_URL: "host=localhost user=postgres password=postgres"
         run: |
           cargo check --no-default-features --features uniffi,chain-bitcoind,storage-postgres --verbose --color always
-          cargo test --lib --no-run --no-default-features --features chain-electrum,storage-postgres --verbose --color always
+          cargo test --lib --no-default-features --features chain-electrum,storage-postgres --verbose --color always
           cargo check --test integration_tests_postgres --no-default-features --features chain-electrum,storage-postgres --verbose --color always
       - name: Enable caching for bitcoind
         id: cache-bitcoind

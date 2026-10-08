@@ -2657,10 +2657,13 @@ pub(crate) fn sanitize_alias(alias_str: &str) -> Result<NodeAlias, BuildError> {
 
 #[cfg(test)]
 mod tests {
+	#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 	use std::future::Future;
 	use std::sync::Arc;
 
+	#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 	use lightning::io;
+	#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 	use lightning::util::persist::{
 		KVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
 		CHANNEL_MANAGER_PERSISTENCE_KEY, CHANNEL_MANAGER_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -2668,12 +2671,16 @@ mod tests {
 	};
 
 	use super::{sanitize_alias, BuildError, NodeAlias, NodeBuilder};
+	#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 	use crate::entropy::NodeEntropy;
+	#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 	use crate::io::test_utils::InMemoryStore;
 	use crate::logger::Logger;
 
+	#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 	struct ChannelManagerReadFailingStore(InMemoryStore);
 
+	#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 	impl KVStore for ChannelManagerReadFailingStore {
 		fn read(
 			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
@@ -2710,6 +2717,7 @@ mod tests {
 		}
 	}
 
+	#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 	impl PaginatedKVStore for ChannelManagerReadFailingStore {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
@@ -2724,9 +2732,17 @@ mod tests {
 		}
 	}
 
+	// Bitcoind fetches the chain tip during `build`, which fails before the channel manager read
+	// if no server is reachable.
 	#[test]
+	#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 	fn channel_manager_read_failure_fails_build() {
-		let builder = NodeBuilder::new();
+		// Esplora and Electrum don't connect during `build`, so no server is needed.
+		let mut builder = NodeBuilder::new();
+		#[cfg(feature = "chain-esplora")]
+		builder.set_chain_source_esplora("http://127.0.0.1:3002".to_string(), None);
+		#[cfg(not(feature = "chain-esplora"))]
+		builder.set_chain_source_electrum("tcp://127.0.0.1:50001".to_string(), None);
 		let logger = Arc::new(Logger::new_log_facade());
 		#[cfg(not(feature = "uniffi"))]
 		let node_entropy = NodeEntropy::from_seed_bytes([42; 64]);
