@@ -12,10 +12,12 @@ use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::log_debug;
+use lightning::offers::offer::Amount;
 use lightning_liquidity::lsps0::ser::LSPSRequestId;
 use lightning_liquidity::lsps1::event::LSPS1ClientEvent;
 use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1Options, LSPS1OrderId, LSPS1OrderParams,
+	LSPS1PaymentInfo as LdkLSPS1PaymentInfo,
 };
 use tokio::sync::oneshot;
 
@@ -28,6 +30,47 @@ use crate::logger::{log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::{LiquidityManager, Wallet};
 use crate::Error;
+
+/// Checks that the LSP-provided payment options are consistent with the order.
+///
+/// For each offered option, the advertised total must equal the fee plus the client balance of
+/// the order, and any embedded BOLT11 invoice or BOLT12 offer must ask for exactly that total.
+/// This prevents an LSP from advertising a small total while embedding a payment request for a
+/// larger amount.
+fn payment_options_are_consistent(payment: &LdkLSPS1PaymentInfo, order: &LSPS1OrderParams) -> bool {
+	let totals_match = |fee_total_sat: u64, order_total_sat: u64| {
+		order.client_balance_sat.checked_add(fee_total_sat) == Some(order_total_sat)
+	};
+	let total_msat = |order_total_sat: u64| order_total_sat.checked_mul(1_000);
+
+	if let Some(bolt11) = payment.bolt11.as_ref() {
+		if !totals_match(bolt11.fee_total_sat, bolt11.order_total_sat)
+			|| bolt11.invoice.amount_milli_satoshis() != total_msat(bolt11.order_total_sat)
+		{
+			return false;
+		}
+	}
+
+	if let Some(bolt12) = payment.bolt12.as_ref() {
+		let offer_amount_msat = match bolt12.offer.amount() {
+			Some(Amount::Bitcoin { amount_msats }) => Some(amount_msats),
+			_ => None,
+		};
+		if !totals_match(bolt12.fee_total_sat, bolt12.order_total_sat)
+			|| offer_amount_msat != total_msat(bolt12.order_total_sat)
+		{
+			return false;
+		}
+	}
+
+	if let Some(onchain) = payment.onchain.as_ref() {
+		if !totals_match(onchain.fee_total_sat, onchain.order_total_sat) {
+			return false;
+		}
+	}
+
+	true
+}
 
 pub(crate) struct LSPS1Client<L: Deref>
 where
@@ -307,6 +350,16 @@ where
 					if let Some(request) =
 						self.pending_create_order_requests.lock().expect("lock").remove(&request_id)
 					{
+						if !payment_options_are_consistent(&payment, &order) {
+							log_error!(
+								self.logger,
+								"Rejecting LSPS1 order {:?} as the LSP-provided payment options are inconsistent with the order: {:?}",
+								order_id,
+								payment
+							);
+							return;
+						}
+
 						let response = LSPS1OrderStatus {
 							order_id,
 							order_params: order,
@@ -356,6 +409,16 @@ where
 						.expect("lock")
 						.remove(&request_id)
 					{
+						if !payment_options_are_consistent(&payment, &order) {
+							log_error!(
+								self.logger,
+								"Rejecting LSPS1 order {:?} as the LSP-provided payment options are inconsistent with the order: {:?}",
+								order_id,
+								payment
+							);
+							return;
+						}
+
 						let response = LSPS1OrderStatus {
 							order_id,
 							order_params: order,
@@ -547,5 +610,197 @@ impl LSPS1Liquidity {
 			liquidity_source.lsps1_check_order_status(order_id, lsp_node_id).await
 		})?;
 		Ok(response)
+	}
+}
+
+#[cfg(all(test, not(feature = "uniffi")))]
+mod tests {
+	use std::str::FromStr;
+
+	use lightning::ln::msgs::SocketAddress;
+	use lightning_liquidity::lsps1::msgs::LSPS1PaymentInfo as LdkLSPS1PaymentInfo;
+	use tokio::sync::oneshot;
+
+	use super::*;
+	use crate::builder::NodeBuilder;
+	use crate::entropy::NodeEntropy;
+	use crate::io::test_utils::InMemoryStore;
+	use crate::Node;
+
+	// A valid invoice for 1,000,000 sat (10 mBTC).
+	const INVOICE_1M_SAT: &str = "lnbc10m1pn8g2j4pp575tg4wt8jwgu2lvtk3aj6hy7mc6tnupw07wwkxcvyhtt3wlzw0zsdqqcqzzgxqyz5vqrzjqwnvuc0u4txn35cafc7w94gxvq5p3cu9dd95f7hlrh0fvs46wpvhdv6dzdeg0ww2eyqqqqryqqqqthqqpysp5fkd3k2rzvwdt2av068p58evf6eg50q0eftfhrpugaxkuyje4d25q9qrsgqqkfmnn67s5g6hadrcvf5h0l7p92rtlkwrfqdvc7uuf6lew0czxksvqhyux3zjrl3tlakwhtvezwl24zshnfumukwh0yntqsng9z6glcquvw7kc";
+	const INVOICE_AMOUNT_SAT: u64 = 1_000_000;
+	const CLIENT_BALANCE_SAT: u64 = 1;
+
+	fn lsp_node_id() -> PublicKey {
+		PublicKey::from_str("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")
+			.unwrap()
+	}
+
+	fn build_node() -> Node {
+		let mut builder = NodeBuilder::new();
+		builder.set_log_facade_logger();
+		builder.add_liquidity_source(
+			lsp_node_id(),
+			SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: 9735 },
+			None,
+			false,
+		);
+		builder
+			.build_with_store(NodeEntropy::from_seed_bytes([42u8; 64]), InMemoryStore::new())
+			.unwrap()
+	}
+
+	fn order_params() -> LSPS1OrderParams {
+		LSPS1OrderParams {
+			lsp_balance_sat: 100_000,
+			client_balance_sat: CLIENT_BALANCE_SAT,
+			required_channel_confirmations: 0,
+			funding_confirms_within_blocks: 1,
+			channel_expiry_blocks: 144,
+			token: None,
+			announce_channel: false,
+		}
+	}
+
+	fn bolt11_payment_info(fee_total_sat: u64, order_total_sat: u64) -> LdkLSPS1PaymentInfo {
+		serde_json::from_str(&format!(
+			r#"{{
+				"bolt11": {{
+					"state": "EXPECT_PAYMENT",
+					"expires_at": "2035-01-01T00:00:00Z",
+					"fee_total_sat": "{fee_total_sat}",
+					"order_total_sat": "{order_total_sat}",
+					"invoice": "{INVOICE_1M_SAT}"
+				}},
+				"bolt12": null,
+				"onchain": null
+			}}"#
+		))
+		.unwrap()
+	}
+
+	fn onchain_payment_info(fee_total_sat: u64, order_total_sat: u64) -> LdkLSPS1PaymentInfo {
+		serde_json::from_str(&format!(
+			r#"{{
+				"bolt11": null,
+				"bolt12": null,
+				"onchain": {{
+					"state": "EXPECT_PAYMENT",
+					"expires_at": "2035-01-01T00:00:00Z",
+					"fee_total_sat": "{fee_total_sat}",
+					"order_total_sat": "{order_total_sat}",
+					"address": "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4",
+					"min_onchain_payment_confirmations": 1,
+					"min_fee_for_0conf": 253
+				}}
+			}}"#
+		))
+		.unwrap()
+	}
+
+	// Delivers the given LSP response for a pending create-order request (or a pending
+	// check-order-status request if `via_order_status` is set) and returns whether the client
+	// forwarded it to the waiting caller.
+	fn response_is_forwarded(
+		node: &Node, payment: LdkLSPS1PaymentInfo, via_order_status: bool,
+	) -> bool {
+		let client = node.liquidity_source.lsps1_client();
+		let handler = client.liquidity_manager.lsps1_client_handler().unwrap();
+		let order_id = LSPS1OrderId("order".to_owned());
+		let (sender, receiver) = oneshot::channel();
+
+		let (request_id, _pending_request) = if via_order_status {
+			let request_id = handler.check_order_status(&lsp_node_id(), order_id.clone());
+			let mut lock = client.pending_check_order_status_requests.lock().unwrap();
+			let guard = PendingRequestGuard::insert(
+				&client.pending_check_order_status_requests,
+				&mut lock,
+				request_id.clone(),
+				sender,
+			);
+			(request_id, guard)
+		} else {
+			let request_id = handler.create_order(&lsp_node_id(), order_params(), None);
+			let mut lock = client.pending_create_order_requests.lock().unwrap();
+			let guard = PendingRequestGuard::insert(
+				&client.pending_create_order_requests,
+				&mut lock,
+				request_id.clone(),
+				sender,
+			);
+			(request_id, guard)
+		};
+
+		let event = if via_order_status {
+			LSPS1ClientEvent::OrderStatus {
+				request_id,
+				counterparty_node_id: lsp_node_id(),
+				order_id,
+				order: order_params(),
+				payment,
+				channel: None,
+			}
+		} else {
+			LSPS1ClientEvent::OrderCreated {
+				request_id,
+				counterparty_node_id: lsp_node_id(),
+				order_id,
+				order: order_params(),
+				payment,
+				channel: None,
+			}
+		};
+
+		let event_client = Arc::clone(&client);
+		node.runtime.block_on(async move {
+			event_client.handle_event(event).await;
+			receiver.await.is_ok()
+		})
+	}
+
+	#[test]
+	fn accepts_consistent_payment_options() {
+		let node = build_node();
+		let fee_total_sat = INVOICE_AMOUNT_SAT - CLIENT_BALANCE_SAT;
+		for via_order_status in [false, true] {
+			assert!(response_is_forwarded(
+				&node,
+				bolt11_payment_info(fee_total_sat, INVOICE_AMOUNT_SAT),
+				via_order_status
+			));
+			assert!(response_is_forwarded(
+				&node,
+				onchain_payment_info(fee_total_sat, INVOICE_AMOUNT_SAT),
+				via_order_status
+			));
+		}
+	}
+
+	#[test]
+	fn rejects_invoice_amount_disagreeing_with_order_total() {
+		let node = build_node();
+		// The LSP advertises a one-satoshi total, but the embedded invoice asks for 1,000,000 sat.
+		for via_order_status in [false, true] {
+			assert!(!response_is_forwarded(&node, bolt11_payment_info(0, 1), via_order_status));
+		}
+	}
+
+	#[test]
+	fn rejects_fee_disagreeing_with_order_total() {
+		let node = build_node();
+		let fee_total_sat = INVOICE_AMOUNT_SAT - CLIENT_BALANCE_SAT - 1;
+		for via_order_status in [false, true] {
+			assert!(!response_is_forwarded(
+				&node,
+				bolt11_payment_info(fee_total_sat, INVOICE_AMOUNT_SAT),
+				via_order_status
+			));
+			assert!(!response_is_forwarded(
+				&node,
+				onchain_payment_info(fee_total_sat, INVOICE_AMOUNT_SAT),
+				via_order_status
+			));
+		}
 	}
 }
