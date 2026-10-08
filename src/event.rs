@@ -790,6 +790,18 @@ where
 						},
 						_ => {},
 					}
+				} else if counterparty_skimmed_fee_msat > 0 {
+					// We only ever authorize an LSP to withhold a fee for JIT-channel payments we
+					// previously registered. Any other payment (e.g., BOLT12 offer or spontaneous
+					// payments, for which no record exists yet) must not have fees skimmed.
+					log_info!(
+						self.logger,
+						"Refusing inbound payment with hash {} as the counterparty withheld {}msat without a corresponding JIT-channel payment authorizing it",
+						hex_utils::to_string(&payment_hash.0),
+						counterparty_skimmed_fee_msat,
+					);
+					self.channel_manager.fail_htlc_backwards(&payment_hash);
+					return Ok(());
 				}
 
 				log_info!(
