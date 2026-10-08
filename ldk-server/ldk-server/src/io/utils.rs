@@ -1,0 +1,108 @@
+// This file is Copyright its original authors, visible in version control
+// history.
+//
+// This file is licensed under the Apache License, Version 2.0 <LICENSE-APACHE
+// or http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your option.
+// You may not use this file except in accordance with one or both of these
+// licenses.
+
+use ldk_node::lightning::types::string::PrintableString;
+use ldk_node::lightning::util::persist::{
+	KVSTORE_NAMESPACE_KEY_ALPHABET, KVSTORE_NAMESPACE_KEY_MAX_LEN,
+};
+
+pub(crate) fn check_namespace_key_validity(
+	primary_namespace: &str, secondary_namespace: &str, key: Option<&str>, operation: &str,
+) -> Result<(), std::io::Error> {
+	if let Some(key) = key {
+		if key.is_empty() {
+			debug_assert!(
+				false,
+				"Failed to {} {}/{}/{}: key may not be empty.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace),
+				PrintableString(key)
+			);
+			let msg = format!(
+				"Failed to {} {}/{}/{}: key may not be empty.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace),
+				PrintableString(key)
+			);
+			return Err(std::io::Error::other(msg));
+		}
+
+		if primary_namespace.is_empty() && !secondary_namespace.is_empty() {
+			debug_assert!(false,
+				"Failed to {} {}/{}/{}: primary namespace may not be empty if a non-empty secondary namespace is given.",
+				operation,
+				PrintableString(primary_namespace), PrintableString(secondary_namespace), PrintableString(key)
+			);
+			let msg = format!(
+				"Failed to {} {}/{}/{}: primary namespace may not be empty if a non-empty secondary namespace is given.", operation,
+				PrintableString(primary_namespace), PrintableString(secondary_namespace), PrintableString(key)
+			);
+			return Err(std::io::Error::other(msg));
+		}
+
+		if !is_valid_kvstore_str(primary_namespace)
+			|| !is_valid_kvstore_str(secondary_namespace)
+			|| !is_valid_kvstore_str(key)
+		{
+			debug_assert!(
+				false,
+				"Failed to {} {}/{}/{}: primary namespace, secondary namespace, and key must be valid.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace),
+				PrintableString(key)
+			);
+			let msg = format!(
+				"Failed to {} {}/{}/{}: primary namespace, secondary namespace, and key must be valid.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace),
+				PrintableString(key)
+			);
+			return Err(std::io::Error::other(msg));
+		}
+	} else {
+		if primary_namespace.is_empty() && !secondary_namespace.is_empty() {
+			debug_assert!(false,
+				"Failed to {} {}/{}: primary namespace may not be empty if a non-empty secondary namespace is given.",
+				operation, PrintableString(primary_namespace), PrintableString(secondary_namespace)
+			);
+			let msg = format!(
+				"Failed to {} {}/{}: primary namespace may not be empty if a non-empty secondary namespace is given.",
+				operation, PrintableString(primary_namespace), PrintableString(secondary_namespace)
+			);
+			return Err(std::io::Error::other(msg));
+		}
+		if !is_valid_kvstore_str(primary_namespace) || !is_valid_kvstore_str(secondary_namespace) {
+			debug_assert!(
+				false,
+				"Failed to {} {}/{}: primary namespace and secondary namespace must be valid.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace)
+			);
+			let msg = format!(
+				"Failed to {} {}/{}: primary namespace and secondary namespace must be valid.",
+				operation,
+				PrintableString(primary_namespace),
+				PrintableString(secondary_namespace)
+			);
+			return Err(std::io::Error::other(msg));
+		}
+	}
+
+	Ok(())
+}
+
+pub(crate) fn is_valid_kvstore_str(key: &str) -> bool {
+	key.len() <= KVSTORE_NAMESPACE_KEY_MAX_LEN
+		&& key.chars().all(|c| KVSTORE_NAMESPACE_KEY_ALPHABET.contains(c))
+}

@@ -1,0 +1,501 @@
+syntax = "proto3";
+package api;
+
+import 'types.proto';
+
+// Retrieve the latest node info like `node_id`, `current_best_block` etc.
+// See more:
+// - https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.node_id
+// - https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.status
+message GetNodeInfoRequest {
+}
+
+// The response `content` for the `GetNodeInfo` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message GetNodeInfoResponse {
+
+  // The hex-encoded `node-id` or public key for our own lightning node.
+  string node_id = 1;
+
+  // The best block to which our Lightning wallet is currently synced.
+  //
+  // Should be always set, will never be `None`.
+  types.BestBlock current_best_block = 3;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our Lightning wallet to
+  // the chain tip.
+  //
+  // Will be `None` if the wallet hasn't been synced yet.
+  optional uint64 latest_lightning_wallet_sync_timestamp = 4;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when we last successfully synced our on-chain
+  // wallet to the chain tip.
+  //
+  // Will be `None` if the wallet hasn’t been synced since the node was initialized.
+  optional uint64 latest_onchain_wallet_sync_timestamp = 5;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when we last successfully update our fee rate cache.
+  //
+  // Will be `None` if the cache hasn’t been updated since the node was initialized.
+  optional uint64 latest_fee_rate_cache_update_timestamp = 6;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when the last rapid gossip sync (RGS) snapshot we
+  // successfully applied was generated.
+  //
+  // Will be `None` if RGS isn’t configured or the snapshot hasn’t been updated since the node was initialized.
+  optional uint64 latest_rgs_snapshot_timestamp = 7;
+
+  // The timestamp, in seconds since start of the UNIX epoch, when we last broadcasted a node announcement.
+  //
+  // Will be `None` if we have no public channels or we haven’t broadcasted since the node was initialized.
+  optional uint64  latest_node_announcement_broadcast_timestamp = 8;
+}
+
+// Retrieve a new on-chain funding address.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.new_address
+message OnchainReceiveRequest {
+}
+
+// The response `content` for the `OnchainReceive` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`..
+message OnchainReceiveResponse {
+
+  // A Bitcoin on-chain address.
+  string address = 1;
+}
+
+// Send an on-chain payment to the given address.
+message OnchainSendRequest {
+
+  // The address to send coins to.
+  string address = 1;
+
+  // The amount in satoshis to send.
+  // While sending the specified amount, we will respect any on-chain reserve we need to keep,
+  // i.e., won't allow to cut into `total_anchor_channels_reserve_sats`.
+  // See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.send_to_address
+  optional uint64 amount_sats = 2;
+
+  // If set, the amount_sats field should be unset.
+  // It indicates that node will send full balance to the specified address.
+  //
+  // Please note that when send_all is used this operation will **not** retain any on-chain reserves,
+  // which might be potentially dangerous if you have open Anchor channels for which you can't trust
+  // the counterparty to spend the Anchor output after channel closure.
+  // See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.OnchainPayment.html#method.send_all_to_address
+  optional bool send_all = 3;
+
+  // If `fee_rate_sat_per_vb` is set it will be used on the resulting transaction. Otherwise we'll retrieve
+  // a reasonable estimate from BitcoinD.
+  optional uint64 fee_rate_sat_per_vb = 4;
+}
+
+// The response `content` for the `OnchainSend` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message OnchainSendResponse {
+
+  // The transaction ID of the broadcasted transaction.
+  string txid = 1;
+}
+
+// Return a BOLT11 payable invoice that can be used to request and receive a payment
+// for the given amount, if specified.
+// The inbound payment will be automatically claimed upon arrival.
+// See more:
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt11Payment.html#method.receive
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt11Payment.html#method.receive_variable_amount
+message Bolt11ReceiveRequest {
+
+  // The amount in millisatoshi to send. If unset, a "zero-amount" or variable-amount invoice is returned.
+  optional uint64 amount_msat = 1;
+
+  // An optional description to attach along with the invoice.
+  // Will be set in the description field of the encoded payment request.
+  types.Bolt11InvoiceDescription description = 2;
+
+  // Invoice expiry time in seconds.
+  uint32 expiry_secs = 3;
+}
+
+// The response `content` for the `Bolt11Receive` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message Bolt11ReceiveResponse {
+
+  // An invoice for a payment within the Lightning Network.
+  // With the details of the invoice, the sender has all the data necessary to send a payment
+  // to the recipient.
+  string invoice = 1;
+}
+
+// Send a payment for a BOLT11 invoice.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt11Payment.html#method.send
+message Bolt11SendRequest {
+
+  // An invoice for a payment within the Lightning Network.
+  string invoice = 1;
+
+  // Set this field when paying a so-called "zero-amount" invoice, i.e., an invoice that leaves the
+  // amount paid to be determined by the user.
+  // This operation will fail if the amount specified is less than the value required by the given invoice.
+  optional uint64 amount_msat = 2;
+  
+  // Configuration options for payment routing and pathfinding.
+  optional types.RouteParametersConfig route_parameters = 3;
+
+}
+
+// The response `content` for the `Bolt11Send` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message Bolt11SendResponse {
+
+  // An identifier used to uniquely identify a payment in hex-encoded form.
+  string payment_id = 1;
+}
+
+// Returns a BOLT12 offer for the given amount, if specified.
+//
+// See more:
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt12Payment.html#method.receive
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt12Payment.html#method.receive_variable_amount
+message Bolt12ReceiveRequest {
+
+  // An optional description to attach along with the offer.
+  // Will be set in the description field of the encoded offer.
+  string description = 1;
+
+  // The amount in millisatoshi to send. If unset, a "zero-amount" or variable-amount offer is returned.
+  optional uint64 amount_msat = 2;
+
+  // Offer expiry time in seconds.
+  optional uint32 expiry_secs = 3;
+
+  // If set, it represents the number of items requested, can only be set for fixed-amount offers.
+  optional uint64 quantity = 4;
+}
+
+// The response `content` for the `Bolt12Receive` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message Bolt12ReceiveResponse {
+
+  // An offer for a payment within the Lightning Network.
+  // With the details of the offer, the sender has all the data necessary to send a payment
+  // to the recipient.
+  string offer = 1;
+}
+
+// Send a payment for a BOLT12 offer.
+// See more:
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt12Payment.html#method.send
+// - https://docs.rs/ldk-node/latest/ldk_node/payment/struct.Bolt12Payment.html#method.send_using_amount
+message Bolt12SendRequest {
+
+  // An offer for a payment within the Lightning Network.
+  string offer = 1;
+
+  // Set this field when paying a so-called "zero-amount" offer, i.e., an offer that leaves the
+  // amount paid to be determined by the user.
+  // This operation will fail if the amount specified is less than the value required by the given offer.
+  optional uint64 amount_msat = 2;
+
+  // If set, it represents the number of items requested.
+  optional uint64 quantity = 3;
+
+  // If set, it will be seen by the recipient and reflected back in the invoice.
+  optional string payer_note = 4;
+
+  // Configuration options for payment routing and pathfinding.
+  optional types.RouteParametersConfig route_parameters = 5;
+}
+
+// The response `content` for the `Bolt12Send` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message Bolt12SendResponse {
+
+  // An identifier used to uniquely identify a payment in hex-encoded form.
+  string payment_id = 1;
+}
+
+// Creates a new outbound channel to the given remote node.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.connect_open_channel
+message OpenChannelRequest {
+
+  // The hex-encoded public key of the node to open a channel with.
+  string node_pubkey = 1;
+
+  // An address which can be used to connect to a remote peer.
+  // It can be of type IPv4:port, IPv6:port, OnionV3:port or hostname:port
+  string address = 2;
+
+  // The amount of satoshis the caller is willing to commit to the channel.
+  uint64 channel_amount_sats = 3;
+
+  // The amount of satoshis to push to the remote side as part of the initial commitment state.
+  optional uint64 push_to_counterparty_msat = 4;
+
+  // The channel configuration to be used for opening this channel. If unset, default ChannelConfig is used.
+  optional types.ChannelConfig channel_config = 5;
+
+  // Whether the channel should be public.
+  bool announce_channel = 6;
+}
+
+// The response `content` for the `OpenChannel` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message OpenChannelResponse {
+
+  // The local channel id of the created channel that user can use to refer to channel.
+  string user_channel_id = 1;
+}
+
+// Increases the channel balance by the given amount.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.splice_in
+message SpliceInRequest {
+
+  // The local `user_channel_id` of the channel.
+  string user_channel_id = 1;
+
+  // The hex-encoded public key of the channel's counterparty node.
+  string counterparty_node_id = 2;
+
+  // The amount of sats to splice into the channel.
+  uint64 splice_amount_sats = 3;
+}
+
+// The response `content` for the `SpliceIn` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message SpliceInResponse {}
+
+// Decreases the channel balance by the given amount.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.splice_out
+message SpliceOutRequest {
+
+  // The local `user_channel_id` of this channel.
+  string user_channel_id = 1;
+
+  // The hex-encoded public key of the channel's counterparty node.
+  string counterparty_node_id = 2;
+
+  // A Bitcoin on-chain address to send the spliced-out funds.
+  //
+  // If not set, an address from the node's on-chain wallet will be used.
+  optional string address = 3;
+
+  // The amount of sats to splice out of the channel.
+  uint64 splice_amount_sats = 4;
+}
+
+// The response `content` for the `SpliceOut` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message SpliceOutResponse {
+
+  // The Bitcoin on-chain address where the funds will be sent.
+  string address = 1;
+}
+
+// Update the config for a previously opened channel.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.update_channel_config
+message UpdateChannelConfigRequest {
+
+  // The local `user_channel_id` of this channel.
+  string user_channel_id = 1;
+
+  // The hex-encoded public key of the counterparty node to update channel config with.
+  string counterparty_node_id = 2;
+
+  // The updated channel configuration settings for a channel.
+  types.ChannelConfig channel_config = 3;
+}
+
+// The response `content` for the `UpdateChannelConfig` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message UpdateChannelConfigResponse {
+}
+
+// Closes the channel specified by given request.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.close_channel
+message CloseChannelRequest {
+
+  // The local `user_channel_id` of this channel.
+  string user_channel_id = 1;
+
+  // The hex-encoded public key of the node to close a channel with.
+  string counterparty_node_id = 2;
+}
+
+// The response `content` for the `CloseChannel` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message CloseChannelResponse {}
+
+// Force closes the channel specified by given request.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.force_close_channel
+message ForceCloseChannelRequest {
+  // The local `user_channel_id` of this channel.
+  string user_channel_id = 1;
+  // The hex-encoded public key of the node to close a channel with.
+  string counterparty_node_id = 2;
+  // The reason for force-closing.
+  optional string force_close_reason = 3;
+}
+
+// The response `content` for the `ForceCloseChannel` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message ForceCloseChannelResponse {}
+
+// Returns a list of known channels.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_channels
+message ListChannelsRequest {}
+
+// The response `content` for the `ListChannels` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message ListChannelsResponse {
+
+  // List of channels.
+  repeated types.Channel channels = 1;
+}
+
+// Returns payment details for a given payment_id.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.payment
+message GetPaymentDetailsRequest {
+  // An identifier used to uniquely identify a payment in hex-encoded form.
+  string payment_id = 1;
+}
+
+// The response `content` for the `GetPaymentDetails` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message GetPaymentDetailsResponse {
+  // Represents a payment.
+  // Will be `None` if payment doesn't exist.
+  types.Payment payment = 1;
+}
+
+// Retrieves list of all payments.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_payments
+message ListPaymentsRequest {
+  // `page_token` is a pagination token.
+  //
+  // To query for the first page, `page_token` must not be specified.
+  //
+  // For subsequent pages, use the value that was returned as `next_page_token` in the previous
+  // page's response.
+  optional types.PageToken page_token = 1;
+}
+
+// The response `content` for the `ListPayments` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message ListPaymentsResponse {
+  // List of payments.
+  repeated types.Payment payments = 1;
+
+  // `next_page_token` is a pagination token, used to retrieve the next page of results.
+  // Use this value to query for next-page of paginated operation, by specifying
+  // this value as the `page_token` in the next request.
+  //
+  // If `next_page_token` is `None`, then the "last page" of results has been processed and
+  // there is no more data to be retrieved.
+  //
+  // If `next_page_token` is not `None`, it does not necessarily mean that there is more data in the
+  // result set. The only way to know when you have reached the end of the result set is when
+  // `next_page_token` is `None`.
+  //
+  // **Caution**: Clients must not assume a specific number of records to be present in a page for
+  // paginated response.
+  optional types.PageToken next_page_token = 2;
+}
+
+// Retrieves list of all forwarded payments.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/enum.Event.html#variant.PaymentForwarded
+message ListForwardedPaymentsRequest {
+  // `page_token` is a pagination token.
+  //
+  // To query for the first page, `page_token` must not be specified.
+  //
+  // For subsequent pages, use the value that was returned as `next_page_token` in the previous
+  // page's response.
+  optional types.PageToken page_token = 1;
+}
+
+// The response `content` for the `ListForwardedPayments` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message ListForwardedPaymentsResponse {
+  // List of forwarded payments.
+  repeated types.ForwardedPayment forwarded_payments = 1;
+
+  // `next_page_token` is a pagination token, used to retrieve the next page of results.
+  // Use this value to query for next-page of paginated operation, by specifying
+  // this value as the `page_token` in the next request.
+  //
+  // If `next_page_token` is `None`, then the "last page" of results has been processed and
+  // there is no more data to be retrieved.
+  //
+  // If `next_page_token` is not `None`, it does not necessarily mean that there is more data in the
+  // result set. The only way to know when you have reached the end of the result set is when
+  // `next_page_token` is `None`.
+  //
+  // **Caution**: Clients must not assume a specific number of records to be present in a page for
+  // paginated response.
+  optional types.PageToken next_page_token = 2;
+}
+
+// Retrieves an overview of all known balances.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.list_balances
+message GetBalancesRequest {}
+
+// The response `content` for the `GetBalances` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message GetBalancesResponse {
+  // The total balance of our on-chain wallet.
+  uint64 total_onchain_balance_sats = 1;
+
+  // The currently spendable balance of our on-chain wallet.
+  //
+  // This includes any sufficiently confirmed funds, minus `total_anchor_channels_reserve_sats`.
+  uint64 spendable_onchain_balance_sats = 2;
+
+  // The share of our total balance that we retain as an emergency reserve to (hopefully) be
+  // able to spend the Anchor outputs when one of our channels is closed.
+  uint64 total_anchor_channels_reserve_sats = 3;
+
+  // The total balance that we would be able to claim across all our Lightning channels.
+  //
+  // Note this excludes balances that we are unsure if we are able to claim (e.g., as we are
+  // waiting for a preimage or for a timeout to expire). These balances will however be included
+  // as `MaybePreimageClaimableHTLC` and `MaybeTimeoutClaimableHTLC` in `lightning_balances`.
+  uint64 total_lightning_balance_sats = 4;
+
+  // A detailed list of all known Lightning balances that would be claimable on channel closure.
+  //
+  // Note that less than the listed amounts are spendable over lightning as further reserve
+  // restrictions apply. Please refer to `Channel::outbound_capacity_msat` and
+  // Channel::next_outbound_htlc_limit_msat as returned by `ListChannels`
+  // for a better approximation of the spendable amounts.
+  repeated types.LightningBalance lightning_balances = 5;
+
+  // A detailed list of balances currently being swept from the Lightning to the on-chain
+  // wallet.
+  //
+  // These are balances resulting from channel closures that may have been encumbered by a
+  // delay, but are now being claimed and useable once sufficiently confirmed on-chain.
+  //
+  // Note that, depending on the sync status of the wallets, swept balances listed here might or
+  // might not already be accounted for in `total_onchain_balance_sats`.
+  repeated types.PendingSweepBalance pending_balances_from_channel_closures = 6;
+}
+
+// Connect to a peer on the Lightning Network.
+// See more: https://docs.rs/ldk-node/latest/ldk_node/struct.Node.html#method.connect
+message ConnectPeerRequest {
+  // The hex-encoded public key of the node to connect to.
+  string node_pubkey = 1;
+
+  // An address which can be used to connect to a remote peer.
+  // It can be of type IPv4:port, IPv6:port, OnionV3:port or hostname:port
+  string address = 2;
+
+  // Whether to persist the peer connection, i.e., whether the peer will be re-connected on
+  // restart.
+  bool persist = 3;
+}
+
+// The response `content` for the `ConnectPeer` API, when HttpStatusCode is OK (200).
+// When HttpStatusCode is not OK (non-200), the response `content` contains a serialized `ErrorResponse`.
+message ConnectPeerResponse {}

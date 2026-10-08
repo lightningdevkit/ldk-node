@@ -1,0 +1,25 @@
+[package]
+name = "ldk-server-protos"
+version = "0.1.0"
+edition = "2021"
+
+build = "build.rs"
+
+# We use a cfg instead of a feature for genproto to prevent it from being
+# enabled with --all-features. Proto generation is a developer-only tool that
+# requires external dependencies (protoc) and shouldn't be triggered accidentally.
+# This lint configuration tells Cargo that genproto is an expected custom cfg.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(genproto)'] }
+
+[features]
+default = []
+serde = ["dep:serde", "dep:bytes"]
+
+[dependencies]
+prost = { version = "0.11.6", default-features = false, features = ["std", "prost-derive"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
+bytes = { version = "1", features = ["serde"], optional = true }
+
+[target.'cfg(genproto)'.build-dependencies]
+prost-build = { version = "0.11.6", default-features = false }
