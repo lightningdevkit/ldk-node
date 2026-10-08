@@ -4776,6 +4776,43 @@ async fn fs_store_persistence_backwards_compatibility() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_fee_bump_rbf_twice_before_sync() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a.clone(), addr_b],
+		Amount::from_sat(500_000),
+	)
+	.await;
+	node_b.sync_wallets().unwrap();
+	let txid = node_b.onchain_payment().send_to_address(&addr_a, 100_000, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+	node_b.sync_wallets().unwrap();
+	let payment_id = PaymentId(txid.to_byte_array());
+	let first_fee = node_b.payment(&payment_id).unwrap().unwrap().fee_paid_msat.unwrap();
+
+	let first_replacement = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
+	let second_replacement = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
+	assert_ne!(first_replacement, second_replacement);
+	let payment = node_b.payment(&payment_id).unwrap().unwrap();
+	assert!(payment.fee_paid_msat.unwrap() > first_fee);
+	assert!(
+		matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == second_replacement)
+	);
+	wait_for_tx(&electrsd.client, second_replacement).await;
+	node_b.sync_wallets().unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_fee_bump_rbf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
