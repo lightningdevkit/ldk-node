@@ -4414,4 +4414,107 @@ mod tests {
 		);
 		assert_ne!(locked_wallet.next_unused_address(KeychainKind::Internal).index, 0);
 	}
+
+	/// Pins down the eviction ordering our bitcoind mempool producer relies on: BDK keeps an
+	/// evicted transaction canonical for as long as the absence we reported predates the
+	/// `last_seen` we reported, and only drops it once the absence catches up. The producer has
+	/// to date absences on a clock that can clear a `last_seen` reloaded from the store, which
+	/// is why it reads the local clock rather than Bitcoin Core's mempool entry times — see
+	/// `chain::bitcoind::observation_time_secs`.
+	#[cfg(feature = "chain-bitcoind")]
+	#[tokio::test]
+	async fn mempool_eviction_needs_an_absence_dated_after_last_seen() {
+		// The mempool entry time our outgoing transaction was emitted with, i.e. the
+		// `last_seen` the wallet persists for it.
+		const LAST_SEEN: u64 = 200;
+
+		// A confirmed 100_000 sat input, spent by an unconfirmed 60_000 sat payment that paid a
+		// 1_000 sat fee and left 39_000 sats of change.
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let spend_txid = {
+			let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+			let (funding_tx, block_id) = {
+				let mut locked_wallet = wallet.inner.lock().unwrap();
+				let script_pubkey = locked_wallet
+					.reveal_next_address(KeychainKind::External)
+					.address
+					.script_pubkey();
+				let funding_tx = Transaction {
+					version: bitcoin::transaction::Version::TWO,
+					lock_time: LockTime::ZERO,
+					input: Vec::new(),
+					output: vec![TxOut { value: Amount::from_sat(100_000), script_pubkey }],
+				};
+				let block_id = BlockId {
+					height: locked_wallet.latest_checkpoint().height() + 1,
+					hash: bitcoin::BlockHash::from_byte_array([23; 32]),
+				};
+				(funding_tx, block_id)
+			};
+			let funding_txid = funding_tx.compute_txid();
+			let mut tx_update = TxUpdate::default();
+			tx_update.txs = vec![Arc::new(funding_tx)];
+			tx_update.anchors =
+				[(ConfirmationBlockTime { block_id, confirmation_time: 1 }, funding_txid)].into();
+			let chain = CheckPoint::from_block_ids([
+				wallet.inner.lock().unwrap().latest_checkpoint().block_id(),
+				block_id,
+			])
+			.unwrap();
+			wallet
+				.apply_update(Update { tx_update, chain: Some(chain), ..Default::default() })
+				.await
+				.unwrap();
+			assert_eq!(wallet.get_balances(0).unwrap(), (100_000, 100_000));
+
+			let change_script_pubkey = wallet
+				.inner
+				.lock()
+				.unwrap()
+				.reveal_next_address(KeychainKind::Internal)
+				.address
+				.script_pubkey();
+			let spend_tx = Transaction {
+				version: bitcoin::transaction::Version::TWO,
+				lock_time: LockTime::ZERO,
+				input: vec![bitcoin::TxIn {
+					previous_output: OutPoint { txid: funding_txid, vout: 0 },
+					..Default::default()
+				}],
+				output: vec![
+					TxOut {
+						value: Amount::from_sat(60_000),
+						script_pubkey: ScriptBuf::from_bytes(vec![0x51]),
+					},
+					TxOut { value: Amount::from_sat(39_000), script_pubkey: change_script_pubkey },
+				],
+			};
+			let spend_txid = spend_tx.compute_txid();
+			wallet.apply_mempool_txs(vec![(spend_tx, LAST_SEEN)], Vec::new()).await.unwrap();
+			assert_eq!(wallet.get_balances(0).unwrap(), (39_000, 39_000));
+
+			spend_txid
+		};
+
+		// Restart: the wallet reloads the transaction and its `last_seen` from the store.
+		let wallet = new_test_wallet(Arc::clone(&store), true).await;
+		assert_eq!(wallet.get_unconfirmed_txids(), vec![spend_txid]);
+		assert_eq!(wallet.get_balances(0).unwrap(), (39_000, 39_000));
+
+		// The transaction is gone from the mempool, with nothing confirming, replacing or
+		// descending from it. Absences predating `last_seen` leave it canonical: the input
+		// stays spent and the stale change keeps counting.
+		for stale in [0, LAST_SEEN - 1] {
+			wallet.apply_mempool_txs(Vec::new(), vec![(spend_txid, stale)]).await.unwrap();
+			assert_eq!(wallet.get_unconfirmed_txids(), vec![spend_txid]);
+			assert_eq!(wallet.get_balances(0).unwrap(), (39_000, 39_000));
+		}
+
+		// Once the absence reaches `last_seen`, the transaction stops being canonical: the
+		// confirmed input comes back and the stale change stops counting.
+		wallet.apply_mempool_txs(Vec::new(), vec![(spend_txid, LAST_SEEN)]).await.unwrap();
+		assert!(wallet.get_unconfirmed_txids().is_empty());
+		assert_eq!(wallet.get_balances(0).unwrap(), (100_000, 100_000));
+	}
 }
