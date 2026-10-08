@@ -461,6 +461,21 @@ impl Wallet {
 	}
 
 	#[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
+	pub(crate) fn broadcaster(&self) -> &Arc<Broadcaster> {
+		&self.broadcaster
+	}
+
+	#[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
+	pub(crate) fn fee_estimator(&self) -> &Arc<OnchainFeeEstimator> {
+		&self.fee_estimator
+	}
+
+	#[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
+	pub(crate) fn logger(&self) -> &Arc<Logger> {
+		&self.logger
+	}
+
+	#[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
 	pub(crate) fn current_best_block(&self) -> BlockLocator {
 		let checkpoint = self.inner.lock().expect("lock").latest_checkpoint();
 		let mut current_block = Some(checkpoint.clone());
