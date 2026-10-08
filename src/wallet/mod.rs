@@ -4033,6 +4033,7 @@ mod tests {
 				preimage: None,
 				secret: None,
 				counterparty_skimmed_fee_msat: None,
+				claimable_amount_msat: None,
 			},
 			Some(1_000),
 			None,

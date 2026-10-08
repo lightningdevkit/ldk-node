@@ -63,6 +63,13 @@
   current chain tip now aborts with a new `BuildError::ChainTipFetchFailed` variant instead of
   silently pinning the wallet birthday to genesis, which would have forced a full-history rescan
   once the chain source became reachable again. (#884)
+- `Bolt11Payment::claim_for_id`'s `claimable_amount_msat` argument is now checked against the
+  amount actually reported by the triggering `PaymentClaimable` event, catching a caller mixing
+  up arguments across concurrent manual claims. Previously, for any payment received since the
+  payment-ID refactor in v0.8-development, this check compared the argument against a value
+  derived from the very same event, making it ineffective for well-behaved callers and silently
+  permissive of mismatched ones. The historic guard against underpayment (net of any
+  JIT-channel-opening LSP fee) is preserved for payments serialized before that refactor.
 
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
