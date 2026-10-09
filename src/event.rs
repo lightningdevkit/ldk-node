@@ -13,8 +13,10 @@ use std::sync::{Arc, Mutex};
 
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Amount, OutPoint};
+use bitcoin::{Amount, OutPoint, Txid};
 use lightning::blinded_path::message::NextMessageHop;
+use lightning::chain::chaininterface::FundingCandidate;
+use lightning::chain::transaction::OutPoint as LdkOutPoint;
 use lightning::events::bump_transaction::BumpTransactionEvent;
 #[cfg(not(feature = "uniffi"))]
 use lightning::events::PaidBolt12Invoice;
@@ -26,7 +28,7 @@ use lightning::events::{
 use lightning::ln::channelmanager::{PaymentId, TrustedChannelFeatures};
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
-use lightning::sign::EntropySource;
+use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
@@ -51,14 +53,18 @@ use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use crate::payment::forwarding_store::{ForwardRecord, ForwardingStore};
 use crate::payment::store::{
-	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
+	Channel, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
+	TransactionType,
 };
 use crate::payment::PaymentMetadata;
 use crate::probing::Prober;
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	ChainMonitor, CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper,
+	Wallet,
 };
+use crate::wallet::provenance::{ChannelOutputRole, ChannelTxFacts, FactsRecordOutcome};
+use crate::wallet::{closed_channel_held_rounds, funding_candidates, held_splice_rounds};
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
 	UserChannelId,
@@ -559,6 +565,7 @@ where
 	wallet: Arc<Wallet>,
 	bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
 	channel_manager: Arc<ChannelManager>,
+	chain_monitor: Arc<ChainMonitor>,
 	connection_manager: Arc<ConnectionManager<L>>,
 	output_sweeper: Arc<Sweeper>,
 	network_graph: Arc<Graph>,
@@ -583,19 +590,21 @@ where
 	pub fn new(
 		event_queue: Arc<EventQueue<L>>, wallet: Arc<Wallet>,
 		bump_tx_event_handler: Arc<BumpTransactionEventHandler>,
-		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
-		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
-		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
-		forwarding_store: Arc<ForwardingStore>, peer_store: Arc<PeerStore<L>>,
-		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
-		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
-		prober: Option<Arc<Prober>>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		connection_manager: Arc<ConnectionManager<L>>, output_sweeper: Arc<Sweeper>,
+		network_graph: Arc<Graph>, liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
+		payment_store: Arc<PaymentStore>, forwarding_store: Arc<ForwardingStore>,
+		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
+		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
+		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
+		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
 			wallet,
 			bump_tx_event_handler,
 			channel_manager,
+			chain_monitor,
 			connection_manager,
 			output_sweeper,
 			network_graph,
@@ -733,6 +742,55 @@ where
 		Ok((payment_id, None))
 	}
 
+	/// The channel's pending splice rounds that have a transaction, as LDK currently holds them.
+	fn pending_splice_rounds(
+		&self, counterparty_node_id: PublicKey, channel_id: ChannelId,
+	) -> Vec<FundingCandidate> {
+		let splice_details = self
+			.channel_manager
+			.list_channels_with_counterparty(&counterparty_node_id)
+			.into_iter()
+			.find(|channel| channel.channel_id == channel_id)
+			.and_then(|channel| channel.splice_details);
+		funding_candidates(splice_details.as_ref(), counterparty_node_id, channel_id)
+	}
+
+	/// The splice rounds LDK holds for the channel, as [`held_splice_rounds`] lists them, or
+	/// `None` once the channel is gone.
+	fn held_splice_rounds(
+		&self, counterparty_node_id: PublicKey, channel_id: ChannelId,
+	) -> Option<Vec<Txid>> {
+		self.channel_manager
+			.list_channels_with_counterparty(&counterparty_node_id)
+			.into_iter()
+			.find(|channel| channel.channel_id == channel_id)
+			.map(|channel| held_splice_rounds(channel.splice_details.as_ref(), channel.funding_txo))
+	}
+
+	/// Records what one of this node's channels reported about a transaction it produced, and
+	/// names the transaction's payment record from it if wallet sync wrote that record first.
+	///
+	/// A failure is logged rather than reported: these facts accompany a transaction this node
+	/// has already released or a claim it has already made, so there is nothing left to withhold,
+	/// and the producing event is re-offered until the claim resolves.
+	async fn record_channel_tx_facts(&self, facts: ChannelTxFacts) {
+		let txid = facts.txid;
+		match self.wallet.record_channel_tx_facts(facts).await {
+			Ok(FactsRecordOutcome::Recorded) => self.wallet.name_recorded_transaction(txid).await,
+			// Refused for lack of room, which the wallet has logged: nothing was recorded that
+			// could name the transaction.
+			Ok(FactsRecordOutcome::Incomplete) => {},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to record what channel transaction {} is: {}",
+					txid,
+					e
+				);
+			},
+		}
+	}
+
 	pub async fn handle_event(&self, event: LdkEvent) -> Result<(), ReplayEvent> {
 		match event {
 			LdkEvent::FundingGenerationReady {
@@ -755,7 +813,7 @@ where
 				let funding_transaction = self
 					.wallet
 					.create_funding_transaction(
-						output_script,
+						output_script.clone(),
 						channel_amount,
 						confirmation_target,
 						locktime,
@@ -763,6 +821,60 @@ where
 					.await;
 				match funding_transaction {
 					Ok(final_tx) => {
+						// Record what the transaction is before handing it to LDK, which is what
+						// authorizes either party to broadcast it. LDK identifies the funding
+						// output by the same script and value, and names the channel after that
+						// outpoint, so the fact matches the channel LDK will report from here on
+						// rather than the temporary one this event carries.
+						let txid = final_tx.compute_txid();
+						let funding_vout = final_tx
+							.output
+							.iter()
+							.position(|output| {
+								output.script_pubkey == output_script
+									&& output.value == channel_amount
+							})
+							.and_then(|index| u16::try_from(index).ok());
+						if let Some(vout) = funding_vout {
+							let funding_txo = LdkOutPoint { txid, index: vout };
+							let channel = Channel {
+								counterparty_node_id,
+								channel_id: ChannelId::v1_from_funding_outpoint(funding_txo),
+							};
+							let facts = ChannelTxFacts::new(txid).with_outputs(
+								&channel,
+								Some(UserChannelId(user_channel_id)),
+								ChannelOutputRole::Funding,
+								[vout as u32],
+							);
+							match self.wallet.record_channel_tx_facts(facts).await {
+								Ok(FactsRecordOutcome::Recorded) => {},
+								// Replaying would rebuild the same transaction and find the same
+								// full store, so the channel is funded with a transaction this
+								// node will report without a classification.
+								Ok(FactsRecordOutcome::Incomplete) => log_error!(
+									self.logger,
+									"Funding channel {} with a transaction this node has no room to describe",
+									temporary_channel_id,
+								),
+								Err(e) => {
+									log_error!(
+										self.logger,
+										"Failed to record the funding transaction of channel {}: {}",
+										temporary_channel_id,
+										e,
+									);
+									return Err(ReplayEvent());
+								},
+							}
+						} else {
+							log_error!(
+								self.logger,
+								"Failed to locate the funding output of channel {} in the transaction funding it",
+								temporary_channel_id,
+							);
+						}
+
 						let needs_manual_broadcast = self
 							.liquidity_source
 							.lsps2_service()
@@ -834,7 +946,22 @@ where
 					},
 				}
 			},
-			LdkEvent::FundingTxBroadcastSafe { user_channel_id, counterparty_node_id, .. } => {
+			LdkEvent::FundingTxBroadcastSafe {
+				channel_id,
+				user_channel_id,
+				counterparty_node_id,
+				funding_txo,
+				..
+			} => {
+				let channel = Channel { counterparty_node_id, channel_id };
+				let facts = ChannelTxFacts::new(funding_txo.txid).with_outputs(
+					&channel,
+					Some(UserChannelId(user_channel_id)),
+					ChannelOutputRole::Funding,
+					[funding_txo.vout],
+				);
+				self.record_channel_tx_facts(facts).await;
+
 				self.liquidity_source
 					.lsps2_service()
 					.lsps2_funding_tx_broadcast_safe(user_channel_id, counterparty_node_id);
@@ -1545,17 +1672,47 @@ where
 					.await;
 			},
 			LdkEvent::SpendableOutputs { outputs, channel_id, counterparty_node_id } => {
+				let spendable_outpoints = sweepable_outpoints(&outputs);
+				let directly_paid_outpoints = direct_outpoints(&outputs);
+
+				// Static outputs are excluded from the sweeper; `sweepable_outpoints` leaves them
+				// out of the spendable record below, and `direct_outpoints` has them recorded as
+				// paid straight to the wallet instead.
 				match self
 					.output_sweeper
 					.track_spendable_outputs(outputs, channel_id, counterparty_node_id, true, None)
 					.await
 				{
-					Ok(_) => return Ok(()),
+					Ok(_) => {},
 					Err(_) => {
 						log_error!(self.logger, "Failed to track spendable outputs");
 						return Err(ReplayEvent());
 					},
 				};
+
+				// Record which channel resolved these outputs only once the sweeper holds them:
+				// the sweep itself must never wait on bookkeeping, and the sweeper's own record
+				// is durable, so a failure here costs a label rather than the funds.
+				if let (Some(counterparty_node_id), Some(channel_id)) =
+					(counterparty_node_id, channel_id)
+				{
+					let channel = Channel { counterparty_node_id, channel_id };
+					let spendable = ChannelTxFacts::per_transaction(
+						&channel,
+						None,
+						ChannelOutputRole::Spendable,
+						spendable_outpoints,
+					);
+					let directly_paid = ChannelTxFacts::per_transaction(
+						&channel,
+						None,
+						ChannelOutputRole::Direct,
+						directly_paid_outpoints,
+					);
+					for facts in spendable.into_iter().chain(directly_paid) {
+						self.record_channel_tx_facts(facts).await;
+					}
+				}
 			},
 			LdkEvent::OpenChannelRequest {
 				temporary_channel_id,
@@ -1834,6 +1991,17 @@ where
 					"LDK Node has only ever persisted ChannelPending events from rust-lightning 0.0.115 or later",
 				);
 
+				let channel = Channel { counterparty_node_id, channel_id };
+				let facts = ChannelTxFacts::new(funding_txo.txid)
+					.with_outputs(
+						&channel,
+						Some(UserChannelId(user_channel_id)),
+						ChannelOutputRole::Funding,
+						[funding_txo.vout],
+					)
+					.with_self_role(TransactionType::Funding { channels: vec![channel.clone()] });
+				self.record_channel_tx_facts(facts).await;
+
 				let event = Event::ChannelPending {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
@@ -1907,6 +2075,53 @@ where
 					);
 				}
 
+				// The funding this channel now runs on is either the one it opened with or the
+				// splice round that just locked, so recording it here also catches a round that
+				// locked before anything else reported it.
+				if let Some(funding_txo) = funding_txo {
+					let channel = Channel { counterparty_node_id, channel_id };
+					let facts = ChannelTxFacts::new(funding_txo.txid).with_outputs(
+						&channel,
+						Some(UserChannelId(user_channel_id)),
+						ChannelOutputRole::Funding,
+						[funding_txo.vout],
+					);
+					self.record_channel_tx_facts(facts).await;
+				}
+
+				// A splice round LDK promoted to the funding — a zero-conf splice before its
+				// transaction confirms — can still confirm once a later splice builds on it and
+				// once the channel closes, when LDK holds it no longer, so its funding payment
+				// records the promotion and is kept at the close (see
+				// `closed_channel_held_rounds`). LDK discards the round's siblings as it promotes
+				// the round, so the channel's other funding payments are resolved now, by the
+				// rounds the channel manager holds once the channel is updated — the promoted
+				// round, and whatever was negotiated behind it — or left to the close for a
+				// channel the manager no longer lists (see
+				// `Wallet::resolve_promoted_splice_round`).
+				if let Some(funding_txo) = funding_txo {
+					let held_rounds = self.held_splice_rounds(counterparty_node_id, channel_id);
+					if let Err(e) = self
+						.wallet
+						.resolve_promoted_splice_round(
+							channel_id,
+							funding_txo.txid,
+							held_rounds.as_deref(),
+						)
+						.await
+					{
+						log_error!(
+							self.logger,
+							"Failed to resolve the funding payments of channel {} as splice round \
+							{} locked: {}",
+							channel_id,
+							funding_txo.txid,
+							e,
+						);
+						return Err(ReplayEvent());
+					}
+				}
+
 				self.liquidity_source
 					.lsps2_service()
 					.handle_channel_ready(user_channel_id, &channel_id, &counterparty_node_id)
@@ -1931,9 +2146,44 @@ where
 				reason,
 				user_channel_id,
 				counterparty_node_id,
+				channel_funding_txo,
 				..
 			} => {
 				log_info!(self.logger, "Channel {} closed due to: {}", channel_id, reason);
+
+				// A splice round this node signed dies with the channel unless LDK had already
+				// handed it to the broadcaster. Whatever the channel manager reports for a round
+				// still awaiting the counterparty's signatures when the channel closes is queued
+				// after this event, so its record is taken back here. The channel manager holds
+				// only the closed channel's last funding, but the channel's monitor still watches
+				// every pending round the counterparty committed to and the background processor
+				// has flushed to it, and our signatures may have left the node for such a round, so
+				// it is kept (see `closed_channel_held_rounds`). A payment left with no round of
+				// ours the monitor watches, and none LDK promoted to the funding before, is failed:
+				// the monitor's `DiscardFunding` events settle such payments once the close
+				// matures, but reach the handler ahead of this event when one sync delivers the
+				// close and its maturity, and then find the channel still listed with every round
+				// held. The monitor's guard is not `Send`, so its watched transactions are
+				// collected before anything is awaited.
+				let watched_txids: Vec<Txid> = self
+					.chain_monitor
+					.get_monitor(channel_id)
+					.map(|monitor| {
+						monitor.get_outputs_to_watch().into_iter().map(|(txid, _)| txid).collect()
+					})
+					.unwrap_or_default();
+				let held_rounds = closed_channel_held_rounds(channel_funding_txo, watched_txids);
+				if let Err(e) =
+					self.wallet.resolve_closed_channel_splice_rounds(channel_id, &held_rounds).await
+				{
+					log_error!(
+						self.logger,
+						"Failed to resolve the funding payments of channel {} at its close: {}",
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
 
 				// `counterparty_node_id` has been set on every `ChannelClosed` since LDK 0.0.117.
 				let counterparty_node_id = counterparty_node_id
@@ -1992,6 +2242,58 @@ where
 				}
 			},
 			LdkEvent::DiscardFunding { channel_id, funding_info } => {
+				// LDK lets a splice round go with this event — a sibling round locked, or the
+				// channel's close matured — naming this node's contribution to the round rather
+				// than the round, so the event itself resolves no funding payment. For a channel
+				// the manager lists, the payments were resolved as the sibling's promotion was
+				// handled, from the rounds the manager holds (see
+				// `Wallet::resolve_promoted_splice_round`), and the event only takes back a round
+				// nothing broadcast that the manager no longer holds: its pending rounds and its
+				// funding, the monitor left out — its updates land after the manager's, deferred
+				// to the background processor's flush, so it may still watch a round the manager
+				// let go. For a channel the manager no longer lists — the monitor's events for the
+				// rounds of a closed channel — the funding its monitor settled on and whatever it
+				// still watches decide, as at `ChannelClosed`. The monitor's guard is not `Send`,
+				// so its state is collected before anything is awaited.
+				let channel = self
+					.channel_manager
+					.list_channels()
+					.into_iter()
+					.find(|channel| channel.channel_id == channel_id);
+				let resolved = match channel {
+					Some(channel) => {
+						let held_rounds = held_splice_rounds(
+							channel.splice_details.as_ref(),
+							channel.funding_txo,
+						);
+						self.wallet.drop_abandoned_splice_rounds(channel_id, &held_rounds).await
+					},
+					None => {
+						let held_rounds = match self.chain_monitor.get_monitor(channel_id) {
+							Ok(monitor) => closed_channel_held_rounds(
+								Some(monitor.get_funding_txo()),
+								monitor.get_outputs_to_watch().into_iter().map(|(txid, _)| txid),
+							),
+							Err(()) => Vec::new(),
+						};
+						self.wallet
+							.resolve_closed_channel_splice_rounds(channel_id, &held_rounds)
+							.await
+					},
+				};
+				if let Err(e) = resolved {
+					log_error!(
+						self.logger,
+						"Failed to resolve the funding payments of channel {} for a discarded \
+						splice round: {}",
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
+
+				// TODO(#1037): once inputs are locked at coin selection, `inputs` are locks this
+				// event returns: unlock them here.
 				if let FundingInfo::Contribution { inputs: _, outputs } = funding_info {
 					log_info!(
 						self.logger,
@@ -2087,6 +2389,64 @@ where
 				}
 
 				self.bump_tx_event_handler.handle_event(&bte).await;
+
+				// Record what the claim is spending only once it has been made: a claim must
+				// never wait on bookkeeping, and LDK re-offers the event until the claim
+				// resolves, so a failure here costs a label rather than the funds.
+				let facts = match &bte {
+					BumpTransactionEvent::ChannelClose {
+						channel_id,
+						counterparty_node_id,
+						commitment_tx,
+						anchor_descriptor,
+						pending_htlcs,
+						..
+					} => {
+						let channel = Channel {
+							counterparty_node_id: *counterparty_node_id,
+							channel_id: *channel_id,
+						};
+						// An HTLC below the dust limit is paid to fees instead of to an output of
+						// its own, and so has no output index to record.
+						let htlc_vouts =
+							pending_htlcs.iter().filter_map(|htlc| htlc.transaction_output_index);
+						vec![ChannelTxFacts::new(commitment_tx.compute_txid())
+							.with_outputs(
+								&channel,
+								None,
+								ChannelOutputRole::Anchor,
+								[anchor_descriptor.outpoint.vout],
+							)
+							.with_outputs(&channel, None, ChannelOutputRole::Htlc, htlc_vouts)
+							.with_self_role(TransactionType::UnilateralClose {
+								counterparty_node_id: *counterparty_node_id,
+								channel_id: *channel_id,
+							})]
+					},
+					BumpTransactionEvent::HTLCResolution {
+						channel_id,
+						counterparty_node_id,
+						htlc_descriptors,
+						..
+					} => {
+						let channel = Channel {
+							counterparty_node_id: *counterparty_node_id,
+							channel_id: *channel_id,
+						};
+						ChannelTxFacts::per_transaction(
+							&channel,
+							None,
+							ChannelOutputRole::Htlc,
+							htlc_descriptors.iter().map(|descriptor| {
+								let outpoint = descriptor.outpoint();
+								(outpoint.txid, outpoint.vout)
+							}),
+						)
+					},
+				};
+				for facts in facts {
+					self.record_channel_tx_facts(facts).await;
+				}
 			},
 			LdkEvent::OnionMessageIntercepted { next_hop, message, .. } => {
 				if let NextMessageHop::NodeId(peer_node_id) = next_hop {
@@ -2192,6 +2552,26 @@ where
 				..
 			} => match self.wallet.sign_owned_inputs(unsigned_transaction) {
 				Ok(partially_signed_tx) => {
+					// Record the splice round before handing our signatures to LDK:
+					// `funding_transaction_signed` releases them to the counterparty, after which
+					// either party may broadcast — and wallet sync could observe the transaction
+					// before this node has recorded what it is. The round's place in the channel's
+					// splice history is written from that history, and the round's broadcast adds
+					// nothing to it. On a failed write, replay rather than proceed unrecorded: LDK
+					// re-offers the event in-session and regenerates it across restarts while the
+					// transaction is unsigned.
+					let candidates = self.pending_splice_rounds(counterparty_node_id, channel_id);
+					if let Err(e) =
+						self.wallet.record_signed_funding(&partially_signed_tx, &candidates).await
+					{
+						log_error!(
+							self.logger,
+							"Failed to record the signed splice round for channel {}: {}",
+							channel_id,
+							e,
+						);
+						return Err(ReplayEvent());
+					}
 					match self.channel_manager.funding_transaction_signed(
 						&channel_id,
 						&counterparty_node_id,
@@ -2206,9 +2586,18 @@ where
 							);
 						},
 						Err(e) => {
-							// TODO(splicing): Abort splice once supported in LDK 0.3
-							debug_assert!(false, "Failed signing funding transaction: {:?}", e);
-							log_error!(self.logger, "Failed signing funding transaction: {:?}", e);
+							// Either the round was reset after its history was read above — LDK
+							// then reports the failure through `SpliceNegotiationFailed`, whose
+							// handling takes the record back — or LDK rejected the witnesses, in
+							// which case the round stays pending in LDK, and the record with it.
+							// TODO(splicing): cancel the contribution here through
+							// `ChannelManager::cancel_funding_contributed`; a follow-up wires it.
+							log_error!(
+								self.logger,
+								"LDK refused the signed funding transaction for channel {}: {:?}",
+								channel_id,
+								e,
+							);
 						},
 					}
 				},
@@ -2230,6 +2619,39 @@ where
 					counterparty_node_id,
 					new_funding_txo,
 				);
+
+				let channel = Channel { counterparty_node_id, channel_id };
+				let facts = ChannelTxFacts::new(new_funding_txo.txid)
+					.with_outputs(
+						&channel,
+						Some(UserChannelId(user_channel_id)),
+						ChannelOutputRole::Funding,
+						[new_funding_txo.vout],
+					)
+					.with_self_role(TransactionType::InteractiveFunding {
+						channels: vec![channel.clone()],
+					});
+				self.record_channel_tx_facts(facts).await;
+
+				// LDK emits this event only once our `tx_signatures` for the round are ready to
+				// send, so the counterparty may already hold them and may broadcast the round
+				// without us. The round, recorded when it was signed, therefore no longer awaits
+				// broadcast. On a failed write, replay: LDK re-offers the event in-session and
+				// persists it across restarts.
+				if let Err(e) = self
+					.wallet
+					.record_broadcast_splice_round(channel_id, new_funding_txo.txid)
+					.await
+				{
+					log_error!(
+						self.logger,
+						"Failed to mark splice round {} of channel {} as broadcast: {}",
+						new_funding_txo.txid,
+						channel_id,
+						e,
+					);
+					return Err(ReplayEvent());
+				}
 
 				let event = Event::SpliceNegotiated {
 					channel_id,
@@ -2259,6 +2681,30 @@ where
 					counterparty_node_id,
 				);
 
+				// A round this node signed was recorded when signing; if the failed round was
+				// among them, nothing can broadcast it anymore, so take its record back. The
+				// rounds LDK still holds tell which recorded ones it abandoned (a contribution
+				// can fail while an earlier signed round still awaits its signatures). A closed
+				// channel is left to its `ChannelClosed` event: LDK queues one for every channel it
+				// removes — before the failures a force-close reports, after the one a cooperative
+				// close reports — and that event carries the channel's last funding, which this
+				// handler can no longer read from the channel.
+				if let Some(held_rounds) = self.held_splice_rounds(counterparty_node_id, channel_id)
+				{
+					if let Err(e) =
+						self.wallet.drop_abandoned_splice_rounds(channel_id, &held_rounds).await
+					{
+						log_error!(
+							self.logger,
+							"Failed to drop the abandoned splice round of channel {} from its \
+							funding payment: {}",
+							channel_id,
+							e,
+						);
+						return Err(ReplayEvent());
+					}
+				}
+
 				let event = Event::SpliceNegotiationFailed {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
@@ -2276,6 +2722,38 @@ where
 		}
 		Ok(())
 	}
+}
+
+/// The outpoints among `outputs` that the sweeper takes charge of, which are the ones a sweep
+/// will spend. LDK reports an output paying a script of this wallet's own — its destination
+/// script, or the shutdown script of a cooperative close — as a `StaticOutput`; the sweeper is
+/// told to leave those alone, and the record does not call them spendable: whatever spends such
+/// an output next is an ordinary wallet transaction, not a sweep. See `direct_outpoints` for
+/// what is recorded about them instead.
+fn sweepable_outpoints(outputs: &[SpendableOutputDescriptor]) -> Vec<(Txid, u32)> {
+	outputs
+		.iter()
+		.filter(|output| !matches!(output, SpendableOutputDescriptor::StaticOutput { .. }))
+		.map(|output| {
+			let outpoint = output.spendable_outpoint();
+			(outpoint.txid, outpoint.index as u32)
+		})
+		.collect()
+}
+
+/// The outpoints among `outputs` that LDK reports as `StaticOutput`s: those paying a script of
+/// this wallet's own, which are the proceeds of a claim or the shutdown output of a cooperative
+/// close. They are recorded as the channel's payment straight to the wallet, which is what names
+/// a claim.
+fn direct_outpoints(outputs: &[SpendableOutputDescriptor]) -> Vec<(Txid, u32)> {
+	outputs
+		.iter()
+		.filter(|output| matches!(output, SpendableOutputDescriptor::StaticOutput { .. }))
+		.map(|output| {
+			let outpoint = output.spendable_outpoint();
+			(outpoint.txid, outpoint.index as u32)
+		})
+		.collect()
 }
 
 #[cfg(test)]
@@ -2634,5 +3112,39 @@ mod tests {
 			}
 		}
 		assert_eq!(event_queue.next_event(), None);
+	}
+
+	/// A `StaticOutput` pays a script of this wallet's own, so the sweeper is told to leave it
+	/// alone and it is recorded as the channel's payment straight to the wallet rather than as
+	/// spendable: the transaction that spends it next is an ordinary wallet transaction, not a
+	/// sweep. The outputs the sweeper does take are the ones recorded as spendable.
+	#[test]
+	fn static_outputs_are_not_recorded_as_spendable() {
+		use bitcoin::hashes::Hash;
+		use lightning::sign::StaticPaymentOutputDescriptor;
+
+		let outpoint =
+			|byte: u8| LdkOutPoint { txid: Txid::from_byte_array([byte; 32]), index: byte as u16 };
+		let output = bitcoin::TxOut {
+			value: Amount::from_sat(1_000),
+			script_pubkey: bitcoin::ScriptBuf::new(),
+		};
+		let outputs = vec![
+			SpendableOutputDescriptor::StaticOutput {
+				outpoint: outpoint(1),
+				output: output.clone(),
+				channel_keys_id: Some([1u8; 32]),
+			},
+			SpendableOutputDescriptor::StaticPaymentOutput(StaticPaymentOutputDescriptor {
+				outpoint: outpoint(2),
+				output,
+				channel_keys_id: [2u8; 32],
+				channel_value_satoshis: 100_000,
+				channel_transaction_parameters: None,
+			}),
+		];
+
+		assert_eq!(sweepable_outpoints(&outputs), vec![(outpoint(2).txid, 2)]);
+		assert_eq!(direct_outpoints(&outputs), vec![(outpoint(1).txid, 1)]);
 	}
 }
