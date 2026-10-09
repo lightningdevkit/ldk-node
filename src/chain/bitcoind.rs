@@ -334,15 +334,11 @@ impl BitcoindChainSource {
 			tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
 		chain_polling_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-		let mut fee_rate_update_interval =
-			tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
-		// When starting up, we just blocked on updating, so skip the first tick.
-		fee_rate_update_interval.reset();
-		fee_rate_update_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
 		log_info!(self.logger, "Starting continuous polling for chain updates.");
 
-		// Start the polling loop.
+		// Start the polling loop. We update fee rate estimates on the same tick right after polling
+		// for chain data, as using separate timers would allow chain polls taking longer than the
+		// polling interval to starve the fee rate updates.
 		let mut last_best_block_hash = None;
 		loop {
 			tokio::select! {
@@ -354,40 +350,40 @@ impl BitcoindChainSource {
 					);
 					return;
 				}
-				_ = chain_polling_interval.tick() => {
-					tokio::select! {
-						biased;
-						_ = stop_sync_receiver.changed() => {
-							log_trace!(
-								self.logger,
-								"Stopping polling for new chain data.",
-							);
-							return;
-						}
-						_ = self.poll_and_update_listeners(
-							Arc::clone(&onchain_wallet),
-							Arc::clone(&channel_manager),
-							Arc::clone(&chain_monitor),
-							Arc::clone(&output_sweeper)
-						) => {}
-					}
+				_ = chain_polling_interval.tick() => {}
+			}
+
+			tokio::select! {
+				biased;
+				_ = stop_sync_receiver.changed() => {
+					log_trace!(
+						self.logger,
+						"Stopping polling for new chain data.",
+					);
+					return;
 				}
-				_ = fee_rate_update_interval.tick() => {
-					if last_best_block_hash != Some(channel_manager.current_best_block().block_hash) {
-						tokio::select! {
-							biased;
-							_ = stop_sync_receiver.changed() => {
-								log_trace!(
-									self.logger,
-									"Stopping polling for new chain data.",
-								);
-								return;
-							}
-							update_res = self.update_fee_rate_estimates() => {
-								if update_res.is_ok() {
-									last_best_block_hash = Some(channel_manager.current_best_block().block_hash);
-								}
-							}
+				_ = self.poll_and_update_listeners(
+					Arc::clone(&onchain_wallet),
+					Arc::clone(&channel_manager),
+					Arc::clone(&chain_monitor),
+					Arc::clone(&output_sweeper)
+				) => {}
+			}
+
+			let current_best_block_hash = channel_manager.current_best_block().block_hash;
+			if last_best_block_hash != Some(current_best_block_hash) {
+				tokio::select! {
+					biased;
+					_ = stop_sync_receiver.changed() => {
+						log_trace!(
+							self.logger,
+							"Stopping polling for new chain data.",
+						);
+						return;
+					}
+					update_res = self.update_fee_rate_estimates() => {
+						if update_res.is_ok() {
+							last_best_block_hash = Some(current_best_block_hash);
 						}
 					}
 				}
