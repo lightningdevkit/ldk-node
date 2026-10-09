@@ -19,7 +19,9 @@ use lightning::ln::channelmanager::{
 };
 use lightning::ln::outbound_payment::Retry;
 use lightning::offers::invoice_request::RecurrenceId;
-use lightning::offers::offer::{Amount, Offer as LdkOffer, OfferFromHrn, Quantity, RecurrenceType};
+use lightning::offers::offer::{
+	Amount, Offer as LdkOffer, OfferFromHrn, Quantity, Recurrence, RecurrenceType,
+};
 use lightning::offers::parse::Bolt12SemanticError;
 use lightning::offers::payer_proof::PaidBolt12Invoice as LdkPaidBolt12Invoice;
 #[cfg(not(feature = "uniffi"))]
@@ -308,14 +310,31 @@ impl Bolt12Payment {
 					route_params_config: details.routing_override.unwrap_or_default(),
 					retry_strategy: details.retry_policy,
 				};
-				match self.channel_manager.pay_for_recurrence(
-					&offer,
-					Some(details.amount_msat),
-					payment_id,
-					recurrence_id,
-					params,
-					optional_params,
-				) {
+				// Persistence can outlast the payment window. Recheck immediately before
+				// queueing and record an expired reservation as failed without sending it.
+				let request_result = (|| {
+					if details.paid_count > 0 {
+						let recurrence = offer.offer_recurrence().ok_or(Error::InvalidOffer)?;
+						self.validate_outbound_recurrence_payment_window(&details, &recurrence)?;
+					}
+					self.channel_manager
+						.pay_for_recurrence(
+							&offer,
+							Some(details.amount_msat),
+							payment_id,
+							recurrence_id,
+							params,
+							optional_params,
+						)
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to send invoice request: {:?}", e);
+							match e {
+								Bolt12SemanticError::DuplicatePaymentId => Error::DuplicatePayment,
+								_ => Error::InvoiceRequestCreationFailed,
+							}
+						})
+				})();
+				match request_result {
 					Ok(()) => {
 						log_info!(
 							self.logger,
@@ -328,11 +347,7 @@ impl Bolt12Payment {
 						Ok(None)
 					},
 					Err(e) => {
-						log_error!(self.logger, "Failed to send invoice request: {:?}", e);
-						*result = Err(match e {
-							Bolt12SemanticError::DuplicatePaymentId => Error::DuplicatePayment,
-							_ => Error::InvoiceRequestCreationFailed,
-						});
+						*result = Err(e);
 						let payment = self
 							.payment_store
 							.mutate(&payment_id, |current| {
@@ -359,6 +374,150 @@ impl Bolt12Payment {
 			})
 			.await?;
 		submission_result
+	}
+
+	/// Submits the next sequential payment for an active outbound recurrence.
+	///
+	/// The initial payment must have succeeded, no payment may be in progress, and the next
+	/// period's payment window must be open. Failed attempts may be retried within that window.
+	///
+	/// Returns the [`PaymentId`] when the invoice request is successfully submitted. This does
+	/// not indicate that the payment has succeeded; inspect its payment record for the outcome.
+	/// Synchronous submission failures return an error.
+	pub fn pay_next_outbound_recurrence(
+		&self, recurrence_id: RecurrenceId,
+	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let details = self
+			.runtime
+			.block_on(self.outbound_recurrence_store.get(&recurrence_id))?
+			.ok_or(Error::InvalidRecurrenceId)?;
+
+		// Sanity Checks
+		if details.status != OutboundRecurrenceStatus::Active {
+			log_error!(self.logger, "Cannot pay the next recurrence: recurrence is not active.");
+			return Err(Error::InvalidOutboundRecurrence);
+		}
+
+		if matches!(details.payment_state, OutboundRecurrencePaymentState::Active(_)) {
+			log_error!(
+				self.logger,
+				"Cannot pay the next recurrence: a payment is already active for the current period."
+			);
+			return Err(Error::PaymentSendingFailed);
+		}
+
+		if details.paid_count == 0 {
+			log_error!(
+				self.logger,
+				"Cannot pay the next recurrence before the initial payment succeeds."
+			);
+			return Err(Error::InvalidOutboundRecurrence);
+		}
+
+		self.runtime.block_on(self.submit_outbound_recurrence_payment(details))
+	}
+
+	/// Reserves a subsequent attempt before using the shared submission gate.
+	///
+	/// Recheck the caller's period and attempt under the recurrence mutation lock so concurrent
+	/// calls cannot both reserve the same period or replace a newer attempt. As with initial
+	/// reservation, acquire payment-store locks second and never overwrite an existing payment.
+	async fn submit_outbound_recurrence_payment(
+		&self, expected: OutboundRecurrenceDetails,
+	) -> Result<PaymentId, Error> {
+		let recurrence_id = expected.id;
+		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
+		self.outbound_recurrence_store
+			.mutate_async(&recurrence_id, |current| async move {
+				let mut details = current.ok_or(Error::InvalidRecurrenceId)?;
+				if details.status != OutboundRecurrenceStatus::Active
+					|| details.paid_count != expected.paid_count
+					|| details.payment_state != expected.payment_state
+				{
+					return Err(Error::InvalidOutboundRecurrence);
+				}
+				match details.payment_state {
+					OutboundRecurrencePaymentState::Active(_) => {
+						return Err(Error::PaymentSendingFailed)
+					},
+					OutboundRecurrencePaymentState::Failed(previous_id) => {
+						// A recurrence failure may be persisted before the payment outcome. Wait
+						// for that outcome instead of replacing an incompletely handled attempt.
+						match self.payment_store.get(&previous_id).await? {
+							Some(payment) if payment.status != PaymentStatus::Failed => {
+								return Err(Error::PaymentSendingFailed);
+							},
+							_ => {},
+						}
+					},
+					OutboundRecurrencePaymentState::NoActivePayment => {},
+				}
+				let offer = LdkOffer::try_from(details.original_offer.clone())
+					.map_err(|_| Error::InvalidOffer)?;
+				let recurrence = offer.offer_recurrence().ok_or(Error::InvalidOffer)?;
+				self.validate_outbound_recurrence_payment_window(&details, &recurrence)?;
+
+				let payment = PaymentDetails::new(
+					payment_id,
+					PaymentKind::Bolt12Offer {
+						hash: None,
+						preimage: None,
+						secret: None,
+						offer_id: offer.id(),
+						payer_note: details.payer_note.clone(),
+						quantity: details.quantity,
+					},
+					Some(details.amount_msat),
+					None,
+					PaymentDirection::Outbound,
+					PaymentStatus::Pending,
+				);
+				self.payment_store
+					.mutate(&payment_id, |current| current.is_none().then_some(payment))
+					.await?
+					.ok_or(Error::DuplicatePayment)?;
+				details.payment_state = OutboundRecurrencePaymentState::Active(payment_id);
+				Ok(Some(details))
+			})
+			.await?;
+		self.submit_reserved_outbound_recurrence(recurrence_id, payment_id).await
+	}
+
+	/// Checks the next outbound period against the offer limit and its payment window.
+	fn validate_outbound_recurrence_payment_window(
+		&self, details: &OutboundRecurrenceDetails, recurrence: &Recurrence,
+	) -> Result<(), Error> {
+		let period_index = recurrence
+			.period_index(details.paid_count, details.initial_start)
+			.map_err(|_| Error::InvalidOffer)?;
+
+		if recurrence.recurrence_limit.map_or(false, |limit| period_index > limit.0) {
+			debug_assert!(false, "Recurrence exceeded its limit without being marked completed.");
+			return Err(Error::InvalidOutboundRecurrence);
+		}
+
+		let basetime = details.basetime.ok_or(Error::InvalidOffer)?;
+
+		let (opening, closing) =
+			recurrence.payment_window(basetime, period_index).map_err(|_| Error::InvalidOffer)?;
+
+		let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+		if now < opening {
+			log_error!(self.logger, "Tried to send recurrence payment too early.");
+			return Err(Error::PaymentSendingFailed);
+		}
+
+		if now >= closing {
+			// TODO: Figure out, where we should ideally be changing recurrence states at appropriate times.
+			return Err(Error::InvalidOutboundRecurrence);
+		}
+
+		Ok(())
 	}
 
 	pub(crate) fn send_using_amount_inner(
