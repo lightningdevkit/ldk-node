@@ -5,47 +5,70 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+use std::collections::VecDeque;
 use std::ops::Deref;
-use std::sync::{Mutex as StdMutex, Weak};
+use std::sync::Mutex as StdMutex;
 
-use bitcoin::Transaction;
+use bitcoin::{Transaction, Txid};
 use lightning::chain::chaininterface::{
 	BroadcasterInterface, TransactionType as LdkTransactionType,
 };
-use tokio::sync::{mpsc, Mutex, MutexGuard};
+use tokio::sync::Notify;
 
-use crate::logger::{log_error, LdkLogger};
-use crate::types::Wallet;
-use crate::Error;
+use crate::logger::{log_trace, LdkLogger};
 
-const BCAST_PACKAGE_QUEUE_SIZE: usize = 256;
-
-/// A package of transactions that LDK handed to the broadcaster in one `broadcast_transactions`
-/// call, along with each transaction's type. Queued until the background task classifies and
-/// broadcasts it. Built only via [`BroadcastPackage::new`] from such a call, so unrelated
-/// transactions can't be grouped into one package by accident.
-pub(crate) struct BroadcastPackage(Vec<(Transaction, Option<LdkTransactionType>)>);
+/// A package of transactions to broadcast together: everything LDK handed over in one
+/// `broadcast_transactions` call, or a single transaction the wallet broadcasts itself. Queued
+/// until the background task sends it. Built only from one such source, so unrelated transactions
+/// can't be grouped into one package by accident.
+pub(crate) struct BroadcastPackage(Vec<Transaction>);
 
 impl BroadcastPackage {
-	/// Builds a package from the transactions of a single `broadcast_transactions` call.
-	fn new(txs: &[(&Transaction, LdkTransactionType)]) -> Self {
-		Self(txs.iter().map(|(tx, tx_type)| ((*tx).clone(), Some(tx_type.clone()))).collect())
-	}
-
-	/// Builds a package for wallet-originated broadcasts that have no LDK classification.
-	fn unclassified(tx: Transaction) -> Self {
-		Self(vec![(tx, None)])
-	}
-
-	/// The packaged transactions and their types, for classification.
-	fn transactions(&self) -> &[(Transaction, Option<LdkTransactionType>)] {
-		&self.0
+	/// The txids of the packaged transactions, identifying the package's effect on chain.
+	fn txids(&self) -> Vec<Txid> {
+		self.0.iter().map(Transaction::compute_txid).collect()
 	}
 
 	/// Consumes the package into its transactions, ready for the chain client.
 	pub(crate) fn into_sorted_transactions(self) -> SortedTransactions {
-		let txs = self.0.into_iter().map(|(tx, _)| tx).collect();
-		SortedTransactions::sort_parents_child_package_topologically(txs)
+		SortedTransactions::sort_parents_child_package_topologically(self.0)
+	}
+}
+
+/// The packages handed to the broadcaster, waiting in arrival order for the background task to
+/// send them.
+///
+/// The queue belongs to the broadcaster and outlives the task draining it: what is queued when the
+/// node stops is broadcast after the next start.
+pub(crate) struct BroadcastQueue {
+	packages: StdMutex<VecDeque<BroadcastPackage>>,
+	/// Wakes the draining task when a package is queued.
+	notify: Notify,
+}
+
+impl BroadcastQueue {
+	pub(crate) fn new() -> Self {
+		Self { packages: StdMutex::new(VecDeque::new()), notify: Notify::new() }
+	}
+
+	/// Queues a package to broadcast.
+	pub(crate) fn push(&self, package: BroadcastPackage) {
+		self.packages.lock().expect("lock").push_back(package);
+		self.notify.notify_one();
+	}
+
+	/// The next package to broadcast, waiting for one while the queue is empty.
+	///
+	/// Safe to drop before completion: a package leaves the queue only as the future completes.
+	pub(crate) async fn next(&self) -> BroadcastPackage {
+		loop {
+			if let Some(package) = self.packages.lock().expect("lock").pop_front() {
+				return package;
+			}
+			// A package queued between the check above and the wait below is not missed: with
+			// no task waiting, `notify_one` stores a permit that completes the next `notified`.
+			self.notify.notified().await;
+		}
 	}
 }
 
@@ -96,13 +119,7 @@ pub(crate) struct TransactionBroadcaster<L: Deref>
 where
 	L::Target: LdkLogger,
 {
-	queue_sender: mpsc::Sender<BroadcastPackage>,
-	queue_receiver: Mutex<mpsc::Receiver<BroadcastPackage>>,
-	/// Weak handle to the [`Wallet`] that classifies funding broadcasts (channel opens and
-	/// splices) into payment records. Remains `None` while the builder is wiring the node up,
-	/// during which broadcasts are forwarded to the queue but no payment record is written.
-	/// [`Self::set_wallet`] installs the handle once the [`Wallet`] exists.
-	wallet: StdMutex<Option<Weak<Wallet>>>,
+	queue: BroadcastQueue,
 	logger: L,
 }
 
@@ -111,49 +128,22 @@ where
 	L::Target: LdkLogger,
 {
 	pub(crate) fn new(logger: L) -> Self {
-		let (queue_sender, queue_receiver) = mpsc::channel(BCAST_PACKAGE_QUEUE_SIZE);
-		Self {
-			queue_sender,
-			queue_receiver: Mutex::new(queue_receiver),
-			wallet: StdMutex::new(None),
-			logger,
-		}
+		Self { queue: BroadcastQueue::new(), logger }
 	}
 
-	/// Installs the [`Wallet`] handle used to classify funding broadcasts (channel opens and
-	/// splices) into payment records. Called once the builder has constructed both the
-	/// broadcaster and the wallet.
-	pub(crate) fn set_wallet(&self, wallet: Weak<Wallet>) {
-		*self.wallet.lock().expect("lock") = Some(wallet);
+	/// The next queued package to broadcast, waiting for one when none is queued.
+	pub(crate) async fn next_package(&self) -> BroadcastPackage {
+		self.queue.next().await
 	}
 
-	pub(crate) async fn get_broadcast_queue(
-		&self,
-	) -> MutexGuard<'_, mpsc::Receiver<BroadcastPackage>> {
-		self.queue_receiver.lock().await
+	/// Queues a transaction the wallet broadcasts on its own behalf.
+	pub(crate) fn broadcast(&self, tx: Transaction) {
+		self.queue_package(BroadcastPackage(vec![tx]));
 	}
 
-	/// Classifies a queued package into payment records and returns the package ready for the
-	/// chain client. Returns `Err` if any classification fails; callers must not broadcast the
-	/// package in that case, since a crash would leave the transaction on-chain without a record.
-	pub(crate) async fn classify_package(
-		&self, package: BroadcastPackage,
-	) -> Result<BroadcastPackage, Error> {
-		let wallet_opt = self.wallet.lock().expect("lock").as_ref().and_then(Weak::upgrade);
-		if let Some(wallet) = wallet_opt {
-			for (tx, tx_type) in package.transactions() {
-				if let Some(tx_type) = tx_type {
-					wallet.classify_broadcast(tx, tx_type).await?;
-				}
-			}
-		}
-		Ok(package)
-	}
-
-	pub(crate) fn broadcast_unclassified_transaction(&self, tx: Transaction) {
-		self.queue_sender.try_send(BroadcastPackage::unclassified(tx)).unwrap_or_else(|e| {
-			log_error!(self.logger, "Failed to broadcast transactions: {}", e);
-		});
+	fn queue_package(&self, package: BroadcastPackage) {
+		log_trace!(self.logger, "Queuing package for broadcast: {:?}", package.txids());
+		self.queue.push(package);
 	}
 }
 
@@ -162,9 +152,7 @@ where
 	L::Target: LdkLogger,
 {
 	fn broadcast_transactions(&self, txs: &[(&Transaction, LdkTransactionType)]) {
-		self.queue_sender.try_send(BroadcastPackage::new(txs)).unwrap_or_else(|e| {
-			log_error!(self.logger, "Failed to broadcast transactions: {}", e);
-		});
+		self.queue_package(BroadcastPackage(txs.iter().map(|(tx, _)| (*tx).clone()).collect()));
 	}
 }
 
@@ -173,7 +161,7 @@ mod tests {
 	use bitcoin::hashes::Hash;
 	use bitcoin::{Amount, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut, Txid, Witness};
 
-	use super::SortedTransactions;
+	use super::{BroadcastPackage, BroadcastQueue, SortedTransactions};
 
 	fn txin(txid: Txid, vout: u32) -> TxIn {
 		TxIn {
@@ -313,5 +301,57 @@ mod tests {
 	#[test]
 	fn topological_sort_accepts_empty_vec() {
 		SortedTransactions::sort_parents_child_package_topologically(Vec::new());
+	}
+
+	/// Everything `next` hands out before the queue goes quiet, in order.
+	async fn drain(queue: &BroadcastQueue) -> Vec<Txid> {
+		let mut txids = Vec::new();
+		while let Ok(package) =
+			tokio::time::timeout(std::time::Duration::from_millis(200), queue.next()).await
+		{
+			txids.extend(package.into_sorted_transactions().iter().map(Transaction::compute_txid));
+		}
+		txids
+	}
+
+	/// Every queued package is handed out, in arrival order, however often the same transaction
+	/// arrives.
+	#[tokio::test]
+	async fn packages_are_handed_out_in_arrival_order() {
+		let (tx_a, tx_b) = (parent_tx(1), parent_tx(2));
+		let queue = BroadcastQueue::new();
+
+		queue.push(BroadcastPackage(vec![tx_a.clone()]));
+		queue.push(BroadcastPackage(vec![tx_b.clone()]));
+		queue.push(BroadcastPackage(vec![tx_a.clone()]));
+
+		assert_eq!(
+			drain(&queue).await,
+			vec![tx_a.compute_txid(), tx_b.compute_txid(), tx_a.compute_txid()]
+		);
+	}
+
+	/// `next` waits for a package when none is queued and wakes when one is pushed.
+	#[tokio::test]
+	async fn next_wakes_on_a_push() {
+		let tx = parent_tx(1);
+		let queue = BroadcastQueue::new();
+
+		assert!(tokio::time::timeout(std::time::Duration::from_millis(100), queue.next())
+			.await
+			.is_err());
+
+		let (_, next) = tokio::join!(
+			async {
+				tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+				queue.push(BroadcastPackage(vec![tx.clone()]));
+			},
+			tokio::time::timeout(std::time::Duration::from_secs(5), queue.next()),
+		);
+		let handed_out = next.expect("woken by the push").into_sorted_transactions();
+		assert_eq!(
+			handed_out.iter().map(Transaction::compute_txid).collect::<Vec<_>>(),
+			vec![tx.compute_txid()],
+		);
 	}
 }
