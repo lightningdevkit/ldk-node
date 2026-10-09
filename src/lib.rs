@@ -55,7 +55,7 @@
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 //! 	let node_addr = SocketAddress::from_str("IP_ADDR:PORT").unwrap();
-//! 	node.open_channel(node_id, node_addr, 10000, None, None).unwrap();
+//! 	node.open_channel(node_id, node_addr, 10000, None, None, None).unwrap();
 //!
 //! 	let event = node.wait_next_event();
 //! 	println!("EVENT: {:?}", event);
@@ -200,7 +200,7 @@ pub use types::{
 pub use vss_client;
 
 use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY};
-use crate::ffi::{maybe_deref, maybe_wrap};
+use crate::ffi::{maybe_deref, maybe_map_fee_rate_opt, maybe_wrap, FfiFeeRate};
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
 use crate::wallet::FundingAmount;
@@ -280,6 +280,7 @@ pub struct Node {
 	node_metrics: Arc<PersistedNodeMetrics>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	pending_funding_fee_rates: Arc<Mutex<std::collections::HashMap<u128, bitcoin::FeeRate>>>,
 	#[cfg(feature = "unified-payments")]
 	hrn_resolver: HRNResolver,
 	prober: Option<Arc<Prober>>,
@@ -703,6 +704,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
+			Arc::clone(&self.pending_funding_fee_rates),
 		));
 
 		if let Some(prober) = self.prober.clone() {
@@ -1343,6 +1345,7 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: FundingAmount,
 		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
 		announce_for_forwarding: bool, disable_counterparty_reserve: bool,
+		fee_rate: Option<bitcoin::FeeRate>,
 	) -> Result<UserChannelId, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
@@ -1375,8 +1378,9 @@ impl Node {
 					self.new_channel_anchor_reserve_sats(&peer_info.node_id)?;
 				let total_anchor_reserve_sats = cur_anchor_reserve_sats + new_channel_reserve;
 
-				let fee_rate =
-					self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+				let fee_rate = fee_rate.unwrap_or_else(|| {
+					self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+				});
 
 				let amount =
 					self.wallet.get_max_funding_amount(total_anchor_reserve_sats, fee_rate)?;
@@ -1414,6 +1418,12 @@ impl Node {
 				.try_into()
 				.expect("a 16-byte slice should convert into a [u8; 16]"),
 		);
+
+		// Register the fee-rate override before creating the channel, as the
+		// `FundingGenerationReady` event may be handled before `create_channel` returns.
+		if let Some(fee_rate) = fee_rate {
+			self.pending_funding_fee_rates.lock().expect("lock").insert(user_channel_id, fee_rate);
+		}
 
 		let result = if disable_counterparty_reserve {
 			self.channel_manager.create_channel_to_trusted_peer_0reserve(
@@ -1455,6 +1465,7 @@ impl Node {
 					zero_reserve_string,
 					e
 				);
+				self.pending_funding_fee_rates.lock().expect("lock").remove(&user_channel_id);
 				Err(Error::ChannelCreationFailed)
 			},
 		}
@@ -1520,13 +1531,18 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
+		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1535,6 +1551,7 @@ impl Node {
 			channel_config,
 			false,
 			false,
+			fee_rate_opt,
 		)
 	}
 
@@ -1556,18 +1573,23 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
+		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
 			return Err(Error::ChannelCreationFailed);
 		}
 
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1576,6 +1598,7 @@ impl Node {
 			channel_config,
 			true,
 			false,
+			fee_rate_opt,
 		)
 	}
 
@@ -1590,13 +1613,17 @@ impl Node {
 	/// channel counterparty on channel open. This can be useful to start out with the balance not
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
-		channel_config: Option<ChannelConfig>,
+		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1605,6 +1632,7 @@ impl Node {
 			channel_config,
 			false,
 			false,
+			fee_rate_opt,
 		)
 	}
 
@@ -1623,18 +1651,22 @@ impl Node {
 	/// channel counterparty on channel open. This can be useful to start out with the balance not
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
-		channel_config: Option<ChannelConfig>,
+		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {err}");
 			return Err(Error::ChannelCreationFailed);
 		}
 
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1643,6 +1675,7 @@ impl Node {
 			channel_config,
 			true,
 			false,
+			fee_rate_opt,
 		)
 	}
 
@@ -1662,13 +1695,18 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_0reserve_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
+		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1677,6 +1715,7 @@ impl Node {
 			channel_config,
 			false,
 			true,
+			fee_rate_opt,
 		)
 	}
 
@@ -1693,11 +1732,15 @@ impl Node {
 	/// channel counterparty on channel open. This can be useful to start out with the balance not
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn open_0reserve_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
-		channel_config: Option<ChannelConfig>,
+		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
@@ -1706,6 +1749,7 @@ impl Node {
 			channel_config,
 			false,
 			true,
+			fee_rate_opt,
 		)
 	}
 

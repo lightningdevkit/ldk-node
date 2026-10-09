@@ -34,6 +34,7 @@ use common::{
 	TestNode, TestStoreType, TestSyncStore,
 };
 use electrsd::corepc_node::{self, Node as BitcoinD};
+use electrsd::electrum_client::ElectrumApi;
 use electrsd::ElectrsD;
 use ldk_node::config::{
 	AsyncPaymentsRole, EsploraSyncConfig, ForwardedPaymentTrackingMode, ADDRESS_POOL_SIZE,
@@ -632,6 +633,7 @@ async fn channel_open_fails_when_funds_insufficient() {
 			120000,
 			None,
 			None,
+			None,
 		)
 	);
 }
@@ -979,6 +981,7 @@ async fn split_underpaid_bolt11_payment() {
 				payer.listening_addresses().unwrap().first().unwrap().clone(),
 				channel_amount_sat,
 				push_amount_msat,
+				None,
 				None,
 			)
 			.unwrap();
@@ -5048,23 +5051,30 @@ fn open_channel_variant(
 	let address = node_b.listening_addresses().unwrap().first().unwrap().clone();
 	match variant {
 		OpenChannelVariant::Standard => node_a
-			.open_channel(node_b.node_id(), address, channel_amount_sats, None, None)
+			.open_channel(node_b.node_id(), address, channel_amount_sats, None, None, None)
 			.map(|_| ()),
 		OpenChannelVariant::Announced => node_a
-			.open_announced_channel(node_b.node_id(), address, channel_amount_sats, None, None)
+			.open_announced_channel(
+				node_b.node_id(),
+				address,
+				channel_amount_sats,
+				None,
+				None,
+				None,
+			)
 			.map(|_| ()),
 		OpenChannelVariant::ZeroReserve => node_a
-			.open_0reserve_channel(node_b.node_id(), address, channel_amount_sats, None, None)
+			.open_0reserve_channel(node_b.node_id(), address, channel_amount_sats, None, None, None)
 			.map(|_| ()),
 		OpenChannelVariant::StandardWithAll => {
-			node_a.open_channel_with_all(node_b.node_id(), address, None, None).map(|_| ())
+			node_a.open_channel_with_all(node_b.node_id(), address, None, None, None).map(|_| ())
 		},
 		OpenChannelVariant::AnnouncedWithAll => node_a
-			.open_announced_channel_with_all(node_b.node_id(), address, None, None)
+			.open_announced_channel_with_all(node_b.node_id(), address, None, None, None)
 			.map(|_| ()),
-		OpenChannelVariant::ZeroReserveWithAll => {
-			node_a.open_0reserve_channel_with_all(node_b.node_id(), address, None, None).map(|_| ())
-		},
+		OpenChannelVariant::ZeroReserveWithAll => node_a
+			.open_0reserve_channel_with_all(node_b.node_id(), address, None, None, None)
+			.map(|_| ()),
 	}
 }
 
@@ -5345,4 +5355,88 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	client.stop().unwrap();
 	cheap.stop().unwrap();
 	expensive.stop().unwrap();
+}
+
+fn tx_fee_rate_sat_per_vb<E: ElectrumApi>(electrs: &E, txid: Txid) -> f64 {
+	let tx = electrs.transaction_get(&txid).unwrap();
+	let input_sats: u64 = tx
+		.input
+		.iter()
+		.map(|txin| {
+			let prev_tx = electrs.transaction_get(&txin.previous_output.txid).unwrap();
+			prev_tx.output[txin.previous_output.vout as usize].value.to_sat()
+		})
+		.sum();
+	let output_sats: u64 = tx.output.iter().map(|txout| txout.value.to_sat()).sum();
+	(input_sats - output_sats) as f64 / (tx.weight().to_wu() as f64 / 4.0)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn open_channel_with_fee_rate_override() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+	let (node_c, node_d) = setup_two_nodes(&chain_source, false, false);
+
+	let premine_amount_sat = 1_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![
+			node_a.onchain_payment().new_address().unwrap(),
+			node_c.onchain_payment().new_address().unwrap(),
+		],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_c.sync_wallets().unwrap();
+
+	// Well above the ~1 sat/vB the estimator yields on regtest.
+	let fee_rate_sat_per_vb = 25;
+	let fee_rate = bitcoin::FeeRate::from_sat_per_vb(fee_rate_sat_per_vb).unwrap();
+
+	// Exact amount.
+	node_a
+		.open_channel(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			500_000,
+			None,
+			Some(fee_rate.into()),
+			None,
+		)
+		.unwrap();
+	let funding_txo_a = expect_channel_pending_event!(node_a, node_b.node_id());
+	expect_channel_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, funding_txo_a.txid).await;
+	let actual = tx_fee_rate_sat_per_vb(&electrsd.client, funding_txo_a.txid);
+	assert!(
+		(actual - fee_rate_sat_per_vb as f64).abs() < 0.5,
+		"funding tx paid {actual} sat/vB, expected {fee_rate_sat_per_vb} sat/vB"
+	);
+
+	// Max amount: the amount must be computed at the overridden rate, otherwise funding fails.
+	node_c
+		.open_channel_with_all(
+			node_d.node_id(),
+			node_d.listening_addresses().unwrap().first().unwrap().clone(),
+			None,
+			Some(fee_rate.into()),
+			None,
+		)
+		.unwrap();
+	let funding_txo_c = expect_channel_pending_event!(node_c, node_d.node_id());
+	expect_channel_pending_event!(node_d, node_c.node_id());
+	wait_for_tx(&electrsd.client, funding_txo_c.txid).await;
+	let actual = tx_fee_rate_sat_per_vb(&electrsd.client, funding_txo_c.txid);
+	assert!(
+		(actual - fee_rate_sat_per_vb as f64).abs() < 0.5,
+		"funding tx paid {actual} sat/vB, expected {fee_rate_sat_per_vb} sat/vB"
+	);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+	node_c.stop().unwrap();
+	node_d.stop().unwrap();
 }

@@ -31,6 +31,14 @@ pub fn maybe_wrap<T>(ldk_type: impl Into<T>) -> std::sync::Arc<T> {
 	std::sync::Arc::new(ldk_type.into())
 }
 
+#[cfg(feature = "uniffi")]
+pub(crate) type FfiFeeRate = std::sync::Arc<bitcoin::FeeRate>;
+
+#[cfg(feature = "uniffi")]
+pub(crate) fn maybe_map_fee_rate_opt(fee_rate: Option<FfiFeeRate>) -> Option<bitcoin::FeeRate> {
+	fee_rate.map(|f| *f)
+}
+
 #[cfg(not(feature = "uniffi"))]
 pub fn maybe_deref<T>(value: &T) -> &T {
 	value
@@ -44,4 +52,12 @@ pub fn maybe_try_convert_enum<T>(value: &T) -> Result<&T, crate::error::Error> {
 #[cfg(not(feature = "uniffi"))]
 pub fn maybe_wrap<T>(value: T) -> T {
 	value
+}
+
+#[cfg(not(feature = "uniffi"))]
+pub(crate) type FfiFeeRate = bitcoin::FeeRate;
+
+#[cfg(not(feature = "uniffi"))]
+pub(crate) fn maybe_map_fee_rate_opt(fee_rate: Option<FfiFeeRate>) -> Option<bitcoin::FeeRate> {
+	fee_rate
 }
