@@ -10,7 +10,7 @@ use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
 
 use crate::data_store::{StorableObject, StorableObjectUpdate, UpdatableObject};
-use crate::payment::store::PaymentDetailsUpdate;
+use crate::payment::store::{Channel, PaymentDetailsUpdate, TransactionType};
 use crate::payment::{PaymentDetails, PaymentKind};
 
 /// One candidate transaction in an interactive-funding (splice) RBF history, holding this node's
@@ -28,44 +28,153 @@ pub(crate) struct FundingTxCandidate {
 	/// This node's share of the on-chain fee for this candidate, in millisatoshis, or `None` if
 	/// this node did not contribute to it.
 	pub fee_paid_msat: Option<u64>,
+	/// Whether this node signed the candidate but LDK has yet to report the round negotiated. Set
+	/// when the round is recorded at signing time, cleared when LDK reports the splice negotiated
+	/// (`SpliceNegotiated`, emitted only once our `tx_signatures` for the round are ready to send).
+	/// Such a round may be abandoned without a trace — the counterparty aborts, or the channel
+	/// closes, before the signatures are exchanged — so only such a round may be dropped from the
+	/// history, and only once LDK no longer holds it.
+	pub awaiting_broadcast: bool,
 }
 
 impl_writeable_tlv_based!(FundingTxCandidate, {
 	(0, txid, required),
 	(2, amount_msat, option),
 	(4, fee_paid_msat, option),
+	(6, awaiting_broadcast, required),
 });
 
-/// Represents a pending payment
+/// A pending payment tracked by LDK Node, keyed by [`PaymentId`].
+///
+/// Each part of an entry is written by a different subsystem and is present on its own schedule,
+/// so all of them are optional. Signing a round of an interactive funding adds the round to
+/// `candidates` and names the `funding_channels` it belongs to, still without a transaction anyone
+/// has seen; wallet sync adds `details` once it observes the transaction, and records
+/// `conflicting_txids` for any wallet transaction. A splice uses all of them; the fields do not
+/// partition by payment type. An entry holding none of them tracks nothing and is removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingPaymentDetails {
-	/// The full payment details
-	pub details: PaymentDetails,
-	/// Transaction IDs that have replaced or conflict with this payment.
+pub(crate) struct PendingPaymentDetails {
+	/// The payment this entry tracks.
+	pub id: PaymentId,
+	/// The full payment details, or `None` for a splice whose transaction wallet sync has yet to
+	/// observe — including one this node has signed but nothing has broadcast.
+	pub details: Option<PaymentDetails>,
+	/// Transaction IDs wallet sync observed to have replaced or to conflict with this
+	/// payment, used to map later events about those txids back to this record. This is
+	/// BDK's view, distinct from `candidates`: it can hold conflicts that were never
+	/// negotiated candidates, while a candidate replaced between wallet syncs may never
+	/// appear here (it gets no `TxReplaced` event of its own).
 	pub conflicting_txids: Vec<Txid>,
+	/// The channels whose interactive funding `candidates` are rounds of, as the signing of a
+	/// round named them. Empty for a non-funding payment and for a record wallet sync created
+	/// on its own, whose channels its classification names instead.
+	pub funding_channels: Vec<Channel>,
 	/// For interactive funding (splices), this node's per-candidate funding figures across the
-	/// RBF history, keyed by each candidate's txid. Empty for non-funding payments and for
-	/// records written before per-candidate tracking existed.
-	pub(crate) candidates: Vec<FundingTxCandidate>,
+	/// RBF history, keyed by each candidate's txid and recorded as each round is signed.
+	/// Empty for non-funding payments.
+	pub candidates: Vec<FundingTxCandidate>,
+	/// The candidates LDK promoted to the channel's funding, as `ChannelReady` reported them.
+	/// A zero-conf splice locks before its transaction confirms, and every later splice builds
+	/// on it, so such a round can still confirm once the channel's funding has moved on from
+	/// it and once the channel has closed, when LDK holds it no longer. Kept apart from the
+	/// candidates, which each funding-record write replaces as a whole.
+	pub locked_rounds: Vec<Txid>,
 }
 
 impl PendingPaymentDetails {
 	pub(crate) fn new(
 		details: PaymentDetails, conflicting_txids: Vec<Txid>, candidates: Vec<FundingTxCandidate>,
 	) -> Self {
-		Self { details, conflicting_txids, candidates }
+		Self {
+			id: details.id,
+			details: Some(details),
+			conflicting_txids,
+			funding_channels: Vec::new(),
+			candidates,
+			locked_rounds: Vec::new(),
+		}
+	}
+
+	/// An entry for the rounds of an interactive funding of `funding_channels` this node has
+	/// signed, before any transaction of it has been observed and therefore before a payment
+	/// record for it exists.
+	pub(crate) fn signed_rounds(
+		id: PaymentId, funding_channels: Vec<Channel>, candidates: Vec<FundingTxCandidate>,
+	) -> Self {
+		Self {
+			id,
+			details: None,
+			conflicting_txids: Vec::new(),
+			funding_channels,
+			candidates,
+			locked_rounds: Vec::new(),
+		}
+	}
+
+	/// The full payment details, or `None` for a splice whose transaction has not been observed.
+	pub(crate) fn details(&self) -> Option<&PaymentDetails> {
+		self.details.as_ref()
+	}
+
+	/// Transaction IDs that have replaced or conflict with this payment.
+	pub(crate) fn conflicting_txids(&self) -> &[Txid] {
+		&self.conflicting_txids
+	}
+
+	/// The rounds LDK promoted to the channel's funding, as `ChannelReady` reported them.
+	pub(crate) fn locked_rounds(&self) -> &[Txid] {
+		&self.locked_rounds
+	}
+
+	/// Records that LDK promoted the round with the given txid to the channel's funding. Returns
+	/// whether the record changed: a round recorded as promoted already leaves it as it is.
+	pub(crate) fn record_locked_round(&mut self, txid: Txid) -> bool {
+		if self.locked_rounds.contains(&txid) {
+			return false;
+		}
+		self.locked_rounds.push(txid);
+		true
 	}
 
 	/// Returns this node's recorded funding figures for the candidate with the given txid, if any.
 	pub(crate) fn candidate(&self, txid: Txid) -> Option<&FundingTxCandidate> {
 		self.candidates.iter().find(|candidate| candidate.txid == txid)
 	}
+
+	/// This node's recorded funding figures across the candidate history, in LDK's order; empty
+	/// for a splice without a signed round yet and for non-funding payments.
+	pub(crate) fn candidates(&self) -> &[FundingTxCandidate] {
+		&self.candidates
+	}
+
+	/// The channels of the interactive funding this entry tracks: those the signing of a round
+	/// named, else those its classification names.
+	pub(crate) fn funding_channels(&self) -> &[Channel] {
+		if !self.funding_channels.is_empty() {
+			return &self.funding_channels;
+		}
+		match self.details.as_ref().map(|details| &details.kind) {
+			Some(PaymentKind::Onchain {
+				tx_type: Some(TransactionType::InteractiveFunding { channels }),
+				..
+			}) => channels,
+			_ => &[],
+		}
+	}
+
+	/// Whether this entry tracks nothing anymore and can be dropped.
+	pub(crate) fn is_empty(&self) -> bool {
+		self.details.is_none() && self.candidates.is_empty() && self.locked_rounds.is_empty()
+	}
 }
 
 impl_writeable_tlv_based!(PendingPaymentDetails, {
-	(0, details, required),
-	(2, conflicting_txids, optional_vec),
-	(4, candidates, optional_vec),
+	(0, id, required),
+	(2, details, option),
+	(4, conflicting_txids, optional_vec),
+	(6, funding_channels, optional_vec),
+	(8, candidates, optional_vec),
+	(12, locked_rounds, optional_vec),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -80,7 +189,7 @@ impl StorableObject for PendingPaymentDetails {
 	type Id = PaymentId;
 
 	fn id(&self) -> Self::Id {
-		self.details.id
+		self.id
 	}
 }
 
@@ -90,9 +199,13 @@ impl UpdatableObject for PendingPaymentDetails {
 	fn update(&mut self, update: Self::Update) -> bool {
 		let mut updated = false;
 
-		// Update the underlying payment details if present
-		if let Some(payment_update) = update.payment_update {
-			updated |= self.details.update(payment_update);
+		// Update the underlying payment details if present. An entry with no record yet is not
+		// given one here: only the writer that observed the transaction knows what the record
+		// says, and it sets the field directly.
+		if let (Some(payment_update), Some(details)) =
+			(update.payment_update, self.details.as_mut())
+		{
+			updated |= details.update(payment_update);
 		}
 
 		if let Some(new_conflicting_txids) = update.conflicting_txids {
@@ -102,14 +215,19 @@ impl UpdatableObject for PendingPaymentDetails {
 			}
 		}
 
-		if let PaymentKind::Onchain { txid, .. } = &self.details.kind {
+		if let Some(PaymentKind::Onchain { txid, .. }) =
+			self.details.as_ref().map(|details| &details.kind)
+		{
+			let txid = *txid;
 			let conflicts_len = self.conflicting_txids.len();
-			self.conflicting_txids.retain(|conflicting_txid| conflicting_txid != txid);
+			self.conflicting_txids.retain(|conflicting_txid| *conflicting_txid != txid);
 			updated |= self.conflicting_txids.len() != conflicts_len;
 		}
 
-		// Each classify passes the complete candidate history, so a non-empty update replaces the
-		// stored list. An empty update (e.g. a non-funding payment) leaves it untouched.
+		// Each funding-record write passes the candidate history as of its own round, so a
+		// non-empty update replaces the stored list. An empty update (e.g. a non-funding
+		// payment) leaves it untouched. Dropping an abandoned round, the only writer that
+		// shrinks it, goes through the store's `mutate` instead.
 		if !update.candidates.is_empty() && self.candidates != update.candidates {
 			self.candidates = update.candidates;
 			updated = true;
@@ -131,23 +249,109 @@ impl StorableObjectUpdate<PendingPaymentDetails> for PendingPaymentDetailsUpdate
 
 impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 	fn from(value: &PendingPaymentDetails) -> Self {
-		let conflicting_txids = if value.conflicting_txids.is_empty() {
-			None
-		} else {
-			Some(value.conflicting_txids.clone())
-		};
-		Self {
-			id: value.id(),
-			payment_update: Some(value.details.to_update()),
-			conflicting_txids,
-			candidates: value.candidates.clone(),
+		match &value.details {
+			// An entry with no record yet carries nothing a payment-tracking merge could apply.
+			None => Self {
+				id: value.id,
+				payment_update: None,
+				conflicting_txids: None,
+				candidates: value.candidates.clone(),
+			},
+			Some(details) => {
+				let conflicting_txids = if value.conflicting_txids.is_empty() {
+					None
+				} else {
+					Some(value.conflicting_txids.clone())
+				};
+				Self {
+					id: details.id,
+					payment_update: Some(details.to_update()),
+					conflicting_txids,
+					candidates: value.candidates.clone(),
+				}
+			},
 		}
 	}
+}
+
+/// Builds a [`FundingContribution`] for tests through its `Readable` impl — the only path open
+/// outside `rust-lightning`, which keeps its builder private. The length-prefixed stream holds
+/// the required TLV records (the given estimated fee in satoshis, feerate, max feerate, and the
+/// is-splice flag) plus the given contributed outputs.
+///
+/// [`FundingContribution`]: lightning::ln::funding::FundingContribution
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_with_outputs(
+	estimated_fee_sat: u64, feerate: u64, outputs: &[bitcoin::TxOut],
+) -> lightning::ln::funding::FundingContribution {
+	test_funding_contribution_with_parts(estimated_fee_sat, feerate, &[], outputs, None)
+}
+
+/// Builds a [`FundingContribution`] for tests from its parts: the given estimated fee, an input
+/// spending output 0 — which must be P2WPKH — of each given previous transaction, the given
+/// contributed outputs and change output, and the given input-selection feerate (also used as
+/// the maximum), with the is-splice flag set.
+///
+/// [`FundingContribution`]: lightning::ln::funding::FundingContribution
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_with_parts(
+	estimated_fee_sat: u64, feerate: u64, prevtxs: &[bitcoin::Transaction],
+	outputs: &[bitcoin::TxOut], change_output: Option<&bitcoin::TxOut>,
+) -> lightning::ln::funding::FundingContribution {
+	use lightning::util::ser::{BigSize, Writeable};
+	use lightning::util::wallet_utils::ConfirmedUtxo;
+	let mut records = vec![1, 8]; // (1, estimated_fee)
+	records.extend_from_slice(&estimated_fee_sat.to_be_bytes());
+	if !prevtxs.is_empty() {
+		let mut input_bytes = Vec::new();
+		for prevtx in prevtxs {
+			ConfirmedUtxo::new_p2wpkh(prevtx.clone(), 0)
+				.expect("test prevtx output 0 must be P2WPKH")
+				.write(&mut input_bytes)
+				.expect("in-memory write must succeed");
+		}
+		records.push(3); // (3, inputs)
+		BigSize(input_bytes.len() as u64)
+			.write(&mut records)
+			.expect("in-memory write must succeed");
+		records.extend_from_slice(&input_bytes);
+	}
+	if !outputs.is_empty() {
+		let mut output_bytes = Vec::new();
+		for output in outputs {
+			output.write(&mut output_bytes).expect("in-memory write must succeed");
+		}
+		records.push(5); // (5, outputs)
+		BigSize(output_bytes.len() as u64)
+			.write(&mut records)
+			.expect("in-memory write must succeed");
+		records.extend_from_slice(&output_bytes);
+	}
+	if let Some(change_output) = change_output {
+		let change_bytes = change_output.encode();
+		records.push(7); // (7, change_output)
+		BigSize(change_bytes.len() as u64)
+			.write(&mut records)
+			.expect("in-memory write must succeed");
+		records.extend_from_slice(&change_bytes);
+	}
+	records.extend_from_slice(&[9, 8]); // (9, feerate)
+	records.extend_from_slice(&feerate.to_be_bytes());
+	records.extend_from_slice(&[11, 8]); // (11, max_feerate)
+	records.extend_from_slice(&feerate.to_be_bytes());
+	records.extend_from_slice(&[13, 1, 1]); // (13, is_splice: true)
+	let mut tlv_bytes = Vec::new();
+	// BigSize length prefix over the TLV records above.
+	BigSize(records.len() as u64).write(&mut tlv_bytes).expect("in-memory write must succeed");
+	tlv_bytes.extend(records);
+	lightning::util::ser::Readable::read(&mut &tlv_bytes[..])
+		.expect("hand-built TLV stream must decode")
 }
 
 #[cfg(test)]
 mod tests {
 	use bitcoin::hashes::Hash;
+	use lightning::util::ser::{Readable, Writeable};
 
 	use super::*;
 	use crate::payment::store::ConfirmationStatus;
@@ -163,16 +367,23 @@ mod tests {
 		// original and RBF candidates.
 		let counterparty_txid = Txid::from_byte_array([4u8; 32]);
 		let candidates = vec![
-			FundingTxCandidate { txid: counterparty_txid, amount_msat: None, fee_paid_msat: None },
+			FundingTxCandidate {
+				txid: counterparty_txid,
+				amount_msat: None,
+				fee_paid_msat: None,
+				awaiting_broadcast: false,
+			},
 			FundingTxCandidate {
 				txid: first_txid,
 				amount_msat: Some(1_000_000),
 				fee_paid_msat: Some(1_000),
+				awaiting_broadcast: false,
 			},
 			FundingTxCandidate {
 				txid: rbf_txid,
 				amount_msat: Some(1_000_000),
 				fee_paid_msat: Some(5_000),
+				awaiting_broadcast: false,
 			},
 		];
 
@@ -240,84 +451,72 @@ mod tests {
 
 		assert!(pending_payment.update(update));
 		assert_eq!(
-			pending_payment.conflicting_txids,
+			pending_payment.conflicting_txids(),
 			Vec::<Txid>::new(),
 			"current txid must not remain in its own conflict list"
 		);
 	}
 
+	/// A candidate with the given txid byte, with a stake of ours in it if `ours`.
+	fn candidate(txid_byte: u8, ours: bool) -> FundingTxCandidate {
+		FundingTxCandidate {
+			txid: test_txid(txid_byte),
+			amount_msat: ours.then_some(1_000),
+			fee_paid_msat: ours.then_some(100),
+			awaiting_broadcast: false,
+		}
+	}
+
+	fn entry(candidates: Vec<FundingTxCandidate>) -> PendingPaymentDetails {
+		let payment_id = PaymentId([1u8; 32]);
+		let txid = candidates.last().expect("at least one candidate").txid;
+		PendingPaymentDetails::new(pending_onchain_payment(payment_id, txid), vec![], candidates)
+	}
+
+	/// An entry written by a node from before the rounds LDK promoted were kept on it reads as an
+	/// entry with none, everything else intact.
 	#[test]
-	fn funding_classification_pending_update_preserves_mirrored_confirmation() {
-		use bitcoin::BlockHash;
+	fn an_entry_written_without_locked_rounds_reads_with_none() {
+		let mut stored = entry(vec![candidate(2, false), candidate(3, true)]);
+		stored.conflicting_txids = vec![test_txid(9)];
 
-		use crate::payment::store::PaymentDetailsUpdate;
-
-		let txid = test_txid(7);
-		let payment_id = PaymentId(txid.to_byte_array());
-
-		// A pending entry wallet sync has already mirrored a confirmation into (via
-		// `apply_funding_status_update_locked`) before classification ran.
-		let confirmed_details = PaymentDetails::new(
-			payment_id,
-			PaymentKind::Onchain {
-				txid,
-				status: ConfirmationStatus::Confirmed {
-					block_hash: BlockHash::from_byte_array([8u8; 32]),
-					height: 100,
-					timestamp: 1,
-				},
-				tx_type: None,
-			},
-			Some(2_000_000),
-			Some(999),
-			PaymentDirection::Outbound,
-			PaymentStatus::Pending,
-		);
-		let mirrored = PendingPaymentDetails::new(confirmed_details, Vec::new(), Vec::new());
-
-		// A fresh classification is always Unconfirmed and carries the candidate history; its
-		// figures are the active candidate's.
-		let fresh = pending_onchain_payment(payment_id, txid);
-		let candidates = vec![FundingTxCandidate {
-			txid,
-			amount_msat: fresh.amount_msat,
-			fee_paid_msat: fresh.fee_paid_msat,
-		}];
-
-		// The old fresh-insert path merged the full fresh record, downgrading the mirrored
-		// confirmation.
-		let mut downgraded = mirrored.clone();
-		let full_update =
-			PendingPaymentDetails::new(fresh.clone(), Vec::new(), candidates.clone()).to_update();
-		assert!(downgraded.update(full_update));
-		assert!(
-			matches!(
-				downgraded.details.kind,
-				PaymentKind::Onchain { status: ConfirmationStatus::Unconfirmed, .. }
-			),
-			"a full merge of a fresh classification downgrades a mirrored confirmation",
-		);
-
-		// The narrow classification update merges the candidates while preserving the
-		// confirmation state wallet sync owns. It names the confirmed txid, so its
-		// contribution-derived figures replace the mirrored wallet-view ones.
-		let mut merged = mirrored.clone();
-		let narrow_update = PendingPaymentDetailsUpdate {
-			id: payment_id,
-			payment_update: Some(PaymentDetailsUpdate::funding_reclassification(fresh)),
-			conflicting_txids: None,
-			candidates: candidates.clone(),
+		let write_as_before = || -> Result<Vec<u8>, lightning::io::Error> {
+			let mut written = Vec::new();
+			lightning::write_tlv_fields!(&mut written, {
+				(0, stored.id, required),
+				(2, stored.details, option),
+				(4, stored.conflicting_txids, optional_vec),
+				(6, stored.funding_channels, optional_vec),
+				(8, stored.candidates, optional_vec),
+			});
+			Ok(written)
 		};
-		assert!(merged.update(narrow_update));
-		assert!(
-			matches!(
-				merged.details.kind,
-				PaymentKind::Onchain { status: ConfirmationStatus::Confirmed { .. }, .. }
-			),
-			"a narrow classification update must not downgrade a mirrored confirmation",
-		);
-		assert_eq!(merged.candidates, candidates);
-		assert_eq!(merged.details.amount_msat, Some(1_000));
-		assert_eq!(merged.details.fee_paid_msat, Some(100));
+		let written_before = write_as_before().unwrap();
+
+		let decoded: PendingPaymentDetails = Readable::read(&mut &written_before[..])
+			.expect("an entry written before the rounds were kept still reads");
+		assert!(decoded.locked_rounds().is_empty());
+		assert_eq!(decoded, stored);
+	}
+
+	/// The rounds LDK promoted round-trip with the entry, absent or present, and the merge of a
+	/// record's full update, as wallet sync writes it, leaves them.
+	#[test]
+	fn locked_rounds_round_trip_and_survive_a_merge() {
+		let mut stored = entry(vec![candidate(2, false)]);
+		let decoded: PendingPaymentDetails =
+			Readable::read(&mut &stored.encode()[..]).expect("encoding must round-trip");
+		assert!(decoded.locked_rounds().is_empty());
+
+		assert!(stored.record_locked_round(test_txid(2)));
+		assert!(!stored.record_locked_round(test_txid(2)));
+		let decoded: PendingPaymentDetails =
+			Readable::read(&mut &stored.encode()[..]).expect("encoding must round-trip");
+		assert_eq!(decoded, stored);
+
+		let synced = entry(vec![candidate(2, false), candidate(3, false)]);
+		assert!(stored.update(synced.to_update()));
+		assert_eq!(stored.candidates().len(), 2);
+		assert_eq!(stored.locked_rounds(), &[test_txid(2)]);
 	}
 }

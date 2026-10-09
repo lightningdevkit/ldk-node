@@ -65,6 +65,59 @@ pub(crate) const PAYMENT_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1000).
 // may displace those entries.
 pub(crate) const PAYMENT_CACHE_WARMUP_COUNT: NonZeroUsize = NonZeroUsize::new(50).unwrap();
 
+// The number of channel transaction provenance records we keep in memory.
+//
+// A record is written when a channel produces a transaction and read back when the wallet meets
+// that transaction, so the working set is a node's recent channel activity rather than its whole
+// history. Records are small — a handful of outpoints, each with a role and a channel reference
+// — so this bounds the store's share of memory well below the payment store's while still
+// covering the channels a node is busy with.
+pub(crate) const CHANNEL_TX_FACTS_CACHE_CAPACITY: NonZeroUsize = NonZeroUsize::new(1000).unwrap();
+
+// The number of channel transaction provenance records we read into the cache when starting up.
+//
+// This matches the built-in storage backends' page size, so warming the cache costs a single page
+// listing and one batch of reads. Later activity may displace those entries, which are then read
+// back individually as they are needed.
+pub(crate) const CHANNEL_TX_FACTS_CACHE_WARMUP_COUNT: NonZeroUsize = NonZeroUsize::new(50).unwrap();
+
+// The number of blocks a channel transaction provenance record outlives the last thing the node
+// learned about its transaction.
+//
+// Roughly a year at ten minutes a block. It is an absolute backstop rather than the usual reason
+// a record goes: a record is dropped only once the channels it names are gone from the node's
+// channel manager, chain monitor and output sweeper, and the funding it records has been spent
+// and settled. Those checks are blind to a transaction of a channel that never reached them, so
+// without the cap such a record would be kept forever.
+pub(crate) const CHANNEL_TX_FACTS_RETENTION_BLOCKS: u32 = 52_560;
+
+// The number of bytes one channel transaction provenance record may take up.
+//
+// A record is written whole and holds one entry per channel-controlled output of its transaction,
+// so a counterparty loading a commitment transaction with HTLCs grows a record this node is
+// obliged to keep. The limit is comfortably above a commitment transaction carrying the most
+// HTLCs LDK allows, and bounds what any single transaction can cost.
+pub(crate) const CHANNEL_TX_FACTS_MAX_RECORD_BYTES: usize = 128 * 1024;
+
+// The number of channel transaction provenance records the node keeps.
+//
+// Records are dropped only once the channels they belong to have resolved, so between prunes a
+// counterparty opening and closing channels, or replacing a negotiated funding again and again,
+// drives the store's growth. Past this many records nothing new is admitted and the transactions
+// it would have described go unclassified, which is bounded loss of detail rather than unbounded
+// storage.
+pub(crate) const CHANNEL_TX_FACTS_MAX_RECORDS: usize = 100_000;
+
+// The number of pages of channel transaction provenance records one chain tip change examines.
+//
+// Pruning shares the pass that graduates payments, so it has to leave promptly; it resumes where
+// it left off on the next tip and so walks the whole store over consecutive blocks. At the
+// built-in backends' page size this is a couple of hundred records a block: a store whose records
+// fit the cache is walked in a single tip and costs the backend nothing beyond listing its keys,
+// while one at the limit above takes a few hundred blocks — which is also how stale the record
+// count that walk maintains can get.
+pub(crate) const CHANNEL_TX_FACTS_PRUNE_PAGES_PER_TIP: usize = 4;
+
 // The default {Esplora,Electrum} client timeout we're using.
 const DEFAULT_PER_REQUEST_TIMEOUT_SECS: u8 = 10;
 

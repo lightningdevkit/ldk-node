@@ -58,6 +58,7 @@ use crate::config::BitcoindRestClientConfig;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole, Config,
 	ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig, TorConfig,
+	CHANNEL_TX_FACTS_CACHE_CAPACITY, CHANNEL_TX_FACTS_CACHE_WARMUP_COUNT,
 	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
 	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT, PAYMENT_CACHE_CAPACITY,
 	PAYMENT_CACHE_WARMUP_COUNT,
@@ -83,6 +84,8 @@ use crate::io::utils::{
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
 	self, CHANNEL_FORWARDING_STATS_PERSISTENCE_SECONDARY_NAMESPACE,
+	CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE,
 	FORWARDED_PAYMENT_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -104,11 +107,12 @@ use crate::probing::{
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
-	PendingPaymentStore,
+	AsyncPersister, ChainMonitor, ChannelManager, ChannelTxFactsStore, DynStore, DynStoreRef,
+	DynStoreWrapper, GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
+	PeerManager, PendingPaymentStore,
 };
 use crate::wallet::persist::{read_address_pool, KVStoreWalletPersister};
+use crate::wallet::provenance::NodeChannelLiveness;
 use crate::wallet::Wallet;
 use crate::{Node, NodeMetrics, PersistedNodeMetrics};
 
@@ -1564,6 +1568,7 @@ fn build_with_store_internal(
 		channel_forwarding_stats_res,
 		node_metris_res,
 		pending_payment_store_res,
+		channel_tx_facts_store_res,
 		address_pool_res,
 	) = runtime.block_on(async move {
 		tokio::join!(
@@ -1585,6 +1590,13 @@ fn build_with_store_internal(
 				&*kv_store_ref,
 				PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 				PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+			read_n_objects(
+				&*kv_store_ref,
+				CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_TX_FACTS_CACHE_WARMUP_COUNT,
 				Arc::clone(&logger_ref),
 			),
 			read_address_pool(&*kv_store_ref, &*logger_ref),
@@ -1918,6 +1930,24 @@ fn build_with_store_internal(
 		},
 	};
 
+	let channel_tx_facts_store = match channel_tx_facts_store_res {
+		Ok(channel_tx_facts) => Arc::new(ChannelTxFactsStore::new(
+			// The read hands us the newest records first, while the cache treats the objects it
+			// is seeded with as increasingly recently used. Reverse them, so that the newest
+			// record is the last one to be evicted rather than the first.
+			channel_tx_facts.into_iter().rev().collect(),
+			KeepLeastRecentlyUsed::new(CHANNEL_TX_FACTS_CACHE_CAPACITY),
+			CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(e) => {
+			log_error!(logger, "Failed to read channel transaction facts from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
 	let persisted_pool_indices = match address_pool_res {
 		Ok(indices) => indices,
 		Err(e) => {
@@ -1938,6 +1968,7 @@ fn build_with_store_internal(
 		Arc::clone(&config),
 		Arc::clone(&logger),
 		Arc::clone(&pending_payment_store),
+		Arc::clone(&channel_tx_facts_store),
 	));
 
 	// Fill the address pool up front so LDK's sync `SignerProvider` callbacks can hand out
@@ -1946,8 +1977,6 @@ fn build_with_store_internal(
 		log_error!(logger, "Failed to fill the wallet's address pool: {}", e);
 		BuildError::WalletSetupFailed
 	})?;
-
-	tx_broadcaster.set_wallet(Arc::downgrade(&wallet));
 
 	// Initialize the KeysManager
 	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
@@ -2428,6 +2457,15 @@ fn build_with_store_internal(
 			}
 		},
 	};
+
+	// The wallet drops the facts it recorded for a channel once nothing holds that channel
+	// anymore, and records on start what a held channel's producers never reported; both it can
+	// only ask now that the node's channel state exists.
+	wallet.set_channel_liveness(Arc::new(NodeChannelLiveness::new(
+		&channel_manager,
+		&chain_monitor,
+		&output_sweeper,
+	)));
 
 	let event_queue = match event_queue_res {
 		Ok(event_queue) => Arc::new(event_queue),
