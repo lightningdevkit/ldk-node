@@ -154,7 +154,7 @@ impl Liquidity {
 	/// The given `token` will be used by the LSP to authenticate the user.
 	/// `trust_peer_0conf` controls whether the node will accept 0-confirmation channels opened by this
 	/// LSP. Note this supersedes [`Config::trusted_peers_0conf`] for this peer.
-	/// Re-adding an existing `node_id` updates its address/token/0conf settings and reconnects.
+	/// Re-adding an existing `node_id` updates its address/token/0conf settings. A changed address reconnects and rediscovers protocols; token or 0conf-only updates are applied in place.
 	pub fn add_liquidity_source(
 		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 		trust_peer_0conf: bool,
@@ -163,21 +163,38 @@ impl Liquidity {
 		{
 			let mut lsp_nodes = self.liquidity_source.lsp_nodes.write().expect("lock");
 			if let Some(existing) = lsp_nodes.iter_mut().find(|n| n.node_id == node_id) {
-				if existing.address == address {
+				let addr_changed = existing.address != address;
+				let changed = addr_changed
+					|| existing.token != token
+					|| existing.trust_peer_0conf != trust_peer_0conf;
+				if !changed {
 					log_info!(self.logger, "LSP node {} already added, skipping.", node_id);
 					return Ok(());
 				}
-				log_info!(
-					self.logger,
-					"Updating existing LSP node {} address/config and reconnecting.",
-					node_id
-				);
+				if addr_changed {
+					log_info!(
+						self.logger,
+						"Updating existing LSP node {} address/config and reconnecting.",
+						node_id
+					);
+				} else {
+					log_info!(
+						self.logger,
+						"Updating existing LSP node {} token/0conf without reconnecting.",
+						node_id
+					);
+				}
 				let prev_address = std::mem::replace(&mut existing.address, address.clone());
 				let prev_token = std::mem::replace(&mut existing.token, token.clone());
 				let prev_trust =
 					std::mem::replace(&mut existing.trust_peer_0conf, trust_peer_0conf);
-				// Force rediscovery after config/address change.
-				let prev_protocols = std::mem::take(&mut existing.supported_protocols);
+				// Force rediscovery only when the address changes; token/0conf updates
+				// must still stick even if connect/discover later fails.
+				let prev_protocols = if addr_changed {
+					std::mem::take(&mut existing.supported_protocols)
+				} else {
+					existing.supported_protocols.clone()
+				};
 				previous = Some((prev_address, prev_token, prev_trust, prev_protocols));
 			} else {
 				lsp_nodes.push(LspNode {
@@ -206,23 +223,30 @@ impl Liquidity {
 			}
 		};
 
-		let con_cm = Arc::clone(&self.connection_manager);
-		let connect_addr = address.clone();
-		if let Err(e) = self
-			.runtime
-			.block_on(async move { con_cm.connect_peer_if_necessary(node_id, connect_addr).await })
-		{
-			cleanup();
-			return Err(e);
-		}
-		log_info!(self.logger, "Connected to LSP {}@{}.", node_id, address);
+		let reconnect = previous
+			.as_ref()
+			.map(|(prev_address, _, _, _)| prev_address != &address)
+			.unwrap_or(true);
+		if reconnect {
+			let con_cm = Arc::clone(&self.connection_manager);
+			let connect_addr = address.clone();
+			if let Err(e) = self.runtime.block_on(async move {
+				con_cm.connect_peer_if_necessary(node_id, connect_addr).await
+			}) {
+				cleanup();
+				return Err(e);
+			}
+			log_info!(self.logger, "Connected to LSP {}@{}.", node_id, address);
 
-		if let Err(e) = self
-			.runtime
-			.block_on(async { self.liquidity_source.discover_lsp_protocols(&node_id).await })
-		{
-			cleanup();
-			return Err(e);
+			if let Err(e) = self
+				.runtime
+				.block_on(async { self.liquidity_source.discover_lsp_protocols(&node_id).await })
+			{
+				cleanup();
+				return Err(e);
+			}
+		} else {
+			log_info!(self.logger, "Updated LSP {} config (address unchanged).", node_id);
 		}
 
 		Ok(())
