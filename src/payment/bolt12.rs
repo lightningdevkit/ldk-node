@@ -566,6 +566,72 @@ impl Bolt12Payment {
 		Ok(())
 	}
 
+	/// Cancels an outbound recurrence locally and, after the first successful payment, queues a
+	/// continuity-preserving cancellation request for the payee.
+	///
+	/// Abandons an active attempt but retains its payment ID until the outcome is known. A late
+	/// success is still recorded without reopening the recurrence. If queueing remote cancellation
+	/// fails, local cancellation is persisted before returning the queueing error.
+	pub fn cancel_outbound_recurrence(&self, recurrence_id: RecurrenceId) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let mut cancellation_result = Ok(());
+		let result = &mut cancellation_result;
+		self.runtime.block_on(self.outbound_recurrence_store.mutate_async(
+			&recurrence_id,
+			|current| async move {
+				let mut details = current.ok_or(Error::InvalidRecurrenceId)?;
+				match details.status {
+					OutboundRecurrenceStatus::Cancelled => {
+						log_error!(self.logger, "Tried to cancel an already cancelled recurrence.");
+						return Err(Error::InvalidOutboundRecurrence);
+					},
+					OutboundRecurrenceStatus::Completed => {
+						log_error!(
+							self.logger,
+							"A completed outbound recurrence cannot be cancelled."
+						);
+						return Err(Error::InvalidOutboundRecurrence);
+					},
+					_ => {},
+				}
+
+				// Validate stored offer data before abandoning a payment or queueing a message.
+				let offer = match details.paid_count {
+					0 => None,
+					_ => Some(
+						LdkOffer::try_from(details.original_offer.clone())
+							.map_err(|_| Error::InvalidOffer)?,
+					),
+				};
+				// Submission holds this same mutation lock through queueing. If cancellation
+				// wins, its persisted status blocks the reservation; otherwise abandon the
+				// queued attempt. Retain its ID since in-flight HTLCs can still settle.
+				if let OutboundRecurrencePaymentState::Active(payment_id) = details.payment_state {
+					self.channel_manager.abandon_payment(payment_id);
+				}
+				if let Some(offer) = offer {
+					// The payee authenticates continuity using the latest successfully paid state.
+					let params = lightning::ln::channelmanager::RecurrenceCancellationParams {
+						counter: details.paid_count,
+						start: details.initial_start,
+						prev_state: details.opaque_state.clone(),
+					};
+					*result = self
+						.channel_manager
+						.cancel_recurrence(&offer, recurrence_id, params)
+						.map_err(|_| Error::PaymentSendingFailed);
+				}
+				// Remote queueing failure must not let the local reservation submit afterward.
+				details.status = OutboundRecurrenceStatus::Cancelled;
+				Ok(Some(details))
+			},
+		))?;
+		cancellation_result
+	}
+
 	pub(crate) fn send_using_amount_inner(
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>, hrn: Option<HumanReadableName>,

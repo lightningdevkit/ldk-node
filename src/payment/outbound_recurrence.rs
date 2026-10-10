@@ -59,7 +59,8 @@ pub enum OutboundRecurrencePaymentState {
 	NoActivePayment,
 	/// An attempt with this payment ID is in progress.
 	///
-	/// Another attempt must not be started while this attempt remains active.
+	/// Another attempt must not be started while this attempt remains active. Cancellation
+	/// retains this ID until the outcome is known, since abandoned HTLCs may still succeed.
 	Active(PaymentId),
 	/// The attempt with this payment ID failed and is no longer in progress.
 	///
