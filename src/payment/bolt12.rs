@@ -312,6 +312,38 @@ impl Bolt12Payment {
 		self.runtime.block_on(self.submit_recurrence_payment(details))
 	}
 
+	/// Retries a failed payment attempt without advancing the recurrence period.
+	///
+	/// The recurrence must be active and its latest attempt must have failed. Its payment
+	/// window must be open, except for an initial payment whose offer has no explicit basetime:
+	/// that window is not known until the first payment succeeds.
+	///
+	/// Returns a new [`PaymentId`] when the invoice request is successfully submitted, not when
+	/// the payment succeeds. Returns [`Error::NotRunning`] if the node is stopped,
+	/// [`Error::InvalidRecurrenceId`] if the recurrence is unknown, or
+	/// [`Error::InvalidRecurrence`] if its lifecycle or attempt state does not permit a retry.
+	/// Payment-window, submission, and persistence errors are returned to the caller.
+	pub fn retry_recurrence(&self, recurrence_id: RecurrenceId) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let details = self
+			.runtime
+			.block_on(self.recurrence_store.get(&recurrence_id))?
+			.ok_or(Error::InvalidRecurrenceId)?;
+
+		// A retry replaces only a failed attempt; it must not start a new period or replace
+		// an in-progress payment. The shared submission path preserves the period counter.
+		if details.status != RecurrenceStatus::Active
+			|| !matches!(details.payment_state, RecurrencePaymentState::Failed(_))
+		{
+			return Err(Error::InvalidRecurrence);
+		}
+
+		self.runtime.block_on(self.submit_recurrence_payment(details))
+	}
+
 	async fn submit_recurrence_payment(
 		&self, mut details: RecurrenceDetails,
 	) -> Result<PaymentId, Error> {
@@ -415,7 +447,19 @@ impl Bolt12Payment {
 			return Err(Error::InvalidRecurrence);
 		}
 
-		let basetime = details.basetime.ok_or(Error::InvalidOffer)?;
+		// Without an explicit basetime, the first successful invoice establishes the window.
+		let basetime = match details.basetime {
+			Some(basetime) => basetime,
+			None if details.paid_count == 0
+				&& !matches!(recurrence.recurrence_type, RecurrenceType::Compulsory(Some(_))) =>
+			{
+				// If the offer has no basetime and the first payment has not succeeded,
+				// period zero's start time and payment window are not known yet.
+				// Skip the window check so a failed first payment can be retried.
+				return Ok(());
+			},
+			None => return Err(Error::InvalidOffer),
+		};
 
 		let (opening, closing) =
 			recurrence.payment_window(basetime, period_index).map_err(|_| Error::InvalidOffer)?;
@@ -429,10 +473,6 @@ impl Bolt12Payment {
 
 		if now >= closing {
 			// TODO: Figure out, where we should ideally be changing recurrence states at appropriate times.
-			debug_assert!(
-				false,
-				"Recurrence crossed the period's closing window without being marked missed."
-			);
 			return Err(Error::InvalidRecurrence);
 		}
 
