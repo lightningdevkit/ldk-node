@@ -525,7 +525,7 @@ impl NodeBuilder {
 	/// 0-confirmation channels opened by this LSP. If `false`, 0-confirmation
 	/// acceptance for this peer falls back to [`Config::trusted_peers_0conf`].
 	///
-	/// May be called multiple times to register several LSPs. Duplicate `node_id`s are ignored.
+	/// May be called multiple times to register several LSPs. Re-adding an existing `node_id` updates its address, token, and 0conf trust settings.
 	///
 	/// [bLIP-50 / LSPS0]: https://github.com/lightning/blips/blob/master/blip-0050.md
 	pub fn add_liquidity_source(
@@ -535,7 +535,12 @@ impl NodeBuilder {
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
 
-		if liquidity_source_config.lsp_nodes.iter().any(|n| n.node_id == node_id) {
+		if let Some(existing) =
+			liquidity_source_config.lsp_nodes.iter_mut().find(|n| n.node_id == node_id)
+		{
+			existing.address = address;
+			existing.token = token;
+			existing.trust_peer_0conf = trust_peer_0conf;
 			return self;
 		}
 
@@ -1185,7 +1190,7 @@ impl Builder {
 	/// 0-confirmation channels opened by this LSP. If `false`, 0-confirmation
 	/// acceptance for this peer falls back to [`Config::trusted_peers_0conf`].
 	///
-	/// May be called multiple times to register several LSPs. Duplicate `node_id`s are ignored.
+	/// May be called multiple times to register several LSPs. Re-adding an existing `node_id` updates its address, token, and 0conf trust settings.
 	///
 	/// [bLIP-50 / LSPS0]: https://github.com/lightning/blips/blob/master/blip-0050.md
 	pub fn add_liquidity_source(
@@ -2804,5 +2809,55 @@ mod tests {
 		let mut builder = NodeBuilder::new();
 		builder.set_runtime(multi_thread_runtime.handle().clone()).unwrap();
 		assert!(builder.setup_runtime(&logger).is_ok(), "a multi-threaded runtime should be used");
+	}
+
+	#[test]
+	fn add_liquidity_source_updates_existing_lsp_in_place() {
+		use std::str::FromStr;
+
+		use bitcoin::secp256k1::PublicKey;
+		use lightning::ln::msgs::SocketAddress;
+
+		let mut builder = NodeBuilder::new();
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let first_address = SocketAddress::from_str("127.0.0.1:9735").unwrap();
+		let second_address = SocketAddress::from_str("127.0.0.2:9735").unwrap();
+
+		// Register an LSP, then re-add the same node_id with a new address and
+		// different 0conf/trust settings. Re-adding must update the existing
+		// entry in place rather than silently dropping the new values.
+		builder.add_liquidity_source(node_id, first_address.clone(), None, true);
+		builder.add_liquidity_source(
+			node_id,
+			second_address.clone(),
+			Some("token".to_owned()),
+			false,
+		);
+
+		let config = builder
+			.liquidity_source_config
+			.as_ref()
+			.expect("liquidity source config should be initialized");
+		assert_eq!(
+			config.lsp_nodes.len(),
+			1,
+			"re-adding the same node_id must not create a duplicate entry",
+		);
+		assert_eq!(
+			config.lsp_nodes[0].address, second_address,
+			"re-adding must update the address in place",
+		);
+		assert_eq!(
+			config.lsp_nodes[0].token,
+			Some("token".to_owned()),
+			"re-adding must update the token in place",
+		);
+		assert!(
+			!config.lsp_nodes[0].trust_peer_0conf,
+			"re-adding must update the 0conf trust setting in place",
+		);
 	}
 }
