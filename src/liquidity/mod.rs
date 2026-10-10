@@ -154,50 +154,113 @@ impl Liquidity {
 	/// The given `token` will be used by the LSP to authenticate the user.
 	/// `trust_peer_0conf` controls whether the node will accept 0-confirmation channels opened by this
 	/// LSP. Note this supersedes [`Config::trusted_peers_0conf`] for this peer.
-	/// Duplicate `node_id`s are ignored.
+	/// Re-adding an existing `node_id` updates its address/token/0conf settings. A changed address
+	/// disconnects any live session, dials the new address, and rediscovers protocols. Token or
+	/// 0conf-only updates are applied in place. A failed update restores the previous config only
+	/// if no newer update for the same `node_id` has landed.
 	pub fn add_liquidity_source(
 		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 		trust_peer_0conf: bool,
 	) -> Result<(), Error> {
+		let mut previous: Option<(SocketAddress, Option<String>, bool, Option<Vec<u16>>)> = None;
+		let mut addr_changed = true;
+		// Generation of this write. Cleanup restores or removes only if it is still current,
+		// so a concurrent re-add for the same node_id is not rolled back.
+		let mut update_generation = 0u64;
 		{
 			let mut lsp_nodes = self.liquidity_source.lsp_nodes.write().expect("lock");
-			if lsp_nodes.iter().any(|n| n.node_id == node_id) {
-				log_info!(self.logger, "LSP node {} already added, skipping.", node_id);
-				return Ok(());
+			if let Some(existing) = lsp_nodes.iter_mut().find(|n| n.node_id == node_id) {
+				addr_changed = existing.address != address;
+				let changed = addr_changed
+					|| existing.token != token
+					|| existing.trust_peer_0conf != trust_peer_0conf;
+				if !changed {
+					log_info!(self.logger, "LSP node {} already added, skipping.", node_id);
+					return Ok(());
+				}
+				if addr_changed {
+					log_info!(
+						self.logger,
+						"Updating existing LSP node {} address/config; disconnecting and reconnecting.",
+						node_id
+					);
+				} else {
+					log_info!(
+						self.logger,
+						"Updating existing LSP node {} token/0conf without reconnecting.",
+						node_id
+					);
+				}
+				let prev_address = std::mem::replace(&mut existing.address, address.clone());
+				let prev_token = std::mem::replace(&mut existing.token, token.clone());
+				let prev_trust =
+					std::mem::replace(&mut existing.trust_peer_0conf, trust_peer_0conf);
+				// Keep supported_protocols until rediscovery overwrites them. Clearing here
+				// makes get_lsp_config miss this LSP for the whole connect+discover window.
+				let prev_protocols = existing.supported_protocols.clone();
+				existing.config_generation = existing.config_generation.wrapping_add(1);
+				update_generation = existing.config_generation;
+				previous = Some((prev_address, prev_token, prev_trust, prev_protocols));
+			} else {
+				update_generation = 1;
+				lsp_nodes.push(LspNode {
+					node_id,
+					address: address.clone(),
+					token: token.clone(),
+					trust_peer_0conf,
+					supported_protocols: None,
+					config_generation: update_generation,
+				});
 			}
-
-			lsp_nodes.push(LspNode {
-				node_id,
-				address: address.clone(),
-				token: token.clone(),
-				trust_peer_0conf,
-				supported_protocols: None,
-			});
 		}
 
-		// If anything below fails, drop the half-initialized entry so the user can retry cleanly.
+		// On failure: remove half-initialized inserts; restore prior config for updates.
+		// Skip if a newer add for this node_id already committed a later generation.
 		let lsp_nodes = Arc::clone(&self.liquidity_source.lsp_nodes);
 		let cleanup = move || {
-			lsp_nodes.write().expect("lock").retain(|n| n.node_id != node_id);
+			let mut nodes = lsp_nodes.write().expect("lock");
+			let still_current = nodes
+				.iter()
+				.find(|n| n.node_id == node_id)
+				.is_some_and(|n| n.config_generation == update_generation);
+			if !still_current {
+				return;
+			}
+			if let Some((prev_address, prev_token, prev_trust, prev_protocols)) = previous {
+				if let Some(existing) = nodes.iter_mut().find(|n| n.node_id == node_id) {
+					existing.address = prev_address;
+					existing.token = prev_token;
+					existing.trust_peer_0conf = prev_trust;
+					existing.supported_protocols = prev_protocols;
+				}
+			} else {
+				nodes.retain(|n| n.node_id != node_id);
+			}
 		};
 
-		let con_cm = Arc::clone(&self.connection_manager);
-		let connect_addr = address.clone();
-		if let Err(e) = self
-			.runtime
-			.block_on(async move { con_cm.connect_peer_if_necessary(node_id, connect_addr).await })
-		{
-			cleanup();
-			return Err(e);
-		}
-		log_info!(self.logger, "Connected to LSP {}@{}.", node_id, address);
+		if addr_changed {
+			let con_cm = Arc::clone(&self.connection_manager);
+			let connect_addr = address.clone();
+			// connect_peer_if_necessary no-ops while the peer is up, so a live LSP would keep
+			// the old session and never dial the new address. Drop it first, then dial.
+			if let Err(e) = self.runtime.block_on(async move {
+				con_cm.disconnect_peer(node_id);
+				con_cm.do_connect_peer(node_id, connect_addr).await
+			}) {
+				cleanup();
+				return Err(e);
+			}
+			log_info!(self.logger, "Connected to LSP {}@{}.", node_id, address);
 
-		if let Err(e) = self
-			.runtime
-			.block_on(async { self.liquidity_source.discover_lsp_protocols(&node_id).await })
-		{
-			cleanup();
-			return Err(e);
+			if let Err(e) = self
+				.runtime
+				.block_on(async { self.liquidity_source.discover_lsp_protocols(&node_id).await })
+			{
+				cleanup();
+				return Err(e);
+			}
+		} else {
+			log_info!(self.logger, "Updated LSP {} config (address unchanged).", node_id);
 		}
 
 		Ok(())
@@ -232,6 +295,9 @@ pub(crate) struct LspNode {
 	trust_peer_0conf: bool,
 	// Protocol numbers discovered via LSPS0 (e.g., 1 = LSPS1, 2 = LSPS2, 5 = LSPS5).
 	supported_protocols: Option<Vec<u16>>,
+	// Bumped on every in-place config write. Failure cleanup matches this so a newer
+	// concurrent update is not overwritten by an older rollback.
+	config_generation: u64,
 }
 
 pub(crate) struct LiquiditySourceBuilder<L: Deref>
@@ -331,6 +397,7 @@ where
 					token: cfg.token,
 					trust_peer_0conf: cfg.trust_peer_0conf,
 					supported_protocols: None,
+					config_generation: 0,
 				})
 				.collect(),
 		));
