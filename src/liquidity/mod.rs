@@ -160,10 +160,11 @@ impl Liquidity {
 		trust_peer_0conf: bool,
 	) -> Result<(), Error> {
 		let mut previous: Option<(SocketAddress, Option<String>, bool, Option<Vec<u16>>)> = None;
+		let mut addr_changed = true;
 		{
 			let mut lsp_nodes = self.liquidity_source.lsp_nodes.write().expect("lock");
 			if let Some(existing) = lsp_nodes.iter_mut().find(|n| n.node_id == node_id) {
-				let addr_changed = existing.address != address;
+				addr_changed = existing.address != address;
 				let changed = addr_changed
 					|| existing.token != token
 					|| existing.trust_peer_0conf != trust_peer_0conf;
@@ -188,13 +189,9 @@ impl Liquidity {
 				let prev_token = std::mem::replace(&mut existing.token, token.clone());
 				let prev_trust =
 					std::mem::replace(&mut existing.trust_peer_0conf, trust_peer_0conf);
-				// Force rediscovery only when the address changes; token/0conf updates
-				// must still stick even if connect/discover later fails.
-				let prev_protocols = if addr_changed {
-					std::mem::take(&mut existing.supported_protocols)
-				} else {
-					existing.supported_protocols.clone()
-				};
+				// Keep supported_protocols until rediscovery overwrites them. Clearing here
+				// makes get_lsp_config miss this LSP for the whole connect+discover window.
+				let prev_protocols = existing.supported_protocols.clone();
 				previous = Some((prev_address, prev_token, prev_trust, prev_protocols));
 			} else {
 				lsp_nodes.push(LspNode {
@@ -223,11 +220,7 @@ impl Liquidity {
 			}
 		};
 
-		let reconnect = previous
-			.as_ref()
-			.map(|(prev_address, _, _, _)| prev_address != &address)
-			.unwrap_or(true);
-		if reconnect {
+		if addr_changed {
 			let con_cm = Arc::clone(&self.connection_manager);
 			let connect_addr = address.clone();
 			if let Err(e) = self.runtime.block_on(async move {
