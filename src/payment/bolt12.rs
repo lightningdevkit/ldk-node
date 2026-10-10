@@ -313,10 +313,10 @@ impl Bolt12Payment {
 				// Persistence can outlast the payment window. Recheck immediately before
 				// queueing and record an expired reservation as failed without sending it.
 				let request_result = (|| {
-					if details.paid_count > 0 {
-						let recurrence = offer.offer_recurrence().ok_or(Error::InvalidOffer)?;
-						self.validate_outbound_recurrence_payment_window(&details, &recurrence)?;
-					}
+					let recurrence = offer.offer_recurrence().ok_or(Error::InvalidOffer)?;
+					// Initial retries with a known basetime also have a payment window. The
+					// validator permits an unknown window only before basetime is established.
+					self.validate_outbound_recurrence_payment_window(&details, &recurrence)?;
 					self.channel_manager
 						.pay_for_recurrence(
 							&offer,
@@ -421,6 +421,40 @@ impl Bolt12Payment {
 		self.runtime.block_on(self.submit_outbound_recurrence_payment(details))
 	}
 
+	/// Retries a failed payment attempt without advancing the recurrence period.
+	///
+	/// The recurrence must be active and its latest attempt must have failed. Its payment
+	/// window must be open, except for an initial payment whose offer has no explicit basetime:
+	/// that window is not known until the first payment succeeds.
+	///
+	/// Returns a new [`PaymentId`] when the invoice request is successfully submitted, not when
+	/// the payment succeeds. Returns [`Error::NotRunning`] if the node is stopped,
+	/// [`Error::InvalidRecurrenceId`] if the recurrence is unknown, or
+	/// [`Error::InvalidOutboundRecurrence`] if its lifecycle or attempt state does not permit a retry.
+	/// Payment-window, submission, and persistence errors are returned to the caller.
+	pub fn retry_outbound_recurrence(
+		&self, recurrence_id: RecurrenceId,
+	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let details = self
+			.runtime
+			.block_on(self.outbound_recurrence_store.get(&recurrence_id))?
+			.ok_or(Error::InvalidRecurrenceId)?;
+
+		// A retry replaces only a failed attempt; it must not start a new period or replace
+		// an in-progress payment. The shared submission path preserves the period counter.
+		if details.status != OutboundRecurrenceStatus::Active
+			|| !matches!(details.payment_state, OutboundRecurrencePaymentState::Failed(_))
+		{
+			return Err(Error::InvalidOutboundRecurrence);
+		}
+
+		self.runtime.block_on(self.submit_outbound_recurrence_payment(details))
+	}
+
 	/// Reserves a subsequent attempt before using the shared submission gate.
 	///
 	/// Recheck the caller's period and attempt under the recurrence mutation lock so concurrent
@@ -500,7 +534,19 @@ impl Bolt12Payment {
 			return Err(Error::InvalidOutboundRecurrence);
 		}
 
-		let basetime = details.basetime.ok_or(Error::InvalidOffer)?;
+		// Without an explicit basetime, the first successful invoice establishes the window.
+		let basetime = match details.basetime {
+			Some(basetime) => basetime,
+			None if details.paid_count == 0
+				&& !matches!(recurrence.recurrence_type, RecurrenceType::Compulsory(Some(_))) =>
+			{
+				// If the offer has no basetime and the first payment has not succeeded,
+				// period zero's start time and payment window are not known yet.
+				// Skip the window check so a failed first payment can be retried.
+				return Ok(());
+			},
+			None => return Err(Error::InvalidOffer),
+		};
 
 		let (opening, closing) =
 			recurrence.payment_window(basetime, period_index).map_err(|_| Error::InvalidOffer)?;
