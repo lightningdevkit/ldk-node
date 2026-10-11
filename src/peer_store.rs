@@ -44,15 +44,19 @@ where
 
 	pub(crate) async fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
-		let data = {
-			let mut locked_peers = self.peers.write().expect("lock");
+		let (node_id, data) = {
+			let locked_peers = self.peers.read().expect("lock");
 			if locked_peers.contains_key(&peer_info.node_id) {
 				return Ok(());
 			}
-			locked_peers.insert(peer_info.node_id, peer_info);
-			PeerStoreSerWrapper(&locked_peers).encode()
+			let node_id = peer_info.node_id;
+			let mut updated_peers = locked_peers.clone();
+			updated_peers.insert(node_id, peer_info.clone());
+			(node_id, PeerStoreSerWrapper(&updated_peers).encode())
 		};
-		self.persist_peers(data).await
+		self.persist_peers(data).await?;
+		self.peers.write().expect("lock").insert(node_id, peer_info);
+		Ok(())
 	}
 
 	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
@@ -70,18 +74,16 @@ where
 
 	/// Returns the current in-memory peer set.
 	///
-	/// The async mutation lock serializes `add_peer` and `remove_peer`, but this synchronous
-	/// reader cannot wait on it. Until peer-store reads are async, callers may observe peer
-	/// changes that are still being persisted.
+	/// Changes are only published once they have been persisted, but this synchronous reader
+	/// cannot wait on the async mutation lock, so it may not yet reflect a change in flight.
 	pub(crate) fn list_peers(&self) -> Vec<PeerInfo> {
 		self.peers.read().expect("lock").values().cloned().collect()
 	}
 
 	/// Returns the current in-memory peer info for `node_id`.
 	///
-	/// The async mutation lock serializes `add_peer` and `remove_peer`, but this synchronous
-	/// reader cannot wait on it. Until peer-store reads are async, callers may observe peer
-	/// changes that are still being persisted.
+	/// Changes are only published once they have been persisted, but this synchronous reader
+	/// cannot wait on the async mutation lock, so it may not yet reflect a change in flight.
 	pub(crate) fn get_peer(&self, node_id: &PublicKey) -> Option<PeerInfo> {
 		self.peers.read().expect("lock").get(node_id).cloned()
 	}
@@ -257,6 +259,180 @@ mod tests {
 		assert_eq!(peers.len(), 1);
 		assert_eq!(peers[0], expected_peer_info);
 		assert_eq!(deser_peer_store.get_peer(&node_id), Some(expected_peer_info));
+	}
+
+	struct FailFirstWriteStore {
+		inner: InMemoryStore,
+		fail_next_write: std::sync::atomic::AtomicBool,
+		// Whether the failing write still reaches the underlying store, i.e., commits without
+		// being acknowledged.
+		commit_failed_write: bool,
+	}
+
+	impl FailFirstWriteStore {
+		fn new(commit_failed_write: bool) -> Self {
+			Self {
+				inner: InMemoryStore::new(),
+				fail_next_write: std::sync::atomic::AtomicBool::new(true),
+				commit_failed_write,
+			}
+		}
+	}
+
+	impl KVStore for FailFirstWriteStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			KVStore::read(&self.inner, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			let fail = self.fail_next_write.swap(false, std::sync::atomic::Ordering::SeqCst);
+			let fut = (!fail || self.commit_failed_write).then(|| {
+				KVStore::write(&self.inner, primary_namespace, secondary_namespace, key, buf)
+			});
+			async move {
+				let res = match fut {
+					Some(fut) => fut.await,
+					None => Ok(()),
+				};
+				if fail {
+					Err(io::Error::new(io::ErrorKind::Other, "write failed"))
+				} else {
+					res
+				}
+			}
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::remove(&self.inner, primary_namespace, secondary_namespace, key, lazy)
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			KVStore::list(&self.inner, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for FailFirstWriteStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
+			PaginatedKVStore::list_paginated(
+				&self.inner,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+		}
+	}
+
+	#[tokio::test]
+	async fn add_peer_is_retried_after_persist_failure() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailFirstWriteStore::new(false)));
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let peer_info =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9738").unwrap() };
+
+		// A failed write must not leave the peer visible as stored.
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(peer_info.clone()).await);
+		assert_eq!(None, peer_store.get_peer(&node_id));
+
+		// The retry has to persist it, so it survives a restart.
+		assert_eq!(Ok(()), peer_store.add_peer(peer_info.clone()).await);
+		assert_eq!(Some(peer_info.clone()), peer_store.get_peer(&node_id));
+
+		let persisted_bytes = KVStore::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+		let restored = PeerStore::read(&mut &persisted_bytes[..], (store, logger)).unwrap();
+		assert_eq!(Some(peer_info), restored.get_peer(&node_id));
+	}
+
+	#[tokio::test]
+	async fn failed_add_peer_keeps_other_peers_and_retry_persists_all() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailFirstWriteStore::new(false)));
+		let logger = Arc::new(TestLogger::new());
+
+		let existing_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let existing = PeerInfo {
+			node_id: existing_id,
+			address: SocketAddress::from_str("127.0.0.1:9738").unwrap(),
+		};
+		let mut peers = HashMap::new();
+		peers.insert(existing_id, existing.clone());
+		let persisted_bytes = PeerStoreSerWrapper(&peers).encode();
+		let peer_store =
+			PeerStore::read(&mut &persisted_bytes[..], (Arc::clone(&store), Arc::clone(&logger)))
+				.unwrap();
+
+		let new_id = PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		let new_peer = PeerInfo {
+			node_id: new_id,
+			address: SocketAddress::from_str("127.0.0.1:9739").unwrap(),
+		};
+
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(new_peer.clone()).await);
+		assert_eq!(vec![existing.clone()], peer_store.list_peers());
+
+		assert_eq!(Ok(()), peer_store.add_peer(new_peer.clone()).await);
+		let persisted_bytes = KVStore::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+		let restored = PeerStore::read(&mut &persisted_bytes[..], (store, logger)).unwrap();
+		assert_eq!(Some(existing), restored.get_peer(&existing_id));
+		assert_eq!(Some(new_peer), restored.get_peer(&new_id));
+	}
+
+	#[tokio::test]
+	async fn add_peer_retry_is_idempotent_after_unacknowledged_commit() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailFirstWriteStore::new(true)));
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let peer_info =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9738").unwrap() };
+
+		// The write reached the store, but we weren't told so we must not publish the peer.
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(peer_info.clone()).await);
+		assert_eq!(None, peer_store.get_peer(&node_id));
+
+		assert_eq!(Ok(()), peer_store.add_peer(peer_info.clone()).await);
+		assert_eq!(Some(peer_info.clone()), peer_store.get_peer(&node_id));
+		assert_eq!(1, peer_store.list_peers().len());
 	}
 
 	#[tokio::test]
