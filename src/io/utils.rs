@@ -87,7 +87,8 @@ pub(crate) fn read_or_generate_seed_file(
 		}
 
 		#[cfg(unix)]
-		let mut f = OpenOptions::new().write(true).create_new(true).mode(0o400).open(keys_seed_path)?;
+		let mut f =
+			OpenOptions::new().write(true).create_new(true).mode(0o400).open(keys_seed_path)?;
 
 		#[cfg(not(unix))]
 		let mut f = OpenOptions::new().write(true).create_new(true).open(keys_seed_path)?;

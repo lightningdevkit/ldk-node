@@ -1375,7 +1375,8 @@ impl BlockSource for BitcoindClient {
 
 	fn get_best_block<'a>(
 		&'a self,
-	) -> impl Future<Output = Result<(bitcoin::BlockHash, Option<u32>), BlockSourceError>> + 'a {
+	) -> impl Future<Output = Result<(bitcoin::BlockHash, Option<u32>), BlockSourceError>> + 'a
+	{
 		async move {
 			match self {
 				BitcoindClient::Rpc { rpc_client, .. } => rpc_client.get_best_block().await,

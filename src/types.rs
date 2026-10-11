@@ -105,7 +105,8 @@ impl<'a> KVStore for dyn DynStoreTrait + 'a {
 impl<'a> PaginatedKVStore for dyn DynStoreTrait + 'a {
 	fn list_paginated(
 		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
-	) -> impl Future<Output = Result<PaginatedListResponse, bitcoin::io::Error>> + Send + 'static {
+	) -> impl Future<Output = Result<PaginatedListResponse, bitcoin::io::Error>> + Send + 'static
+	{
 		DynStoreTrait::list_paginated_async(
 			self,
 			primary_namespace,
@@ -153,7 +154,8 @@ impl KVStore for DynStoreRef {
 impl PaginatedKVStore for DynStoreRef {
 	fn list_paginated(
 		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
-	) -> impl Future<Output = Result<PaginatedListResponse, bitcoin::io::Error>> + Send + 'static {
+	) -> impl Future<Output = Result<PaginatedListResponse, bitcoin::io::Error>> + Send + 'static
+	{
 		DynStoreTrait::list_paginated_async(
 			&*self.0,
 			primary_namespace,
@@ -186,7 +188,8 @@ impl<T: PaginatedKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
 
 	fn list_async(
 		&self, primary_namespace: &str, secondary_namespace: &str,
-	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static>> {
+	) -> Pin<Box<dyn Future<Output = Result<Vec<String>, bitcoin::io::Error>> + Send + 'static>>
+	{
 		Box::pin(KVStore::list(&self.0, primary_namespace, secondary_namespace))
 	}
 
