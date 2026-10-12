@@ -3877,6 +3877,23 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	let mut client_config = random_config();
 	client_config.node_config.manually_handle_unknown_bolt11_payments = true;
+	let client_seed = [42; 64];
+	#[cfg(not(feature = "uniffi"))]
+	{
+		client_config.node_entropy = NodeEntropy::from_seed_bytes(client_seed);
+	}
+	#[cfg(feature = "uniffi")]
+	{
+		client_config.node_entropy = NodeEntropy::from_seed_bytes(client_seed.to_vec()).unwrap();
+	}
+	let client_master_key =
+		bitcoin::bip32::Xpriv::new_master(client_config.node_config.network, &client_seed).unwrap();
+	let client_keys = lightning::sign::KeysManager::new(
+		&client_master_key.private_key.secret_bytes(),
+		0,
+		0,
+		true,
+	);
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
@@ -3969,6 +3986,55 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	expect_payment_successful_event!(payer_node, payment_id, None);
 	expect_event!(service_node, PaymentForwarded);
 	expect_payment_received_event!(client_node, amount_msat);
+
+	// Bypass the intercept SCID using the existing service -> client channel. Re-signing a
+	// smaller invoice only bypasses the sending API's amount check; the recipient gets the
+	// original payment hash, secret, and metadata, as it would from a malicious payer.
+	for payment_hash in [None, Some(PaymentHash::from(PaymentPreimage([44; 32])))] {
+		let invoice = match payment_hash {
+			None => client_node.bolt11_payment().receive_via_jit_channel(
+				jit_amount_msat,
+				&invoice_description,
+				1024,
+				None,
+			),
+			Some(hash) => client_node.bolt11_payment().receive_via_jit_channel_for_hash(
+				jit_amount_msat,
+				&invoice_description,
+				1024,
+				None,
+				hash,
+			),
+		}
+		.unwrap();
+		let invoice: &lightning_invoice::Bolt11Invoice = &invoice;
+		let underpayment = lightning_invoice::InvoiceBuilder::new(invoice.currency())
+			.description("Underpay JIT invoice".to_owned())
+			.payment_hash(invoice.payment_hash())
+			.payment_secret(*invoice.payment_secret())
+			.payment_metadata(invoice.payment_metadata().unwrap().clone())
+			.amount_milli_satoshis(1_000_000)
+			.current_timestamp()
+			.min_final_cltv_expiry_delta(invoice.min_final_cltv_expiry_delta())
+			.build_signed(|hash| {
+				bitcoin::secp256k1::Secp256k1::new()
+					.sign_ecdsa_recoverable(hash, &client_keys.get_node_secret_key())
+			})
+			.unwrap();
+		assert_eq!(underpayment.recover_payee_pub_key(), client_node.node_id());
+		#[cfg(feature = "uniffi")]
+		let underpayment = Arc::new(underpayment.into());
+		let payment_id = service_node.bolt11_payment().send(&underpayment, None).unwrap();
+		tokio::select! {
+			_ = async {
+				expect_event!(service_node, PaymentFailed);
+				assert_eq!(service_node.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Failed);
+			} => {},
+			event = client_node.next_event_async() => {
+				panic!("JIT invoice accepted an underpayment (custom hash: {}): {:?}", payment_hash.is_some(), event);
+			},
+		}
+	}
 
 	////////////////////////////////////////////////////////////////////////////
 	// receive_via_jit_channel_for_hash and claim_for_id
