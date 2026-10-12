@@ -2357,9 +2357,11 @@ fn build_with_store_internal(
 				liquidity_source_builder.lsps2_service(promise_secret, config.clone())
 			});
 
-			lsc.lsps1_service
-				.as_ref()
-				.map(|config| liquidity_source_builder.lsps1_service(config.clone()));
+			lsc.lsps1_service.as_ref().map(|config| {
+				let supported_options = config.clone().ldk_service_config.supported_options;
+				let service_config = config.clone().service_config;
+				liquidity_source_builder.lsps1_service(supported_options, service_config)
+			});
 		}
 
 		let liquidity_source = runtime

@@ -853,25 +853,35 @@ where
 			} => {
 				// We intercept early and check if the payment was an LSPS1
 				// order payment and handle properly.
-				if let Ok(bytes) = self
-					.event_queue
-					.kv_store
-					.read("lsps1_pending_orders", "", &payment_hash.to_string())
-					.await
+				let (payment_preimage, payment_method, db_lookup_key) = match &purpose {
+					PaymentPurpose::Bolt11InvoicePayment { payment_preimage, .. } => (
+						*payment_preimage,
+						lightning_liquidity::lsps1::service::PaymentMethod::Bolt11,
+						payment_hash.to_string(),
+					),
+					PaymentPurpose::Bolt12OfferPayment {
+						payment_preimage,
+						payment_context,
+						..
+					} => {
+						let offer_id = payment_context.offer_id.to_string();
+						(
+							*payment_preimage,
+							lightning_liquidity::lsps1::service::PaymentMethod::Bolt12,
+							offer_id,
+						)
+					},
+					_ => (
+						None,
+						lightning_liquidity::lsps1::service::PaymentMethod::Bolt11,
+						payment_hash.to_string(),
+					),
+				};
+
+				if let Ok(bytes) =
+					self.event_queue.kv_store.read("lsps1_pending_orders", "", &db_lookup_key).await
 				{
 					if let Ok(pending_order) = PendingLSPS1Order::read(&mut &bytes[..]) {
-						let (payment_preimage, payment_method) = match purpose {
-							PaymentPurpose::Bolt11InvoicePayment { payment_preimage, .. } => (
-								payment_preimage,
-								lightning_liquidity::lsps1::service::PaymentMethod::Bolt11,
-							),
-							PaymentPurpose::Bolt12OfferPayment { payment_preimage, .. } => (
-								payment_preimage,
-								lightning_liquidity::lsps1::service::PaymentMethod::Bolt12,
-							),
-							_ => (None, lightning_liquidity::lsps1::service::PaymentMethod::Bolt11),
-						};
-
 						if let Some(preimage) = payment_preimage {
 							let expected_msat =
 								pending_order.order_total_amount_sat.saturating_mul(1000);
@@ -898,12 +908,7 @@ where
 								if let Err(e) = self
 									.event_queue
 									.kv_store
-									.remove(
-										"lsps1_pending_orders",
-										"",
-										&payment_hash.to_string(),
-										false,
-									)
+									.remove("lsps1_pending_orders", "", &db_lookup_key, false)
 									.await
 								{
 									log_error!(
@@ -997,35 +1002,12 @@ where
 										)
 										.await
 								});
-
-								if let Err(e) = self
-									.event_queue
-									.kv_store
-									.remove(
-										"lsps1_pending_orders",
-										"",
-										&payment_hash.to_string(),
-										false,
-									)
-									.await
-								{
-									log_error!(
-										self.logger,
-										"Failed to remove LSPS1 pending order from the store: {:?}",
-										e
-									);
-								}
 							}
 
 							if let Err(e) = self
 								.event_queue
 								.kv_store
-								.remove(
-									"lsps1_pending_orders",
-									"",
-									&payment_hash.to_string(),
-									false,
-								)
+								.remove("lsps1_pending_orders", "", &db_lookup_key, false)
 								.await
 							{
 								log_error!(
