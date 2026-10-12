@@ -600,6 +600,135 @@ async fn channel_full_cycle_0conf_0reserve() {
 	.await;
 }
 
+/// An [`InMemoryStore`] whose writes of the persisted peer list fail while `fail_peer_writes` is set.
+#[derive(Clone)]
+struct PeerWriteFailingStore {
+	inner: Arc<InMemoryStore>,
+	fail_peer_writes: Arc<AtomicBool>,
+}
+
+impl PeerWriteFailingStore {
+	fn new() -> Self {
+		Self {
+			inner: Arc::new(InMemoryStore::new()),
+			fail_peer_writes: Arc::new(AtomicBool::new(false)),
+		}
+	}
+}
+
+impl KVStore for PeerWriteFailingStore {
+	fn read(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+	) -> impl Future<Output = Result<Vec<u8>, lightning::io::Error>> + 'static + Send {
+		KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+	}
+
+	fn write(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		let inner = Arc::clone(&self.inner);
+		// The peer list lives at `("", "", "peers")`, see `PEER_INFO_PERSISTENCE_*`.
+		let fail = self.fail_peer_writes.load(Ordering::Acquire)
+			&& primary_namespace.is_empty()
+			&& secondary_namespace.is_empty()
+			&& key == "peers";
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		async move {
+			if fail {
+				return Err(lightning::io::Error::new(
+					lightning::io::ErrorKind::Other,
+					"injected peer store write failure",
+				));
+			}
+			KVStore::write(&*inner, &primary_namespace, &secondary_namespace, &key, buf).await
+		}
+	}
+
+	fn remove(
+		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
+		KVStore::remove(&*self.inner, primary_namespace, secondary_namespace, key, lazy)
+	}
+
+	fn list(
+		&self, primary_namespace: &str, secondary_namespace: &str,
+	) -> impl Future<Output = Result<Vec<String>, lightning::io::Error>> + 'static + Send {
+		KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+	}
+}
+
+impl PaginatedKVStore for PeerWriteFailingStore {
+	fn list_paginated(
+		&self, primary_namespace: &str, secondary_namespace: &str, page_token: Option<PageToken>,
+	) -> impl Future<Output = Result<PaginatedListResponse, lightning::io::Error>> + 'static + Send
+	{
+		PaginatedKVStore::list_paginated(
+			&*self.inner,
+			primary_namespace,
+			secondary_namespace,
+			page_token,
+		)
+	}
+}
+
+// If the peer cannot be persisted, `open_channel` must fail without having created a channel:
+// reporting a failure for a live channel would make a retrying caller open a second one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn channel_open_fails_cleanly_when_peer_persistence_fails() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let chain_source = TestChainSource::Esplora(&electrsd);
+
+	let config_a = random_config();
+	setup_builder!(builder_a, config_a.node_config);
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+	builder_a.set_chain_source_esplora(esplora_url, Some(sync_config));
+	let store = PeerWriteFailingStore::new();
+	let node_a = builder_a.build_with_store(config_a.node_entropy.into(), store.clone()).unwrap();
+	node_a.start().unwrap();
+
+	let node_b = setup_node(&chain_source, random_config());
+
+	// Fund both nodes so node B passes the anchor reserve check on the accept path.
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let node_b_id = node_b.node_id();
+	let node_b_addr = node_b.listening_addresses().unwrap().first().unwrap().clone();
+
+	// The peer store write fails: no channel may have been initiated.
+	store.fail_peer_writes.store(true, Ordering::Release);
+	assert_eq!(
+		Err(NodeError::PersistenceFailed),
+		node_a.open_channel(node_b_id, node_b_addr.clone(), 100_000, None, None)
+	);
+	assert!(node_a.list_channels().is_empty());
+	assert!(!node_a.list_peers().iter().any(|p| p.node_id == node_b_id && p.is_persisted));
+
+	// Once the store recovers, a retry opens exactly one channel and persists the peer.
+	store.fail_peer_writes.store(false, Ordering::Release);
+	node_a.open_channel(node_b_id, node_b_addr, 100_000, None, None).unwrap();
+	expect_channel_pending_event!(node_a, node_b_id);
+	expect_channel_pending_event!(node_b, node_a.node_id());
+	assert_eq!(node_a.list_channels().len(), 1);
+	assert!(node_a.list_peers().iter().any(|p| p.node_id == node_b_id && p.is_persisted));
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_open_fails_when_funds_insufficient() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();

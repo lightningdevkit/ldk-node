@@ -45,14 +45,19 @@ where
 	pub(crate) async fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let data = {
-			let mut locked_peers = self.peers.write().expect("lock");
+			let locked_peers = self.peers.read().expect("lock");
 			if locked_peers.contains_key(&peer_info.node_id) {
 				return Ok(());
 			}
-			locked_peers.insert(peer_info.node_id, peer_info);
-			PeerStoreSerWrapper(&locked_peers).encode()
+			let mut updated_peers = locked_peers.clone();
+			updated_peers.insert(peer_info.node_id, peer_info.clone());
+			PeerStoreSerWrapper(&updated_peers).encode()
 		};
-		self.persist_peers(data).await
+		// Only update the in-memory set once the write succeeded, so a failed write can be
+		// retried: otherwise the next `add_peer` would find the peer and skip persisting it.
+		self.persist_peers(data).await?;
+		self.peers.write().expect("lock").insert(peer_info.node_id, peer_info);
+		Ok(())
 	}
 
 	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
@@ -276,5 +281,23 @@ mod tests {
 
 		assert_eq!(Err(Error::PersistenceFailed), peer_store.remove_peer(&node_id).await);
 		assert_eq!(Some(peer_info), peer_store.get_peer(&node_id));
+	}
+
+	#[tokio::test]
+	async fn add_peer_does_not_mutate_memory_if_persist_fails() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(store, logger);
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let peer_info =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9738").unwrap() };
+
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(peer_info.clone()).await);
+		assert_eq!(None, peer_store.get_peer(&node_id));
+		// A retry must attempt the write again rather than treating the peer as stored.
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(peer_info).await);
 	}
 }
