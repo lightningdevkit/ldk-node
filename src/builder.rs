@@ -2819,7 +2819,7 @@ mod tests {
 			node.update_channel_config(&user_channel_id, node_id, Default::default()),
 			Err(Error::NotRunning)
 		);
-		assert_eq!(node.splice_in(&user_channel_id, node_id, 1_000), Err(Error::NotRunning));
+		assert_eq!(node.splice_in(&user_channel_id, node_id, 1_000, None), Err(Error::NotRunning));
 		assert_eq!(
 			node.bump_channel_funding_fee(&user_channel_id, node_id),
 			Err(Error::NotRunning)

@@ -61,6 +61,11 @@
   disclosed. The method is stateless: the payment id, preimage, and invoice are taken from
   `Event::PaymentSuccessful` and nothing is persisted. Payments settled via a static invoice,
   i.e., async payments, don't support payer proofs. (#1045)
+- `Node::splice_in`, `Node::splice_in_with_all`, and `Node::splice_out` now take an optional
+  `min_fee_rate`. If set, it is used as the minimum feerate for our contribution to the splice
+  transaction instead of a feerate estimate retrieved from the configured chain source. For
+  `splice_in_with_all`, the amount spliced in is determined at `min_fee_rate`, or at the estimate
+  if unset.
 
 ## Bug Fixes and Improvements
 - Building a fresh node against a Bitcoin Core RPC or REST chain source that fails to return the

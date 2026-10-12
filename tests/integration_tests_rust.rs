@@ -2851,7 +2851,8 @@ async fn splice_channel() {
 			&user_channel_id_a,
 			node_b.node_id(),
 			&address,
-			excessive_splice_out_sats
+			excessive_splice_out_sats,
+			None
 		),
 		Err(NodeError::ChannelSplicingFailed),
 	);
@@ -2861,11 +2862,11 @@ async fn splice_channel() {
 	let amount_msat = 400_000_000;
 
 	assert_eq!(
-		node_b.splice_in(&user_channel_id_b, node_b.node_id(), 5_000_000),
+		node_b.splice_in(&user_channel_id_b, node_b.node_id(), 5_000_000, None),
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
-		node_b.splice_out(&user_channel_id_b, node_b.node_id(), &address, amount_msat / 1000),
+		node_b.splice_out(&user_channel_id_b, node_b.node_id(), &address, amount_msat / 1000, None),
 		Err(NodeError::ChannelSplicingFailed),
 	);
 	assert_eq!(
@@ -2874,7 +2875,7 @@ async fn splice_channel() {
 	);
 
 	// Splice-in funds for Node B so that it has outbound liquidity to make a payment
-	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000).unwrap();
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 4_000_000, None).unwrap();
 
 	let txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 
@@ -2932,7 +2933,9 @@ async fn splice_channel() {
 
 	// Splice-out funds for Node A from the payment sent by Node B
 	let address = node_a.onchain_payment().new_address().unwrap();
-	node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, amount_msat / 1000).unwrap();
+	node_a
+		.splice_out(&user_channel_id_a, node_b.node_id(), &address, amount_msat / 1000, None)
+		.unwrap();
 
 	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 
@@ -3044,7 +3047,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	);
 
 	// Initiate a splice-in to create a pending splice
-	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000, None).unwrap();
 
 	let original_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 
@@ -3075,7 +3078,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// Re-splicing the pending splice we already contributed to is rejected; the RBF guard points at
 	// bump_channel_funding_fee instead.
 	assert_eq!(
-		node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000),
+		node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000, None),
 		Err(NodeError::ChannelSplicingFailed),
 	);
 
@@ -3284,7 +3287,7 @@ async fn splice_payment_reorged_to_unconfirmed() {
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
 	// node_b splices in, recording a funding payment it contributed to.
-	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000, None).unwrap();
 	let splice_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(&electrsd.client, splice_txo.txid).await;
 	// node_b recorded what the splice's transaction is when signing it, so the sync below files it
@@ -3362,7 +3365,7 @@ async fn splice_in_rbf_joins_counterparty_splice() {
 
 	// node_b (which didn't fund the channel open, so holds the on-chain balance) initiates a
 	// splice-in; node_a does not contribute to this first candidate.
-	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000, None).unwrap();
 	let counterparty_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(&electrsd.client, counterparty_txo.txid).await;
 	node_a.sync_wallets().unwrap();
@@ -3371,7 +3374,7 @@ async fn splice_in_rbf_joins_counterparty_splice() {
 	// node_a contributes to the pending splice via RBF. Before honoring the funding template's RBF
 	// minimum feerate, this was rejected with FeeRateBelowRbfMinimum because node_a's funding
 	// feerate estimate sat below the minimum required to replace the in-flight transaction.
-	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 100_000).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 100_000, None).unwrap();
 	let rbf_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 	assert_ne!(counterparty_txo, rbf_txo, "node_a's RBF should produce a different funding txo");
@@ -3444,7 +3447,7 @@ async fn open_and_splice_from_counterparty(
 	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
-	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000, None).unwrap();
 	let counterparty_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(&electrsd.client, counterparty_txo.txid).await;
 	node_a.sync_wallets().unwrap();
@@ -3626,7 +3629,7 @@ async fn open_and_join_counterparty_splice(
 	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
-	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000).unwrap();
+	node_b.splice_in(&user_channel_id_b, node_a.node_id(), 1_000_000, None).unwrap();
 	let first_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 	let first_tx = wait_for_transaction(bitcoind, electrsd, first_txo.txid).await;
 	wait_for_classified_funding_payment(node_b, first_txo.txid).await;
@@ -3634,7 +3637,7 @@ async fn open_and_join_counterparty_splice(
 	node_b.sync_wallets().unwrap();
 
 	deprioritise_transaction(bitcoind, first_txo.txid);
-	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 100_000).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 100_000, None).unwrap();
 	let rbf_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	expect_splice_negotiated_event!(node_b, node_a.node_id());
 	assert_ne!(first_txo, rbf_txo, "node A's round should replace node B's");
@@ -3774,7 +3777,7 @@ async fn signed_splice_round_the_monitor_watches_is_kept_at_close() {
 	let broadcast_b = logs_b.count(BROADCAST_FUNDING);
 	let resolved_a = logs_a.count(CLOSED_CHANNEL_ROUNDS_RESOLVED);
 
-	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 200_000).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 200_000, None).unwrap();
 	// Recording the round writes what the transaction is before the round is signed, so node A does
 	// not sign while those writes are held, and node B's `commitment_signed` is stashed until it
 	// has.
@@ -3890,7 +3893,7 @@ async fn broadcast_splice_round_lost_to_a_close_fails_its_payment() {
 		.and_then(|channel| channel.funding_txo)
 		.expect("the channel has a funding");
 
-	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 500_000).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 500_000, None).unwrap();
 	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	wait_for_tx(&electrsd.client, splice_txo.txid).await;
 	wait_for_classified_funding_payment(&node_a, splice_txo.txid).await;
@@ -4055,7 +4058,7 @@ async fn signed_splice_round_the_monitor_does_not_watch_is_dropped_at_close() {
 	let reclaimed_a = logs_a.count(RECLAIMED_ADDRESSES);
 
 	let hold_b = Arc::clone(&store_b.serializer).write_owned().await;
-	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 200_000).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 200_000, None).unwrap();
 	assert!(logs_a.wait_for_count(SIGNED_FUNDING, signed_a + 1).await, "node A never signed");
 	let rbf_txid = only_signed_round_txid(&logs_a);
 	assert_eq!(logs_b.count(SIGNED_FUNDING), signed_b, "node B signed with its writes held");
@@ -4131,7 +4134,7 @@ async fn superseded_zero_conf_splice_round_keeps_its_payment_at_close() {
 	node_a.sync_wallets().unwrap();
 	node_b.sync_wallets().unwrap();
 
-	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 1_000_000).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 1_000_000, None).unwrap();
 	let first = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	wait_for_classified_funding_payment(&node_a, first.txid).await;
 	// The zero-conf splice locks without confirmations, re-signaled as `ChannelReady`, and node A
@@ -4141,7 +4144,7 @@ async fn superseded_zero_conf_splice_round_keeps_its_payment_at_close() {
 	assert_eq!(logs_a.count(ROUND_LOCKED), 1, "the promotion of the first round was not recorded");
 
 	let address = node_a.onchain_payment().new_address().unwrap();
-	node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, 500_000).unwrap();
+	node_a.splice_out(&user_channel_id_a, node_b.node_id(), &address, 500_000, None).unwrap();
 	let second = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	wait_for_classified_funding_payment(&node_a, second.txid).await;
 	expect_channel_ready_event!(node_a, node_b.node_id());
@@ -4224,7 +4227,7 @@ async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
 	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
 
 	// Node B contributes nothing to either round, so only node A hears of them.
-	node_a.splice_in_with_all(&user_channel_id_a, node_b.node_id()).unwrap();
+	node_a.splice_in_with_all(&user_channel_id_a, node_b.node_id(), None).unwrap();
 	let first_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	let first_round = wait_for_transaction(&bitcoind, &electrsd, first_txo.txid).await;
 	wait_for_classified_funding_payment(&node_a, first_txo.txid).await;
@@ -5575,9 +5578,12 @@ async fn live_node_apis_return_not_running_after_stop() {
 		node_a.open_channel(node_b_id, node_b_addr.clone(), 100_000, None, None, None),
 		Err(NodeError::NotRunning)
 	);
-	assert_eq!(node_a.splice_in(&user_channel_id, node_b_id, 10_000), Err(NodeError::NotRunning));
 	assert_eq!(
-		node_a.splice_out(&user_channel_id, node_b_id, &btc_address, 10_000),
+		node_a.splice_in(&user_channel_id, node_b_id, 10_000, None),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(
+		node_a.splice_out(&user_channel_id, node_b_id, &btc_address, 10_000, None),
 		Err(NodeError::NotRunning)
 	);
 	assert_eq!(
