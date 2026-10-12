@@ -48,8 +48,17 @@ jobs:
           cargo update -p encoding_rs --precise "0.8.35" --verbose # encoding_rs 0.8.40 and newer require 1.88 and newer
           cargo update -p proptest --precise "1.11.0" --verbose # proptest 1.12.0 requires Rust 1.88
       - name: Set RUSTFLAGS to deny warnings
+        id: rustflags
         if: "matrix.toolchain == 'stable'"
-        run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+        run: |
+          echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ldk-node") | .version')
+          # Preserve the deprecated FeeRate constructor in the 0.7 bindings.
+          if [[ "$version" == 0.7.* ]]; then
+            echo "uniffi=-D warnings -A deprecated" >> "$GITHUB_OUTPUT"
+          else
+            echo "uniffi=-D warnings" >> "$GITHUB_OUTPUT"
+          fi
       - name: Enable caching for bitcoind
         id: cache-bitcoind
         uses: actions/cache@v5
@@ -77,6 +86,8 @@ jobs:
         run: cargo build --verbose --color always
       - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
         if: matrix.build-uniffi
+        env:
+          RUSTFLAGS: ${{ steps.rustflags.outputs.uniffi }}
         run: cargo build --features uniffi --verbose --color always
       - name: Build documentation on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest' || matrix.toolchain != '1.85.0'"
@@ -87,6 +98,8 @@ jobs:
         run: cargo check --release --verbose --color always
       - name: Check release build with UniFFI support on Rust ${{ matrix.toolchain }}
         if: matrix.build-uniffi
+        env:
+          RUSTFLAGS: ${{ steps.rustflags.outputs.uniffi }}
         run: cargo check --release --features uniffi --verbose --color always
       - name: Test on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest'"
