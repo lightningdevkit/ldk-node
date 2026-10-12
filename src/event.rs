@@ -23,7 +23,7 @@ use lightning::events::{
 	OutboundHTLCLocator as LdkOutboundHtlcLocator, PaymentFailureReason, PaymentPurpose,
 	ReplayEvent,
 };
-use lightning::ln::channelmanager::{PaymentId, TrustedChannelFeatures};
+use lightning::ln::channelmanager::{FailureCode, PaymentId, TrustedChannelFeatures};
 use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
@@ -851,6 +851,22 @@ where
 			} => {
 				let (payment_id, mut payment_info) =
 					self.resolve_inbound_payment_id(payment_id, &payment_hash).await?;
+
+				if let Some((tlv_type, _)) = onion_fields
+					.as_ref()
+					.and_then(|fields| fields.custom_tlvs().iter().find(|(id, _)| id % 2 == 0))
+				{
+					log_info!(
+						self.logger,
+						"Refusing inbound payment with hash {} as the sender included unknown required TLVs (incl {})",
+						hex_utils::to_string(&payment_hash.0),
+						tlv_type,
+					);
+					let error_code = FailureCode::InvalidOnionPayload(Some((*tlv_type, 0)));
+					self.channel_manager.fail_htlc_backwards_with_reason(&payment_hash, error_code);
+					return Ok(());
+				}
+
 				if let Some(info) = payment_info.as_ref() {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
@@ -859,18 +875,7 @@ where
 							payment_id
 						);
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
-
-						let update = PaymentDetailsUpdate {
-							status: Some(PaymentStatus::Failed),
-							..PaymentDetailsUpdate::new(payment_id)
-						};
-						match self.payment_store.update(update).await {
-							Ok(_) => return Ok(()),
-							Err(e) => {
-								log_error!(self.logger, "Failed to access payment store: {}", e);
-								return Err(ReplayEvent());
-							},
-						};
+						return Ok(());
 					}
 
 					if info.status == PaymentStatus::Succeeded
@@ -902,18 +907,7 @@ where
 							amount_msat,
 						);
 						self.channel_manager.fail_htlc_backwards(&payment_hash);
-
-						let update = PaymentDetailsUpdate {
-							status: Some(PaymentStatus::Failed),
-							..PaymentDetailsUpdate::new(payment_id)
-						};
-						match self.payment_store.update(update).await {
-							Ok(_) => return Ok(()),
-							Err(e) => {
-								log_error!(self.logger, "Failed to access payment store: {}", e);
-								return Err(ReplayEvent());
-							},
-						};
+						return Ok(());
 					}
 				}
 
