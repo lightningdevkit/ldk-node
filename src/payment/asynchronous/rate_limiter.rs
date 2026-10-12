@@ -23,6 +23,8 @@ pub(crate) struct RateLimiter {
 	max_idle: Duration,
 }
 
+const MAX_USERS: usize = 10_000;
+
 struct Bucket {
 	tokens: u32,
 	last_refill: Instant,
@@ -36,10 +38,19 @@ impl RateLimiter {
 	pub(crate) fn allow(&mut self, user_id: &[u8]) -> bool {
 		let now = Instant::now();
 
-		let entry = self.users.entry(user_id.to_vec());
-		let is_new_user = matches!(entry, std::collections::hash_map::Entry::Vacant(_));
+		let is_new_user = !self.users.contains_key(user_id);
 
-		let bucket = entry.or_insert(Bucket { tokens: self.capacity, last_refill: now });
+		if is_new_user {
+			self.garbage_collect(self.max_idle);
+			if self.users.len() >= MAX_USERS {
+				return false;
+			}
+		}
+
+		let bucket = self
+			.users
+			.entry(user_id.to_vec())
+			.or_insert(Bucket { tokens: self.capacity, last_refill: now });
 
 		let elapsed = now.duration_since(bucket.last_refill);
 		let tokens_to_add = (elapsed.as_secs_f64() / self.refill_interval.as_secs_f64()) as u32;
@@ -55,11 +66,6 @@ impl RateLimiter {
 		} else {
 			false
 		};
-
-		// Each time a new user is added, we take the opportunity to clean up old rate limits.
-		if is_new_user {
-			self.garbage_collect(self.max_idle);
-		}
 
 		allow
 	}

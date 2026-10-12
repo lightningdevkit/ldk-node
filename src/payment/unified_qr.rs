@@ -91,9 +91,9 @@ impl UnifiedQrPayment {
 	pub fn receive(
 		&self, amount_sats: u64, description: &str, expiry_sec: u32,
 	) -> Result<String, Error> {
-		let onchain_address = self.onchain_payment.new_address()?;
+		let amount_msats = amount_sats.checked_mul(1_000).ok_or(Error::InvalidAmount)?;
 
-		let amount_msats = amount_sats * 1_000;
+		let onchain_address = self.onchain_payment.new_address()?;
 
 		let bolt12_offer =
 			match self.bolt12_payment.receive_inner(amount_msats, description, None, None) {
@@ -155,6 +155,20 @@ impl UnifiedQrPayment {
 			let offer = maybe_wrap(offer);
 			match self.bolt12_payment.send(&offer, None, None, route_parameters) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt12 { payment_id }),
+				// A duplicate payment already exists, so falling back to the BOLT11 invoice
+				// would pay the same offer a second time.
+				Err(Error::DuplicatePayment) => {
+					log_error!(self.logger, "Failed to send BOLT12 offer: DuplicatePayment. This is part of a unified QR code payment. Aborting to avoid duplicate payment.");
+					return Err(Error::DuplicatePayment);
+				},
+				// A persistence failure may occur after the Lightning payment has already been
+				// initiated with the ChannelManager. Falling back to the BOLT11 invoice in that
+				// case would double-pay, so we abort instead of proceeding to the next payment
+				// method.
+				Err(Error::PersistenceFailed) => {
+					log_error!(self.logger, "Failed to send BOLT12 offer: PersistenceFailed. This is part of a unified QR code payment. Aborting to avoid a potential duplicate payment.");
+					return Err(Error::PersistenceFailed);
+				},
 				Err(e) => {
 					log_error!(self.logger, "Failed to send BOLT12 offer: {:?}. This is part of a unified QR code payment. Falling back to the BOLT11 invoice.", e);
 				},
@@ -165,6 +179,20 @@ impl UnifiedQrPayment {
 			let invoice = maybe_wrap(invoice);
 			match self.bolt11_invoice.send(&invoice, route_parameters) {
 				Ok(payment_id) => return Ok(QrPaymentResult::Bolt11 { payment_id }),
+				// A duplicate payment already exists, so falling back to the on-chain method
+				// would pay the same invoice a second time.
+				Err(Error::DuplicatePayment) => {
+					log_error!(self.logger, "Failed to send BOLT11 invoice: DuplicatePayment. This is part of a unified QR code payment. Aborting to avoid duplicate payment.");
+					return Err(Error::DuplicatePayment);
+				},
+				// A persistence failure may occur after the Lightning payment has already been
+				// initiated with the ChannelManager. Falling back to the on-chain method in that
+				// case would double-pay, so we abort instead of proceeding to the next payment
+				// method.
+				Err(Error::PersistenceFailed) => {
+					log_error!(self.logger, "Failed to send BOLT11 invoice: PersistenceFailed. This is part of a unified QR code payment. Aborting to avoid a potential duplicate payment.");
+					return Err(Error::PersistenceFailed);
+				},
 				Err(e) => {
 					log_error!(self.logger, "Failed to send BOLT11 invoice: {:?}. This is part of a unified QR code payment. Falling back to the on-chain transaction.", e);
 				},

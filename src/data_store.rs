@@ -5,7 +5,7 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
-use std::collections::{hash_map, HashMap};
+use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
@@ -75,28 +75,28 @@ where
 	pub(crate) fn insert_or_update(&self, object: SO) -> Result<bool, Error> {
 		let mut locked_objects = self.objects.lock().unwrap();
 
-		let updated;
-		match locked_objects.entry(object.id()) {
-			hash_map::Entry::Occupied(mut e) => {
-				let update = object.to_update();
-				updated = e.get_mut().update(&update);
-				if updated {
-					self.persist(&e.get())?;
-				}
-			},
-			hash_map::Entry::Vacant(e) => {
-				e.insert(object.clone());
-				self.persist(&object)?;
-				updated = true;
-			},
-		}
+		let id = object.id();
+		let updated_object = if let Some(existing_object) = locked_objects.get(&id) {
+			let mut updated_object = existing_object.clone();
+			let updated = updated_object.update(&object.to_update());
+			if updated {
+				updated_object
+			} else {
+				return Ok(false);
+			}
+		} else {
+			object
+		};
 
-		Ok(updated)
+		// Persist first, so a failed write leaves the in-memory state aligned with storage.
+		self.persist(&updated_object)?;
+		locked_objects.insert(id, updated_object);
+		Ok(true)
 	}
 
 	pub(crate) fn remove(&self, id: &SO::Id) -> Result<(), Error> {
-		let removed = self.objects.lock().unwrap().remove(id).is_some();
-		if removed {
+		let mut locked_objects = self.objects.lock().unwrap();
+		if locked_objects.contains_key(id) {
 			let store_key = id.encode_to_hex_str();
 			KVStoreSync::remove(
 				&*self.kv_store,
@@ -116,6 +116,8 @@ where
 				);
 				Error::PersistenceFailed
 			})?;
+			// Only drop the object from memory once the backing store removal succeeded.
+			locked_objects.remove(id);
 		}
 		Ok(())
 	}
@@ -127,17 +129,19 @@ where
 	pub(crate) fn update(&self, update: &SO::Update) -> Result<DataStoreUpdateResult, Error> {
 		let mut locked_objects = self.objects.lock().unwrap();
 
-		if let Some(object) = locked_objects.get_mut(&update.id()) {
-			let updated = object.update(update);
-			if updated {
-				self.persist(&object)?;
-				Ok(DataStoreUpdateResult::Updated)
-			} else {
-				Ok(DataStoreUpdateResult::Unchanged)
-			}
-		} else {
-			Ok(DataStoreUpdateResult::NotFound)
+		let id = update.id();
+		let Some(object) = locked_objects.get(&id) else {
+			return Ok(DataStoreUpdateResult::NotFound);
+		};
+		let mut updated_object = object.clone();
+		if !updated_object.update(update) {
+			return Ok(DataStoreUpdateResult::Unchanged);
 		}
+
+		// Persist first, so a failed write leaves the in-memory state aligned with storage.
+		self.persist(&updated_object)?;
+		locked_objects.insert(id, updated_object);
+		Ok(DataStoreUpdateResult::Updated)
 	}
 
 	pub(crate) fn list_filter<F: FnMut(&&SO) -> bool>(&self, f: F) -> Vec<SO> {
@@ -171,7 +175,12 @@ where
 
 #[cfg(test)]
 mod tests {
+	use std::future::Future;
+	use std::pin::Pin;
+
 	use lightning::impl_writeable_tlv_based;
+	use lightning::io;
+	use lightning::util::persist::KVStore;
 	use lightning::util::test_utils::TestLogger;
 
 	use super::*;
@@ -295,5 +304,108 @@ mod tests {
 		let mut new_iou_object = iou_object;
 		new_iou_object.data[0] += 1;
 		assert_eq!(Ok(true), data_store.insert_or_update(new_iou_object));
+	}
+
+	struct FailingStore;
+
+	impl KVStore for FailingStore {
+		fn read(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str,
+		) -> Pin<Box<dyn Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send>> {
+			Box::pin(async { Err(io::Error::new(io::ErrorKind::Other, "read failed")) })
+		}
+
+		fn write(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _buf: Vec<u8>,
+		) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
+			Box::pin(async { Err(io::Error::new(io::ErrorKind::Other, "write failed")) })
+		}
+
+		fn remove(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _lazy: bool,
+		) -> Pin<Box<dyn Future<Output = Result<(), io::Error>> + 'static + Send>> {
+			Box::pin(async { Err(io::Error::new(io::ErrorKind::Other, "remove failed")) })
+		}
+
+		fn list(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+		) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + 'static + Send>> {
+			Box::pin(async { Err(io::Error::new(io::ErrorKind::Other, "list failed")) })
+		}
+	}
+
+	impl KVStoreSync for FailingStore {
+		fn read(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str,
+		) -> io::Result<Vec<u8>> {
+			Err(io::Error::new(io::ErrorKind::Other, "read failed"))
+		}
+
+		fn write(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _buf: Vec<u8>,
+		) -> io::Result<()> {
+			Err(io::Error::new(io::ErrorKind::Other, "write failed"))
+		}
+
+		fn remove(
+			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str, _lazy: bool,
+		) -> io::Result<()> {
+			Err(io::Error::new(io::ErrorKind::Other, "remove failed"))
+		}
+
+		fn list(
+			&self, _primary_namespace: &str, _secondary_namespace: &str,
+		) -> io::Result<Vec<String>> {
+			Err(io::Error::new(io::ErrorKind::Other, "list failed"))
+		}
+	}
+
+	fn new_failing_data_store(objects: Vec<TestObject>) -> DataStore<TestObject, Arc<TestLogger>> {
+		let store: Arc<DynStore> = Arc::new(FailingStore);
+		let logger = Arc::new(TestLogger::new());
+		DataStore::new(
+			objects,
+			"datastore_test_primary".to_string(),
+			"datastore_test_secondary".to_string(),
+			store,
+			logger,
+		)
+	}
+
+	#[test]
+	fn insert_or_update_does_not_mutate_memory_if_persist_fails() {
+		let existing_id = TestObjectId { id: [42u8; 4] };
+		let existing_object = TestObject { id: existing_id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![existing_object]);
+
+		let updated_object = TestObject { id: existing_id, data: [24u8; 3] };
+		assert_eq!(Err(Error::PersistenceFailed), data_store.insert_or_update(updated_object));
+		assert_eq!(Some(existing_object), data_store.get(&existing_id));
+
+		let new_id = TestObjectId { id: [55u8; 4] };
+		let new_object = TestObject { id: new_id, data: [34u8; 3] };
+		assert_eq!(Err(Error::PersistenceFailed), data_store.insert_or_update(new_object));
+		assert!(data_store.get(&new_id).is_none());
+	}
+
+	#[test]
+	fn update_does_not_mutate_memory_if_persist_fails() {
+		let id = TestObjectId { id: [42u8; 4] };
+		let object = TestObject { id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![object]);
+
+		let update = TestObjectUpdate { id, data: [24u8; 3] };
+		assert_eq!(Err(Error::PersistenceFailed), data_store.update(&update));
+		assert_eq!(Some(object), data_store.get(&id));
+	}
+
+	#[test]
+	fn remove_does_not_mutate_memory_if_persist_fails() {
+		let id = TestObjectId { id: [42u8; 4] };
+		let object = TestObject { id, data: [23u8; 3] };
+		let data_store = new_failing_data_store(vec![object]);
+
+		assert_eq!(Err(Error::PersistenceFailed), data_store.remove(&id));
+		assert_eq!(Some(object), data_store.get(&id));
 	}
 }

@@ -1,3 +1,41 @@
+# 0.7.1 - Oct. 12, 2026
+This patch release backports a number of bug fixes and security-relevant hardening.
+
+## Bug Fixes and Improvements
+- Inbound payments with a counterparty-withheld fee are now refused unless they are JIT-channel
+  payments for which we authorized the fee, closing a gap for BOLT12 and spontaneous payments. (#899)
+- Unified (BIP21) payments no longer fall back to the next payment method when the BOLT12 or BOLT11
+  leg fails with `DuplicatePayment` or `PersistenceFailed`, avoiding potential double payments.
+  (#1038, #1098)
+- A late `PaymentFailed` event no longer marks an already-succeeded outbound payment as failed.
+  (#1065)
+- An inbound HTLC reusing the payment hash of an outbound payment no longer marks that outbound
+  payment as failed. (#1157)
+- A duplicate HTLC for an already-received payment no longer marks that payment as failed. (#1157)
+- Inbound payments carrying unknown even-typed custom TLVs are now failed back instead of being
+  surfaced as claimable, as LDK would refuse to claim them. (#1157)
+- BOLT11 JIT invoices now enforce their amount at the recipient, so a payer can no longer bypass
+  the LSP and have an underpayment accepted over an existing channel. (#1156)
+- `Builder::build` now fails instead of starting a fresh node when the `ChannelManager` can't be
+  read from the store for reasons other than it being absent. (#1032)
+- In-memory payment data is no longer updated when the corresponding persistence operation fails.
+  (#933)
+- An anchor reserve is now kept for peers that merely support (rather than require) anchor
+  channels, while splice-ins no longer require an additional reserve. (#660)
+- Channels whose type is not yet negotiated are now counted toward the anchor reserve, so
+  concurrent channel opens can no longer leave too little reserved. (#1152)
+- Electrum `Filter` registrations are now retained across `Node::stop`/`Node::start` cycles.
+  (#1025)
+- Raw transaction fetching and reorg handling via Bitcoin Core REST have been fixed. (#1006, #1022)
+- Fee estimation for send-all operations no longer clears a reserved change address, avoiding
+  address reuse. (#1096)
+- Seed files are now created with owner-only permissions. (#741)
+- Payment preimages are no longer logged on successful sends. (#1035)
+- Several unchecked arithmetic operations have been fixed. (#927, #940)
+- The async payments rate limiter now caps the number of tracked users. (#866)
+- `bitcoind` mempool reconciliation now runs in linear rather than quadratic time. (#1068)
+- Odd-length hex strings are now rejected when parsing hex in the bindings. (#909)
+
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
 

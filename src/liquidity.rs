@@ -749,7 +749,7 @@ where
 					self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
 				let required_funds_sats = channel_amount_sats
 					+ self.config.anchor_channels_config.as_ref().map_or(0, |c| {
-						if init_features.requires_anchors_zero_fee_htlc_tx()
+						if init_features.supports_anchors_zero_fee_htlc_tx()
 							&& !c.trusted_peers_no_reserve.contains(&their_network_key)
 						{
 							c.per_channel_reserve_sats
@@ -760,7 +760,7 @@ where
 				if spendable_amount_sats < required_funds_sats {
 					log_error!(self.logger,
 						"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
-						spendable_amount_sats, channel_amount_sats
+						spendable_amount_sats, required_funds_sats
 					);
 					// TODO: We just silently fail here. Eventually we will need to remember
 					// the pending requests and regularly retry opening the channel until we
@@ -1278,7 +1278,7 @@ where
 					.channel_manager
 					.create_inbound_payment_for_hash(
 						payment_hash,
-						None,
+						amount_msat,
 						expiry_secs,
 						Some(min_final_cltv_expiry_delta),
 					)
@@ -1290,7 +1290,7 @@ where
 			},
 			None => self
 				.channel_manager
-				.create_inbound_payment(None, expiry_secs, Some(min_final_cltv_expiry_delta))
+				.create_inbound_payment(amount_msat, expiry_secs, Some(min_final_cltv_expiry_delta))
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to register inbound payment: {:?}", e);
 					Error::InvoiceCreationFailed

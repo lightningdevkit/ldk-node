@@ -315,6 +315,60 @@ async fn start_stop_reinit() {
 	reinitialized_node.stop().unwrap();
 }
 
+// The Electrum chain source drops its runtime client - and with it the tx-sync client holding all
+// `Filter` registrations - when stopped. As `ChannelMonitor`s only register their watched
+// transactions and outputs while being loaded in `Builder::build`, nothing would re-register them
+// on the next `start`, leaving the node blind to confirmations and spends of, e.g., its funding
+// outputs. So here we assert the chain source replays its registrations across a `stop`/`start`
+// cycle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn electrum_registrations_survive_chain_source_restart() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Electrum(&electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	// Opening the channel registers the funding transaction and output with the chain source's
+	// `Filter`. We leave it unconfirmed for now, so watching for it is still pending.
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+
+	// Restart node A repeatedly, which tears down and recreates its Electrum chain source every time.
+	// Note that the `ChannelMonitor`s are not reloaded here, so the registrations have to survive in
+	// the chain source itself, and they have to survive more than a single cycle, i.e., replaying
+	// them mustn't consume them.
+	for _ in 0..3 {
+		node_a.stop().unwrap();
+		node_a.start().unwrap();
+	}
+
+	// Reconnect eagerly rather than waiting on the background reconnection interval.
+	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	node_a.connect(node_b.node_id(), node_addr_b, false).unwrap();
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Node A can only learn that the funding transaction confirmed if its registrations survived
+	// the restart.
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
@@ -973,6 +1027,18 @@ async fn splice_channel() {
 	);
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 0);
 
+	let address = node_a.onchain_payment().new_address().unwrap();
+	let excessive_splice_out_sats = node_a.list_channels()[0].outbound_capacity_msat / 1000 + 1;
+	assert_eq!(
+		node_a.splice_out(
+			&user_channel_id_a,
+			node_b.node_id(),
+			&address,
+			excessive_splice_out_sats
+		),
+		Err(NodeError::ChannelSplicingFailed),
+	);
+
 	// Test that splicing and payments fail when there are insufficient funds
 	let address = node_b.onchain_payment().new_address().unwrap();
 	let amount_msat = 400_000_000;
@@ -1569,6 +1635,18 @@ async fn generate_bip21_uri() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn unified_receive_rejects_msat_overflow() {
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let node = setup_node(&chain_source, random_config(true), None);
+
+	assert_eq!(
+		Err(NodeError::InvalidAmount),
+		node.unified_qr_payment().receive(u64::MAX, "asdf", 4_000)
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn unified_qr_send_receive() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
@@ -1647,6 +1725,15 @@ async fn unified_qr_send_receive() {
 		};
 	expect_payment_successful_event!(node_a, Some(invoice_payment_id), None);
 
+	// Retrying the same BOLT11 invoice must return DuplicatePayment, not fall back to on-chain.
+	match node_a.unified_qr_payment().send(uri_str_without_offer, None) {
+		Err(NodeError::DuplicatePayment) => {},
+		Ok(QrPaymentResult::Onchain { txid }) => {
+			panic!("Regression: duplicate BOLT11 payment fell back to on-chain. txid={}", txid);
+		},
+		other => panic!("Expected DuplicatePayment error on retry, got: {:?}", other),
+	}
+
 	let expect_onchain_amount_sats = 800_000;
 	let onchain_uqr_payment =
 		node_b.unified_qr_payment().receive(expect_onchain_amount_sats, "asdf", 4_000).unwrap();
@@ -1719,6 +1806,19 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	let client_config = random_config(true);
 	setup_builder!(client_builder, client_config.node_config);
+	let client_seed = [42u8; 64];
+	#[cfg(feature = "uniffi")]
+	client_builder.set_entropy_seed_bytes(client_seed.to_vec()).unwrap();
+	#[cfg(not(feature = "uniffi"))]
+	client_builder.set_entropy_seed_bytes(client_seed);
+	let client_master_key =
+		bitcoin::bip32::Xpriv::new_master(client_config.node_config.network, &client_seed).unwrap();
+	let client_keys = lightning::sign::KeysManager::new(
+		&client_master_key.private_key.secret_bytes(),
+		0,
+		0,
+		true,
+	);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.set_liquidity_source_lsps2(service_node_id, service_addr, None);
 	let client_node = client_builder.build().unwrap();
@@ -1810,6 +1910,54 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	expect_payment_successful_event!(payer_node, Some(payment_id), None);
 	expect_event!(service_node, PaymentForwarded);
 	expect_payment_received_event!(client_node, amount_msat);
+
+	// Bypass the intercept SCID using the existing service -> client channel. Re-signing a
+	// smaller invoice only bypasses the sending API's amount check; the recipient gets the
+	// original payment hash and secret, as it would from a malicious payer.
+	for payment_hash in [None, Some(PaymentHash::from(PaymentPreimage([44; 32])))] {
+		let invoice = match payment_hash {
+			None => client_node.bolt11_payment().receive_via_jit_channel(
+				jit_amount_msat,
+				&invoice_description,
+				1024,
+				None,
+			),
+			Some(hash) => client_node.bolt11_payment().receive_via_jit_channel_for_hash(
+				jit_amount_msat,
+				&invoice_description,
+				1024,
+				None,
+				hash,
+			),
+		}
+		.unwrap();
+		let invoice: &lightning_invoice::Bolt11Invoice = &invoice;
+		let underpayment = lightning_invoice::InvoiceBuilder::new(invoice.currency())
+			.description("Underpay JIT invoice".to_owned())
+			.payment_hash(*invoice.payment_hash())
+			.payment_secret(*invoice.payment_secret())
+			.amount_milli_satoshis(1_000_000)
+			.current_timestamp()
+			.min_final_cltv_expiry_delta(invoice.min_final_cltv_expiry_delta())
+			.build_signed(|hash| {
+				bitcoin::secp256k1::Secp256k1::new()
+					.sign_ecdsa_recoverable(hash, &client_keys.get_node_secret_key())
+			})
+			.unwrap();
+		assert_eq!(underpayment.recover_payee_pub_key(), client_node.node_id());
+		#[cfg(feature = "uniffi")]
+		let underpayment = Arc::new(underpayment.into());
+		let payment_id = service_node.bolt11_payment().send(&underpayment, None).unwrap();
+		tokio::select! {
+			_ = async {
+				expect_event!(service_node, PaymentFailed);
+				assert_eq!(service_node.payment(&payment_id).unwrap().status, PaymentStatus::Failed);
+			} => {},
+			event = client_node.next_event_async() => {
+				panic!("JIT invoice accepted an underpayment (custom hash: {}): {:?}", payment_hash.is_some(), event);
+			},
+		}
+	}
 
 	////////////////////////////////////////////////////////////////////////////
 	// receive_via_jit_channel_for_hash and claim_for_hash
