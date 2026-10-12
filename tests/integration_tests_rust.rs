@@ -5346,3 +5346,67 @@ async fn do_lsps2_multi_lsp_picks_cheapest(reverse_order: bool) {
 	cheap.stop().unwrap();
 	expensive.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_discovery_retried_after_lsp_unreachable_at_start() {
+	// If the LSP is unreachable while the client node starts, the client's one-off
+	// LSPS0 protocol discovery fails. It is never retried: the LSP is left out of
+	// the LSPS2 candidates, so every JIT invoice fails with
+	// `LiquiditySourceUnavailable` until the node restarts, even once the LSP is
+	// reachable and connected.
+	let (_bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm: 10_000,
+		channel_over_provisioning_ppm: 100_000,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: false,
+		disable_client_reserve: false,
+	};
+
+	// The LSP is built but not started: its address is known, nothing listens on it.
+	let service_config = random_config();
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(lsps2_service_config);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config();
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	// Let the client's start-up discovery run against the closed port and give up.
+	tokio::time::sleep(Duration::from_secs(5)).await;
+
+	// The LSP comes up, and the client is connected to it.
+	service_node.start().unwrap();
+	client_node.connect(service_node_id, service_addr, false).unwrap();
+
+	let description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("jit")).unwrap());
+	let res = client_node.bolt11_payment().receive_via_jit_channel(
+		100_000_000,
+		&description.into(),
+		1024,
+		None,
+	);
+	assert!(res.is_ok(), "JIT invoice with the LSP reachable and connected failed: {:?}", res.err());
+
+	service_node.stop().unwrap();
+	client_node.stop().unwrap();
+}

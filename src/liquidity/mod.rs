@@ -521,6 +521,57 @@ where
 		Ok(protocols)
 	}
 
+	/// Re-attempts LSPS0 protocol discovery for configured LSPs whose discovery did not succeed.
+	///
+	/// Protocol discovery otherwise runs once, in the background, when the node starts. If an LSP is
+	/// unreachable at that moment (e.g., it is restarting), its supported protocols stay unknown and
+	/// it is skipped by every later LSPS2 request until the node restarts. This retries discovery,
+	/// connecting first, for those LSPs. It does nothing while start-up discovery is still running
+	/// (callers already wait for it) and logs, rather than returns, failures: the caller then
+	/// proceeds with whatever LSPs are known, as before.
+	pub(crate) async fn rediscover_undiscovered_lsps<CL: Deref + Clone + Sync + Send>(
+		&self, connection_manager: &ConnectionManager<CL>,
+	) where
+		CL::Target: LdkLogger,
+	{
+		if !*self.discovery_done_rx.borrow() {
+			return;
+		}
+		let undiscovered: Vec<(PublicKey, SocketAddress)> = self
+			.lsp_nodes
+			.read()
+			.expect("lock")
+			.iter()
+			.filter(|n| n.supported_protocols.is_none())
+			.map(|n| (n.node_id, n.address.clone()))
+			.collect();
+		for (node_id, address) in undiscovered {
+			if let Err(e) = connection_manager.connect_peer_if_necessary(node_id, address).await {
+				log_error!(
+					self.logger,
+					"Failed to connect to LSP {} to retry protocol discovery: {}",
+					node_id,
+					e
+				);
+				continue;
+			}
+			match self.discover_lsp_protocols(&node_id).await {
+				Ok(protocols) => log_info!(
+					self.logger,
+					"Discovered protocols for LSP {} on retry: {:?}",
+					node_id,
+					protocols
+				),
+				Err(e) => log_error!(
+					self.logger,
+					"Retried protocol discovery for LSP {} failed: {}",
+					node_id,
+					e
+				),
+			}
+		}
+	}
+
 	pub(crate) async fn get_lsp_config(
 		&self, node_id: &PublicKey, protocol: u16,
 	) -> Option<LspConfig> {
