@@ -44,7 +44,7 @@ use ldk_node::config::{
 	DEFAULT_FULL_SCAN_STOP_GAP,
 };
 use ldk_node::entropy::NodeEntropy;
-use ldk_node::liquidity::LSPS2ServiceConfig;
+use ldk_node::liquidity::{LSPS1Service, LSPS1ServiceConfig, LSPS2ServiceConfig};
 use ldk_node::payment::{
 	ConfirmationStatus, ForwardedPaymentId, PayerProofOptions, PaymentDetails, PaymentDirection,
 	PaymentKind, PaymentStatus, TransactionType, UnifiedPaymentResult,
@@ -56,6 +56,9 @@ use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
+use lightning_liquidity::lsps0::ser::LSPSDateTime;
+use lightning_liquidity::lsps1::msgs::LSPS1Options;
+use lightning_liquidity::lsps1::service::LSPS1ServiceConfig as LdkLSPS1ServiceConfig;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use log::LevelFilter;
 use serde_json::json;
@@ -7221,4 +7224,415 @@ async fn open_channel_with_fee_rate_override() {
 	node_b.stop().unwrap();
 	node_c.stop().unwrap();
 	node_d.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps1_bolt11_happy_path() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let ldk_service_config = LdkLSPS1ServiceConfig {
+		supported_options: LSPS1Options {
+			min_required_channel_confirmations: 0,
+			min_funding_confirms_within_blocks: 6,
+			supports_zero_channel_reserve: true,
+			max_channel_expiry_blocks: 144,
+			min_initial_client_balance_sat: 1_000_000,
+			max_initial_client_balance_sat: 100_000_000,
+			min_initial_lsp_balance_sat: 100_000,
+			max_initial_lsp_balance_sat: 100_000_000,
+			min_channel_balance_sat: 100_000,
+			max_channel_balance_sat: 100_000_000,
+		},
+	};
+
+	let service_config = LSPS1ServiceConfig {
+		require_token: None,
+		channel_fee_base_msat: 100,
+		channel_fee_proportional_ppm: 1_000,
+		payment_option_expires_at: LSPSDateTime::from_str("2035-01-01T00:00:00Z").unwrap(),
+		bolt11_invoice_expiry_secs: Some(3600),
+		min_onchain_payment_confirmations: Some(1),
+		min_fee_for_0conf: 253,
+		allow_bolt11_payment: true,
+		allow_bolt12_payment: false,
+		allow_onchain_payment: false,
+	};
+
+	let lsps1_service_config = LSPS1Service { ldk_service_config, service_config };
+
+	let service_config = random_config();
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(Some(lsps1_service_config), None);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let mut client_config = random_config();
+	client_config.node_config.manually_handle_unknown_bolt11_payments = true;
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	let payer_config = random_config();
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();
+	let client_addr_onchain = client_node.onchain_payment().new_address().unwrap();
+	let payer_addr_onchain = payer_node.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 10_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr_onchain, client_addr_onchain, payer_addr_onchain],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	println!("Premine complete!");
+
+	// Open a channel from payer -> service that will allow paying the BOLT11 invoice
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	println!("Client requesting a channel from the LSP..");
+	let order_status = client_node
+		.liquidity()
+		.lsps1()
+		.request_channel(100_000, 1_000_000, 144, true, Some(service_node_id))
+		.expect("Failed to request LSPS1 channel");
+
+	let bolt11_invoice = order_status.payment_options.bolt11.unwrap().invoice;
+
+	println!("Paying LSPS1 invoice via payer_node...");
+	let payment_id =
+		payer_node.bolt11_payment().send(&bolt11_invoice, None).expect("Failed to send payment");
+
+	// Order total plus fees
+	let expected_received_amount_msat = 1_000_101_000;
+	expect_payment_received_event!(service_node, expected_received_amount_msat);
+
+	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+
+	expect_payment_successful_event!(payer_node, payment_id, None);
+
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+
+	let requested_client_balance_sat: u64 = 1_000_000;
+	let requested_lsp_balance_sat: u64 = 100_000;
+	let expected_channel_value_sat = requested_client_balance_sat + requested_lsp_balance_sat;
+
+	let client_channels = client_node.list_channels();
+	let new_client_channel =
+		client_channels.iter().find(|c| c.counterparty.node_id == service_node_id).unwrap();
+	let client_reserve_sat = new_client_channel.unspendable_punishment_reserve.unwrap();
+	let expected_outbound_capacity_msat =
+		(requested_client_balance_sat - client_reserve_sat) * 1000;
+
+	assert_eq!(new_client_channel.channel_value_sats, expected_channel_value_sat);
+	assert_eq!(new_client_channel.outbound_capacity_msat, expected_outbound_capacity_msat);
+	assert!(new_client_channel.inbound_capacity_msat > 0);
+	assert!(new_client_channel.inbound_capacity_msat < (requested_lsp_balance_sat * 1000));
+
+	service_node.stop().unwrap();
+	client_node.stop().unwrap();
+	payer_node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps1_bolt12_happy_path() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let ldk_service_config = LdkLSPS1ServiceConfig {
+		supported_options: LSPS1Options {
+			min_required_channel_confirmations: 0,
+			min_funding_confirms_within_blocks: 6,
+			supports_zero_channel_reserve: true,
+			max_channel_expiry_blocks: 144,
+			min_initial_client_balance_sat: 1_000_000,
+			max_initial_client_balance_sat: 100_000_000,
+			min_initial_lsp_balance_sat: 100_000,
+			max_initial_lsp_balance_sat: 100_000_000,
+			min_channel_balance_sat: 100_000,
+			max_channel_balance_sat: 100_000_000,
+		},
+	};
+
+	let service_config = LSPS1ServiceConfig {
+		require_token: None,
+		channel_fee_base_msat: 100,
+		channel_fee_proportional_ppm: 1_000,
+		payment_option_expires_at: LSPSDateTime::from_str("2035-01-01T00:00:00Z").unwrap(),
+		bolt11_invoice_expiry_secs: Some(3600),
+		min_onchain_payment_confirmations: Some(1),
+		min_fee_for_0conf: 253,
+		allow_bolt11_payment: false,
+		allow_bolt12_payment: true,
+		allow_onchain_payment: false,
+	};
+
+	let lsps1_service_config = LSPS1Service { ldk_service_config, service_config };
+
+	let service_config = random_config();
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(Some(lsps1_service_config), None);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let mut client_config = random_config();
+	client_config.node_config.manually_handle_unknown_bolt11_payments = true;
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	let payer_config = random_config();
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();
+	let client_addr_onchain = client_node.onchain_payment().new_address().unwrap();
+	let payer_addr_onchain = payer_node.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 10_000_000;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr_onchain, client_addr_onchain, payer_addr_onchain],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	println!("Premine complete!");
+
+	// Open a channel from payer -> service that will allow paying the BOLT11 invoice
+	open_channel(&payer_node, &service_node, 5_000_000, true, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	println!("Client requesting a channel from the LSP..");
+	let order_status = client_node
+		.liquidity()
+		.lsps1()
+		.request_channel(100_000, 1_000_000, 144, true, Some(service_node_id))
+		.expect("Failed to request LSPS1 channel");
+
+	let bolt12_offer = order_status.payment_options.bolt12.unwrap().offer;
+
+	println!("Paying LSPS1 offer via payer_node...");
+	let payment_id = payer_node
+		.bolt12_payment()
+		.send(&bolt12_offer, None, None, None)
+		.expect("Failed to send BOLT12 payment");
+
+	// Order total plus fees
+	let expected_received_amount_msat = 1_000_101_000;
+	expect_payment_received_event!(service_node, expected_received_amount_msat);
+
+	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+
+	expect_payment_successful_event!(payer_node, payment_id, None);
+
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+
+	let requested_client_balance_sat: u64 = 1_000_000;
+	let requested_lsp_balance_sat: u64 = 100_000;
+	let expected_channel_value_sat = requested_client_balance_sat + requested_lsp_balance_sat;
+
+	let client_channels = client_node.list_channels();
+	let new_client_channel =
+		client_channels.iter().find(|c| c.counterparty.node_id == service_node_id).unwrap();
+	let client_reserve_sat = new_client_channel.unspendable_punishment_reserve.unwrap();
+	let expected_outbound_capacity_msat =
+		(requested_client_balance_sat - client_reserve_sat) * 1000;
+
+	assert_eq!(new_client_channel.channel_value_sats, expected_channel_value_sat);
+	assert_eq!(new_client_channel.outbound_capacity_msat, expected_outbound_capacity_msat);
+	assert!(new_client_channel.inbound_capacity_msat > 0);
+	assert!(new_client_channel.inbound_capacity_msat < (requested_lsp_balance_sat * 1000));
+
+	service_node.stop().unwrap();
+	client_node.stop().unwrap();
+	payer_node.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps1_onchain_happy_path() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let ldk_service_config = LdkLSPS1ServiceConfig {
+		supported_options: LSPS1Options {
+			min_required_channel_confirmations: 0,
+			min_funding_confirms_within_blocks: 6,
+			supports_zero_channel_reserve: true,
+			max_channel_expiry_blocks: 144,
+			min_initial_client_balance_sat: 1_000_000,
+			max_initial_client_balance_sat: 100_000_000,
+			min_initial_lsp_balance_sat: 100_000,
+			max_initial_lsp_balance_sat: 100_000_000,
+			min_channel_balance_sat: 100_000,
+			max_channel_balance_sat: 100_000_000,
+		},
+	};
+
+	let service_config = LSPS1ServiceConfig {
+		require_token: None,
+		channel_fee_base_msat: 100,
+		channel_fee_proportional_ppm: 1_000,
+		payment_option_expires_at: LSPSDateTime::from_str("2035-01-01T00:00:00Z").unwrap(),
+		bolt11_invoice_expiry_secs: Some(3600),
+		min_onchain_payment_confirmations: Some(1),
+		min_fee_for_0conf: 253,
+		allow_bolt11_payment: false,
+		allow_bolt12_payment: false,
+		allow_onchain_payment: true,
+	};
+
+	let lsps1_service_config = LSPS1Service { ldk_service_config, service_config };
+
+	let service_config = random_config();
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(Some(lsps1_service_config), None);
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config();
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	let service_addr_onchain = service_node.onchain_payment().new_address().unwrap();
+	let client_addr_onchain = client_node.onchain_payment().new_address().unwrap();
+
+	let premine_amount_sat = 10_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_addr_onchain, client_addr_onchain],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	println!("Premine complete!");
+
+	println!("Client requesting a channel from the LSP..");
+	let order_status = client_node
+		.liquidity()
+		.lsps1()
+		.request_channel(100_000, 1_000_000, 144, true, Some(service_node_id))
+		.expect("Failed to request LSPS1 channel");
+
+	let onchain_info =
+		order_status.payment_options.onchain.expect("LSP should return on-chain info");
+
+	let payment_address = onchain_info.address;
+	let order_total_sat: u64 = onchain_info.order_total_sat;
+
+	println!("Paying LSPS1 order via Client's on-chain wallet...");
+	let payment_txid = client_node
+		.onchain_payment()
+		.send_to_address(
+			&payment_address,
+			order_total_sat,
+			Some(FeeRate::from_sat_per_kwu(253).into()),
+		)
+		.expect("Failed to send on-chain payment");
+
+	// The LSP requires `min_onchain_payment_confirmations: 1`.
+	// So we must mine 1 block before the LSP will fulfill the order
+	wait_for_tx(&electrsd.client, payment_txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+
+	let funding_txo = expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+
+	let requested_client_balance_sat: u64 = 1_000_000;
+	let requested_lsp_balance_sat: u64 = 100_000;
+	let expected_channel_value_sat = requested_client_balance_sat + requested_lsp_balance_sat;
+
+	let client_channels = client_node.list_channels();
+	let new_client_channel =
+		client_channels.iter().find(|c| c.counterparty.node_id == service_node_id).unwrap();
+	let client_reserve_sat = new_client_channel.unspendable_punishment_reserve.unwrap();
+	let expected_outbound_capacity_msat =
+		(requested_client_balance_sat - client_reserve_sat) * 1000;
+
+	assert_eq!(new_client_channel.channel_value_sats, expected_channel_value_sat);
+	assert_eq!(new_client_channel.outbound_capacity_msat, expected_outbound_capacity_msat);
+	assert!(new_client_channel.inbound_capacity_msat > 0);
+	assert!(new_client_channel.inbound_capacity_msat < (requested_lsp_balance_sat * 1000));
+
+	service_node.stop().unwrap();
+	client_node.stop().unwrap();
 }

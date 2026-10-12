@@ -23,9 +23,12 @@ use lightning::ln::msgs::SocketAddress;
 use lightning_liquidity::events::LiquidityEvent;
 use lightning_liquidity::lsps0::event::LSPS0ClientEvent;
 use lightning_liquidity::lsps1::client::LSPS1ClientConfig as LdkLSPS1ClientConfig;
+use lightning_liquidity::lsps1::msgs::LSPS1Options;
+use lightning_liquidity::lsps1::service::LSPS1ServiceConfig as LdkLSPS1ServiceConfig;
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
+pub use service::lsps1::{LSPS1Service, LSPS1ServiceConfig};
 pub use service::lsps2::LSPS2ServiceConfig;
 use tokio::sync::oneshot;
 
@@ -33,7 +36,7 @@ use crate::builder::BuildError;
 use crate::connection::ConnectionManager;
 use crate::liquidity::client::lsps1::LSPS1Client;
 use crate::liquidity::client::lsps2::LSPS2Client;
-use crate::liquidity::service::lsps1::{LSPS1Service, LSPS1ServiceLiquiditySource};
+use crate::liquidity::service::lsps1::LSPS1ServiceLiquiditySource;
 use crate::liquidity::service::lsps2::{LSPS2Service, LSPS2ServiceLiquiditySource};
 use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::runtime::Runtime;
@@ -289,8 +292,14 @@ where
 		self
 	}
 
-	pub(crate) fn lsps1_service(&mut self, service_config: LSPS1Service) -> &mut Self {
-		self.lsps1_service = Some(service_config);
+	pub(crate) fn lsps1_service(
+		&mut self, supported_options: LSPS1Options, service_config: LSPS1ServiceConfig,
+	) -> &mut Self {
+		let ldk_lsps1_service_config = LSPS1Service {
+			ldk_service_config: LdkLSPS1ServiceConfig { supported_options },
+			service_config,
+		};
+		self.lsps1_service = Some(ldk_lsps1_service_config);
 		self
 	}
 

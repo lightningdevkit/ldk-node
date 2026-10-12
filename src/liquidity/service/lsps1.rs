@@ -39,8 +39,10 @@ const LSPS1_SWEEP_ORDERS_DURATION: Duration = Duration::from_secs(60 * 60 * 24);
 /// Server-side configuration options for bLIP-51 / LSPS1 channel requests.
 #[derive(Debug, Clone)]
 pub struct LSPS1Service {
-	pub(crate) ldk_service_config: LdkLSPS1ServiceConfig,
-	pub(crate) service_config: LSPS1ServiceConfig,
+	/// Server-side configuration options for bLIP-51 / LSPS1 channel requests.
+	pub ldk_service_config: LdkLSPS1ServiceConfig,
+	/// LSP based options
+	pub service_config: LSPS1ServiceConfig,
 }
 
 pub(crate) struct LSPS1ServiceLiquiditySource<L: Deref>
@@ -110,7 +112,7 @@ pub struct LSPS1ServiceConfig {
 	pub min_onchain_payment_confirmations: Option<u16>,
 	/// The minimum fee rate for the on-chain payment in case the client wants the payment to be
 	/// confirmed without a confirmation.
-	pub min_fee_for_0conf: FeeRate,
+	pub min_fee_for_0conf: u64,
 	/// The option that tells if BOLT11 payments is accepted.
 	pub allow_bolt11_payment: bool,
 	/// The option that tells if onchain payments is accepted.
@@ -125,10 +127,6 @@ where
 {
 	pub(crate) fn set_peer_manager(&self, peer_manager: Weak<PeerManager>) {
 		*self.peer_manager.write().expect("lock") = Some(peer_manager);
-	}
-
-	pub(crate) fn liquidity_manager(&self) -> Arc<LiquidityManager> {
-		Arc::clone(&self.liquidity_manager)
 	}
 
 	pub(crate) async fn handle_event(&self, event: LSPS1ServiceEvent) {
@@ -261,7 +259,7 @@ where
 								self.logger,
 								"Failed to generate LSPS1 Onchain Address: {:?}",
 								e
-							)
+							);
 						})
 						.expect("Should've gotten a valid address");
 
@@ -276,7 +274,9 @@ where
 						min_onchain_payment_confirmations: lsps1_service_config
 							.service_config
 							.min_onchain_payment_confirmations,
-						min_fee_for_0conf: lsps1_service_config.service_config.min_fee_for_0conf,
+						min_fee_for_0conf: FeeRate::from_sat_per_kwu(
+							lsps1_service_config.service_config.min_fee_for_0conf,
+						),
 						refund_onchain_address,
 					});
 				}
