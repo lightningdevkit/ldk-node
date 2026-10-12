@@ -1759,11 +1759,12 @@ async fn onchain_wallet_full_scan_stop_gap_recovers_far_esplora_and_electrum_fun
 async fn do_onchain_wallet_full_scan_stop_gap_recovers_far_funds(
 	chain_source: TestChainSource<'_>, bitcoind: &BitcoinD, electrsd: &ElectrsD,
 ) {
-	let configured_stop_gap = DEFAULT_FULL_SCAN_STOP_GAP + 5;
-	// Handouts consume the pool oldest revealed index first, so the last of N handouts sits at
-	// index N - 1, behind N - 1 revealed-but-unused scripts. Choose N so the funded address lies
-	// beyond the default stop gap's reach but within the configured gap's.
-	let handout_count = DEFAULT_FULL_SCAN_STOP_GAP + 3;
+	// Fresh nodes reveal ADDRESS_POOL_SIZE scripts before syncing. BDK applies the stop gap
+	// beyond that revealed range, so fund an address past both the pool and the default gap.
+	// Leave room for Esplora's final batch of concurrent requests to overshoot the gap.
+	let handout_count = ADDRESS_POOL_SIZE + DEFAULT_FULL_SCAN_STOP_GAP + 5;
+	// Also cover older BDK clients, which count revealed-but-unused scripts toward the gap.
+	let configured_stop_gap = handout_count;
 
 	let address_source_config = random_config();
 	let node_entropy = address_source_config.node_entropy;
