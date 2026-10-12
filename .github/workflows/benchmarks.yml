@@ -34,7 +34,7 @@ jobs:
         if: "(steps.cache-bitcoind.outputs.cache-hit != 'true' || steps.cache-electrs.outputs.cache-hit != 'true')"
         run: |
           source ./scripts/download_bitcoind_electrs.sh
-          mkdir bin
+          mkdir -p bin
           mv "$BITCOIND_EXE" bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
           mv "$ELECTRS_EXE" bin/electrs-${{ runner.os }}-${{ runner.arch }}
       - name: Set bitcoind/electrs environment variables
