@@ -130,6 +130,9 @@ impl Bolt11Payment {
 	) -> Result<LdkBolt11Invoice, Error> {
 		let connection_manager = Arc::clone(&self.connection_manager);
 		let res = self.runtime.block_on(async move {
+			// An LSP that was unreachable when the node started was never discovered; retry it
+			// now rather than skipping it until the next restart.
+			self.liquidity_source.rediscover_undiscovered_lsps(&connection_manager).await;
 			if let Some(amount_msat) = amount_msat {
 				self.liquidity_source
 					.lsps2_client()
