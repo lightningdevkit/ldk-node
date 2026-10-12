@@ -8,6 +8,9 @@ concurrency:
 
 jobs:
   build:
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         platform: [
