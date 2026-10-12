@@ -19,7 +19,7 @@ use bitcoin::hashes::hex::FromHex;
 use bitcoin::hashes::sha256::Hash as Sha256Hash;
 use bitcoin::hashes::Hash;
 use bitcoin::hex::DisplayHex;
-use bitcoin::{Address, Amount, ScriptBuf, Transaction, Txid};
+use bitcoin::{Address, Amount, FeeRate, ScriptBuf, Transaction, Txid};
 use common::logging::{
 	init_log_logger, validate_log_entry, CollectingLogWriter, MultiNodeLogger, TestLogWriter,
 };
@@ -2976,6 +2976,136 @@ async fn splice_channel() {
 	assert_eq!(
 		node_a.list_balances().total_lightning_balance_sats,
 		4_000_000 - closing_transaction_fee_sat - anchor_output_sat - expected_splice_out_fee_sat
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_channel_with_fee_rate() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	open_channel(&node_a, &node_b, 4_000_000, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Ten times the feerate our chain source estimates on regtest, so a splice that ignored the
+	// requested feerate would be easy to tell apart.
+	let fee_rate = FeeRate::from_sat_per_kwu(2_500);
+
+	let address = node_a.onchain_payment().new_address().unwrap();
+	node_a
+		.splice_out(&user_channel_id_a, node_b.node_id(), &address, 100_000, Some(fee_rate.into()))
+		.unwrap();
+
+	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	wait_for_classified_funding_payment(&node_a, txo.txid).await;
+	wait_for_tx(&electrsd.client, txo.txid).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	assert_splice_pays_fee_rate(&node_a, &electrsd.client, txo.txid, fee_rate);
+
+	// A pending splice is fee-bumped to a requested feerate. Replacing it takes a feerate well above
+	// our estimate, so the bump only succeeds at the requested one. Staying within 1.5 times the
+	// pending splice's feerate lets the replacement reuse its inputs, paying the higher fee from
+	// their change.
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 100_000, Some(fee_rate.into())).unwrap();
+
+	let original_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	wait_for_classified_funding_payment(&node_a, original_txo.txid).await;
+	wait_for_tx(&electrsd.client, original_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let bump_fee_rate = FeeRate::from_sat_per_kwu(3_000);
+	node_a
+		.bump_channel_funding_fee(&user_channel_id_a, node_b.node_id(), Some(bump_fee_rate.into()))
+		.unwrap();
+
+	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	assert_ne!(original_txo, txo, "RBF should produce a different funding txo");
+	wait_for_classified_funding_payment(&node_a, txo.txid).await;
+	wait_for_tx(&electrsd.client, txo.txid).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	assert_splice_pays_fee_rate(&node_a, &electrsd.client, txo.txid, bump_fee_rate);
+
+	// The amount spliced in is determined at the requested feerate, so the splice would fail to
+	// fund its fee if it were determined at our estimate instead.
+	node_a.splice_in_with_all(&user_channel_id_a, node_b.node_id(), Some(fee_rate.into())).unwrap();
+
+	let txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	wait_for_classified_funding_payment(&node_a, txo.txid).await;
+	wait_for_tx(&electrsd.client, txo.txid).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	assert_splice_pays_fee_rate(&node_a, &electrsd.client, txo.txid, fee_rate);
+}
+
+/// Asserts that the splice transaction `txid` we funded pays `fee_rate`. Our fee is determined from
+/// an estimate of the transaction's weight, which may differ slightly from its actual weight.
+///
+/// The payment is looked up by transaction rather than by id, as a fee-bumped splice keeps the id
+/// of its first candidate.
+fn assert_splice_pays_fee_rate<E: ElectrumApi>(
+	node: &Node, electrs: &E, txid: Txid, fee_rate: FeeRate,
+) {
+	let payment = node
+		.list_all_payments()
+		.into_iter()
+		.find(|p| matches!(p.kind, PaymentKind::Onchain { txid: t, .. } if t == txid))
+		.unwrap();
+	let fee_paid_sat = payment.fee_paid_msat.unwrap() / 1_000;
+	let weight_wu = electrs.transaction_get(&txid).unwrap().weight().to_wu();
+
+	let paid_sat_per_kwu = fee_paid_sat * 1_000 / weight_wu;
+	let requested_sat_per_kwu = fee_rate.to_sat_per_kwu();
+	assert!(
+		paid_sat_per_kwu.abs_diff(requested_sat_per_kwu) <= requested_sat_per_kwu / 100,
+		"paid {} sat/kwu, requested {} sat/kwu",
+		paid_sat_per_kwu,
+		requested_sat_per_kwu
 	);
 }
 
