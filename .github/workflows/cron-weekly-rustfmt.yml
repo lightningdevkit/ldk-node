@@ -15,12 +15,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@nightly
+      # Nightly 2026-09-23 and later reformat code that stable rustfmt reverts
+      # (see #1118). Keep the last nightly compatible with stable CI checks.
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-09-22
           components: rustfmt
       - name: Run Nightly rustfmt
         # Run the formatter and manually remove trailing whitespace.
-        run: cargo +nightly fmt && git ls-files -- '*.rs' -z | xargs sed -E -i'' -e 's/[[:space:]]+$//'
+        run: cargo +nightly-2026-09-22 fmt && git ls-files -- '*.rs' -z | xargs sed -E -i'' -e 's/[[:space:]]+$//'
       - name: Get the current date
         run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
       - name: Create Pull Request
