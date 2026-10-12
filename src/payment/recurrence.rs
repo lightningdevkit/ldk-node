@@ -8,11 +8,13 @@
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::outbound_payment::Retry;
 pub(crate) use lightning::offers::invoice_request::RecurrenceId;
+use lightning::offers::offer::{Recurrence, RecurrenceType};
 use lightning::routing::router::RouteParametersConfig;
 use lightning::{impl_ser_tlv_based, impl_ser_tlv_based_enum};
 use lightning_types::string::UntrustedString;
 
 use crate::data_store::{StorableObject, StorableObjectId, StorableObjectUpdate};
+use crate::error::Error;
 use crate::hex_utils;
 
 impl StorableObjectId for RecurrenceId {
@@ -159,6 +161,48 @@ impl Default for RecurrenceDetails {
 			last_successful_payment_id: None,
 			pay_next_automatically: false,
 		}
+	}
+}
+
+impl RecurrenceDetails {
+	/// A limit is inclusive: completion means the next unpaid period is beyond it.
+	/// Both payment events and the scheduler use this check so the final allowed period
+	/// remains payable, including when the recurrence starts at a nonzero period index.
+	pub(crate) fn is_completed(&self, recurrence: &Recurrence) -> Result<bool, Error> {
+		let Some(limit) = recurrence.recurrence_limit else {
+			return Ok(false);
+		};
+		// Inspect the last paid period when possible. Computing the next index could
+		// overflow after successfully paying a final period at u32::MAX.
+		let period_index = recurrence
+			.period_index(self.paid_count.saturating_sub(1), self.initial_start)
+			.map_err(|_| Error::InvalidOffer)?;
+		Ok(if self.paid_count == 0 { period_index > limit.0 } else { period_index >= limit.0 })
+	}
+
+	/// Returns the next unpaid period's window, using the offer's canonical calculation.
+	/// An unknown window is permitted only before the first successful payment of an offer
+	/// without an explicit basetime; later periods must retain the established anchor.
+	pub(crate) fn payment_window(
+		&self, recurrence: &Recurrence,
+	) -> Result<Option<(u64, u64)>, Error> {
+		if self.is_completed(recurrence)? {
+			return Err(Error::InvalidRecurrence);
+		}
+		let basetime = match self.basetime {
+			Some(basetime) => basetime,
+			None if self.paid_count == 0
+				&& !matches!(recurrence.recurrence_type, RecurrenceType::Compulsory(Some(_))) =>
+			{
+				// Period zero has no known window until its first payment establishes basetime.
+				return Ok(None);
+			},
+			None => return Err(Error::InvalidOffer),
+		};
+		let period_index = recurrence
+			.period_index(self.paid_count, self.initial_start)
+			.map_err(|_| Error::InvalidOffer)?;
+		recurrence.payment_window(basetime, period_index).map(Some).map_err(|_| Error::InvalidOffer)
 	}
 }
 

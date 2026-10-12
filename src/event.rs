@@ -749,11 +749,7 @@ where
 				updated.payment_state = RecurrencePaymentState::NoActivePayment;
 
 				let recurrence = offer.offer_recurrence().ok_or(Error::InvalidOffer)?;
-				let period_index = recurrence
-					.period_index(updated.paid_count as u32, updated.initial_start)
-					.map_err(|_| Error::InvalidOffer)?;
-				if recurrence.recurrence_limit.map(|limit| period_index >= limit.0).unwrap_or(false)
-				{
+				if updated.is_completed(&recurrence)? {
 					updated.status = RecurrenceStatus::Completed;
 				}
 				Ok(Some(updated))

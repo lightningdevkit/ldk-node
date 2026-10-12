@@ -118,6 +118,10 @@ pub(crate) const BDK_CLIENT_CONCURRENCY: usize = 4;
 // The timeout after which we abandon retrying failed payments.
 pub(crate) const LDK_PAYMENT_RETRY_TIMEOUT: Duration = Duration::from_secs(10);
 
+// Reconcile recurrence lifecycles and payments every 30 seconds. Payments start on the first
+// eligible scan; windows shorter than this polling interval may be missed entirely.
+pub(crate) const RECURRENCE_PROCESSING_INTERVAL: Duration = Duration::from_secs(30);
+
 // The time in-between peer reconnection attempts.
 pub(crate) const PEER_RECONNECTION_INTERVAL: Duration = Duration::from_secs(60);
 

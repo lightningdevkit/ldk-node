@@ -135,7 +135,7 @@ use chain::ChainSource;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
 	LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
-	RGS_SYNC_INTERVAL,
+	RECURRENCE_PROCESSING_INTERVAL, RGS_SYNC_INTERVAL,
 };
 use connection::ConnectionManager;
 pub use error::Error as NodeError;
@@ -560,6 +560,23 @@ impl Node {
 									).await;
 							}
 						}
+				}
+			}
+		});
+
+		// Reconcile persisted recurrences on startup and periodically thereafter. Skipping
+		// missed ticks avoids a burst of payment attempts after the runtime was delayed.
+		let recurrence_payment = self.bolt12_payment();
+		let mut stop_recurrence_processing = self.stop_sender.subscribe();
+		// Let shutdown wait for the current submission to finish recording its result.
+		self.runtime.spawn_background_task(async move {
+			let mut interval = tokio::time::interval(RECURRENCE_PROCESSING_INTERVAL);
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+					biased;
+					_ = stop_recurrence_processing.changed() => return,
+					_ = interval.tick() => recurrence_payment.process_recurrences(&stop_recurrence_processing).await,
 				}
 			}
 		});

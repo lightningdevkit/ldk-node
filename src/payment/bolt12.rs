@@ -35,10 +35,9 @@ use lightning_types::payment::PaymentPreimage;
 use lightning_types::string::UntrustedString;
 
 use crate::config::{AsyncPaymentsRole, Config, LDK_PAYMENT_RETRY_TIMEOUT};
-use crate::data_store::{DataStoreUpdateResult, StorableObject};
 use crate::error::Error;
 use crate::ffi::{maybe_deref, maybe_wrap};
-use crate::logger::{log_error, log_info, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, LdkLogger, Logger};
 use crate::payment::recurrence::{RecurrenceDetails, RecurrencePaymentState, RecurrenceStatus};
 use crate::payment::store::{PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus};
 use crate::runtime::Runtime;
@@ -344,18 +343,212 @@ impl Bolt12Payment {
 		self.runtime.block_on(self.submit_recurrence_payment(details))
 	}
 
+	/// Enables or disables automatic submission of future periods for an active recurrence.
+	/// Failed attempts are retried regardless of this flag. Disabling automatic payment does
+	/// not abandon an attempt already submitted, and the setting survives node restarts.
+	/// This setting may also be changed while the node is stopped.
+	pub fn set_recurrence_pay_next_automatically(
+		&self, recurrence_id: RecurrenceId, enabled: bool,
+	) -> Result<(), Error> {
+		self.runtime.block_on(self.recurrence_store.mutate_async(
+			&recurrence_id,
+			|current| async move {
+				let mut details = current.ok_or(Error::InvalidRecurrenceId)?;
+				if details.status != RecurrenceStatus::Active {
+					return Err(Error::InvalidRecurrence);
+				}
+				if details.pay_next_automatically == enabled {
+					return Ok(None);
+				}
+				details.pay_next_automatically = enabled;
+				Ok(Some(details))
+			},
+		))?;
+		Ok(())
+	}
+
+	/// Reconciles active recurrences and submits eligible attempts from their latest state.
+	/// Lifecycle checks apply even to manually paid recurrences. An in-progress payment is
+	/// left for event handling: a closed request window does not establish its final outcome.
+	pub(crate) async fn process_recurrences(&self, stop: &tokio::sync::watch::Receiver<()>) {
+		let active = self
+			.recurrence_store
+			.list_filter(|details| details.status == RecurrenceStatus::Active)
+			.await;
+		for previous in active {
+			if stop.has_changed().unwrap_or(true) {
+				return;
+			}
+			let result = self
+				.recurrence_store
+				.mutate_async(&previous.id, |current| async move {
+					let Some(mut details) = current else {
+						return Ok(None);
+					};
+					if details.status != RecurrenceStatus::Active
+						|| matches!(details.payment_state, RecurrencePaymentState::Active(_))
+					{
+						return Ok(None);
+					}
+					let offer = LdkOffer::try_from(details.original_offer.clone())
+						.map_err(|_| Error::InvalidOffer)?;
+					let recurrence = offer.offer_recurrence().ok_or(Error::InvalidOffer)?;
+					if details.is_completed(&recurrence)? {
+						details.status = RecurrenceStatus::Completed;
+						return Ok(Some(details));
+					}
+					let now =
+						SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+					let window = details.payment_window(&recurrence)?;
+					if let Some((opening, closing)) = window {
+						if now >= closing {
+							details.status = RecurrenceStatus::Missed;
+							return Ok(Some(details));
+						}
+						if now < opening {
+							return Ok(None);
+						}
+					}
+					match details.payment_state {
+						RecurrencePaymentState::Failed(_) => {},
+						RecurrencePaymentState::NoActivePayment
+							if details.pay_next_automatically && details.paid_count > 0 =>
+						{
+							let basetime = details.basetime.ok_or(Error::InvalidOffer)?;
+							let period_index = recurrence
+								.period_index(details.paid_count, details.initial_start)
+								.map_err(|_| Error::InvalidOffer)?;
+							let start = recurrence
+								.recurrence_period
+								.start_time(basetime, period_index)
+								.map_err(|_| Error::InvalidOffer)?;
+							// Prefer period start rather than prepaying overlapping windows.
+							// Early-only windows close by start, so use their opening instead.
+							let target = match window {
+								Some((opening, closing)) if start >= closing => opening,
+								_ => start,
+							};
+							if now < target {
+								return Ok(None);
+							}
+						},
+						_ => return Ok(None),
+					}
+					// Reserve before queueing so a persistence failure cannot leave a sent
+					// attempt looking retryable. Submission rechecks cancellation separately.
+					self.reserve_recurrence_payment(details).map(Some)
+				})
+				.await;
+			match result {
+				Ok(Some(details))
+					if matches!(details.payment_state, RecurrencePaymentState::Active(_)) =>
+				{
+					if let Err(e) = self.submit_reserved_recurrence_payment(details).await {
+						log_debug!(
+							self.logger,
+							"Could not submit scheduled recurrence {:?}: {}",
+							previous.id,
+							e
+						);
+					}
+				},
+				Err(e) => {
+					log_error!(self.logger, "Failed to process recurrence {:?}: {}", previous.id, e)
+				},
+				_ => {},
+			}
+		}
+	}
+
+	/// Rechecks manual submission under the same mutation lock used by the scheduler and
+	/// payment events. A stale snapshot must not replace a newer attempt or period state.
 	async fn submit_recurrence_payment(
-		&self, mut details: RecurrenceDetails,
+		&self, previous: RecurrenceDetails,
 	) -> Result<PaymentId, Error> {
+		let reserved = self
+			.recurrence_store
+			.mutate_async(&previous.id, |current| async move {
+				let details = current.ok_or(Error::InvalidRecurrenceId)?;
+				if details.status != RecurrenceStatus::Active
+					|| details.paid_count != previous.paid_count
+					|| details.payment_state != previous.payment_state
+				{
+					return Err(Error::InvalidRecurrence);
+				}
+				self.reserve_recurrence_payment(details).map(Some)
+			})
+			.await?
+			.ok_or(Error::InvalidRecurrence)?;
+		self.submit_reserved_recurrence_payment(reserved).await
+	}
+
+	/// Validates and reserves an attempt for persistence before any request is queued.
+	/// An active reservation prevents concurrent callers from paying the same period.
+	/// If the process exits before queueing, the reservation remains active; an uncertain
+	/// attempt must not be automatically retried based only on missing payment events.
+	fn reserve_recurrence_payment(
+		&self, mut details: RecurrenceDetails,
+	) -> Result<RecurrenceDetails, Error> {
+		let offer =
+			LdkOffer::try_from(details.original_offer.clone()).map_err(|_| Error::InvalidOffer)?;
+		let recurrence = offer.offer_recurrence().ok_or(Error::InvalidOffer)?;
+		self.validate_recurrence_payment_window(&details, &recurrence)?;
+		details.payment_state =
+			RecurrencePaymentState::Active(PaymentId(self.keys_manager.get_secure_random_bytes()));
+		Ok(details)
+	}
+
+	/// Queues the durable reservation only if it is still active. Cancellation can win
+	/// between reservation and submission, but cannot race the actual queue operation.
+	/// Successful submission needs no recurrence write: its active ID is already persisted.
+	async fn submit_reserved_recurrence_payment(
+		&self, reserved: RecurrenceDetails,
+	) -> Result<PaymentId, Error> {
+		let RecurrencePaymentState::Active(payment_id) = reserved.payment_state else {
+			return Err(Error::InvalidRecurrence);
+		};
+		let mut result = Err(Error::InvalidRecurrence);
+		let result_ref = &mut result;
+		self.recurrence_store
+			.mutate_async(&reserved.id, |current| async move {
+				let details = current.ok_or(Error::InvalidRecurrenceId)?;
+				if details.status != RecurrenceStatus::Active
+					|| details.payment_state != RecurrencePaymentState::Active(payment_id)
+				{
+					return Err(Error::InvalidRecurrence);
+				}
+				let (updated, submission_result) =
+					self.submit_recurrence_payment_inner(details, payment_id).await?;
+				let submitted = submission_result.is_ok();
+				*result_ref = submission_result;
+				if submitted {
+					Ok(None)
+				} else {
+					Ok(Some(updated))
+				}
+			})
+			.await?;
+		result
+	}
+
+	/// Queues one attempt and persists its payment record, returning the recurrence update
+	/// for the caller to persist under its mutation lock. The lock order is recurrence store
+	/// then payment store; callers must not hold a payment-store lock when entering this path.
+	async fn submit_recurrence_payment_inner(
+		&self, mut details: RecurrenceDetails, payment_id: PaymentId,
+	) -> Result<(RecurrenceDetails, Result<PaymentId, Error>), Error> {
 		let recurrence_id = details.id;
 		let offer =
 			LdkOffer::try_from(details.original_offer.clone()).map_err(|_| Error::InvalidOffer)?;
 
 		let recurrence = offer.offer_recurrence().ok_or(Error::InvalidOffer)?;
 
-		self.validate_recurrence_payment_window(&details, &recurrence)?;
-
-		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
+		if let Err(e) = self.validate_recurrence_payment_window(&details, &recurrence) {
+			// Persistence of the reservation may have crossed the closing boundary.
+			// No request was queued, so release it for lifecycle reconciliation.
+			details.payment_state = RecurrencePaymentState::Failed(payment_id);
+			return Ok((details, Err(e)));
+		}
 
 		let params = RecurrencePaymentParams {
 			counter: details.paid_count,
@@ -387,7 +580,8 @@ impl Bolt12Payment {
 			Err(e) => {
 				log_error!(self.logger, "Failed to send invoice request: {:?}", e);
 				if matches!(e, Bolt12SemanticError::DuplicatePaymentId) {
-					return Err(Error::DuplicatePayment);
+					details.payment_state = RecurrencePaymentState::Failed(payment_id);
+					return Ok((details, Err(Error::DuplicatePayment)));
 				}
 				(
 					PaymentStatus::Failed,
@@ -416,11 +610,14 @@ impl Bolt12Payment {
 
 		details.payment_state = payment_state;
 
-		self.payment_store.insert(payment).await?;
-
-		match self.recurrence_store.update(details.to_update()).await? {
-			DataStoreUpdateResult::Updated | DataStoreUpdateResult::Unchanged => {},
-			DataStoreUpdateResult::NotFound => return Err(Error::InvalidRecurrenceId),
+		if let Err(e) = self.payment_store.insert(payment).await {
+			if res.is_ok() {
+				// A queued request keeps its durable active ID even if its payment record
+				// could not be written. Never make an uncertain outcome retryable.
+				return Err(e);
+			}
+			// A synchronous submission failure is known not to be in progress.
+			return Ok((details, Err(e)));
 		}
 
 		if res.is_ok() {
@@ -432,37 +629,15 @@ impl Bolt12Payment {
 			);
 		}
 
-		res
+		Ok((details, res))
 	}
 
 	fn validate_recurrence_payment_window(
 		&self, details: &RecurrenceDetails, recurrence: &Recurrence,
 	) -> Result<(), Error> {
-		let period_index = recurrence
-			.period_index(details.paid_count, details.initial_start)
-			.map_err(|_| Error::InvalidOffer)?;
-
-		if recurrence.recurrence_limit.map_or(false, |limit| period_index > limit.0) {
-			debug_assert!(false, "Recurrence exceeded its limit without being marked completed.");
-			return Err(Error::InvalidRecurrence);
-		}
-
-		// Without an explicit basetime, the first successful invoice establishes the window.
-		let basetime = match details.basetime {
-			Some(basetime) => basetime,
-			None if details.paid_count == 0
-				&& !matches!(recurrence.recurrence_type, RecurrenceType::Compulsory(Some(_))) =>
-			{
-				// If the offer has no basetime and the first payment has not succeeded,
-				// period zero's start time and payment window are not known yet.
-				// Skip the window check so a failed first payment can be retried.
-				return Ok(());
-			},
-			None => return Err(Error::InvalidOffer),
+		let Some((opening, closing)) = details.payment_window(recurrence)? else {
+			return Ok(());
 		};
-
-		let (opening, closing) =
-			recurrence.payment_window(basetime, period_index).map_err(|_| Error::InvalidOffer)?;
 
 		let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
@@ -472,7 +647,6 @@ impl Bolt12Payment {
 		}
 
 		if now >= closing {
-			// TODO: Figure out, where we should ideally be changing recurrence states at appropriate times.
 			return Err(Error::InvalidRecurrence);
 		}
 
@@ -486,48 +660,39 @@ impl Bolt12Payment {
 			return Err(Error::NotRunning);
 		}
 
-		let mut details = self
-			.runtime
-			.block_on(self.recurrence_store.get(&recurrence_id))?
-			.ok_or(Error::InvalidRecurrenceId)?;
-
-		// Sanity Checks
-		if details.status == RecurrenceStatus::Cancelled {
-			log_error!(self.logger, "Tried to cancel an already cancelled recurrence.");
-			return Err(Error::InvalidRecurrence);
-		}
-
-		if details.status == RecurrenceStatus::Completed {
-			log_error!(self.logger, "A completed recurrece cannot be cancelled.");
-			return Err(Error::InvalidRecurrence);
-		}
-
-		if let RecurrencePaymentState::Active(payment_id) = details.payment_state {
-			self.channel_manager.abandon_payment(payment_id);
-			details.payment_state = RecurrencePaymentState::NoActivePayment;
-		}
-
-		if details.paid_count > 0 {
-			// The payee needs the previous recurrence state to authenticate cancellation continuity.
-			let offer = LdkOffer::try_from(details.original_offer.clone())
-				.map_err(|_| Error::InvalidOffer)?;
-			let counter = u32::try_from(details.paid_count).map_err(|_| Error::InvalidAmount)?;
-			let params = lightning::ln::channelmanager::RecurrenceCancellationParams {
-				counter,
-				start: details.initial_start,
-				prev_state: details.opaque_state.clone(),
-			};
-			self.channel_manager
-				.cancel_recurrence(&offer, recurrence_id, params)
-				.map_err(|_| Error::PaymentSendingFailed)?;
-		}
-
-		details.status = RecurrenceStatus::Cancelled;
-
-		match self.runtime.block_on(self.recurrence_store.update(details.to_update()))? {
-			DataStoreUpdateResult::Updated | DataStoreUpdateResult::Unchanged => {},
-			DataStoreUpdateResult::NotFound => return Err(Error::InvalidRecurrenceId),
-		}
+		// Select and abandon the current attempt under the scheduler's mutation lock so
+		// cancellation cannot overwrite a newly submitted payment or a success event.
+		self.runtime.block_on(self.recurrence_store.mutate_async(
+			&recurrence_id,
+			|current| async move {
+				let mut details = current.ok_or(Error::InvalidRecurrenceId)?;
+				if matches!(
+					details.status,
+					RecurrenceStatus::Cancelled | RecurrenceStatus::Completed
+				) {
+					return Err(Error::InvalidRecurrence);
+				}
+				if let RecurrencePaymentState::Active(payment_id) = details.payment_state {
+					self.channel_manager.abandon_payment(payment_id);
+					details.payment_state = RecurrencePaymentState::NoActivePayment;
+				}
+				if details.paid_count > 0 {
+					// The payee needs the previous recurrence state to authenticate cancellation continuity.
+					let offer = LdkOffer::try_from(details.original_offer.clone())
+						.map_err(|_| Error::InvalidOffer)?;
+					let params = lightning::ln::channelmanager::RecurrenceCancellationParams {
+						counter: details.paid_count,
+						start: details.initial_start,
+						prev_state: details.opaque_state.clone(),
+					};
+					self.channel_manager
+						.cancel_recurrence(&offer, recurrence_id, params)
+						.map_err(|_| Error::PaymentSendingFailed)?;
+				}
+				details.status = RecurrenceStatus::Cancelled;
+				Ok(Some(details))
+			},
+		))?;
 
 		Ok(())
 	}
