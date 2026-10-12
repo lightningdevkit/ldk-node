@@ -8,6 +8,9 @@ concurrency:
 
 jobs:
   build:
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         platform: [
@@ -34,25 +37,40 @@ jobs:
     runs-on: ${{ matrix.platform }}
     steps:
       - name: Checkout source code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
       - name: Install Rust ${{ matrix.toolchain }} toolchain
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile=minimal --default-toolchain ${{ matrix.toolchain }}
       - name: Check formatting on Rust ${{ matrix.toolchain }}
         if: matrix.check-fmt
         run: rustup component add rustfmt && cargo fmt --all -- --check
+      - name: Pin packages to allow for MSRV
+        if: matrix.msrv
+        run: |
+          cargo update -p idna_adapter --precise "1.2.0" --verbose # idna_adapter 1.2.1 uses ICU4X 2.2.0, requiring 1.86 and newer
+          cargo update -p encoding_rs --precise "0.8.35" --verbose # encoding_rs 0.8.40 and newer require 1.88 and newer
+          cargo update -p proptest --precise "1.11.0" --verbose # proptest 1.12.0 requires Rust 1.88
       - name: Set RUSTFLAGS to deny warnings
+        id: rustflags
         if: "matrix.toolchain == 'stable'"
-        run: echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+        run: |
+          echo "RUSTFLAGS=-D warnings" >> "$GITHUB_ENV"
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "ldk-node") | .version')
+          # Preserve the deprecated FeeRate constructor in the 0.7 bindings.
+          if [[ "$version" == 0.7.* ]]; then
+            echo "uniffi=-D warnings -A deprecated" >> "$GITHUB_OUTPUT"
+          else
+            echo "uniffi=-D warnings" >> "$GITHUB_OUTPUT"
+          fi
       - name: Enable caching for bitcoind
         id: cache-bitcoind
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
           key: bitcoind-${{ runner.os }}-${{ runner.arch }}
       - name: Enable caching for electrs
         id: cache-electrs
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: bin/electrs-${{ runner.os }}-${{ runner.arch }}
           key: electrs-${{ runner.os }}-${{ runner.arch }}
@@ -60,7 +78,7 @@ jobs:
         if: "matrix.platform != 'windows-latest' && (steps.cache-bitcoind.outputs.cache-hit != 'true' || steps.cache-electrs.outputs.cache-hit != 'true')"
         run: |
           source ./scripts/download_bitcoind_electrs.sh
-          mkdir bin
+          mkdir -p bin
           mv "$BITCOIND_EXE" bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
           mv "$ELECTRS_EXE" bin/electrs-${{ runner.os }}-${{ runner.arch }}
       - name: Set bitcoind/electrs environment variables
@@ -71,6 +89,8 @@ jobs:
         run: cargo build --verbose --color always
       - name: Build with UniFFI support on Rust ${{ matrix.toolchain }}
         if: matrix.build-uniffi
+        env:
+          RUSTFLAGS: ${{ steps.rustflags.outputs.uniffi }}
         run: cargo build --features uniffi --verbose --color always
       - name: Build documentation on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest' || matrix.toolchain != '1.85.0'"
@@ -81,6 +101,8 @@ jobs:
         run: cargo check --release --verbose --color always
       - name: Check release build with UniFFI support on Rust ${{ matrix.toolchain }}
         if: matrix.build-uniffi
+        env:
+          RUSTFLAGS: ${{ steps.rustflags.outputs.uniffi }}
         run: cargo check --release --features uniffi --verbose --color always
       - name: Test on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest'"

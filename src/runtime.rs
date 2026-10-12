@@ -176,7 +176,9 @@ impl Runtime {
 
 			match timeout_res {
 				Ok(stop_res) => match stop_res {
-					Ok(()) => log_debug!(self.logger, "Stopped background processing of events."),
+					Ok(()) => {
+						log_debug!(self.logger, "Stopped background processing of events.");
+					},
 					Err(e) => {
 						abort_handle.abort();
 						log_error!(

@@ -27,19 +27,25 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
         with:
           path: ldk-node
       - name: Checkout VSS
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
         with:
           repository: lightningdevkit/vss-server
           path: vss-server
 
       - name: Build and Deploy VSS Server
         run: |
-          cd vss-server/rust
-          cargo run server/vss-server-config.toml&
+          version=$(cargo metadata --no-deps --format-version 1 --manifest-path ldk-node/Cargo.toml | jq -r '.packages[] | select(.name == "ldk-node") | .version')
+          cd vss-server
+          # The 0.7 tests use fixed headers without authentication.
+          if [[ "$version" == 0.7.* ]]; then
+            RUSTFLAGS="--cfg noop_authorizer" cargo run --no-default-features server/vss-server-config.toml&
+          else
+            cargo run server/vss-server-config.toml&
+          fi
       - name: Run VSS Integration tests
         run: |
           cd ldk-node

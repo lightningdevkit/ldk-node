@@ -15,11 +15,13 @@ use ldk_node::lightning::ln::msgs::SocketAddress;
 use ldk_node::{Builder, Event};
 use lightning_invoice::{Bolt11InvoiceDescription, Description};
 use lnd_grpc_rust::lnrpc::invoice::InvoiceState::Settled as LndInvoiceStateSettled;
+use lnd_grpc_rust::lnrpc::payment::PaymentStatus as LndPaymentStatus;
 use lnd_grpc_rust::lnrpc::{
 	GetInfoRequest as LndGetInfoRequest, GetInfoResponse as LndGetInfoResponse,
 	Invoice as LndInvoice, ListInvoiceRequest as LndListInvoiceRequest,
-	QueryRoutesRequest as LndQueryRoutesRequest, Route as LndRoute, SendRequest as LndSendRequest,
+	QueryRoutesRequest as LndQueryRoutesRequest, Route as LndRoute,
 };
+use lnd_grpc_rust::routerrpc::SendPaymentRequest as LndSendPaymentRequest;
 use lnd_grpc_rust::{connect, LndClient};
 use tokio::fs;
 
@@ -200,25 +202,33 @@ impl TestLndClient {
 	}
 
 	async fn pay_invoice(&mut self, invoice_str: &str) {
-		let send_req =
-			LndSendRequest { payment_request: invoice_str.to_string(), ..Default::default() };
-		let response = self
+		let send_req = LndSendPaymentRequest {
+			payment_request: invoice_str.to_string(),
+			timeout_seconds: 60,
+			no_inflight_updates: true,
+			..Default::default()
+		};
+		let mut stream = self
 			.client
-			.lightning()
-			.send_payment_sync(send_req)
+			.router()
+			.send_payment_v2(send_req)
 			.await
 			.expect("Failed to pay invoice on LND")
 			.into_inner();
 
-		if !response.payment_error.is_empty() || response.payment_preimage.is_empty() {
-			panic!(
-				"LND payment failed: {}",
-				if response.payment_error.is_empty() {
-					"No preimage returned"
-				} else {
-					&response.payment_error
-				}
-			);
+		while let Some(payment) = stream.message().await.expect("Failed to read LND payment update")
+		{
+			match LndPaymentStatus::try_from(payment.status) {
+				Ok(LndPaymentStatus::Succeeded) => {
+					assert!(!payment.payment_preimage.is_empty(), "No preimage returned");
+					return;
+				},
+				Ok(LndPaymentStatus::Failed) => {
+					panic!("LND payment failed: {:?}", payment.failure_reason);
+				},
+				_ => {},
+			}
 		}
+		panic!("LND payment stream ended without terminal status");
 	}
 }
