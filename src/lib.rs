@@ -369,7 +369,7 @@ impl Node {
 			)
 		})?;
 
-		// Reconcile block-based listeners before peers or event processing can act on stale
+		// Synchronize Lightning chain state before peers or event processing can act on stale
 		// confirmations. Each restored ChannelMonitor may have been persisted at a different tip.
 		self.runtime.block_on(self.chain_source.initialize_wallets(
 			self.stop_sender.subscribe(),

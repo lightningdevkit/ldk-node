@@ -1037,6 +1037,68 @@ async fn split_underpaid_bolt11_payment() {
 	assert_eq!(node_b_payments.first().unwrap().amount_msat, Some(half_amount_msat));
 }
 
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn startup_syncs_lightning_wallet_esplora() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	do_test_startup_syncs_lightning_wallet(
+		TestChainSource::Esplora(&electrsd),
+		&bitcoind,
+		&electrsd,
+	)
+	.await;
+}
+
+#[cfg(feature = "chain-electrum")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn startup_syncs_lightning_wallet_electrum() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	do_test_startup_syncs_lightning_wallet(
+		TestChainSource::Electrum(&electrsd),
+		&bitcoind,
+		&electrsd,
+	)
+	.await;
+}
+
+#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
+async fn do_test_startup_syncs_lightning_wallet(
+	chain_source: TestChainSource<'_>, bitcoind: &BitcoinD, electrsd: &ElectrsD,
+) {
+	let config = random_config();
+	setup_builder!(builder, config.node_config);
+	// Disable background synchronization so only startup can advance the Lightning tip.
+	configure_chain_source(&chain_source, &mut builder, &config);
+	let node = builder.build(config.node_entropy.into()).unwrap();
+	assert!(node.status().latest_lightning_wallet_sync_timestamp.is_none());
+	assert!(node.status().latest_onchain_wallet_sync_timestamp.is_none());
+
+	// Check both the first start and restarting the same node after the chain advances.
+	for _ in 0..2 {
+		let previous_tip = node.status().current_best_block;
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+		let chain_info = bitcoind.client.get_blockchain_info().unwrap();
+		let expected_hash =
+			bitcoind.client.get_block_hash(chain_info.blocks as u64).unwrap().block_hash().unwrap();
+		assert_ne!(previous_tip.block_hash, expected_hash);
+
+		node.start().unwrap();
+		let status = node.status();
+		assert_eq!(
+			status.current_best_block.block_hash, expected_hash,
+			"startup must synchronize the Lightning wallet before returning",
+		);
+		assert_eq!(status.current_best_block.height as i64, chain_info.blocks);
+		assert!(status.latest_lightning_wallet_sync_timestamp.is_some());
+		assert!(status.latest_fee_rate_cache_update_timestamp.is_some());
+		assert!(
+			status.latest_onchain_wallet_sync_timestamp.is_none(),
+			"startup must leave the BDK wallet for background or manual synchronization",
+		);
+		node.stop().unwrap();
+	}
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn start_stop_reinit() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();

@@ -315,7 +315,7 @@ impl ChainSource {
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		#[cfg(not(feature = "chain-bitcoind"))]
-		let _ = (stop_sync_receiver, onchain_wallet, channel_manager, chain_monitor, output_sweeper);
+		let _ = (stop_sync_receiver, onchain_wallet);
 		match &self.kind {
 			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind(source) => {
@@ -331,9 +331,13 @@ impl ChainSource {
 					.await
 			},
 			#[cfg(feature = "chain-esplora")]
-			ChainSourceKind::Esplora(_) => Ok(()),
+			ChainSourceKind::Esplora(source) => {
+				source.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper).await
+			},
 			#[cfg(feature = "chain-electrum")]
-			ChainSourceKind::Electrum(_) => Ok(()),
+			ChainSourceKind::Electrum(source) => {
+				source.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper).await
+			},
 		}
 	}
 
