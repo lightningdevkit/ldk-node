@@ -1578,6 +1578,8 @@ impl std::fmt::Display for Bolt11Invoice {
 pub struct LSPS1PaymentInfo {
 	/// A Lightning payment using BOLT 11.
 	pub bolt11: Option<crate::ffi::LSPS1Bolt11PaymentInfo>,
+	/// A Lightning payment using BOLT 12.
+	pub bolt12: Option<LSPS1Bolt12PaymentInfo>,
 	/// An onchain payment.
 	pub onchain: Option<LSPS1OnchainPaymentInfo>,
 }
@@ -1587,6 +1589,7 @@ impl From<lightning_liquidity::lsps1::msgs::LSPS1PaymentInfo> for LSPS1PaymentIn
 	fn from(value: lightning_liquidity::lsps1::msgs::LSPS1PaymentInfo) -> Self {
 		LSPS1PaymentInfo {
 			bolt11: value.bolt11.map(|b| b.into()),
+			bolt12: value.bolt12.map(|b| b.into()),
 			onchain: value.onchain.map(|o| o.into()),
 		}
 	}
@@ -1655,6 +1658,35 @@ impl From<lightning_liquidity::lsps1::msgs::LSPS1Bolt11PaymentInfo> for LSPS1Bol
 			fee_total_sat: info.fee_total_sat,
 			order_total_sat: info.order_total_sat,
 			invoice: Arc::new(info.invoice.into()),
+		}
+	}
+}
+
+/// A Lightning payment using BOLT 12.
+#[cfg(feature = "uniffi")]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct LSPS1Bolt12PaymentInfo {
+	/// Indicates the current state of the payment.
+	pub state: LSPS1PaymentState,
+	/// The datetime when the payment option expires.
+	pub expires_at: LSPSDateTime,
+	/// The total fee the LSP will charge to open this channel in satoshi.
+	pub fee_total_sat: u64,
+	/// The amount the client needs to pay to have the requested channel openend.
+	pub order_total_sat: u64,
+	/// A BOLT12 offer the client can pay to have to channel opened.
+	pub offer: Arc<Offer>,
+}
+
+#[cfg(feature = "uniffi")]
+impl From<lightning_liquidity::lsps1::msgs::LSPS1Bolt12PaymentInfo> for LSPS1Bolt12PaymentInfo {
+	fn from(info: lightning_liquidity::lsps1::msgs::LSPS1Bolt12PaymentInfo) -> Self {
+		Self {
+			state: info.state,
+			expires_at: info.expires_at,
+			fee_total_sat: info.fee_total_sat,
+			order_total_sat: info.order_total_sat,
+			offer: Arc::new(info.offer.into()),
 		}
 	}
 }
