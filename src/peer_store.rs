@@ -42,35 +42,102 @@ where
 		Self { peers, mutation_lock, kv_store, logger }
 	}
 
-	pub(crate) async fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
+	/// Stores the given peer only if no entry for it exists yet.
+	///
+	/// In particular, an existing peer's stored address is left untouched. Use this for
+	/// gossip- or event-derived peers (e.g., inbound channel counterparties), where the
+	/// discovered address must not override an explicitly stored one.
+	///
+	/// The in-memory state is only updated after the new state has been persisted
+	/// successfully.
+	pub(crate) async fn add_peer_if_missing(&self, peer_info: PeerInfo) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
-		let data = {
-			let mut locked_peers = self.peers.write().expect("lock");
-			if locked_peers.contains_key(&peer_info.node_id) {
+
+		{
+			let peers = self.peers.read().expect("lock");
+			if peers.contains_key(&peer_info.node_id) {
 				return Ok(());
 			}
-			locked_peers.insert(peer_info.node_id, peer_info);
-			PeerStoreSerWrapper(&locked_peers).encode()
+		}
+
+		self.persist_and_apply(peer_info).await
+	}
+
+	/// Stores the given peer, updating the stored address if the peer is already known.
+	///
+	/// Use this for explicitly supplied addresses (e.g., via [`crate::Node::connect`] with
+	/// `persist` set), where a re-connect to a new address should replace the one used for
+	/// reconnection.
+	///
+	/// The in-memory state is only updated after the new state has been persisted
+	/// successfully.
+	pub(crate) async fn upsert_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
+		let _guard = self.mutation_lock.lock().await;
+
+		{
+			let peers = self.peers.read().expect("lock");
+			if peers.get(&peer_info.node_id) == Some(&peer_info) {
+				return Ok(());
+			}
+		}
+
+		self.persist_and_apply(peer_info).await
+	}
+
+	async fn persist_and_apply(&self, peer_info: PeerInfo) -> Result<(), Error> {
+		let data = {
+			let mut locked_peers = self.peers.write().expect("lock");
+
+			// Temporarily apply the update so it is included in the serialized state, then
+			// restore the current state before persisting: readers cannot observe the
+			// temporary value as they need the same lock. This avoids cloning the entire
+			// peer map while retaining the persistence-first semantics.
+			let previous = locked_peers.insert(peer_info.node_id, peer_info.clone());
+			let data = PeerStoreSerWrapper(&locked_peers).encode();
+			match previous {
+				Some(previous) => {
+					locked_peers.insert(peer_info.node_id, previous);
+				},
+				None => {
+					locked_peers.remove(&peer_info.node_id);
+				},
+			}
+			data
 		};
-		self.persist_peers(data).await
+
+		self.persist_peers(data).await?;
+
+		// Persistence succeeded, so apply the update permanently.
+		self.peers.write().expect("lock").insert(peer_info.node_id, peer_info);
+		Ok(())
 	}
 
 	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let data = {
-			let locked_peers = self.peers.read().expect("lock");
-			let mut updated_peers = locked_peers.clone();
-			updated_peers.remove(node_id);
-			PeerStoreSerWrapper(&updated_peers).encode()
+			let mut locked_peers = self.peers.write().expect("lock");
+
+			// Temporarily apply the removal so it is excluded from the serialized state,
+			// then restore the current state before persisting: readers cannot observe
+			// the temporary value as they need the same lock. This avoids cloning the
+			// entire peer map while retaining the persistence-first semantics.
+			let previous = locked_peers.remove(node_id);
+			let data = PeerStoreSerWrapper(&locked_peers).encode();
+			if let Some(previous) = previous {
+				locked_peers.insert(*node_id, previous);
+			}
+			data
 		};
 		self.persist_peers(data).await?;
+
+		// Persistence succeeded, so apply the removal permanently.
 		self.peers.write().expect("lock").remove(node_id);
 		Ok(())
 	}
 
 	/// Returns the current in-memory peer set.
 	///
-	/// The async mutation lock serializes `add_peer` and `remove_peer`, but this synchronous
+	/// The async mutation lock serializes peer-store mutations, but this synchronous
 	/// reader cannot wait on it. Until peer-store reads are async, callers may observe peer
 	/// changes that are still being persisted.
 	pub(crate) fn list_peers(&self) -> Vec<PeerInfo> {
@@ -79,7 +146,7 @@ where
 
 	/// Returns the current in-memory peer info for `node_id`.
 	///
-	/// The async mutation lock serializes `add_peer` and `remove_peer`, but this synchronous
+	/// The async mutation lock serializes peer-store mutations, but this synchronous
 	/// reader cannot wait on it. Until peer-store reads are async, callers may observe peer
 	/// changes that are still being persisted.
 	pub(crate) fn get_peer(&self, node_id: &PublicKey) -> Option<PeerInfo> {
@@ -239,7 +306,7 @@ mod tests {
 		)
 		.await
 		.is_err());
-		peer_store.add_peer(expected_peer_info.clone()).await.unwrap();
+		peer_store.upsert_peer(expected_peer_info.clone()).await.unwrap();
 
 		// Check we can read back what we persisted.
 		let persisted_bytes = KVStore::read(
@@ -276,5 +343,122 @@ mod tests {
 
 		assert_eq!(Err(Error::PersistenceFailed), peer_store.remove_peer(&node_id).await);
 		assert_eq!(Some(peer_info), peer_store.get_peer(&node_id));
+	}
+
+	fn test_node_id() -> PublicKey {
+		PublicKey::from_str("0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993")
+			.unwrap()
+	}
+
+	#[tokio::test]
+	async fn upsert_peer_updates_stored_address() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
+
+		let node_id = test_node_id();
+		let old_address = SocketAddress::from_str("127.0.0.1:9738").unwrap();
+		let new_address = SocketAddress::from_str("127.0.0.1:9739").unwrap();
+
+		let old_peer_info = PeerInfo { node_id, address: old_address };
+		peer_store.upsert_peer(old_peer_info.clone()).await.unwrap();
+		assert_eq!(peer_store.get_peer(&node_id), Some(old_peer_info));
+
+		// Re-adding the same peer with a new address must update the stored entry, also on
+		// disk.
+		let new_peer_info = PeerInfo { node_id, address: new_address };
+		peer_store.upsert_peer(new_peer_info.clone()).await.unwrap();
+		assert_eq!(peer_store.get_peer(&node_id), Some(new_peer_info.clone()));
+
+		let persisted_bytes = KVStore::read(
+			&*store,
+			PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+			PEER_INFO_PERSISTENCE_KEY,
+		)
+		.await
+		.unwrap();
+		let deser_peer_store =
+			PeerStore::read(&mut &persisted_bytes[..], (Arc::clone(&store), logger)).unwrap();
+		assert_eq!(deser_peer_store.get_peer(&node_id), Some(new_peer_info));
+	}
+
+	#[tokio::test]
+	async fn add_peer_if_missing_does_not_overwrite_stored_address() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let peer_store = PeerStore::new(Arc::clone(&store), Arc::clone(&logger));
+
+		let node_id = test_node_id();
+		let stored =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9738").unwrap() };
+		peer_store.upsert_peer(stored.clone()).await.unwrap();
+
+		// A gossip-/event-derived address must not overwrite the explicitly stored one.
+		let discovered =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9739").unwrap() };
+		peer_store.add_peer_if_missing(discovered).await.unwrap();
+		assert_eq!(peer_store.get_peer(&node_id), Some(stored));
+	}
+
+	#[tokio::test]
+	async fn readding_unchanged_peer_skips_persist() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let logger = Arc::new(TestLogger::new());
+
+		let node_id = test_node_id();
+		let peer_info =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9738").unwrap() };
+
+		// Seed the store's in-memory state with the peer info. Any attempt to persist
+		// below would fail, so succeeding proves the no-op paths skip persistence.
+		let mut peers = HashMap::new();
+		peers.insert(node_id, peer_info.clone());
+		let persisted_bytes = PeerStoreSerWrapper(&peers).encode();
+		let peer_store = PeerStore::read(&mut &persisted_bytes[..], (store, logger)).unwrap();
+
+		// Re-adding the unchanged peer must be a no-op and not write again.
+		peer_store.upsert_peer(peer_info.clone()).await.unwrap();
+
+		// Nor must the add-if-missing path write (or overwrite) for a known peer.
+		let other_peer_info =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9739").unwrap() };
+		peer_store.add_peer_if_missing(other_peer_info).await.unwrap();
+		assert_eq!(Some(peer_info), peer_store.get_peer(&node_id));
+	}
+
+	#[tokio::test]
+	async fn upsert_peer_does_not_mutate_memory_if_persist_fails() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let logger = Arc::new(TestLogger::new());
+
+		let node_id = test_node_id();
+		let old_peer_info =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9738").unwrap() };
+		let new_peer_info =
+			PeerInfo { node_id, address: SocketAddress::from_str("127.0.0.1:9739").unwrap() };
+
+		// Seed the store's in-memory state with the old peer info.
+		let mut peers = HashMap::new();
+		peers.insert(node_id, old_peer_info.clone());
+		let persisted_bytes = PeerStoreSerWrapper(&peers).encode();
+		let peer_store =
+			PeerStore::read(&mut &persisted_bytes[..], (Arc::clone(&store), Arc::clone(&logger)))
+				.unwrap();
+
+		// Updating the stored address fails, so the old peer info must remain untouched.
+		assert_eq!(
+			Err(Error::PersistenceFailed),
+			peer_store.upsert_peer(new_peer_info.clone()).await
+		);
+		assert_eq!(Some(old_peer_info.clone()), peer_store.get_peer(&node_id));
+
+		// Inserting a new peer fails too, so no entry must be left behind.
+		let peer_store = PeerStore::new(store, logger);
+		assert_eq!(
+			Err(Error::PersistenceFailed),
+			peer_store.upsert_peer(old_peer_info.clone()).await
+		);
+		assert_eq!(None, peer_store.get_peer(&node_id));
 	}
 }

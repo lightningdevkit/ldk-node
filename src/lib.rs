@@ -1317,6 +1317,8 @@ impl Node {
 	/// Connect to a node on the peer-to-peer network.
 	///
 	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
+	/// A later `connect` with `persist` set to `true` and a different address updates the
+	/// stored address used for reconnection.
 	pub fn connect(
 		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
@@ -1339,7 +1341,7 @@ impl Node {
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
 
 		if persist {
-			self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
+			self.runtime.block_on(self.peer_store.upsert_peer(peer_info))?;
 		}
 
 		Ok(())
@@ -1477,7 +1479,7 @@ impl Node {
 					zero_reserve_string,
 					peer_info.node_id
 				);
-				self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
+				self.runtime.block_on(self.peer_store.upsert_peer(peer_info))?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
