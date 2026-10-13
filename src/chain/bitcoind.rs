@@ -17,7 +17,9 @@ use base64::Engine;
 use bitcoin::transaction::Version;
 use bitcoin::{BlockHash, FeeRate, Network, OutPoint, Transaction, Txid};
 use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
+use lightning::chain::transaction::TransactionData;
 use lightning::chain::{BlockLocator, Listen};
+use lightning::ln::types::ChannelId;
 use lightning::util::ser::Writeable;
 use lightning_block_sync::gossip::UtxoSource;
 use lightning_block_sync::http::{HttpClientError, JsonResponse};
@@ -26,8 +28,8 @@ use lightning_block_sync::poll::{ChainPoller, ChainTip, ValidatedBlockHeader};
 use lightning_block_sync::rest::RestClient;
 use lightning_block_sync::rpc::{RpcClient, RpcClientError};
 use lightning_block_sync::{
-	BlockData, BlockHeaderData, BlockSource, BlockSourceError, BlockSourceErrorKind, HeaderCache,
-	SpvClient,
+	BlockData, BlockHeaderData, BlockSource, BlockSourceError, BlockSourceErrorKind,
+	BlockSourceResult, HeaderCache, SpvClient,
 };
 use serde::Serialize;
 
@@ -43,7 +45,7 @@ use crate::fee_estimator::{
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::tx_broadcaster::SortedTransactions;
-use crate::types::{ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
+use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
@@ -54,6 +56,77 @@ type BitcoindSpvClient =
 
 #[cfg(test)]
 mod startup_tests;
+
+/// Replays chain data to one restored monitor before aggregate polling begins.
+struct ChannelMonitorListener<'a> {
+	channel_id: ChannelId,
+	chain_monitor: &'a ChainMonitor,
+	tx_broadcaster: &'a Broadcaster,
+	fee_estimator: &'a OnchainFeeEstimator,
+	logger: &'a Logger,
+}
+
+impl Listen for ChannelMonitorListener<'_> {
+	fn filtered_block_connected(
+		&self, header: &bitcoin::block::Header, txdata: &TransactionData, height: u32,
+	) {
+		let monitor = self.chain_monitor.get_monitor(self.channel_id).expect("loaded monitor");
+		// Bitcoin Core supplies full blocks, so newly watched outputs need no registration.
+		monitor.block_connected(
+			header,
+			txdata,
+			height,
+			self.tx_broadcaster,
+			self.fee_estimator,
+			self.logger,
+		);
+	}
+
+	fn blocks_disconnected(&self, fork_point: BlockLocator) {
+		let monitor = self.chain_monitor.get_monitor(self.channel_id).expect("loaded monitor");
+		monitor.blocks_disconnected(
+			fork_point,
+			self.tx_broadcaster,
+			self.fee_estimator,
+			self.logger,
+		);
+	}
+}
+
+async fn synchronize_chain_listeners<B: BlockSource>(
+	block_source: &B, network: Network, chain_monitor: &ChainMonitor, tx_broadcaster: &Broadcaster,
+	fee_estimator: &OnchainFeeEstimator, logger: &Logger,
+	chain_listeners: Vec<(BlockLocator, &(dyn Listen + Send + Sync))>,
+) -> BlockSourceResult<(HeaderCache, ValidatedBlockHeader)> {
+	// A single checkpoint for the aggregate ChainMonitor would miss disconnects for monitors
+	// persisted farther ahead on a stale fork. Pair every monitor with its own current locator,
+	// including on retries after a partially completed synchronization.
+	let monitor_listeners: Vec<_> = chain_monitor
+		.list_monitors()
+		.into_iter()
+		.map(|channel_id| ChannelMonitorListener {
+			channel_id,
+			chain_monitor,
+			tx_broadcaster,
+			fee_estimator,
+			logger,
+		})
+		.collect();
+	let mut listeners: Vec<_> = monitor_listeners
+		.iter()
+		.map(|listener| {
+			let best_block = chain_monitor
+				.get_monitor(listener.channel_id)
+				.expect("loaded monitor")
+				.current_best_block();
+			(best_block, listener as &(dyn Listen + Send + Sync))
+		})
+		.collect();
+	listeners.extend(chain_listeners);
+	// Replay need not be persisted here: it is repeated on restart, as permitted by
+	// ChainMonitor::load_existing_monitor. Peers and event processing must remain stopped.
+	synchronize_listeners(block_source, network, listeners).await
+}
 
 async fn acquire_initial_wallet_sync_guard<'a>(
 	wallet_polling_status: &'a Mutex<WalletSyncStatus>,
@@ -185,6 +258,7 @@ impl BitcoindChainSource {
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
 		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		tx_broadcaster: &Broadcaster,
 	) -> Result<(), Error> {
 		// First register for the wallet polling status to make sure `Node::sync_wallets` calls
 		// wait on the result before proceeding.
@@ -211,34 +285,20 @@ impl BitcoindChainSource {
 		let channel_manager_best_block = channel_manager.current_best_block();
 		let sweeper_best_block = output_sweeper.current_best_block();
 
-		let mut chain_listeners = vec![
+		let chain_listeners = vec![
 			(onchain_wallet_best_block, &*onchain_wallet as &(dyn Listen + Send + Sync)),
 			(channel_manager_best_block, &*channel_manager as &(dyn Listen + Send + Sync)),
 			(sweeper_best_block, &*output_sweeper as &(dyn Listen + Send + Sync)),
 		];
 
-		// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
-		// before giving them to `ChainMonitor` it the first place. However, this isn't
-		// trivial as we load them on initialization (in the `Builder`) and only gain
-		// network access during `start`. For now, we just make sure we get the worst known
-		// block hash and sychronize them via `ChainMonitor`.
-		if let Some(worst_channel_monitor_best_block) = chain_monitor
-			.list_monitors()
-			.iter()
-			.flat_map(|channel_id| chain_monitor.get_monitor(*channel_id))
-			.map(|m| m.current_best_block())
-			.min_by_key(|b| b.height)
-		{
-			chain_listeners.push((
-				worst_channel_monitor_best_block,
-				&*chain_monitor as &(dyn Listen + Send + Sync),
-			));
-		}
-
 		let now = SystemTime::now();
-		match synchronize_listeners(
+		match synchronize_chain_listeners(
 			self.api_client.as_ref(),
 			self.config.network,
+			&chain_monitor,
+			tx_broadcaster,
+			&self.fee_estimator,
+			&self.logger,
 			chain_listeners.clone(),
 		)
 		.await

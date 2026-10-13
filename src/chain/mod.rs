@@ -326,6 +326,7 @@ impl ChainSource {
 						channel_manager,
 						chain_monitor,
 						output_sweeper,
+						&self.tx_broadcaster,
 					)
 					.await
 			},
