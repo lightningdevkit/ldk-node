@@ -1755,6 +1755,77 @@ impl Wallet {
 		Ok(())
 	}
 
+	/// Tags an incoming payjoin transaction as [`TransactionType::Payjoin`].
+	///
+	/// The sender broadcasts a payjoin, so it never passes through [`Self::classify_broadcast`],
+	/// and we only learn the outcome once monitoring finds the transaction, possibly after wallet
+	/// sync has already recorded or even graduated it. Like a late funding classification, this
+	/// merges only the classification into an existing record and leaves its figures, status and
+	/// confirmation state to wallet sync. If no record exists yet, one is created from `tx` and
+	/// marked as pending.
+	pub(crate) async fn classify_payjoin(
+		&self, txid: Txid, tx: Option<&Transaction>,
+	) -> Result<(), Error> {
+		// Held across both stores, as wallet sync and the other classifiers do, so neither sees
+		// the record and its pending index out of step.
+		let _guard = self.funding_payment_update_lock.lock().await;
+
+		let id = PaymentId(txid.to_byte_array());
+		let (amount_msat, fee_paid_msat, direction) = match tx {
+			Some(tx) => self.onchain_payment_fields(tx),
+			// Wallet sync fills the values in on its next event for this txid.
+			None => (None, None, PaymentDirection::Inbound),
+		};
+		let details = PaymentDetails::new(
+			id,
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: Some(TransactionType::Payjoin),
+			},
+			amount_msat,
+			fee_paid_msat,
+			direction,
+			PaymentStatus::Pending,
+		);
+
+		let mut classification = PaymentDetailsUpdate::new(id);
+		classification.tx_type = Some(Some(TransactionType::Payjoin));
+
+		self.payment_store
+			.mutate(&id, |existing| match existing {
+				None => Some(details.clone()),
+				Some(current) => {
+					let mut updated = current.clone();
+					updated.update(classification.clone()).then_some(updated)
+				},
+			})
+			.await?;
+
+		let payment_store = Arc::clone(&self.payment_store);
+		self.pending_payment_store
+			.mutate_async(&id, move |existing| async move {
+				let recorded = payment_store.get(&id).await?.unwrap_or(details);
+				Ok(match existing {
+					None if recorded.status == PaymentStatus::Pending => {
+						Some(PendingPaymentDetails::new(recorded, Vec::new(), Vec::new()))
+					},
+					None => None,
+					Some(mut entry) => {
+						let pending_update = PendingPaymentDetailsUpdate {
+							id,
+							payment_update: Some(classification),
+							conflicting_txids: None,
+							candidates: Vec::new(),
+						};
+						entry.update(pending_update).then_some(entry)
+					},
+				})
+			})
+			.await?;
+		Ok(())
+	}
+
 	/// Writes a freshly-classified funding payment to the authoritative payment store and adds a
 	/// pending-store index entry, so wallet sync graduates it through `ANTI_REORG_DELAY`.
 	async fn persist_funding_payment(
@@ -2277,6 +2348,46 @@ impl Wallet {
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
 
 		Ok(new_txid)
+	}
+
+	/// Check if a script belongs to this wallet
+	pub(crate) fn is_mine(&self, script: ScriptBuf) -> Result<bool, Error> {
+		let locked_wallet = self.inner.lock().expect("lock");
+		Ok(locked_wallet.is_mine(script))
+	}
+
+	/// Check if an outpoint belongs to this wallet.
+	pub(crate) fn is_my_outpoint(&self, outpoint: &OutPoint) -> Result<bool, Error> {
+		let locked_wallet = self.inner.lock().expect("lock");
+
+		let script_pubkey = match locked_wallet.tx_details(outpoint.txid) {
+			Some(details) => match details.tx.output.get(outpoint.vout as usize) {
+				Some(txout) => txout.script_pubkey.clone(),
+				None => return Ok(false),
+			},
+			None => return Ok(false),
+		};
+
+		Ok(locked_wallet.is_mine(script_pubkey))
+	}
+
+	#[allow(deprecated)]
+	pub(crate) fn process_psbt(&self, mut psbt: Psbt) -> Result<Psbt, Error> {
+		let locked_wallet = self.inner.lock().expect("lock");
+
+		let sign_options = SignOptions { trust_witness_utxo: true, ..Default::default() };
+
+		locked_wallet.sign(&mut psbt, sign_options).map_err(|e| {
+			log_error!(self.logger, "Failed to sign PSBT: {}", e);
+			Error::WalletOperationFailed
+		})?;
+
+		// Return the signed PSBT (not extracted transaction)
+		Ok(psbt)
+	}
+
+	pub(crate) fn list_unspent_confirmed_utxos(&self) -> Result<Vec<Utxo>, Error> {
+		self.list_confirmed_utxos_inner().map_err(|()| Error::WalletOperationFailed)
 	}
 }
 

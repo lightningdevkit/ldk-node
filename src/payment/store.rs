@@ -468,6 +468,9 @@ pub enum TransactionType {
 		/// The channels participating in the negotiation.
 		channels: Vec<Channel>,
 	},
+	/// A transaction settling a payjoin, i.e., one to which both we and our counterparty
+	/// contributed inputs.
+	Payjoin,
 }
 
 impl_writeable_tlv_based_enum!(TransactionType,
@@ -495,7 +498,8 @@ impl_writeable_tlv_based_enum!(TransactionType,
 	},
 	(12, InteractiveFunding) => {
 		(0, channels, optional_vec),
-	}
+	},
+	(13, Payjoin) => {}
 );
 
 impl From<LdkTransactionType> for TransactionType {
