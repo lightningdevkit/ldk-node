@@ -423,6 +423,10 @@ impl Bolt11Payment {
 	pub fn claim_for_id(
 		&self, payment_id: PaymentId, claimable_amount_msat: u64, preimage: PaymentPreimage,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let details =
 			self.runtime.block_on(self.payment_store.get(&payment_id))?.ok_or_else(|| {
 				log_error!(
@@ -489,6 +493,10 @@ impl Bolt11Payment {
 	///
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	pub fn fail_for_id(&self, payment_id: PaymentId) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let details =
 			self.runtime.block_on(self.payment_store.get(&payment_id))?.ok_or_else(|| {
 				log_error!(
@@ -637,6 +645,9 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			Some(amount_msat),
@@ -682,6 +693,9 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			Some(amount_msat),
@@ -709,6 +723,9 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			None,
@@ -755,6 +772,9 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			None,

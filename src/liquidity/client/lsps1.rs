@@ -463,6 +463,7 @@ pub struct LSPS1Liquidity {
 	wallet: Arc<Wallet>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Arc<LSPS1Client<Arc<Logger>>>,
+	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
 }
 
@@ -470,9 +471,10 @@ impl LSPS1Liquidity {
 	pub(crate) fn new(
 		runtime: Arc<Runtime>, wallet: Arc<Wallet>,
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
-		liquidity_source: Arc<LSPS1Client<Arc<Logger>>>, logger: Arc<Logger>,
+		liquidity_source: Arc<LSPS1Client<Arc<Logger>>>, is_running: Arc<RwLock<bool>>,
+		logger: Arc<Logger>,
 	) -> Self {
-		Self { runtime, wallet, connection_manager, liquidity_source, logger }
+		Self { runtime, wallet, connection_manager, liquidity_source, is_running, logger }
 	}
 }
 
@@ -489,6 +491,10 @@ impl LSPS1Liquidity {
 		&self, lsp_balance_sat: u64, client_balance_sat: u64, channel_expiry_blocks: u32,
 		announce_channel: bool, node_id: Option<PublicKey>,
 	) -> Result<LSPS1OrderStatus, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let lsps1_node = self
 			.runtime
 			.block_on(async { self.liquidity_source.get_lsps1_node(node_id.as_ref()).await })?;
@@ -528,6 +534,10 @@ impl LSPS1Liquidity {
 	pub fn check_order_status(
 		&self, order_id: LSPS1OrderId, lsp_node_id: PublicKey,
 	) -> Result<LSPS1OrderStatus, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let lsps1_node = self
 			.runtime
 			.block_on(async { self.liquidity_source.get_lsps1_node(Some(&lsp_node_id)).await })?;

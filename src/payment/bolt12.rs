@@ -569,6 +569,10 @@ impl Bolt12Payment {
 		&self, amount_msat: u64, expiry_secs: u32, quantity: Option<u64>,
 		payer_note: Option<String>, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<Refund, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
 
 		let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
@@ -640,6 +644,10 @@ impl Bolt12Payment {
 	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
 	/// [`Offer`]: lightning::offers::offer::Offer
 	pub fn receive_async(&self) -> Result<Offer, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		self.channel_manager
 			.get_async_receive_offer()
 			.map(maybe_wrap)
@@ -659,6 +667,10 @@ impl Bolt12Payment {
 	pub fn set_paths_to_static_invoice_server(
 		&self, paths: Vec<BlindedMessagePath>,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		self.channel_manager
 			.set_paths_to_static_invoice_server(paths)
 			.or(Err(Error::InvalidBlindedPaths))
@@ -689,6 +701,10 @@ impl Bolt12Payment {
 	/// [`Offer`]: lightning::offers::offer::Offer
 	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
 	pub fn set_paths_to_static_invoice_server(&self, paths: Vec<u8>) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let decoded_paths = <Vec<BlindedMessagePath> as Readable>::read(&mut &paths[..])
 			.or(Err(Error::InvalidBlindedPaths))?;
 

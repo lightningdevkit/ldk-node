@@ -79,6 +79,10 @@ impl OnchainPayment {
 	pub fn send_to_address(
 		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<FfiFeeRate>,
 	) -> Result<Txid, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.runtime.block_on(self.send_to_address_inner(address, amount_sats, fee_rate_opt))
 	}
@@ -134,6 +138,10 @@ impl OnchainPayment {
 	pub fn bump_fee_rbf(
 		&self, payment_id: PaymentId, fee_rate: Option<FfiFeeRate>,
 	) -> Result<Txid, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let cur_anchor_reserve_sats =
 			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);

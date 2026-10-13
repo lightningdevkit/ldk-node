@@ -14,7 +14,7 @@
 //! [BIP 353]: https://github.com/bitcoin/bips/blob/master/bip-0353.mediawiki
 //! [BOLT 11]: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 //! [BOLT 12]: https://github.com/lightning/bolts/blob/master/12-offer-encoding.md
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use std::vec::IntoIter;
 
@@ -73,6 +73,7 @@ pub struct UnifiedPayment {
 	bolt12_payment: Arc<Bolt12Payment>,
 	#[cfg(not(hrn_tests))]
 	config: Arc<Config>,
+	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
 	hrn_resolver: HRNResolver,
 	#[cfg(hrn_tests)]
@@ -82,8 +83,8 @@ pub struct UnifiedPayment {
 impl UnifiedPayment {
 	pub(crate) fn new(
 		onchain_payment: Arc<OnchainPayment>, bolt11_invoice: Arc<Bolt11Payment>,
-		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, logger: Arc<Logger>,
-		hrn_resolver: HRNResolver,
+		bolt12_payment: Arc<Bolt12Payment>, config: Arc<Config>, is_running: Arc<RwLock<bool>>,
+		logger: Arc<Logger>, hrn_resolver: HRNResolver,
 	) -> Self {
 		#[cfg(hrn_tests)]
 		let _ = config;
@@ -94,6 +95,7 @@ impl UnifiedPayment {
 			bolt12_payment,
 			#[cfg(not(hrn_tests))]
 			config,
+			is_running,
 			logger,
 			hrn_resolver,
 			#[cfg(hrn_tests)]
@@ -189,6 +191,10 @@ impl UnifiedPayment {
 		&self, uri_str: &str, amount_msat: Option<u64>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<UnifiedPaymentResult, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let target_network;
 
 		#[cfg(hrn_tests)]
@@ -321,6 +327,10 @@ impl UnifiedPayment {
 							log_error!(self.logger, "Failed to send BOLT12 offer: DuplicatePayment. This is part of a unified payment. Aborting to avoid duplicate payment.");
 							return Err(Error::DuplicatePayment);
 						},
+						// There is nothing to fall back to if the node isn't running.
+						Err(Error::NotRunning) => {
+							return Err(Error::NotRunning);
+						},
 						// A persistence failure may occur after the Lightning payment has
 						// already been initiated with the ChannelManager. Falling back to
 						// the BOLT11 invoice in that case would double-pay, so we abort
@@ -347,6 +357,10 @@ impl UnifiedPayment {
 						Err(Error::DuplicatePayment) => {
 							log_error!(self.logger, "Failed to send BOLT11 invoice: DuplicatePayment. This is part of a unified payment. Aborting to avoid duplicate payment.");
 							return Err(Error::DuplicatePayment);
+						},
+						// There is nothing to fall back to if the node isn't running.
+						Err(Error::NotRunning) => {
+							return Err(Error::NotRunning);
 						},
 						// A persistence failure may occur after the Lightning payment has
 						// already been initiated with the ChannelManager. Falling back to
