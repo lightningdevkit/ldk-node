@@ -178,11 +178,11 @@ impl BitcoindChainSource {
 		Ok(())
 	}
 
-	pub(super) async fn continuously_sync_wallets(
+	pub(super) async fn initialize_wallets(
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
 		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
-	) {
+	) -> Result<(), Error> {
 		// First register for the wallet polling status to make sure `Node::sync_wallets` calls
 		// wait on the result before proceeding.
 		let Some(initial_sync_guard) =
@@ -190,7 +190,7 @@ impl BitcoindChainSource {
 				.await
 		else {
 			log_trace!(self.logger, "Stopping initial chain sync.");
-			return;
+			return Err(Error::TxSyncFailed);
 		};
 
 		log_info!(
@@ -205,7 +205,7 @@ impl BitcoindChainSource {
 			// if the stop_sync_sender has been dropped, we should just exit
 			if stop_sync_receiver.has_changed().unwrap_or(true) {
 				log_trace!(self.logger, "Stopping initial chain sync.");
-				return;
+				return Err(Error::TxSyncFailed);
 			}
 
 			let onchain_wallet_best_block = onchain_wallet.current_best_block();
@@ -298,7 +298,7 @@ impl BitcoindChainSource {
 									self.logger,
 									"Stopping initial chain sync.",
 								);
-								return;
+								return Err(Error::TxSyncFailed);
 							}
 							_ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
 						}
@@ -318,7 +318,7 @@ impl BitcoindChainSource {
 									self.logger,
 									"Stopping initial chain sync during backoff.",
 								);
-								return;
+								return Err(Error::TxSyncFailed);
 							}
 							_ = tokio::time::sleep(Duration::from_secs(MAX_BACKOFF_SECS)) => {}
 						}
@@ -329,6 +329,27 @@ impl BitcoindChainSource {
 
 		// Now propagate the initial result to unblock waiting subscribers.
 		initial_sync_guard.complete(Ok(()));
+		Ok(())
+	}
+
+	pub(super) async fn continuously_sync_wallets(
+		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
+		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
+		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+	) {
+		if self
+			.initialize_wallets(
+				stop_sync_receiver.clone(),
+				Arc::clone(&onchain_wallet),
+				Arc::clone(&channel_manager),
+				Arc::clone(&chain_monitor),
+				Arc::clone(&output_sweeper),
+			)
+			.await
+			.is_err()
+		{
+			return;
+		}
 
 		let mut chain_polling_interval =
 			tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
