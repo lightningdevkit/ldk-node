@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bitcoin::{Script, Txid};
+#[cfg(feature = "chain-bitcoind")]
+use lightning::chain::Listen;
 use lightning::chain::{BlockLocator, Filter};
 
 #[cfg(feature = "chain-bitcoind")]
@@ -157,6 +159,66 @@ enum ChainSourceKind {
 	Electrum(ElectrumChainSource),
 	#[cfg(feature = "chain-bitcoind")]
 	Bitcoind(BitcoindChainSource),
+}
+
+#[cfg(feature = "chain-bitcoind")]
+pub(crate) struct ChainListener {
+	pub(crate) onchain_wallet: std::sync::Weak<Wallet>,
+	pub(crate) channel_manager: std::sync::Weak<ChannelManager>,
+	pub(crate) chain_monitor: std::sync::Weak<ChainMonitor>,
+	pub(crate) output_sweeper: std::sync::Weak<Sweeper>,
+}
+
+#[cfg(feature = "chain-bitcoind")]
+impl ChainListener {
+	fn upgrade(
+		&self,
+	) -> Option<(Arc<Wallet>, Arc<ChannelManager>, Arc<ChainMonitor>, Arc<Sweeper>)> {
+		Some((
+			self.onchain_wallet.upgrade()?,
+			self.channel_manager.upgrade()?,
+			self.chain_monitor.upgrade()?,
+			self.output_sweeper.upgrade()?,
+		))
+	}
+}
+
+#[cfg(feature = "chain-bitcoind")]
+impl Listen for ChainListener {
+	fn filtered_block_connected(
+		&self, header: &bitcoin::block::Header,
+		txdata: &lightning::chain::transaction::TransactionData, height: u32,
+	) {
+		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
+			self.upgrade()
+		{
+			onchain_wallet.filtered_block_connected(header, txdata, height);
+			channel_manager.filtered_block_connected(header, txdata, height);
+			chain_monitor.filtered_block_connected(header, txdata, height);
+			output_sweeper.filtered_block_connected(header, txdata, height);
+		}
+	}
+	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
+		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
+			self.upgrade()
+		{
+			onchain_wallet.block_connected(block, height);
+			channel_manager.block_connected(block, height);
+			chain_monitor.block_connected(block, height);
+			output_sweeper.block_connected(block, height);
+		}
+	}
+
+	fn blocks_disconnected(&self, fork_point_block: lightning::chain::BlockLocator) {
+		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
+			self.upgrade()
+		{
+			onchain_wallet.blocks_disconnected(fork_point_block);
+			channel_manager.blocks_disconnected(fork_point_block);
+			chain_monitor.blocks_disconnected(fork_point_block);
+			output_sweeper.blocks_disconnected(fork_point_block);
+		}
+	}
 }
 
 impl ChainSource {
