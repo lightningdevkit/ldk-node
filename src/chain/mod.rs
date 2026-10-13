@@ -312,8 +312,17 @@ impl ChainSource {
 	pub(crate) async fn initialize_wallets(
 		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>, onchain_wallet: Arc<Wallet>,
 		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
-		output_sweeper: Arc<Sweeper>,
+		output_sweeper: Arc<Sweeper>, zero_fee_commitments_support_required: bool,
 	) -> Result<(), Error> {
+		// Replay can broadcast claims, so refresh fees and validate the backend before syncing.
+		// TODO: drop 0FC chain source validation when support is ubiquitous.
+		tokio::try_join!(
+			self.update_fee_rate_estimates(),
+			self.validate_zero_fee_commitments_support_if_required(
+				zero_fee_commitments_support_required
+			)
+		)?;
+
 		#[cfg(not(feature = "chain-bitcoind"))]
 		let _ = (stop_sync_receiver, onchain_wallet);
 		match &self.kind {
