@@ -309,6 +309,33 @@ impl ChainSource {
 		}
 	}
 
+	pub(crate) async fn initialize_wallets(
+		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>, onchain_wallet: Arc<Wallet>,
+		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
+	) -> Result<(), Error> {
+		#[cfg(not(feature = "chain-bitcoind"))]
+		let _ = (stop_sync_receiver, onchain_wallet, channel_manager, chain_monitor, output_sweeper);
+		match &self.kind {
+			#[cfg(feature = "chain-bitcoind")]
+			ChainSourceKind::Bitcoind(source) => {
+				source
+					.initialize_wallets(
+						stop_sync_receiver,
+						onchain_wallet,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+					)
+					.await
+			},
+			#[cfg(feature = "chain-esplora")]
+			ChainSourceKind::Esplora(_) => Ok(()),
+			#[cfg(feature = "chain-electrum")]
+			ChainSourceKind::Electrum(_) => Ok(()),
+		}
+	}
+
 	pub(crate) async fn continuously_sync_wallets(
 		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>, onchain_wallet: Arc<Wallet>,
 		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,

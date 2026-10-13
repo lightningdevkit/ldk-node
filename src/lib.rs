@@ -369,6 +369,16 @@ impl Node {
 			)
 		})?;
 
+		// Reconcile block-based listeners before peers or event processing can act on stale
+		// confirmations. Each restored ChannelMonitor may have been persisted at a different tip.
+		self.runtime.block_on(self.chain_source.initialize_wallets(
+			self.stop_sender.subscribe(),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.chain_monitor),
+			Arc::clone(&self.output_sweeper),
+		))?;
+
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);

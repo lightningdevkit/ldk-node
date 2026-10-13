@@ -52,6 +52,9 @@ const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
 type BitcoindSpvClient =
 	SpvClient<ChainPoller<Arc<BitcoindClient>, BitcoindClient>, Arc<ChainListener>>;
 
+#[cfg(test)]
+mod startup_tests;
+
 async fn acquire_initial_wallet_sync_guard<'a>(
 	wallet_polling_status: &'a Mutex<WalletSyncStatus>,
 	stop_sync_receiver: &mut tokio::sync::watch::Receiver<()>,
@@ -198,133 +201,85 @@ impl BitcoindChainSource {
 			"Starting initial synchronization of chain listeners. This might take a while..",
 		);
 
-		let mut backoff = CHAIN_POLLING_INTERVAL_SECS;
-		const MAX_BACKOFF_SECS: u64 = 300;
+		// if the stop_sync_sender has been dropped, we should just exit
+		if stop_sync_receiver.has_changed().unwrap_or(true) {
+			log_trace!(self.logger, "Stopping initial chain sync.");
+			return Err(Error::TxSyncFailed);
+		}
 
-		loop {
-			// if the stop_sync_sender has been dropped, we should just exit
-			if stop_sync_receiver.has_changed().unwrap_or(true) {
-				log_trace!(self.logger, "Stopping initial chain sync.");
+		let onchain_wallet_best_block = onchain_wallet.current_best_block();
+		let channel_manager_best_block = channel_manager.current_best_block();
+		let sweeper_best_block = output_sweeper.current_best_block();
+
+		let mut chain_listeners = vec![
+			(onchain_wallet_best_block, &*onchain_wallet as &(dyn Listen + Send + Sync)),
+			(channel_manager_best_block, &*channel_manager as &(dyn Listen + Send + Sync)),
+			(sweeper_best_block, &*output_sweeper as &(dyn Listen + Send + Sync)),
+		];
+
+		// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
+		// before giving them to `ChainMonitor` it the first place. However, this isn't
+		// trivial as we load them on initialization (in the `Builder`) and only gain
+		// network access during `start`. For now, we just make sure we get the worst known
+		// block hash and sychronize them via `ChainMonitor`.
+		if let Some(worst_channel_monitor_best_block) = chain_monitor
+			.list_monitors()
+			.iter()
+			.flat_map(|channel_id| chain_monitor.get_monitor(*channel_id))
+			.map(|m| m.current_best_block())
+			.min_by_key(|b| b.height)
+		{
+			chain_listeners.push((
+				worst_channel_monitor_best_block,
+				&*chain_monitor as &(dyn Listen + Send + Sync),
+			));
+		}
+
+		let now = SystemTime::now();
+		match synchronize_listeners(
+			self.api_client.as_ref(),
+			self.config.network,
+			chain_listeners.clone(),
+		)
+		.await
+		{
+			Ok((header_cache, chain_tip)) => {
+				let spv_client = self.new_spv_client(
+					chain_tip,
+					header_cache,
+					Arc::clone(&onchain_wallet),
+					Arc::clone(&channel_manager),
+					Arc::clone(&chain_monitor),
+					Arc::clone(&output_sweeper),
+				);
+				*self.spv_client.lock().await = Some(spv_client);
+				{
+					let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
+					log_info!(self.logger, "Finished synchronizing listeners in {}ms", elapsed_ms,);
+					*self.latest_chain_tip.write().expect("lock") = Some(chain_tip);
+					let unix_time_secs_opt =
+						SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+					update_and_persist_node_metrics(
+						&self.node_metrics,
+						&*self.kv_store,
+						&*self.logger,
+						|m| {
+							m.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
+							m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
+						},
+					)
+					.await
+					.unwrap_or_else(|e| {
+						log_error!(self.logger, "Failed to persist node metrics: {}", e);
+					});
+				}
+			},
+
+			Err(e) => {
+				log_error!(self.logger, "Failed to synchronize chain listeners: {:?}", e);
+				initial_sync_guard.complete(Err(Error::TxSyncFailed));
 				return Err(Error::TxSyncFailed);
-			}
-
-			let onchain_wallet_best_block = onchain_wallet.current_best_block();
-			let channel_manager_best_block = channel_manager.current_best_block();
-			let sweeper_best_block = output_sweeper.current_best_block();
-
-			let mut chain_listeners = vec![
-				(onchain_wallet_best_block, &*onchain_wallet as &(dyn Listen + Send + Sync)),
-				(channel_manager_best_block, &*channel_manager as &(dyn Listen + Send + Sync)),
-				(sweeper_best_block, &*output_sweeper as &(dyn Listen + Send + Sync)),
-			];
-
-			// TODO: Eventually we might want to see if we can synchronize `ChannelMonitor`s
-			// before giving them to `ChainMonitor` it the first place. However, this isn't
-			// trivial as we load them on initialization (in the `Builder`) and only gain
-			// network access during `start`. For now, we just make sure we get the worst known
-			// block hash and sychronize them via `ChainMonitor`.
-			if let Some(worst_channel_monitor_best_block) = chain_monitor
-				.list_monitors()
-				.iter()
-				.flat_map(|channel_id| chain_monitor.get_monitor(*channel_id))
-				.map(|m| m.current_best_block())
-				.min_by_key(|b| b.height)
-			{
-				chain_listeners.push((
-					worst_channel_monitor_best_block,
-					&*chain_monitor as &(dyn Listen + Send + Sync),
-				));
-			}
-
-			let now = SystemTime::now();
-			match synchronize_listeners(
-				self.api_client.as_ref(),
-				self.config.network,
-				chain_listeners.clone(),
-			)
-			.await
-			{
-				Ok((header_cache, chain_tip)) => {
-					let spv_client = self.new_spv_client(
-						chain_tip,
-						header_cache,
-						Arc::clone(&onchain_wallet),
-						Arc::clone(&channel_manager),
-						Arc::clone(&chain_monitor),
-						Arc::clone(&output_sweeper),
-					);
-					*self.spv_client.lock().await = Some(spv_client);
-					{
-						let elapsed_ms = now.elapsed().map(|d| d.as_millis()).unwrap_or(0);
-						log_info!(
-							self.logger,
-							"Finished synchronizing listeners in {}ms",
-							elapsed_ms,
-						);
-						*self.latest_chain_tip.write().expect("lock") = Some(chain_tip);
-						let unix_time_secs_opt =
-							SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-						update_and_persist_node_metrics(
-							&self.node_metrics,
-							&*self.kv_store,
-							&*self.logger,
-							|m| {
-								m.latest_lightning_wallet_sync_timestamp = unix_time_secs_opt;
-								m.latest_onchain_wallet_sync_timestamp = unix_time_secs_opt;
-							},
-						)
-						.await
-						.unwrap_or_else(|e| {
-							log_error!(self.logger, "Failed to persist node metrics: {}", e);
-						});
-					}
-					break;
-				},
-
-				Err(e) => {
-					log_error!(self.logger, "Failed to synchronize chain listeners: {:?}", e);
-					if e.kind() == BlockSourceErrorKind::Transient {
-						log_info!(
-									self.logger,
-									"Transient error syncing chain listeners: {:?}. Retrying in {} seconds.",
-									e,
-									backoff
-								);
-						// Sleep with stop signal check to allow immediate shutdown
-						tokio::select! {
-							biased;
-							_ = stop_sync_receiver.changed() => {
-								log_trace!(
-									self.logger,
-									"Stopping initial chain sync.",
-								);
-								return Err(Error::TxSyncFailed);
-							}
-							_ = tokio::time::sleep(Duration::from_secs(backoff)) => {}
-						}
-						backoff = std::cmp::min(backoff * 2, MAX_BACKOFF_SECS);
-					} else {
-						log_error!(
-									self.logger,
-									"Persistent error syncing chain listeners: {:?}. Retrying in {} seconds.",
-									e,
-									MAX_BACKOFF_SECS
-								);
-						// Sleep with stop signal check to allow immediate shutdown
-						tokio::select! {
-							biased;
-							_ = stop_sync_receiver.changed() => {
-								log_trace!(
-									self.logger,
-									"Stopping initial chain sync during backoff.",
-								);
-								return Err(Error::TxSyncFailed);
-							}
-							_ = tokio::time::sleep(Duration::from_secs(MAX_BACKOFF_SECS)) => {}
-						}
-					}
-				},
-			}
+			},
 		}
 
 		// Now propagate the initial result to unblock waiting subscribers.
@@ -337,20 +292,6 @@ impl BitcoindChainSource {
 		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) {
-		if self
-			.initialize_wallets(
-				stop_sync_receiver.clone(),
-				Arc::clone(&onchain_wallet),
-				Arc::clone(&channel_manager),
-				Arc::clone(&chain_monitor),
-				Arc::clone(&output_sweeper),
-			)
-			.await
-			.is_err()
-		{
-			return;
-		}
-
 		let mut chain_polling_interval =
 			tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
 		chain_polling_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
