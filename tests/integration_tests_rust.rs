@@ -31,12 +31,12 @@ use common::{
 	generate_blocks_and_wait, generate_listening_addresses, invalidate_blocks, open_channel,
 	open_channel_no_wait, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_node_with_store, setup_two_nodes,
-	splice_in_with_all, wait_for_block, wait_for_channel_ready_to_send, wait_for_outpoint_spend,
-	wait_for_tx, InMemoryStore, NodePaymentExt, TestChainSource, TestConfig, TestNode,
-	TestStoreType, TestSyncStore,
+	setup_bitcoind_and_electrsd, setup_bitcoind_and_electrsd_for_splice_rbf, setup_builder,
+	setup_node, setup_node_with_store, setup_two_nodes, splice_in_with_all, wait_for_block,
+	wait_for_channel_ready_to_send, wait_for_outpoint_spend, wait_for_tx, InMemoryStore,
+	NodePaymentExt, TestChainSource, TestConfig, TestNode, TestStoreType, TestSyncStore,
 };
-use electrsd::corepc_node::{self, Node as BitcoinD};
+use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::electrum_client::ElectrumApi;
 use electrsd::ElectrsD;
 use ldk_node::config::{
@@ -3120,22 +3120,7 @@ async fn rbf_splice_channel_original_candidate_confirms() {
 }
 
 async fn run_rbf_splice_channel_test(confirm_original: bool) {
-	// Use a custom bitcoind config with a lower incrementalrelayfee so that the +25 sat/kwu
-	// (0.1 sat/vB) RBF feerate bump satisfies BIP125's absolute fee increase requirement.
-	let bitcoind_exe = std::env::var("BITCOIND_EXE")
-		.expect("set BITCOIND_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
-	let mut bitcoind_conf = corepc_node::Conf::default();
-	bitcoind_conf.network = "regtest";
-	bitcoind_conf.args.push("-rest");
-	bitcoind_conf.args.push("-incrementalrelayfee=0.00000100");
-	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
-
-	let electrs_exe = std::env::var("ELECTRS_EXE")
-		.expect("set ELECTRS_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
-	let mut electrsd_conf = electrsd::Conf::default();
-	electrsd_conf.http_enabled = true;
-	electrsd_conf.network = "regtest";
-	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd_for_splice_rbf();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);

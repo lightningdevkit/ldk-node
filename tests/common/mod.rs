@@ -345,11 +345,23 @@ macro_rules! expect_payment_successful_event {
 pub(crate) use expect_payment_successful_event;
 
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
+	setup_bitcoind_and_electrsd_with_args(&[])
+}
+
+/// Like [`setup_bitcoind_and_electrsd`], but with a lower `incrementalrelayfee` so that LDK's
+/// minimum RBF feerate bump of 25 sat/kwu (0.1 sat/vB) satisfies BIP125's absolute fee increase
+/// requirement when replacing a splice transaction.
+pub(crate) fn setup_bitcoind_and_electrsd_for_splice_rbf() -> (BitcoinD, ElectrsD) {
+	setup_bitcoind_and_electrsd_with_args(&["-incrementalrelayfee=0.00000100"])
+}
+
+fn setup_bitcoind_and_electrsd_with_args(bitcoind_args: &[&'static str]) -> (BitcoinD, ElectrsD) {
 	let bitcoind_exe = env::var("BITCOIND_EXE")
 		.expect("set BITCOIND_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
 	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	bitcoind_conf.args.push("-rest");
+	bitcoind_conf.args.extend_from_slice(bitcoind_args);
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = env::var("ELECTRS_EXE")
