@@ -153,16 +153,17 @@ use io::utils::update_and_persist_node_metrics;
 pub use lightning;
 use lightning::chain::BlockLocator;
 use lightning::impl_writeable_tlv_based;
-use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
 pub use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::{FundingContribution, FundingTemplate};
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
+
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStore;
-use lightning::util::wallet_utils::{Input, Wallet as LdkWallet};
+use lightning::util::wallet_utils::{ConfirmedUtxo, Wallet as LdkWallet};
 use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
 pub use lightning_liquidity;
@@ -203,7 +204,7 @@ use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY
 use crate::ffi::{maybe_deref, maybe_map_fee_rate_opt, maybe_wrap, FfiFeeRate};
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
-use crate::wallet::FundingAmount;
+use crate::wallet::{FundingAmount, DUST_LIMIT_SATS};
 
 #[cfg(not(feature = "uniffi"))]
 type NodeFeatures = LdkNodeFeatures;
@@ -1813,61 +1814,9 @@ impl Node {
 			});
 			let max_feerate = max_funding_feerate(min_feerate);
 
-			let splice_amount_sats = match splice_amount_sats {
-				FundingAmount::Exact { amount_sats } => amount_sats,
-				FundingAmount::Max => {
-					let cur_anchor_reserve_sats =
-						total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-
-					const EMPTY_SCRIPT_SIG_WEIGHT: u64 =
-						1 /* empty script_sig */ * bitcoin::constants::WITNESS_SCALE_FACTOR as u64;
-
-					let funding_txo = channel_details.funding_txo.ok_or_else(|| {
-						log_error!(self.logger, "Failed to splice channel: channel not yet ready",);
-						Error::ChannelSplicingFailed
-					})?;
-
-					let funding_output = channel_details.get_funding_output().ok_or_else(|| {
-						log_error!(self.logger, "Failed to splice channel: channel not yet ready");
-						Error::ChannelSplicingFailed
-					})?;
-
-					let shared_input = Input {
-						outpoint: funding_txo.into_bitcoin_outpoint(),
-						previous_utxo: funding_output.clone(),
-						satisfaction_weight: EMPTY_SCRIPT_SIG_WEIGHT
-							+ FUNDING_TRANSACTION_WITNESS_WEIGHT,
-					};
-
-					let amount = self
-						.wallet
-						.get_max_splice_in_amount(
-							shared_input,
-							funding_output.script_pubkey.clone(),
-							cur_anchor_reserve_sats,
-							min_feerate,
-						)
-						.map_err(|e| {
-							log_error!(
-								self.logger,
-								"Failed to determine max splice-in amount: {e:?}"
-							);
-							e
-						})?;
-
-					log_info!(
-						self.logger,
-						"Splicing in with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
-						amount,
-						min_feerate.to_sat_per_kwu(),
-						cur_anchor_reserve_sats,
-					);
-
-					amount
-				},
-			};
-
-			self.check_sufficient_onchain_funds(splice_amount_sats, &counterparty_node_id, false)?;
+			if let FundingAmount::Exact { amount_sats } = splice_amount_sats {
+				self.check_sufficient_onchain_funds(amount_sats, &counterparty_node_id, false)?;
+			}
 
 			let funding_template = self
 				.channel_manager
@@ -1895,18 +1844,91 @@ impl Node {
 				_ => min_feerate,
 			};
 
-			let contribution = self
-				.runtime
-				.block_on(funding_template.splice_in(
-					Amount::from_sat(splice_amount_sats),
-					feerate,
-					max_feerate,
-					Arc::clone(&self.wallet),
-				))
-				.map_err(|e| {
-					log_error!(self.logger, "Failed to splice channel: {}", e);
-					Error::ChannelSplicingFailed
-				})?;
+			let contribution = match splice_amount_sats {
+				FundingAmount::Exact { amount_sats } => self
+					.runtime
+					.block_on(funding_template.splice_in(
+						Amount::from_sat(amount_sats),
+						feerate,
+						max_feerate,
+						Arc::clone(&self.wallet),
+					))
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to splice channel: {}", e);
+						Error::ChannelSplicingFailed
+					})?,
+				FundingAmount::Max => {
+					let cur_anchor_reserve_sats =
+						total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+
+					// Splicing in all funds spends every confirmed UTXO in full, so the inputs are
+					// chosen here rather than by coin selection against an amount. The fee is only
+					// known once the contribution is built, so first check that the inputs can at
+					// least retain the anchor reserve and still add a non-dust amount, rather than
+					// asking LDK to build a contribution from nothing.
+					let inputs = self.wallet.list_confirmed_funding_inputs().map_err(|e| {
+						log_error!(self.logger, "Failed to list confirmed UTXOs: {e:?}");
+						Error::ChannelSplicingFailed
+					})?;
+					let input_total_sats: u64 =
+						inputs.iter().map(|input| input.output().value.to_sat()).sum();
+					if input_total_sats.saturating_sub(cur_anchor_reserve_sats) < DUST_LIMIT_SATS {
+						log_error!(
+							self.logger,
+							"Unable to splice-in due to insufficient funds. Confirmed: {}sats, anchor reserve: {}sats",
+							input_total_sats,
+							cur_anchor_reserve_sats,
+						);
+						return Err(Error::InsufficientFunds);
+					}
+
+					// Manually selected inputs are consumed in full with no change output: the
+					// amount added to the channel is what remains after fees, and a later fee bump
+					// lowers that amount instead of needing further inputs. The anchor reserve is
+					// retained as an explicit output to one of our own addresses, which stays
+					// fixed across fee bumps. The address is reserved so that other change-address
+					// consumers skip it until the splice transaction reaches the wallet.
+					let reserve_output = if cur_anchor_reserve_sats > DUST_LIMIT_SATS {
+						let script_pubkey = self
+							.runtime
+							.block_on(self.wallet.reserve_internal_address())?
+							.script_pubkey();
+						Some(bitcoin::TxOut {
+							value: Amount::from_sat(cur_anchor_reserve_sats),
+							script_pubkey,
+						})
+					} else {
+						None
+					};
+
+					let built = self.build_splice_in_with_all_contribution(
+						funding_template,
+						inputs,
+						reserve_output.clone(),
+						feerate,
+						max_feerate,
+					);
+					match built {
+						Ok(contribution) => contribution,
+						Err(e) => {
+							// LDK never took the contribution, so no `DiscardFunding` event will
+							// free the reserved address; release it here instead.
+							if let Some(reserve_output) = reserve_output {
+								if let Err(e) = self
+									.runtime
+									.block_on(self.wallet.release_outputs(vec![reserve_output]))
+								{
+									log_error!(
+										self.logger,
+										"Failed to release the anchor reserve address: {e:?}"
+									);
+								}
+							}
+							return Err(e);
+						},
+					}
+				},
+			};
 
 			self.channel_manager
 				.funding_contributed(
@@ -1928,6 +1950,48 @@ impl Node {
 			);
 			Err(Error::ChannelSplicingFailed)
 		}
+	}
+
+	/// Builds the contribution for splicing in all on-chain funds: `inputs` are consumed in full
+	/// and `reserve_output`, if any, keeps the anchor reserve on-chain. Fails with
+	/// [`Error::InsufficientFunds`] when fees would leave less than dust to add to the channel.
+	fn build_splice_in_with_all_contribution(
+		&self, funding_template: FundingTemplate, inputs: Vec<ConfirmedUtxo>,
+		reserve_output: Option<bitcoin::TxOut>, feerate: bitcoin::FeeRate,
+		max_feerate: bitcoin::FeeRate,
+	) -> Result<FundingContribution, Error> {
+		let cur_anchor_reserve_sats =
+			reserve_output.as_ref().map_or(0, |output| output.value.to_sat());
+
+		let contribution = funding_template
+			.with_prior_contribution(feerate, max_feerate)
+			.add_inputs(inputs)
+			.and_then(|builder| builder.add_outputs(reserve_output.into_iter().collect()).build())
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to splice channel: {}", e);
+				Error::ChannelSplicingFailed
+			})?;
+
+		let value_added_sats = contribution.value_added().to_sat();
+		if value_added_sats < DUST_LIMIT_SATS {
+			log_error!(
+				self.logger,
+				"Unable to splice-in: available funds would be consumed entirely by fees. Remaining: {}sats, fee: {}sats",
+				value_added_sats,
+				contribution.estimated_fee().to_sat(),
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		log_info!(
+			self.logger,
+			"Splicing in with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
+			value_added_sats,
+			feerate.to_sat_per_kwu(),
+			cur_anchor_reserve_sats,
+		);
+
+		Ok(contribution)
 	}
 
 	/// Add funds to an existing channel from a transaction output you control.
