@@ -37,8 +37,8 @@ use crate::config::{
 	DEFAULT_TX_BROADCAST_TIMEOUT_SECS,
 };
 use crate::fee_estimator::{
-	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
-	ConfirmationTarget, OnchainFeeEstimator,
+	apply_post_estimation_adjustments, get_all_conf_targets, get_fallback_fee_rate_for_network,
+	get_num_block_defaults_for_target, ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -603,45 +603,39 @@ impl BitcoindChainSource {
 			};
 
 			let fee_rate = match (fee_rate_update_res, self.config.network) {
-				(Ok(rate), _) => rate,
+				(Ok(rate), _) => {
+					// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
+					// require some post-estimation adjustments to the fee rates, which we do here.
+					apply_post_estimation_adjustments(target, rate)
+				},
 				(Err(e), Network::Bitcoin) => {
 					// Strictly fail on mainnet.
 					log_error!(self.logger, "Failed to retrieve fee rate estimates: {}", e);
 					return Err(Error::FeerateEstimationUpdateFailed);
 				},
-				(Err(e), n) if n == Network::Regtest || n == Network::Signet => {
-					// On regtest/signet we just fall back to the usual 1 sat/vb == 250
-					// sat/kwu default.
-					log_error!(
-								self.logger,
-								"Failed to retrieve fee rate estimates: {}. Falling back to default of 1 sat/vb.",
-								e,
-							);
-					FeeRate::from_sat_per_kwu(250)
-				},
-				(Err(e), _) => {
-					// On testnet `estimatesmartfee` can be unreliable so we just skip in
-					// case of a failure, which will have us falling back to defaults.
+				(Err(e), network) => {
+					// Off mainnet we carry on with this target's fallback: on regtest/signet
+					// there is no fee market to begin with, and on testnet `estimatesmartfee`
+					// can simply be unreliable. Note this keeps whatever estimates we did get
+					// for the remaining targets.
+					let fallback_fee_rate = get_fallback_fee_rate_for_network(target, network);
 					log_error!(
 						self.logger,
-						"Failed to retrieve fee rate estimates: {}. Falling back to defaults.",
+						"Failed to retrieve fee rate estimates: {}. Falling back to {} sats/kwu.",
 						e,
+						fallback_fee_rate.to_sat_per_kwu(),
 					);
-					return Ok(());
+					fallback_fee_rate
 				},
 			};
 
-			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
-			// require some post-estimation adjustments to the fee rates, which we do here.
-			let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
-
-			new_fee_rate_cache.insert(target, adjusted_fee_rate);
+			new_fee_rate_cache.insert(target, fee_rate);
 
 			log_trace!(
 				self.logger,
 				"Fee rate estimation updated for {:?}: {} sats/kwu",
 				target,
-				adjusted_fee_rate.to_sat_per_kwu(),
+				fee_rate.to_sat_per_kwu(),
 			);
 		}
 

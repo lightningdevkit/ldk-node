@@ -32,8 +32,9 @@ use crate::config::{
 };
 use crate::error::Error;
 use crate::fee_estimator::{
-	apply_post_estimation_adjustments, get_all_conf_targets, get_num_block_defaults_for_target,
-	ConfirmationTarget, OnchainFeeEstimator,
+	apply_post_estimation_adjustments, get_all_conf_targets, get_fallback_fee_rate_for_network,
+	get_num_block_defaults_for_target, ConfirmationTarget, OnchainFeeEstimator,
+	ONE_SAT_PER_VB_SATS_PER_KWU,
 };
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_bytes, log_debug, log_error, log_trace, log_warn, LdkLogger, Logger};
@@ -789,39 +790,77 @@ impl ElectrumRuntimeClient {
 		}
 
 		let mut new_fee_rate_cache = HashMap::with_capacity(10);
-		for (target, raw_fee_rate_btc_per_kvb) in
-			confirmation_targets.into_iter().zip(raw_estimates_btc_kvb.into_iter())
-		{
-			// Parse the retrieved serde_json::Value and fall back to 1 sat/vb (10^3 / 10^8 = 10^-5
-			// = 0.00001 btc/kvb) if we fail or it yields less than that. This is mostly necessary
-			// to continue on `signet`/`regtest` where we might not get estimates (or bogus
-			// values).
-			let fee_rate_btc_per_kvb = raw_fee_rate_btc_per_kvb
-				.as_f64()
-				.map_or(0.00001, |converted| converted.max(0.00001));
+		let mut fell_back_targets = Vec::new();
+		for (index, target) in confirmation_targets.into_iter().enumerate() {
+			// `batch_call` gives us one result per request or an error, and the check above
+			// rejects anything else on mainnet. We still index rather than zip so that a short
+			// response could never silently drop the trailing targets from the cache.
+			let raw_fee_rate_btc_per_kvb =
+				raw_estimates_btc_kvb.get(index).and_then(|raw| raw.as_f64());
 
-			// Electrum, just like Bitcoin Core, gives us a feerate in BTC/KvB.
-			// Thus, we multiply by 25_000_000 (10^8 / 4) to get satoshis/kwu.
-			let fee_rate = {
-				let fee_rate_sat_per_kwu = (fee_rate_btc_per_kvb * 25_000_000.0).round() as u64;
-				FeeRate::from_sat_per_kwu(fee_rate_sat_per_kwu)
-			};
+			let (fee_rate, fell_back) =
+				fee_rate_from_estimate(target, raw_fee_rate_btc_per_kvb, self.config.network);
 
-			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
-			// require some post-estimation adjustments to the fee rates, which we do here.
-			let adjusted_fee_rate = apply_post_estimation_adjustments(target, fee_rate);
+			if fell_back {
+				fell_back_targets.push(target);
+			}
 
-			new_fee_rate_cache.insert(target, adjusted_fee_rate);
+			new_fee_rate_cache.insert(target, fee_rate);
 
 			log_trace!(
 				self.logger,
 				"Fee rate estimation updated for {:?}: {} sats/kwu",
 				target,
-				adjusted_fee_rate.to_sat_per_kwu(),
+				fee_rate.to_sat_per_kwu(),
+			);
+		}
+
+		// On `regtest`/`signet` we expect to fall back for every target, so a warning would be
+		// pure noise there. Elsewhere it means we're pricing transactions off defaults rather
+		// than off the chain, which shouldn't pass silently.
+		if !fell_back_targets.is_empty()
+			&& !matches!(self.config.network, Network::Regtest | Network::Signet)
+		{
+			log_warn!(
+				self.logger,
+				"Received no usable fee rate estimate for {:?}, falling back to their defaults.",
+				fell_back_targets,
 			);
 		}
 
 		Ok(new_fee_rate_cache)
+	}
+}
+
+// Converts a raw `estimatefee` result, as returned by the Electrum server for `target`, into the
+// fee rate we'll cache for it, and whether we had to fall back for it.
+//
+// Note that Electrum serves `-1` when it has no estimate for the requested block count, and that a
+// result may not be a number at all. In either case we have no usable estimate and fall back rather
+// than putting the target on 1 sat/vb, which would silently downgrade urgent targets such as
+// `UrgentOnChainSweep`.
+fn fee_rate_from_estimate(
+	target: ConfirmationTarget, estimate_btc_per_kvb: Option<f64>, network: Network,
+) -> (FeeRate, bool) {
+	// Electrum, just like Bitcoin Core, gives us a feerate in BTC/KvB. Thus, we multiply by
+	// 25_000_000 (10^8 / 4) to get satoshis/kwu.
+	let estimate_sats_kwu = estimate_btc_per_kvb
+		.filter(|converted| *converted > 0.0)
+		.map(|converted| (converted * 25_000_000.0).round() as u64);
+
+	match estimate_sats_kwu {
+		Some(estimate_sats_kwu) => {
+			// Enforce a lower bound of 1 sat/vb on the converted estimate. This is mostly
+			// necessary to continue on `signet`/`regtest` where we might get bogus values.
+			let estimate =
+				FeeRate::from_sat_per_kwu(estimate_sats_kwu.max(ONE_SAT_PER_VB_SATS_PER_KWU));
+
+			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
+			// require some post-estimation adjustments to the fee rates, which we do here.
+			(apply_post_estimation_adjustments(target, estimate), false)
+		},
+		// We have no estimate to adjust, so we fall back.
+		None => (get_fallback_fee_rate_for_network(target, network), true),
 	}
 }
 
@@ -924,8 +963,105 @@ mod tests {
 	use std::thread;
 
 	use bitcoin::blockdata::constants::genesis_block;
+	use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
 
 	use super::*;
+
+	#[test]
+	fn missing_estimates_fall_back_per_network() {
+		// `-1` is what Electrum serves when it has no estimate for the requested block count,
+		// and a short batch response leaves us without a value at all. Neither is a usable
+		// estimate.
+		for raw in [None, Some(-1.0)] {
+			// On mainnet/testnet the target's own default decides, rather than the relay floor
+			// silently downgrading urgent targets to 1 sat/vb.
+			for network in [Network::Bitcoin, Network::Testnet] {
+				let (fee_rate, fell_back) = fee_rate_from_estimate(
+					ConfirmationTarget::Lightning(LdkConfirmationTarget::UrgentOnChainSweep),
+					raw,
+					network,
+				);
+				assert_eq!(fee_rate.to_sat_per_kwu(), 5000, "{:?} on {}", raw, network);
+				assert!(fell_back, "{:?} on {}", raw, network);
+
+				let (fee_rate, fell_back) =
+					fee_rate_from_estimate(ConfirmationTarget::ChannelFunding, raw, network);
+				assert_eq!(fee_rate.to_sat_per_kwu(), 1000, "{:?} on {}", raw, network);
+				assert!(fell_back, "{:?} on {}", raw, network);
+			}
+
+			// While on regtest/signet we stay on the 1 sat/vb stand-in, adjusted as an estimate
+			// would be - so `MaximumFeeEstimate` has to come out at 2775 here too, as LDK sizes
+			// a channel's dust exposure limit off it.
+			for network in [Network::Regtest, Network::Signet] {
+				assert_eq!(
+					fee_rate_from_estimate(
+						ConfirmationTarget::Lightning(LdkConfirmationTarget::MaximumFeeEstimate),
+						raw,
+						network
+					)
+					.0
+					.to_sat_per_kwu(),
+					2775,
+					"{:?} on {}",
+					raw,
+					network
+				);
+				assert_eq!(
+					fee_rate_from_estimate(
+						ConfirmationTarget::Lightning(LdkConfirmationTarget::UrgentOnChainSweep),
+						raw,
+						network
+					)
+					.0
+					.to_sat_per_kwu(),
+					ONE_SAT_PER_VB_SATS_PER_KWU,
+					"{:?} on {}",
+					raw,
+					network
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn estimates_are_converted_floored_and_adjusted() {
+		// 0.00002 btc/kvb == 2 sat/vb == 500 sats/kwu, no post-estimation adjustment.
+		assert_eq!(
+			fee_rate_from_estimate(
+				ConfirmationTarget::Lightning(LdkConfirmationTarget::UrgentOnChainSweep),
+				Some(0.00002),
+				Network::Bitcoin
+			)
+			.0
+			.to_sat_per_kwu(),
+			500
+		);
+
+		// The same estimate bumped by `x * 1.1 + 2500` for `MaximumFeeEstimate`.
+		assert_eq!(
+			fee_rate_from_estimate(
+				ConfirmationTarget::Lightning(LdkConfirmationTarget::MaximumFeeEstimate),
+				Some(0.00002),
+				Network::Bitcoin
+			)
+			.0
+			.to_sat_per_kwu(),
+			3050
+		);
+
+		// A dust-but-positive estimate is floored at 1 sat/vb, not taken at face value.
+		assert_eq!(
+			fee_rate_from_estimate(
+				ConfirmationTarget::OnchainPayment,
+				Some(0.000001),
+				Network::Bitcoin
+			)
+			.0
+			.to_sat_per_kwu(),
+			ONE_SAT_PER_VB_SATS_PER_KWU
+		);
+	}
 
 	struct RecordingConfirm {
 		calls: AtomicUsize,
