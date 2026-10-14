@@ -83,6 +83,7 @@ async fn v0_7_for_hash_payments_can_be_manually_resolved_after_upgrade() {
 			CHANNEL_AMOUNT_SAT,
 			None,
 			None,
+			None,
 		)
 		.unwrap();
 
