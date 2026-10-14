@@ -355,20 +355,16 @@ impl Node {
 			|| monitor_owns_any_0fc_channels
 			|| self.config.anchor_channels_config.enable_zero_fee_commitments;
 
-		// Block to ensure we update our fee rate cache once on startup.
-		// Also take this opportunity to make sure our chain source supports 0FC channels
-		// if they are enabled.
-		//
-		// TODO: drop 0FC chain source validation when support is ubiquitous
-		let chain_source = Arc::clone(&self.chain_source);
-		self.runtime.block_on(async move {
-			tokio::try_join!(
-				chain_source.update_fee_rate_estimates(),
-				chain_source.validate_zero_fee_commitments_support_if_required(
-					zero_fee_commitments_support_required
-				)
-			)
-		})?;
+		// Synchronize Lightning chain state before peers or event processing can act on stale
+		// confirmations. Each restored ChannelMonitor may have been persisted at a different tip.
+		self.runtime.block_on(self.chain_source.initialize_wallets(
+			self.stop_sender.subscribe(),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.chain_monitor),
+			Arc::clone(&self.output_sweeper),
+			zero_fee_commitments_support_required,
+		))?;
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
