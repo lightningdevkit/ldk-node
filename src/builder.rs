@@ -2744,6 +2744,100 @@ mod tests {
 	}
 
 	#[test]
+	fn unstarted_node_rejects_live_node_apis() {
+		use std::str::FromStr;
+
+		use bitcoin::secp256k1::PublicKey;
+		use lightning::ln::channelmanager::PaymentId;
+		use lightning::ln::msgs::SocketAddress;
+		use lightning_types::payment::PaymentPreimage;
+
+		use crate::{Error, UserChannelId};
+
+		let builder = NodeBuilder::new();
+		let logger = Arc::new(Logger::new_log_facade());
+		#[cfg(not(feature = "uniffi"))]
+		let node_entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let node_entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		let node = builder
+			.build_with_store_and_logger(node_entropy, InMemoryStore::new(), logger)
+			.unwrap();
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let payment_id = PaymentId([0; 32]);
+		let user_channel_id = UserChannelId(0);
+
+		assert_eq!(node.onchain_payment().bump_fee_rbf(payment_id, None), Err(Error::NotRunning));
+		assert_eq!(node.close_channel(&user_channel_id, node_id), Err(Error::NotRunning));
+		assert_eq!(
+			node.force_close_channel(&user_channel_id, node_id, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.update_channel_config(&user_channel_id, node_id, Default::default()),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(node.splice_in(&user_channel_id, node_id, 1_000), Err(Error::NotRunning));
+		assert_eq!(
+			node.bump_channel_funding_fee(&user_channel_id, node_id),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(node.bolt11_payment().fail_for_id(payment_id), Err(Error::NotRunning));
+		assert_eq!(
+			node.bolt11_payment().claim_for_id(payment_id, 0, PaymentPreimage([0; 32])),
+			Err(Error::NotRunning)
+		);
+
+		let address = SocketAddress::from_str("127.0.0.1:9735").unwrap();
+		assert_eq!(
+			node.open_channel(node_id, address.clone(), 1_000, None, None, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.open_channel_with_all(node_id, address.clone(), None, None, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.open_announced_channel(node_id, address.clone(), 1_000, None, None, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.open_announced_channel_with_all(node_id, address.clone(), None, None, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.open_0reserve_channel(node_id, address.clone(), 1_000, None, None, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.open_0reserve_channel_with_all(node_id, address, None, None, None),
+			Err(Error::NotRunning)
+		);
+
+		// Async receive state is persisted via the background processor.
+		assert_eq!(node.bolt12_payment().receive_async().err(), Some(Error::NotRunning));
+		#[cfg(not(feature = "uniffi"))]
+		let paths = Vec::new();
+		#[cfg(feature = "uniffi")]
+		let paths = Vec::<u8>::new();
+		assert_eq!(
+			node.bolt12_payment().set_paths_to_static_invoice_server(paths),
+			Err(Error::NotRunning)
+		);
+
+		// The running state is checked before any URI or HRN resolution happens.
+		#[cfg(feature = "unified-payments")]
+		{
+			let res = node.runtime.block_on(node.unified_payment().send("not a uri", None, None));
+			assert_eq!(res.err(), Some(Error::NotRunning));
+		}
+	}
+
+	#[test]
 	fn sanitize_empty_node_alias() {
 		// Empty node alias
 		let alias = "";

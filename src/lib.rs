@@ -1175,6 +1175,7 @@ impl Node {
 			self.bolt11_payment().into(),
 			self.bolt12_payment().into(),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 			self.hrn_resolver.clone(),
 		)
@@ -1199,6 +1200,7 @@ impl Node {
 			self.bolt11_payment(),
 			self.bolt12_payment(),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 			self.hrn_resolver.clone(),
 		))
@@ -1254,6 +1256,7 @@ impl Node {
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.liquidity_source),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -1266,6 +1269,7 @@ impl Node {
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.liquidity_source),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -1538,6 +1542,10 @@ impl Node {
 		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
 		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
@@ -1580,6 +1588,10 @@ impl Node {
 		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
 		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
 			return Err(Error::ChannelCreationFailed);
@@ -1619,6 +1631,10 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
@@ -1657,6 +1673,10 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {err}");
 			return Err(Error::ChannelCreationFailed);
@@ -1702,6 +1722,10 @@ impl Node {
 		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
 		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
@@ -1736,6 +1760,10 @@ impl Node {
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
@@ -1893,6 +1921,10 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		self.splice_in_inner(
 			user_channel_id,
 			counterparty_node_id,
@@ -1916,6 +1948,9 @@ impl Node {
 	pub fn splice_in_with_all(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		self.splice_in_inner(user_channel_id, counterparty_node_id, FundingAmount::Max)
 	}
 
@@ -1934,6 +1969,10 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
 		splice_amount_sats: u64,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
@@ -2015,6 +2054,10 @@ impl Node {
 	pub fn bump_channel_funding_fee(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
@@ -2130,6 +2173,9 @@ impl Node {
 	pub fn close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None)
 	}
 
@@ -2150,6 +2196,9 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		reason: Option<String>,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		self.close_channel_internal(user_channel_id, counterparty_node_id, true, reason)
 	}
 
@@ -2210,6 +2259,10 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		channel_config: ChannelConfig,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let open_channels: Vec<LdkChannelDetails> =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =

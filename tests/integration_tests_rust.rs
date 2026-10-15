@@ -4291,6 +4291,108 @@ async fn spontaneous_send_with_custom_preimage() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn live_node_apis_return_not_running_after_stop() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	let description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("test")).unwrap());
+	let invoice = node_b.bolt11_payment().receive(1_000_000, &description.clone().into(), 3600);
+	let invoice = invoice.unwrap();
+	let node_b_id = node_b.node_id();
+	let node_b_addr = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	let btc_address = node_b.onchain_payment().new_address().unwrap();
+
+	node_a.stop().unwrap();
+
+	let payment_id = PaymentId([0; 32]);
+	let preimage = PaymentPreimage([0; 32]);
+	let user_channel_id = ldk_node::UserChannelId(0);
+
+	// On-chain.
+	assert_eq!(
+		node_a.onchain_payment().send_to_address(&btc_address, 10_000, None),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(
+		node_a.onchain_payment().send_all_to_address(&btc_address, true, None),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(node_a.onchain_payment().bump_fee_rbf(payment_id, None), Err(NodeError::NotRunning));
+
+	// Channels.
+	assert_eq!(
+		node_a.open_channel(node_b_id, node_b_addr.clone(), 100_000, None, None, None),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(node_a.splice_in(&user_channel_id, node_b_id, 10_000), Err(NodeError::NotRunning));
+	assert_eq!(
+		node_a.splice_out(&user_channel_id, node_b_id, &btc_address, 10_000),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(
+		node_a.bump_channel_funding_fee(&user_channel_id, node_b_id),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(node_a.close_channel(&user_channel_id, node_b_id), Err(NodeError::NotRunning));
+	assert_eq!(
+		node_a.force_close_channel(&user_channel_id, node_b_id, None),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(
+		node_a.update_channel_config(&user_channel_id, node_b_id, Default::default()),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(node_a.connect(node_b_id, node_b_addr.clone(), false), Err(NodeError::NotRunning));
+	assert_eq!(node_a.sync_wallets(), Err(NodeError::NotRunning));
+
+	// Payments.
+	assert_eq!(node_a.bolt11_payment().send(&invoice, None), Err(NodeError::NotRunning));
+	assert_eq!(
+		node_a.bolt11_payment().claim_for_id(payment_id, 0, preimage),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(node_a.bolt11_payment().fail_for_id(payment_id), Err(NodeError::NotRunning));
+	assert_eq!(
+		node_a.bolt11_payment().receive_via_jit_channel(1_000_000, &description.into(), 3600, None),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(
+		node_a.bolt12_payment().initiate_refund(1_000, 3600, None, None, None).map(|_| ()),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(
+		node_a.spontaneous_payment().send(1_000, node_b_id, None),
+		Err(NodeError::NotRunning)
+	);
+
+	// Liquidity.
+	assert_eq!(
+		node_a.liquidity().add_liquidity_source(node_b_id, node_b_addr, None, false),
+		Err(NodeError::NotRunning)
+	);
+
+	// The node is fully functional again after a restart.
+	node_a.start().unwrap();
+	node_a.sync_wallets().unwrap();
+	assert!(node_a.onchain_payment().send_to_address(&btc_address, 10_000, None).is_ok());
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn drop_in_async_context() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
