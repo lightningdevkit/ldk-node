@@ -163,7 +163,7 @@ async fn do_v0_7_manual_payment_upgrade(pay_before_upgrade: bool) {
 	let payer_claim_id = payer_claim_id.unwrap_or_else(|| {
 		payer.bolt11_payment().send_using_amount(&claim_invoice, paid_amount_msat, None).unwrap()
 	});
-	let (claim_payment_id, claimable_amount_msat) =
+	let (claim_payment_id, _) =
 		expect_payment_claimable_event!(receiver, claim_hash, paid_amount_msat);
 	assert_eq!(claim_payment_id, PaymentId(claim_hash.0));
 	assert_eq!(
@@ -173,7 +173,7 @@ async fn do_v0_7_manual_payment_upgrade(pay_before_upgrade: bool) {
 	);
 	receiver
 		.bolt11_payment()
-		.claim_for_id(claim_payment_id, claimable_amount_msat, PaymentPreimage(claim_preimage))
+		.claim_for_id(claim_payment_id, PaymentPreimage(claim_preimage))
 		.unwrap();
 	let received_payment_id = expect_payment_received_event!(receiver, paid_amount_msat);
 	assert_eq!(received_payment_id, claim_payment_id);
