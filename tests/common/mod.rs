@@ -836,26 +836,7 @@ pub(crate) fn setup_two_nodes_with_store(
 }
 
 pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
-	setup_builder!(builder, config.node_config);
-	configure_chain_source(chain_source, &mut builder, &config);
-
-	match &config.log_writer {
-		TestLogWriter::FileWriter => {
-			builder.set_filesystem_logger(None, None);
-		},
-		TestLogWriter::LogFacade => {
-			builder.set_log_facade_logger();
-		},
-		TestLogWriter::Custom(custom_log_writer) => {
-			builder.set_custom_logger(Arc::clone(custom_log_writer));
-		},
-	}
-
-	builder.set_async_payments_role(config.async_payments_role).unwrap();
-
-	if let Some(probing) = config.probing {
-		builder.set_probing_config(probing.into());
-	}
+	let builder = configured_builder(chain_source, &config);
 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
@@ -870,6 +851,45 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		},
 	};
 
+	start_node(node)
+}
+
+/// Like [`setup_node`], but around `kv_store`, which the test keeps hold of: to read or change
+/// what the node persisted, or to build the node again around it.
+pub(crate) fn setup_node_with_store<S: PaginatedKVStore + Send + Sync + 'static>(
+	chain_source: &TestChainSource, config: TestConfig, kv_store: S,
+) -> TestNode {
+	let builder = configured_builder(chain_source, &config);
+	let node = builder.build_with_store(config.node_entropy.into(), kv_store).unwrap();
+	start_node(node)
+}
+
+fn configured_builder(chain_source: &TestChainSource, config: &TestConfig) -> Builder {
+	setup_builder!(builder, config.node_config);
+	configure_chain_source(chain_source, &mut builder, config);
+
+	match &config.log_writer {
+		TestLogWriter::FileWriter => {
+			builder.set_filesystem_logger(None, None);
+		},
+		TestLogWriter::LogFacade => {
+			builder.set_log_facade_logger();
+		},
+		TestLogWriter::Custom(custom_log_writer) => {
+			builder.set_custom_logger(Arc::clone(custom_log_writer));
+		},
+	}
+
+	builder.set_async_payments_role(config.async_payments_role.clone()).unwrap();
+
+	if let Some(probing) = config.probing.clone() {
+		builder.set_probing_config(probing.into());
+	}
+
+	builder
+}
+
+fn start_node(node: TestNode) -> TestNode {
 	node.start().unwrap();
 	assert!(node.status().is_running);
 	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());

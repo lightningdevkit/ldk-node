@@ -192,6 +192,11 @@ impl CollectingLogWriter {
 		self.logs.lock().unwrap().iter().filter(|message| message.contains(text)).count()
 	}
 
+	/// Every message logged so far, in order.
+	pub(crate) fn lines(&self) -> Vec<String> {
+		self.logs.lock().unwrap().clone()
+	}
+
 	/// Waits up to ten seconds for a logged message containing `text`, returning whether one
 	/// arrived. Polling beats a fixed sleep: it returns as soon as the line lands and only pays
 	/// the full timeout when the line never comes.

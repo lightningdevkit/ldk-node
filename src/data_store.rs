@@ -389,6 +389,44 @@ where
 		Ok(())
 	}
 
+	/// Removes the object stored under `id` only while `predicate` holds for it. The read, the
+	/// predicate, and the removal share one critical section of the mutation lock, so a
+	/// concurrent write cannot land in between and be deleted by mistake — unlike a separate
+	/// [`Self::get`] followed by [`Self::remove`]. Returns whether the object was removed.
+	pub(crate) async fn remove_if<F: FnOnce(&SO) -> bool>(
+		&self, id: &SO::Id, predicate: F,
+	) -> Result<bool, Error> {
+		let _guard = self.mutation_lock.write().await;
+
+		match self.lookup(id).await? {
+			Some(object) if predicate(&object) => {},
+			_ => return Ok(false),
+		}
+
+		let store_key = id.encode_to_hex_str();
+		KVStore::remove(
+			&*self.kv_store,
+			&self.primary_namespace,
+			&self.secondary_namespace,
+			&store_key,
+			false,
+		)
+		.await
+		.map_err(|e| {
+			log_error!(
+				self.logger,
+				"Removing object data for key {}/{}/{} failed due to: {}",
+				&self.primary_namespace,
+				&self.secondary_namespace,
+				store_key,
+				e
+			);
+			Error::PersistenceFailed
+		})?;
+		self.cache.lock().expect("lock").remove(id);
+		Ok(true)
+	}
+
 	/// Returns the object stored under `id`, if any.
 	pub(crate) async fn get(&self, id: &SO::Id) -> Result<Option<SO>, Error> {
 		let _guard = self.mutation_lock.read().await;
@@ -430,19 +468,6 @@ where
 		self.persist(&new_object).await?;
 		self.cache.lock().expect("lock").insert(new_object.id(), new_object.clone());
 		Ok(Some(new_object))
-	}
-
-	/// Like [`Self::mutate`], but allows the transformation to await fallible reads.
-	///
-	/// The mutation lock remains held while `f` runs. This is useful when the new state must be
-	/// decided from an async read of another store without letting a concurrent writer invalidate
-	/// that decision. Callers must keep cross-store lock ordering consistent to avoid deadlocks.
-	pub(crate) async fn mutate_async<F, Fut>(&self, id: &SO::Id, f: F) -> Result<Option<SO>, Error>
-	where
-		F: FnOnce(Option<SO>) -> Fut,
-		Fut: Future<Output = Result<Option<SO>, Error>>,
-	{
-		self.mutate_with(id, f).await
 	}
 
 	/// Returns whether an object is stored under `id`.
@@ -1164,6 +1189,36 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn remove_if_only_removes_while_the_predicate_holds() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(TestLogger::new());
+		let id = TestObjectId { id: [42u8; 4] };
+		let existing_object = TestObject::new(id, [23u8; 3]);
+		let data_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
+			vec![existing_object],
+			KeepAllEntries,
+			TEST_PRIMARY_NAMESPACE.to_string(),
+			TEST_SECONDARY_NAMESPACE.to_string(),
+			store,
+			logger,
+		);
+
+		// A failed predicate — the entry no longer looks like what the caller decided to delete —
+		// must leave the entry in place.
+		let result = data_store.remove_if(&id, |object| object.data != existing_object.data).await;
+		assert_eq!(Ok(false), result);
+		assert_eq!(Some(existing_object), data_store.get(&id).await.unwrap());
+
+		let result = data_store.remove_if(&id, |object| object.data == existing_object.data).await;
+		assert_eq!(Ok(true), result);
+		assert!(data_store.get(&id).await.unwrap().is_none());
+
+		// An absent entry is not an error; there is just nothing to remove.
+		let result = data_store.remove_if(&id, |_| true).await;
+		assert_eq!(Ok(false), result);
+	}
+
+	#[tokio::test]
 	async fn mutate_transforms_existing_entry() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let logger = Arc::new(TestLogger::new());
@@ -1187,43 +1242,6 @@ mod tests {
 			})
 			.await;
 		let expected = TestObject::new(id, [24u8, 23u8, 23u8]);
-		assert_eq!(Ok(Some(expected)), result);
-		assert_eq!(Some(expected), data_store.get(&id).await.unwrap());
-	}
-
-	#[tokio::test]
-	async fn mutate_async_awaits_fallible_reads() {
-		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let logger = Arc::new(TestLogger::new());
-		let id = TestObjectId { id: [42u8; 4] };
-		let other_id = TestObjectId { id: [43u8; 4] };
-		let existing_object = TestObject::new(id, [23u8; 3]);
-		let other_object = TestObject::new(other_id, [24u8; 3]);
-		let data_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
-			vec![existing_object],
-			KeepAllEntries,
-			TEST_PRIMARY_NAMESPACE.to_string(),
-			TEST_SECONDARY_NAMESPACE.to_string(),
-			Arc::clone(&store),
-			Arc::clone(&logger),
-		);
-		let other_store: DataStore<TestObject, Arc<TestLogger>> = DataStore::new(
-			vec![other_object],
-			KeepAllEntries,
-			"other_datastore_test_primary".to_string(),
-			"other_datastore_test_secondary".to_string(),
-			store,
-			logger,
-		);
-
-		let result = data_store
-			.mutate_async(&id, |existing| async move {
-				let mut updated = existing.unwrap();
-				updated.data = other_store.get(&other_id).await?.unwrap().data;
-				Ok(Some(updated))
-			})
-			.await;
-		let expected = TestObject::new(id, [24u8; 3]);
 		assert_eq!(Ok(Some(expected)), result);
 		assert_eq!(Some(expected), data_store.get(&id).await.unwrap());
 	}

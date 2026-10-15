@@ -355,6 +355,31 @@ impl Node {
 			|| monitor_owns_any_0fc_channels
 			|| self.config.anchor_channels_config.enable_zero_fee_commitments;
 
+		// Record the node's channel outputs for channels not reported by a producer: ones opened
+		// before this node recorded channel facts, and ones whose report failed in an earlier session.
+		// Before anything syncs, so that a close or a sweep the first sync finds is classified
+		// against them.
+		self.runtime.block_on(self.wallet.record_channel_outputs());
+
+		// A splice round recorded when this node signed it is taken back once LDK reports the
+		// negotiation failed or the channel closed. LDK reports the loss of a negotiation its last
+		// channel manager write carried mid-way, but a round committed, negotiated and signed
+		// since that write gets no report if the node stopped before the next one, so drop what
+		// LDK's persisted state does not track before anything runs on the records: nothing has
+		// synced and no background task has started yet, so a failure here fails the start
+		// cleanly. A channel LDK no longer lists is left to its `ChannelClosed` event.
+		let channels = self.channel_manager.list_channels();
+		self.runtime.block_on(self.wallet.drop_splice_rounds_lost_across_restart(
+			|channel_id| {
+				channels.iter().find(|channel| channel.channel_id == channel_id).map(|channel| {
+					wallet::tracked_splice_rounds(
+						channel.splice_details.as_ref(),
+						channel.funding_txo,
+					)
+				})
+			},
+		))?;
+
 		// Synchronize Lightning chain state before peers or event processing can act on stale
 		// confirmations. Each restored ChannelMonitor may have been persisted at a different tip.
 		self.runtime.block_on(self.chain_source.initialize_wallets(
@@ -685,6 +710,7 @@ impl Node {
 			Arc::clone(&self.wallet),
 			bump_tx_event_handler,
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.chain_monitor),
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.output_sweeper),
 			Arc::clone(&self.network_graph),

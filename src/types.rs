@@ -46,6 +46,7 @@ use crate::payment::{
 	ChannelPairForwardingStats, ForwardedPaymentDetails, PaymentDetails, PendingPaymentDetails,
 };
 use crate::runtime::RuntimeSpawner;
+use crate::wallet::provenance::ChannelTxFacts;
 
 #[cfg(feature = "uniffi")]
 type ChannelTypeFeatures = Arc<crate::ffi::ChannelTypeFeatures>;
@@ -341,6 +342,7 @@ pub(crate) type ChannelForwardingStatsStore =
 	DataStore<crate::payment::forwarding_store::StoredChannelForwardingStats, Arc<Logger>>;
 pub(crate) type ChannelPairForwardingStatsStore =
 	DataStore<ChannelPairForwardingStats, Arc<Logger>, KeepNoEntries>;
+pub(crate) type ChannelTxFactsStore = DataStore<ChannelTxFacts, Arc<Logger>, KeepLeastRecentlyUsed>;
 
 /// A local, potentially user-provided, identifier of a channel.
 ///
