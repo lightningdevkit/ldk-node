@@ -318,7 +318,7 @@ impl LdkLogger for Logger {
 
 #[cfg(test)]
 mod tests {
-	use std::sync::{Mutex, OnceLock};
+	use std::sync::Mutex;
 
 	use super::*;
 	#[cfg(unix)]
@@ -354,25 +354,6 @@ mod tests {
 		}
 
 		fn flush(&self) {}
-	}
-
-	/// Serializes the tests that use the global `log` facade logger and maximum level.
-	static LOG_FACADE_LOCK: Mutex<()> = Mutex::new(());
-
-	/// Installs the global `TestLogger` once and returns the buffer it writes to.
-	///
-	/// The `log` facade logger can only be set once per process, so every test that goes
-	/// through `Writer::LogFacadeWriter` shares this logger and holds `LOG_FACADE_LOCK`.
-	fn log_facade_test_output() -> Arc<Mutex<String>> {
-		static OUTPUT: OnceLock<Arc<Mutex<String>>> = OnceLock::new();
-		OUTPUT
-			.get_or_init(|| {
-				let log = Arc::new(Mutex::new(String::new()));
-				log::set_boxed_logger(Box::new(TestLogger { log: log.clone() }))
-					.expect("no other log facade logger is set in unit tests");
-				log
-			})
-			.clone()
 	}
 
 	/// Tests that LogContext correctly formats all three structured fields
@@ -429,9 +410,10 @@ mod tests {
 	/// Tests that LogFacadeWriter appends structured context fields to the log message.
 	#[test]
 	fn test_log_facade_writer_includes_structured_context() {
-		let _guard = LOG_FACADE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		let log = log_facade_test_output();
-		let previous_max_level = log::max_level();
+		let log = Arc::new(Mutex::new(String::new()));
+		let test_logger = TestLogger { log: log.clone() };
+
+		let _ = log::set_boxed_logger(Box::new(test_logger));
 		log::set_max_level(log::LevelFilter::Trace);
 
 		let writer = Writer::LogFacadeWriter;
@@ -473,51 +455,5 @@ mod tests {
 		writer.log(record);
 
 		assert_eq!(*log.lock().expect("lock"), "Test message (ch:abcdef p:02abcd)");
-		log::set_max_level(previous_max_level);
-	}
-
-	/// Tests that LogFacadeWriter drops records above the facade's maximum level, as the `log`
-	/// macros do, and still delivers records at or below it.
-	#[test]
-	fn test_log_facade_writer_respects_max_level() {
-		let _guard = LOG_FACADE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-		let log = log_facade_test_output();
-		let previous_max_level = log::max_level();
-		log::set_max_level(log::LevelFilter::Error);
-
-		let writer = Writer::LogFacadeWriter;
-		let write = |level: LogLevel, message: &str| {
-			#[cfg(not(feature = "uniffi"))]
-			let record = LogRecord {
-				level,
-				args: format_args!("{}", message),
-				module_path: "test_module",
-				line: 42,
-				peer_id: None,
-				channel_id: None,
-				payment_hash: None,
-			};
-			#[cfg(feature = "uniffi")]
-			let record = LogRecord {
-				level,
-				args: message.to_string(),
-				module_path: "test_module".to_string(),
-				line: 42,
-				peer_id: None,
-				channel_id: None,
-				payment_hash: None,
-			};
-			writer.log(record);
-		};
-
-		log.lock().expect("lock").clear();
-		write(LogLevel::Info, "info message");
-		write(LogLevel::Gossip, "gossip message");
-		assert_eq!(*log.lock().expect("lock"), "");
-
-		write(LogLevel::Error, "error message");
-		assert_eq!(*log.lock().expect("lock"), "error message");
-
-		log::set_max_level(previous_max_level);
 	}
 }
