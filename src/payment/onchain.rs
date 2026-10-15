@@ -46,10 +46,6 @@ impl OnchainPayment {
 	pub(crate) async fn send_to_address_inner(
 		&self, address: &bitcoin::Address, amount_sats: u64, fee_rate: Option<bitcoin::FeeRate>,
 	) -> Result<Txid, Error> {
-		if !*self.is_running.read().expect("lock") {
-			return Err(Error::NotRunning);
-		}
-
 		let cur_anchor_reserve_sats =
 			crate::total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 		let send_amount =

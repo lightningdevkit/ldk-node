@@ -1373,10 +1373,6 @@ impl Node {
 		channel_config: Option<ChannelConfig>, announce_for_forwarding: bool,
 		disable_counterparty_reserve: bool,
 	) -> Result<UserChannelId, Error> {
-		if !*self.is_running.read().expect("lock") {
-			return Err(Error::NotRunning);
-		}
-
 		let peer_info = PeerInfo { node_id, address };
 
 		let con_node_id = peer_info.node_id;

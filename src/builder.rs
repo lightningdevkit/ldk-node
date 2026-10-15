@@ -2788,9 +2788,12 @@ mod tests {
 		use bitcoin::secp256k1::PublicKey;
 		use lightning::ln::channelmanager::PaymentId;
 		use lightning::ln::msgs::SocketAddress;
+		use lightning::offers::offer::OfferBuilder;
+		use lightning_invoice::{Bolt11InvoiceDescription, Description};
 		use lightning_types::payment::PaymentPreimage;
 
-		use crate::{Error, UserChannelId};
+		use crate::ffi::maybe_wrap;
+		use crate::{CustomTlvRecord, Error, UserChannelId};
 
 		let builder = NodeBuilder::new();
 		let logger = Arc::new(Logger::new_log_facade());
@@ -2808,6 +2811,60 @@ mod tests {
 		.unwrap();
 		let payment_id = PaymentId([0; 32]);
 		let user_channel_id = UserChannelId(0);
+
+		let custom_tlvs = vec![CustomTlvRecord { type_num: 65_537, value: vec![1, 2, 3] }];
+		let preimage = PaymentPreimage([42; 32]);
+		assert_eq!(node.spontaneous_payment().send(1_000, node_id, None), Err(Error::NotRunning));
+		assert_eq!(
+			node.spontaneous_payment().send_with_custom_tlvs(
+				1_000,
+				node_id,
+				None,
+				custom_tlvs.clone()
+			),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.spontaneous_payment().send_with_preimage(1_000, node_id, preimage, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.spontaneous_payment().send_with_preimage_and_custom_tlvs(
+				1_000,
+				node_id,
+				custom_tlvs,
+				preimage,
+				None,
+			),
+			Err(Error::NotRunning)
+		);
+
+		let description =
+			Bolt11InvoiceDescription::Direct(Description::new("not running".to_string()).unwrap())
+				.into();
+		let invoice = node.bolt11_payment().receive(1_000, &description, 3_600).unwrap();
+		assert_eq!(node.bolt11_payment().send(&invoice, None), Err(Error::NotRunning));
+		assert_eq!(
+			node.bolt11_payment().send_using_amount(&invoice, 1_000, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.bolt11_payment().send_using_amount_underpaying(&invoice, 500, None),
+			Err(Error::NotRunning)
+		);
+
+		let offer = maybe_wrap(
+			OfferBuilder::new(node_id)
+				.description("not running".to_string())
+				.amount_msats(1_000)
+				.build()
+				.unwrap(),
+		);
+		assert_eq!(node.bolt12_payment().send(&offer, None, None, None), Err(Error::NotRunning));
+		assert_eq!(
+			node.bolt12_payment().send_using_amount(&offer, 1_000, None, None, None),
+			Err(Error::NotRunning)
+		);
 
 		assert_eq!(node.onchain_payment().bump_fee_rbf(payment_id, None), Err(Error::NotRunning));
 		assert_eq!(node.close_channel(&user_channel_id, node_id), Err(Error::NotRunning));

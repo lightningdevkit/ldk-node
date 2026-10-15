@@ -58,10 +58,6 @@ impl SpontaneousPayment {
 		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Option<Vec<CustomTlvRecord>>,
 		preimage: Option<PaymentPreimage>,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().expect("lock") {
-			return Err(Error::NotRunning);
-		}
-
 		let payment_preimage = preimage
 			.unwrap_or_else(|| PaymentPreimage(self.keys_manager.get_secure_random_bytes()));
 
@@ -174,6 +170,10 @@ impl SpontaneousPayment {
 		&self, amount_msat: u64, node_id: PublicKey,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		self.send_inner(amount_msat, node_id, route_parameters, None, None)
 	}
 
@@ -182,6 +182,10 @@ impl SpontaneousPayment {
 		&self, amount_msat: u64, node_id: PublicKey,
 		route_parameters: Option<RouteParametersConfig>, custom_tlvs: Vec<CustomTlvRecord>,
 	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), None)
 	}
 
@@ -190,6 +194,10 @@ impl SpontaneousPayment {
 		&self, amount_msat: u64, node_id: PublicKey, preimage: PaymentPreimage,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		self.send_inner(amount_msat, node_id, route_parameters, None, Some(preimage))
 	}
 
@@ -198,6 +206,10 @@ impl SpontaneousPayment {
 		&self, amount_msat: u64, node_id: PublicKey, custom_tlvs: Vec<CustomTlvRecord>,
 		preimage: PaymentPreimage, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		self.send_inner(amount_msat, node_id, route_parameters, Some(custom_tlvs), Some(preimage))
 	}
 
