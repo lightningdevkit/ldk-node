@@ -414,16 +414,19 @@ impl Bolt11Payment {
 	/// This should be called in response to a [`PaymentClaimable`] event as soon as the preimage is
 	/// available.
 	///
-	/// Will check that the payment is known, and that the given preimage and claimable amount
-	/// match our expectations before attempting to claim the payment, and will return an error
-	/// otherwise.
+	/// For every payment, the caller must verify that the event's `claimable_amount_msat` meets
+	/// their expectations before calling, including payments for invoices created before upgrading.
+	/// Calling this method approves claiming the payment reported by the event.
+	///
+	/// Will check that the payment is known and that the given preimage matches its payment hash
+	/// before attempting to claim the payment, and will return an error otherwise.
 	///
 	/// When claiming the payment has succeeded, a [`PaymentReceived`] event will be emitted.
 	///
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`PaymentReceived`]: crate::Event::PaymentReceived
 	pub fn claim_for_id(
-		&self, payment_id: PaymentId, claimable_amount_msat: u64, preimage: PaymentPreimage,
+		&self, payment_id: PaymentId, preimage: PaymentPreimage,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
@@ -459,17 +462,6 @@ impl Bolt11Payment {
 				payment_hash
 			);
 			return Err(Error::InvalidPaymentPreimage);
-		}
-
-		if let Some(received_amount_msat) = details.amount_msat {
-			if claimable_amount_msat < received_amount_msat {
-				log_error!(
-					self.logger,
-					"Failed to manually claim payment {} as the claimable amount is less than expected",
-					payment_id
-				);
-				return Err(Error::InvalidAmount);
-			}
 		}
 
 		self.channel_manager.claim_funds(preimage);

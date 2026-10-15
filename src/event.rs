@@ -224,6 +224,9 @@ pub enum Event {
 	/// If the provided parameters don't match the expectations or the preimage can't be
 	/// retrieved in time, should be failed-back via [`fail_for_id`].
 	///
+	/// For every payment, the caller must verify that `claimable_amount_msat` meets their
+	/// expectations before claiming, including payments for invoices created before upgrading.
+	///
 	/// Note claiming will necessarily fail after the `claim_deadline` has been reached.
 	///
 	/// This event is only emitted for unknown BOLT 11 payments if

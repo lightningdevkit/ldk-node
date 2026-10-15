@@ -1009,7 +1009,7 @@ async fn a_claim_is_classified_after_its_record_graduated() {
 	expect_event!(node_a, ChannelClosed);
 	expect_event!(node_b, ChannelClosed);
 
-	node_b.bolt11_payment().claim_for_id(payment_id, claimable_amount_msat, preimage).unwrap();
+	node_b.bolt11_payment().claim_for_id(payment_id, preimage).unwrap();
 	expect_payment_received_event!(node_b, claimable_amount_msat);
 
 	let onchain_payments = |node: &TestNode| -> Vec<PaymentDetails> {
@@ -5370,7 +5370,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 
 	let service_fee_msat = (jit_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
 	let expected_received_amount_msat = jit_amount_msat - service_fee_msat;
-	let (client_payment_id, claimable_amount_msat) = expect_payment_claimable_event!(
+	let (client_payment_id, _) = expect_payment_claimable_event!(
 		client_node,
 		manual_payment_hash,
 		expected_received_amount_msat
@@ -5381,10 +5381,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		Some(expected_received_amount_msat)
 	);
 	println!("Claiming payment!");
-	client_node
-		.bolt11_payment()
-		.claim_for_id(client_payment_id, claimable_amount_msat, manual_preimage)
-		.unwrap();
+	client_node.bolt11_payment().claim_for_id(client_payment_id, manual_preimage).unwrap();
 
 	expect_event!(service_node, PaymentForwarded);
 	expect_payment_successful_event!(payer_node, payer_payment_id, None);
@@ -5599,7 +5596,7 @@ async fn live_node_apis_return_not_running_after_stop() {
 	// Payments.
 	assert_eq!(node_a.bolt11_payment().send(&invoice, None), Err(NodeError::NotRunning));
 	assert_eq!(
-		node_a.bolt11_payment().claim_for_id(payment_id, 0, preimage),
+		node_a.bolt11_payment().claim_for_id(payment_id, preimage),
 		Err(NodeError::NotRunning)
 	);
 	assert_eq!(node_a.bolt11_payment().fail_for_id(payment_id), Err(NodeError::NotRunning));
@@ -5781,10 +5778,7 @@ async fn lsps2_client_trusts_lsp() {
 		expected_received_amount_msat
 	);
 
-	client_node
-		.bolt11_payment()
-		.claim_for_id(client_payment_id, jit_amount_msat, manual_preimage)
-		.unwrap();
+	client_node.bolt11_payment().claim_for_id(client_payment_id, manual_preimage).unwrap();
 
 	expect_payment_successful_event!(payer_node, payer_payment_id, None);
 
