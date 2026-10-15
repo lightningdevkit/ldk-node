@@ -49,6 +49,15 @@ const FAIL_AMOUNT_MSAT: u64 = 200_000;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn v0_7_for_hash_payments_can_be_manually_resolved_after_upgrade() {
+	do_v0_7_manual_payment_upgrade(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn v0_7_queued_claimable_payments_can_be_resolved_after_upgrade() {
+	do_v0_7_manual_payment_upgrade(true).await;
+}
+
+async fn do_v0_7_manual_payment_upgrade(pay_before_upgrade: bool) {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 	let chain_source = TestChainSource::Esplora(&electrsd);
@@ -122,6 +131,25 @@ async fn v0_7_for_hash_payments_can_be_manually_resolved_after_upgrade() {
 		.unwrap()
 		.to_string();
 
+	// Overpayment must remain claimable even though the migrated record holds the invoice amount.
+	let paid_amount_msat = CLAIM_AMOUNT_MSAT + 1_000;
+	let claim_invoice = CurrentBolt11Invoice::from_str(&claim_invoice).unwrap();
+	let payer_claim_id = if pay_before_upgrade {
+		let id = payer
+			.bolt11_payment()
+			.send_using_amount(&claim_invoice, paid_amount_msat, None)
+			.unwrap();
+		let event = tokio::time::timeout(Duration::from_secs(60), old_receiver.next_event_async())
+			.await
+			.unwrap();
+		assert!(matches!(event, ldk_node_070::Event::PaymentClaimable {
+			payment_hash, claimable_amount_msat, ..
+		} if payment_hash.0 == claim_hash.0 && claimable_amount_msat == paid_amount_msat));
+		// Leave the event queued so it must survive the upgrade.
+		Some(id)
+	} else {
+		None
+	};
 	old_receiver.stop().unwrap();
 
 	let receiver = build_current_receiver(receiver_storage_path, receiver_addresses, &esplora_url);
@@ -132,17 +160,27 @@ async fn v0_7_for_hash_payments_can_be_manually_resolved_after_upgrade() {
 	payer.connect(receiver.node_id(), old_receiver_addr, true).unwrap();
 	wait_for_current_channel_usable(&payer, receiver.node_id(), CLAIM_AMOUNT_MSAT).await;
 
-	let claim_invoice = CurrentBolt11Invoice::from_str(&claim_invoice).unwrap();
-	let payer_claim_id = payer.bolt11_payment().send(&claim_invoice, None).unwrap();
+	let payer_claim_id = payer_claim_id.unwrap_or_else(|| {
+		payer.bolt11_payment().send_using_amount(&claim_invoice, paid_amount_msat, None).unwrap()
+	});
 	let (claim_payment_id, claimable_amount_msat) =
-		expect_payment_claimable_event!(receiver, claim_hash, CLAIM_AMOUNT_MSAT);
+		expect_payment_claimable_event!(receiver, claim_hash, paid_amount_msat);
 	assert_eq!(claim_payment_id, PaymentId(claim_hash.0));
+	assert_eq!(
+		receiver.payment(&claim_payment_id).unwrap().unwrap().amount_msat,
+		Some(if pay_before_upgrade { CLAIM_AMOUNT_MSAT } else { paid_amount_msat }),
+		"only a new claimable event replaces the legacy invoice amount with the received amount"
+	);
 	receiver
 		.bolt11_payment()
 		.claim_for_id(claim_payment_id, claimable_amount_msat, PaymentPreimage(claim_preimage))
 		.unwrap();
-	let received_payment_id = expect_payment_received_event!(receiver, CLAIM_AMOUNT_MSAT);
+	let received_payment_id = expect_payment_received_event!(receiver, paid_amount_msat);
 	assert_eq!(received_payment_id, claim_payment_id);
+	assert_eq!(
+		receiver.payment(&claim_payment_id).unwrap().unwrap().amount_msat,
+		Some(paid_amount_msat)
+	);
 	expect_payment_successful_event!(payer, payer_claim_id, None);
 	assert_eq!(
 		receiver.payment(&claim_payment_id).unwrap().unwrap().status,

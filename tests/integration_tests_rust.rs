@@ -5378,7 +5378,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	assert_ne!(client_payment_id.0, manual_payment_hash.0);
 	assert_eq!(
 		client_node.payment(&client_payment_id).unwrap().unwrap().amount_msat,
-		Some(jit_amount_msat)
+		Some(expected_received_amount_msat)
 	);
 	println!("Claiming payment!");
 	client_node
