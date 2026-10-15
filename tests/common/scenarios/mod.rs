@@ -239,7 +239,7 @@ pub(crate) async fn splice_in_scenario<E: ElectrumApi>(
 	)
 	.await;
 	let ext_node_id = peer.get_node_id().await.unwrap();
-	node.splice_in(&user_ch, ext_node_id, 500_000).unwrap();
+	node.splice_in(&user_ch, ext_node_id, 500_000, None).unwrap();
 	let splice_txo = expect_splice_negotiated_event!(node, ext_node_id);
 	wait_for_tx(electrs, splice_txo.txid).await;
 	generate_blocks_and_wait(bitcoind, electrs, 6).await;

@@ -1805,15 +1805,16 @@ impl Node {
 
 	fn splice_in_inner(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
-		splice_amount_sats: FundingAmount,
+		splice_amount_sats: FundingAmount, min_fee_rate: Option<bitcoin::FeeRate>,
 	) -> Result<(), Error> {
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			let min_feerate =
-				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let min_feerate = min_fee_rate.unwrap_or_else(|| {
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+			});
 			let max_feerate = max_funding_feerate(min_feerate);
 
 			let splice_amount_sats = match splice_amount_sats {
@@ -1939,13 +1940,19 @@ impl Node {
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
 	///
+	/// If `min_fee_rate` is set, it will be used as the minimum feerate for our contribution to the
+	/// splice transaction instead of a feerate estimate retrieved from the configured chain source.
+	/// As with the estimate, we may pay up to 1.5 times this feerate: when the channel already has a
+	/// pending splice that requires a higher feerate to be replaced, or when the counterparty
+	/// initiates a splice concurrently and our contribution is added to theirs.
+	///
 	/// # Experimental API
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
 	/// this classification may change in the future.
 	pub fn splice_in(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
-		splice_amount_sats: u64,
+		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
@@ -1955,6 +1962,7 @@ impl Node {
 			user_channel_id,
 			counterparty_node_id,
 			FundingAmount::Exact { amount_sats: splice_amount_sats },
+			maybe_map_fee_rate_opt(min_fee_rate),
 		)
 	}
 
@@ -1967,17 +1975,31 @@ impl Node {
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
 	///
+	/// If `min_fee_rate` is set, it will be used as the minimum feerate for our contribution to the
+	/// splice transaction instead of a feerate estimate retrieved from the configured chain source.
+	/// As with the estimate, we may pay up to 1.5 times this feerate: when the channel already has a
+	/// pending splice that requires a higher feerate to be replaced, or when the counterparty
+	/// initiates a splice concurrently and our contribution is added to theirs.
+	///
+	/// The amount spliced in is determined at `min_fee_rate`, or at the estimate if unset.
+	///
 	/// # Experimental API
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
 	/// this classification may change in the future.
 	pub fn splice_in_with_all(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
-		self.splice_in_inner(user_channel_id, counterparty_node_id, FundingAmount::Max)
+		self.splice_in_inner(
+			user_channel_id,
+			counterparty_node_id,
+			FundingAmount::Max,
+			maybe_map_fee_rate_opt(min_fee_rate),
+		)
 	}
 
 	/// Remove funds from an existing channel, sending them to an on-chain address.
@@ -1986,6 +2008,12 @@ impl Node {
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
 	///
+	/// If `min_fee_rate` is set, it will be used as the minimum feerate for our contribution to the
+	/// splice transaction instead of a feerate estimate retrieved from the configured chain source.
+	/// As with the estimate, we may pay up to 1.5 times this feerate: when the channel already has a
+	/// pending splice that requires a higher feerate to be replaced, or when the counterparty
+	/// initiates a splice concurrently and our contribution is added to theirs.
+	///
 	/// # Experimental API
 	///
 	/// This API is experimental. Currently, a splice-out will be marked as an inbound payment if
@@ -1993,11 +2021,13 @@ impl Node {
 	/// in the future.
 	pub fn splice_out(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
-		splice_amount_sats: u64,
+		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
+
+		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
 
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
@@ -2012,8 +2042,9 @@ impl Node {
 
 			self.wallet.parse_and_validate_address(address)?;
 
-			let min_feerate =
-				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let min_feerate = min_fee_rate.unwrap_or_else(|| {
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+			});
 			let max_feerate = max_funding_feerate(min_feerate);
 
 			let funding_template = self
@@ -2077,20 +2108,29 @@ impl Node {
 	/// Fee-bumps the pending splice on a channel by replacing its in-flight funding transaction
 	/// (RBF). The splice's amount and destination are preserved; only the fee rate is raised.
 	/// Errors if the channel has no pending splice to bump.
+	///
+	/// If `min_fee_rate` is set, it will be used as the minimum feerate for the replacement instead
+	/// of a feerate estimate retrieved from the configured chain source. As with the estimate, we
+	/// pay the feerate required to replace the pending splice if it is higher, but no more than 1.5
+	/// times this feerate: if replacing it requires more, the bump fails.
 	pub fn bump_channel_funding_fee(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
+
+		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
 
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			let min_feerate =
-				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let min_feerate = min_fee_rate.unwrap_or_else(|| {
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+			});
 
 			let funding_template = self
 				.channel_manager
