@@ -76,6 +76,9 @@ pub(crate) use in_memory_store::InMemoryStore;
 /// Shared timeout (in seconds) for waiting on LDK events and external node operations.
 pub(crate) const INTEROP_TIMEOUT_SECS: u64 = 60;
 
+/// How long `exponential_backoff_poll` keeps polling before it gives up.
+pub(crate) const POLL_TIMEOUT_SECS: u64 = 60;
+
 macro_rules! expect_event {
 	($node:expr, $event_type:ident) => {{
 		let event = tokio::time::timeout(
@@ -1008,8 +1011,11 @@ pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> T
 where
 	F: FnMut() -> Option<T>,
 {
+	// Budgeted by time rather than by tries: a try count gave about nine seconds in all, which a
+	// busy CI runner exceeds just indexing a hundred freshly generated blocks. A condition that
+	// already holds returns at once either way.
+	let deadline = tokio::time::Instant::now() + Duration::from_secs(POLL_TIMEOUT_SECS);
 	let mut delay = Duration::from_millis(64);
-	let mut tries = 0;
 	loop {
 		match poll() {
 			Some(data) => break data,
@@ -1019,8 +1025,7 @@ where
 
 			None => {},
 		}
-		assert!(tries < 20, "Reached max tries.");
-		tries += 1;
+		assert!(tokio::time::Instant::now() < deadline, "Timed out after {}s.", POLL_TIMEOUT_SECS);
 		tokio::time::sleep(delay).await;
 	}
 }
