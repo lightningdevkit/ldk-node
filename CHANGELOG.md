@@ -66,6 +66,8 @@
   transaction instead of a feerate estimate retrieved from the configured chain source. For
   `splice_in_with_all`, the amount spliced in is determined at `min_fee_rate`, or at the estimate
   if unset.
+  `Node::bump_channel_funding_fee` takes the same optional `min_fee_rate` for the replacement
+  transaction.
 
 ## Bug Fixes and Improvements
 - Building a fresh node against a Bitcoin Core RPC or REST chain source that fails to return the

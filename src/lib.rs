@@ -2108,20 +2108,29 @@ impl Node {
 	/// Fee-bumps the pending splice on a channel by replacing its in-flight funding transaction
 	/// (RBF). The splice's amount and destination are preserved; only the fee rate is raised.
 	/// Errors if the channel has no pending splice to bump.
+	///
+	/// If `min_fee_rate` is set, it will be used as the minimum feerate for the replacement instead
+	/// of a feerate estimate retrieved from the configured chain source. As with the estimate, we
+	/// pay the feerate required to replace the pending splice if it is higher, but no more than 1.5
+	/// times this feerate: if replacing it requires more, the bump fails.
 	pub fn bump_channel_funding_fee(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
+
+		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
 
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			let min_feerate =
-				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let min_feerate = min_fee_rate.unwrap_or_else(|| {
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+			});
 
 			let funding_template = self
 				.channel_manager

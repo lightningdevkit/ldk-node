@@ -3042,7 +3042,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 
 	// bump_channel_funding_fee should fail when there's no pending splice
 	assert_eq!(
-		node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id()),
+		node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id(), None),
 		Err(NodeError::ChannelSplicingFailed),
 	);
 
@@ -3083,7 +3083,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	);
 
 	// bump_channel_funding_fee should succeed when there's a pending splice
-	node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id()).unwrap();
+	node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id(), None).unwrap();
 
 	let rbf_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 
@@ -4249,7 +4249,7 @@ async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
 	// The bump pays little more than the first round, which bitcoind may refuse to replace for it:
 	// have it replaced, so the mempool serves the bump.
 	deprioritise_transaction(&bitcoind, first_txo.txid);
-	node_a.bump_channel_funding_fee(&user_channel_id_a, node_b.node_id()).unwrap();
+	node_a.bump_channel_funding_fee(&user_channel_id_a, node_b.node_id(), None).unwrap();
 	let bump_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	assert_ne!(first_txo, bump_txo, "the bump produced the same funding");
 	wait_for_classified_funding_payment(&node_a, bump_txo.txid).await;
@@ -5587,7 +5587,7 @@ async fn live_node_apis_return_not_running_after_stop() {
 		Err(NodeError::NotRunning)
 	);
 	assert_eq!(
-		node_a.bump_channel_funding_fee(&user_channel_id, node_b_id),
+		node_a.bump_channel_funding_fee(&user_channel_id, node_b_id, None),
 		Err(NodeError::NotRunning)
 	);
 	assert_eq!(node_a.close_channel(&user_channel_id, node_b_id), Err(NodeError::NotRunning));
