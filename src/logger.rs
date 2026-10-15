@@ -226,15 +226,22 @@ impl LogWriter for Writer {
 					.expect("Failed to write to log file")
 			},
 			Writer::LogFacadeWriter => {
-				let mut builder = LogFacadeRecord::builder();
-
-				match record.level {
-					LogLevel::Gossip | LogLevel::Trace => builder.level(LogFacadeLevel::Trace),
-					LogLevel::Debug => builder.level(LogFacadeLevel::Debug),
-					LogLevel::Info => builder.level(LogFacadeLevel::Info),
-					LogLevel::Warn => builder.level(LogFacadeLevel::Warn),
-					LogLevel::Error => builder.level(LogFacadeLevel::Error),
+				let level = match record.level {
+					LogLevel::Gossip | LogLevel::Trace => LogFacadeLevel::Trace,
+					LogLevel::Debug => LogFacadeLevel::Debug,
+					LogLevel::Info => LogFacadeLevel::Info,
+					LogLevel::Warn => LogFacadeLevel::Warn,
+					LogLevel::Error => LogFacadeLevel::Error,
 				};
+
+				// Apply the same gates as the `log` macros: the compile-time `STATIC_MAX_LEVEL`
+				// and the runtime maximum the application set via `log::set_max_level`.
+				if level > log::STATIC_MAX_LEVEL || level > log::max_level() {
+					return;
+				}
+
+				let mut builder = LogFacadeRecord::builder();
+				builder.level(level);
 
 				#[cfg(not(feature = "uniffi"))]
 				log::logger().log(
