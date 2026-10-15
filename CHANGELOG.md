@@ -1,6 +1,10 @@
 # Pending
 
 ## Compatibility Notes
+- Inbound BOLT11 payments now report amounts net of any withheld LSP fee as soon as they
+  become claimable, consistently with completed payments and BOLT12. Pending invoices from
+  v0.7 and earlier retain invoice-based amounts, minus any recorded fee, until another payment
+  event supplies the actual amount. Their historical serialization format is preserved.
 - The language bindings now expose `Mnemonic` as an object instead of a string alias. Existing
   mnemonic phrases must be passed through its fallible constructor, which returns
   `NodeError::InvalidMnemonic` for invalid input; generated mnemonics can be converted back to a
