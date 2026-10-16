@@ -12,9 +12,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use lightning::ln::channelmanager::PaymentId;
-use lightning::util::persist::PageToken;
 
-use crate::data_store::DataStorePage;
 use crate::payment::{PaymentDetails, PendingPaymentDetails};
 use crate::types::{PaymentStore, PendingPaymentStore};
 use crate::Error;
@@ -33,6 +31,10 @@ use crate::Error;
 /// write compiles only for a holder of the lock. The reads are methods of this type and take no
 /// lock; a caller whose write depends on what it read takes the lock first and reads through the
 /// guard.
+///
+/// The payment store is bounded, so nothing here lists it: a transaction is mapped to its payment
+/// through the pending store, which keeps every entry in memory, and through what was recorded
+/// about the transaction, which is read by its id.
 pub(super) struct PaymentStores {
 	payment_store: Arc<PaymentStore>,
 	pending_payment_store: Arc<PendingPaymentStore>,
@@ -69,14 +71,6 @@ impl PaymentStores {
 		&self, id: &PaymentId,
 	) -> Result<Option<PendingPaymentDetails>, Error> {
 		self.pending_payment_store.get(id).await
-	}
-
-	/// A page of payment records, ordered from most recently created to least recently created;
-	/// see [`DataStore::list_page`](crate::data_store::DataStore::list_page).
-	pub(super) async fn payments_page(
-		&self, page_token: Option<PageToken>,
-	) -> Result<DataStorePage<PaymentDetails>, Error> {
-		self.payment_store.list_page(page_token).await
 	}
 
 	/// Whether the pending store has an entry under `id`.
