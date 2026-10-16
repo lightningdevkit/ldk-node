@@ -190,8 +190,8 @@ use probing::{run_prober, Prober};
 use runtime::Runtime;
 pub use tokio;
 use types::{
-	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
+	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, DynStoreRef,
+	Graph, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{
 	ChannelCounterparty, ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId,
@@ -980,6 +980,19 @@ impl Node {
 	/// Returns the config with which the [`Node`] was initialized.
 	pub fn config(&self) -> Config {
 		self.config.as_ref().clone()
+	}
+
+	/// Returns a handle to the [`KVStore`] the [`Node`] persists its state to.
+	///
+	/// This allows applications to persist their own data in the same store as the node, e.g., to
+	/// keep it in the same database and back it up together.
+	///
+	/// **Note:** Applications must only read and write namespaces of their own. Modifying or
+	/// removing any data written by the node itself may lead to loss of funds.
+	///
+	/// [`KVStore`]: lightning::util::persist::KVStore
+	pub fn kv_store(&self) -> DynStoreRef {
+		DynStoreRef(Arc::clone(&self.kv_store))
 	}
 
 	/// Returns the next event in the event queue, if currently available.
