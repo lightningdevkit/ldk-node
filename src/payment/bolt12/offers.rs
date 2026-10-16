@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use bitcoin::block::Header;
 use bitcoin::constants::ChainHash;
@@ -74,7 +74,6 @@ const MAX_RESPONDERS_PER_JIT_INVOICE_REQUEST: usize = 10;
 const MAX_PENDING_JIT_INVOICE_RESPONDERS: usize =
 	MAX_PENDING_JIT_INVOICE_REQUESTS * MAX_RESPONDERS_PER_JIT_INVOICE_REQUEST;
 const MAX_COMPLETED_JIT_INVOICE_RESPONSES: usize = 100;
-const JIT_INVOICE_RESPONSE_CACHE_LIFETIME: Duration = Duration::from_secs(60);
 
 struct PendingJitInvoiceRequests<T> {
 	state: Arc<Mutex<PendingJitInvoiceRequestState<T>>>,
@@ -91,9 +90,7 @@ struct PendingJitInvoiceRequestState<T> {
 
 impl<T> PendingJitInvoiceRequestState<T> {
 	fn expire_completed_responses(&mut self) {
-		self.completed_responses.retain(|_, (completed_at, invoice, _)| {
-			completed_at.elapsed() < JIT_INVOICE_RESPONSE_CACHE_LIFETIME && !invoice.is_expired()
-		});
+		self.completed_responses.retain(|_, (_, invoice, _)| !invoice.is_expired());
 	}
 }
 
@@ -599,7 +596,7 @@ impl Listen for NodeOffersMessageHandler {
 mod tests {
 	use core::sync::atomic::{AtomicBool, Ordering};
 	use std::num::NonZeroU64;
-	use std::time::{SystemTime, UNIX_EPOCH};
+	use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 	use bitcoin::secp256k1::{Keypair, PublicKey, SecretKey};
 	use lightning::blinded_path::payment::{BlindedPayInfo, BlindedPaymentPath};
@@ -807,12 +804,15 @@ mod tests {
 	}
 
 	#[test]
-	fn completed_jit_invoice_responses_expire() {
+	fn completed_jit_invoice_responses_follow_invoice_expiry() {
 		let pending_requests = PendingJitInvoiceRequests::new(2, 2, 2);
 		let request_id = sha256::Hash::from_byte_array([1; 32]);
 		let first = started_request(pending_requests.register(request_id, 1));
-		let response = invoice_response(SystemTime::now().duration_since(UNIX_EPOCH).unwrap());
-		assert_eq!(first.complete(Some(response)), vec![1]);
+		let elapsed = Duration::from_secs(60 * 60);
+		let response =
+			invoice_response(SystemTime::now().duration_since(UNIX_EPOCH).unwrap() - elapsed);
+		assert!(!response.0.is_expired());
+		assert_eq!(first.complete(Some(response.clone())), vec![1]);
 		pending_requests
 			.state
 			.lock()
@@ -820,16 +820,29 @@ mod tests {
 			.completed_responses
 			.get_mut(&request_id)
 			.unwrap()
-			.0 -= JIT_INVOICE_RESPONSE_CACHE_LIFETIME;
-		assert!(pending_requests.cached_response(&request_id).is_none());
+			.0 -= elapsed;
+		assert!(
+			pending_requests.cached_response(&request_id).is_some(),
+			"an unexpired invoice response was discarded before a delayed replay"
+		);
+		match pending_requests.register(request_id, 2) {
+			PendingJitInvoiceRequestRegistration::Completed(invoice, context, responder) => {
+				assert_eq!(invoice.encode(), response.0.encode());
+				assert_eq!(context.encode(), response.1.encode());
+				assert_eq!(responder, 2);
+			},
+			_ => panic!("a delayed replay did not reuse its unexpired invoice"),
+		}
 
-		let retry = started_request(pending_requests.register(request_id, 2));
+		let expired_request_id = sha256::Hash::from_byte_array([2; 32]);
+		let expired = started_request(pending_requests.register(expired_request_id, 3));
 		let expired_response = invoice_response(Duration::ZERO);
 		assert!(expired_response.0.is_expired());
-		assert_eq!(retry.complete(Some(expired_response)), vec![2]);
-		assert!(pending_requests.cached_response(&request_id).is_none());
+		assert_eq!(expired.complete(Some(expired_response)), vec![3]);
+		assert!(pending_requests.cached_response(&expired_request_id).is_none());
+		assert!(pending_requests.cached_response(&request_id).is_some());
 		assert!(matches!(
-			pending_requests.register(request_id, 3),
+			pending_requests.register(expired_request_id, 4),
 			PendingJitInvoiceRequestRegistration::Started(_)
 		));
 	}
