@@ -33,7 +33,7 @@ use lightning_block_sync::{
 };
 use serde::Serialize;
 
-use super::{ChainListener, WalletSyncGuard, WalletSyncStatus};
+use super::{acquire_wallet_sync_guard, ChainListener, WalletSyncGuard, WalletSyncStatus};
 use crate::config::{
 	BitcoindRestClientConfig, Config, DEFAULT_FEE_RATE_CACHE_UPDATE_TIMEOUT_SECS,
 	DEFAULT_TX_BROADCAST_TIMEOUT_SECS,
@@ -448,21 +448,12 @@ impl BitcoindChainSource {
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
 		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
-		let receiver_res = {
-			let mut status_lock = self.wallet_polling_status.lock().expect("lock");
-			status_lock.register_or_subscribe_pending_sync()
-		};
-
-		if let Some(mut sync_receiver) = receiver_res {
-			log_debug!(self.logger, "Sync in progress, skipping.");
-			return sync_receiver.recv().await.map_err(|e| {
-				debug_assert!(false, "Failed to receive wallet polling result: {:?}", e);
-				log_error!(self.logger, "Failed to receive wallet polling result: {:?}", e);
-				Error::WalletOperationFailed
-			})?;
-		}
-		let sync_guard =
-			WalletSyncGuard::new(&self.wallet_polling_status, Error::WalletOperationFailed);
+		let sync_guard = acquire_wallet_sync_guard(
+			&self.wallet_polling_status,
+			Error::WalletOperationFailed,
+			&self.logger,
+		)
+		.await?;
 
 		let res = self
 			.poll_and_update_listeners_inner(
@@ -1599,7 +1590,8 @@ mod tests {
 		acquire_initial_wallet_sync_guard, FeeResponse, GetMempoolEntryResponse,
 		GetRawMempoolResponse, GetRawTransactionResponse, MempoolMinFeeResponse,
 	};
-	use crate::chain::{WalletSyncGuard, WalletSyncStatus};
+	use crate::chain::{acquire_wallet_sync_guard, WalletSyncGuard, WalletSyncStatus};
+	use crate::logger::Logger;
 	use crate::Error;
 
 	#[tokio::test]
@@ -1625,6 +1617,56 @@ mod tests {
 			"background sync should own the next sync"
 		);
 		acquired_guard.complete(Ok(()));
+	}
+
+	#[tokio::test]
+	async fn a_sync_waits_for_the_one_in_progress_and_then_runs_its_own() {
+		let logger = Logger::new_log_facade();
+		let status = Mutex::new(WalletSyncStatus::Completed);
+		assert!(status.lock().expect("lock").register_or_subscribe_pending_sync().is_none());
+		let in_progress_guard = WalletSyncGuard::new(&status, Error::WalletOperationFailed);
+		let mut acquire_guard =
+			Box::pin(acquire_wallet_sync_guard(&status, Error::WalletOperationFailed, &logger));
+
+		let early_result =
+			tokio::time::timeout(Duration::from_millis(10), acquire_guard.as_mut()).await;
+		assert!(early_result.is_err(), "the caller should wait for the sync in progress");
+
+		in_progress_guard.complete(Ok(()));
+		let acquired_guard = tokio::time::timeout(Duration::from_secs(1), acquire_guard)
+			.await
+			.expect("the caller should resume once the sync in progress is done")
+			.expect("the caller should acquire the sync guard");
+		assert!(
+			matches!(*status.lock().expect("lock"), WalletSyncStatus::InProgress { .. }),
+			"the caller should own the next sync rather than return"
+		);
+		acquired_guard.complete(Ok(()));
+		assert!(matches!(*status.lock().expect("lock"), WalletSyncStatus::Completed));
+	}
+
+	#[tokio::test]
+	async fn a_sync_fails_when_the_one_in_progress_fails() {
+		let logger = Logger::new_log_facade();
+		let status = Mutex::new(WalletSyncStatus::Completed);
+		assert!(status.lock().expect("lock").register_or_subscribe_pending_sync().is_none());
+		let in_progress_guard = WalletSyncGuard::new(&status, Error::WalletOperationFailed);
+		let mut acquire_guard =
+			Box::pin(acquire_wallet_sync_guard(&status, Error::WalletOperationFailed, &logger));
+
+		let early_result =
+			tokio::time::timeout(Duration::from_millis(10), acquire_guard.as_mut()).await;
+		assert!(early_result.is_err(), "the caller should wait for the sync in progress");
+
+		in_progress_guard.complete(Err(Error::TxSyncFailed));
+		let result = tokio::time::timeout(Duration::from_secs(1), acquire_guard)
+			.await
+			.expect("the caller should resume once the sync in progress is done");
+		assert_eq!(result.err(), Some(Error::TxSyncFailed));
+		assert!(
+			matches!(*status.lock().expect("lock"), WalletSyncStatus::Completed),
+			"a failed caller should not hold the sync status"
+		);
 	}
 
 	prop_compose! {
