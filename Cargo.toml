@@ -147,10 +147,8 @@ criterion = { version = "0.7.0", features = ["async_tokio"] }
 ldk-node-062 = { package = "ldk-node", version = "=0.6.2" }
 ldk-node-070 = { package = "ldk-node", version = "=0.7.0" }
 
-[target.'cfg(not(no_download))'.dev-dependencies]
-electrsd = { version = "0.36.1", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_29_0"] }
-
-[target.'cfg(no_download)'.dev-dependencies]
+# Test binaries are provided via scripts/download_bitcoind_electrs.sh.
+# Keep automatic downloads disabled to avoid the yanked zip dependency.
 electrsd = { version = "0.36.1", default-features = false, features = ["legacy"] }
 corepc-node = { version = "0.10.1", default-features = false, features = ["29_0"] }
 

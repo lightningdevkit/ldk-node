@@ -87,11 +87,11 @@ jobs:
       - name: Test on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest'"
         run: |
-          RUSTFLAGS="--cfg no_download --cfg cycle_tests --cfg tokio_unstable" cargo test
+          RUSTFLAGS="--cfg cycle_tests --cfg tokio_unstable" cargo test
       - name: Test with UniFFI support on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: |
-          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --no-default-features --features uniffi-default
+          RUSTFLAGS="--cfg cycle_tests" cargo test --no-default-features --features uniffi-default
 
   linting:
     name: Linting
