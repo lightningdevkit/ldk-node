@@ -713,6 +713,9 @@ async fn a_close_is_classified_for_a_channel_whose_facts_were_never_recorded() {
 
 	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
 	node_a.connect(node_b.node_id(), node_addr_b, false).unwrap();
+	// Connecting returns once the handshake is done, but a cooperative close is refused until the
+	// channel has been reestablished over the new connection.
+	wait_for_channel_ready_to_send(&node_a, &node_b, 0).await;
 	let user_channel_id_a = node_a.list_channels().first().unwrap().user_channel_id;
 	node_a.close_channel(&user_channel_id_a, node_b.node_id()).unwrap();
 	expect_event!(node_a, ChannelClosed);

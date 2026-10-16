@@ -52,6 +52,17 @@ where
 	unreachable!()
 }
 
+/// Waits until the peer has seen every block Bitcoin Core has. An implementation that polls
+/// its chain backend (CLN every `bitcoind-poll` seconds) sees freshly mined blocks late, so a
+/// message it only sends once it has, such as `channel_ready`, must not be waited for on the
+/// event timeout alone.
+pub(crate) async fn wait_for_peer_block_sync(
+	peer: &(impl ExternalNode + ?Sized), bitcoind: &BitcoindClient,
+) {
+	let chain_height: u64 = bitcoind.get_blockchain_info().unwrap().blocks.try_into().unwrap();
+	peer.wait_for_block_sync(chain_height).await.unwrap();
+}
+
 /// Sync wallets, retrying on `WalletOperationTimeout`.
 pub(crate) async fn sync_wallets_with_retry(node: &Node) {
 	for attempt in 0..3 {
@@ -123,8 +134,7 @@ pub(crate) async fn setup_interop_test<E: ElectrumApi>(
 	generate_blocks_and_wait(bitcoind, electrs, 1).await;
 
 	// Block until the peer indexes the funding tx, else channel opens time out.
-	let chain_height: u64 = bitcoind.get_blockchain_info().unwrap().blocks.try_into().unwrap();
-	peer.wait_for_block_sync(chain_height).await.unwrap();
+	wait_for_peer_block_sync(peer, bitcoind).await;
 
 	sync_wallets_with_retry(node).await;
 
@@ -243,6 +253,7 @@ pub(crate) async fn splice_in_scenario<E: ElectrumApi>(
 	let splice_txo = expect_splice_negotiated_event!(node, ext_node_id);
 	wait_for_tx(electrs, splice_txo.txid).await;
 	generate_blocks_and_wait(bitcoind, electrs, 6).await;
+	wait_for_peer_block_sync(peer, bitcoind).await;
 	sync_wallets_with_retry(node).await;
 	expect_channel_ready_event!(node, ext_node_id);
 
