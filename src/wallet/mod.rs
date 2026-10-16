@@ -643,8 +643,8 @@ impl Wallet {
 					let pending_payments: Vec<PendingPaymentDetails> = self
 						.payment_stores
 						.pending_payments(|p| match p.details() {
-							// An entry of signed rounds whose transaction nothing has observed
-							// yet carries no payment and cannot graduate.
+							// A pre-broadcast splice intent carries no payment yet and cannot
+							// graduate.
 							None => false,
 							Some(details) => {
 								debug_assert!(
@@ -2612,6 +2612,67 @@ impl Wallet {
 		Ok(tx)
 	}
 
+	/// Returns the `PaymentId` of a user-initiated splice intent for one of the channels in
+	/// `candidate`, if any, so the first recorded round of a splice adopts the id chosen at splice
+	/// time rather than a fresh one. The intent identifies the channel, not the round, so it
+	/// decides the id only for a history no record tracks yet
+	/// ([`Self::resolve_interactive_funding_id`]). A fee bump reuses the channel's existing intent,
+	/// so at most one in-flight intent matches and the first is unambiguous.
+	async fn find_splice_payment_id(&self, candidate: &FundingCandidate) -> Option<PaymentId> {
+		self.payment_stores
+			.pending_payments(|p| {
+				p.splice_intent().is_some_and(|intent| {
+					candidate.channels.iter().any(|channel| {
+						channel.channel_id == intent.channel_id
+							&& channel.counterparty_node_id == intent.counterparty_node_id
+					})
+				})
+			})
+			.await
+			.first()
+			.map(|p| p.id())
+	}
+
+	/// Resolves the id under which the `active` round of the interactive funding with negotiated
+	/// history `candidates` is recorded. A round already on record keeps its record: the id of the
+	/// first round of the history any record tracks is adopted (wallet sync may record a round
+	/// before this node does), so a replacement, a replayed signing and a sync-created record
+	/// converge on one record. A record already failed is passed over: wallet sync fails a payment
+	/// whose round lost to a conflicting spend confirmed while the channel stays open, LDK still
+	/// tracks the round and a fee bump of it is signed with the round among its candidates, and a
+	/// failed record's status is never revisited, so the bump filed under it would go untracked.
+	/// Only a history no live record tracks falls back to the channel's splice intent: a
+	/// user-initiated splice adopts the `PaymentId` generated when it was initiated, so its intent,
+	/// funding payment and candidate history share one record. The intent identifies the channel,
+	/// not the round, which is why it must not decide the id of a round already on record: a fee
+	/// bump this node signs of a round wallet sync recorded first must converge on the record sync
+	/// created, not be filed under the bump's intent as a second record. Otherwise a fresh id is
+	/// generated — an id derived from a txid would tie the record's identity to one round of a
+	/// replaceable transaction, and resolution through the record's txid history is what keeps its
+	/// identity stable across RBF replacements. The caller holds the cross-store lock: resolved
+	/// outside it, the id could go stale against a record wallet sync creates for the same
+	/// transaction before the caller's write.
+	async fn resolve_interactive_funding_id(
+		&self, stores: &PaymentStoresGuard<'_>, candidates: &[FundingCandidate],
+		active: &FundingCandidate,
+	) -> Result<PaymentId, Error> {
+		for candidate in candidates.iter() {
+			if let Some(id) = self.find_payment_by_txid(candidate.txid).await? {
+				let failed = stores
+					.payment(&id)
+					.await?
+					.is_some_and(|payment| payment.status == PaymentStatus::Failed);
+				if !failed {
+					return Ok(id);
+				}
+			}
+		}
+		if let Some(id) = self.find_splice_payment_id(active).await {
+			return Ok(id);
+		}
+		Ok(random_payment_id())
+	}
+
 	/// Builds this node's share of the `active` round of an interactive funding whose negotiated
 	/// history is `candidates`, and the per-candidate figures of that history, for recording the
 	/// round under `payment_id`. Returns `None` when there is nothing to record: no local
@@ -2692,8 +2753,9 @@ impl Wallet {
 	/// transaction, and resolves its identity through the fact.
 	///
 	/// `candidates` is the channel's pending splice history as [`funding_candidates`] lists it from
-	/// the channel's [`SpliceDetails`], so the history is written in full, under the first
-	/// candidate's txid as id.
+	/// the channel's [`SpliceDetails`], so the history is written in full, under the id
+	/// [`Self::resolve_interactive_funding_id`] resolves (that of a record already tracking any
+	/// round of the history, else the channel's splice intent, else a fresh one).
 	///
 	/// Nothing is recorded for a round missing from the history (reset between the event's
 	/// emission and its handling, so LDK will refuse the signed transaction), already recorded (a
@@ -2727,9 +2789,9 @@ impl Wallet {
 			})
 			.collect();
 
-		// The reads and the writes below must share one lock acquisition, as in every
-		// funding-record write: read outside it, the record could change under us before the
-		// write.
+		// Resolution, the reads and the writes below must share one lock acquisition, as in every
+		// funding-record write: done outside it, the id could go stale against a record wallet
+		// sync creates for the same transaction before the write.
 		let stores = self.payment_stores.lock().await;
 		// The facts of a round already on record identify its payment and this node's share of
 		// it. Those facts are immutable, so a replay adopts them rather than deriving figures
@@ -2737,11 +2799,9 @@ impl Wallet {
 		// would be refused rather than recorded, leaving the event replaying forever.
 		let recorded_figures =
 			self.channel_tx_facts(&txid).await.and_then(|facts| facts.local_figures);
-		// Anchor the `PaymentId` to the first negotiated candidate so the record stays stable
-		// across RBF replacements.
 		let payment_id = match &recorded_figures {
 			Some(figures) => figures.funding_payment_id,
-			None => PaymentId(candidates.first().map_or(txid, |first| first.txid).to_byte_array()),
+			None => self.resolve_interactive_funding_id(&stores, candidates, signed_round).await?,
 		};
 		let (figures, mut history) =
 			match self.interactive_funding_figures(payment_id, candidates, signed_round, tx) {
@@ -2749,6 +2809,7 @@ impl Wallet {
 				None => return Ok(()),
 			};
 		let figures = recorded_figures.unwrap_or(figures);
+		let direction = figures.direction;
 		// Only the signed round awaits broadcast: LDK broadcast the others once their signatures
 		// were exchanged.
 		if let Some(signed) = history.iter_mut().find(|candidate| candidate.txid == txid) {
@@ -2790,12 +2851,39 @@ impl Wallet {
 				.with_local_figures(figures),
 		)
 		.await?;
+		// The rounds this node contributed nothing to are candidates of this payment all the same,
+		// and one of them may be the round that confirms. Their facts carry the payment's id as
+		// the signed round's do, with no share of their own: the pending entry written below lists
+		// them, but graduation removes it, and the facts are then all that ties such a round to the
+		// payment (`find_payment_by_txid`). A round whose facts already carry a payment keeps it —
+		// the facts are immutable — so only rounds attributed to nothing yet are written.
+		for candidate in candidates.iter().filter(|candidate| candidate.txid != txid) {
+			if aggregate_local_stakes(candidate).amount_msat.is_some() {
+				continue;
+			}
+			let attributed = self
+				.channel_tx_facts(&candidate.txid)
+				.await
+				.is_some_and(|facts| facts.local_figures.is_some());
+			if attributed {
+				continue;
+			}
+			self.record_channel_tx_facts(ChannelTxFacts::new(candidate.txid).with_local_figures(
+				LocalFundingFigures {
+					funding_payment_id: payment_id,
+					amount_msat: None,
+					fee_paid_msat: None,
+					direction,
+				},
+			))
+			.await?;
+		}
 
 		stores
 			.mutate_pending_payment(&payment_id, |existing| {
 				let mut changed = existing.is_none();
 				let mut entry = existing.cloned().unwrap_or_else(|| {
-					PendingPaymentDetails::signed_rounds(payment_id, Vec::new(), Vec::new())
+					PendingPaymentDetails::signed_rounds(payment_id, Vec::new(), Vec::new(), None)
 				});
 				if entry.funding_channels.is_empty() && !funding_channels.is_empty() {
 					entry.funding_channels = funding_channels.clone();
@@ -2814,15 +2902,32 @@ impl Wallet {
 			txid,
 			candidates.len(),
 		);
+
+		// The history is complete; merging the duplicates wallet sync created for earlier rounds
+		// is a courtesy. The signed round can have no duplicate yet, as our signatures have not
+		// left the node, and the round's `SpliceNegotiated` event re-runs the merge, replaying on
+		// failure, so a failure here is logged rather than replaying the signing.
+		if let Err(e) = self.merge_duplicate_candidate_records(&stores, payment_id, &recorded).await
+		{
+			log_error!(
+				self.logger,
+				"Failed to merge duplicate records into funding payment {}: {}",
+				payment_id,
+				e,
+			);
+		}
 		Ok(())
 	}
 
 	/// Marks a splice round recorded when signing ([`Self::record_signed_funding`]) as broadcast
 	/// once LDK reports the splice negotiated: `SpliceNegotiated` is emitted only once our
 	/// `tx_signatures` for the round are ready to send, so the counterparty may have them by then
-	/// and may broadcast the round, which is therefore no longer dropped as abandoned. Nothing is
-	/// written for a round no funding payment of `channel_id` tracks (no local contribution, or no
-	/// wallet-level activity) or one already marked (a replayed event).
+	/// and may broadcast the round, which is therefore no longer dropped as abandoned. Then merges
+	/// the duplicate records wallet sync created for the record's candidates
+	/// ([`Self::merge_duplicate_candidate_records`]), completing a merge the signing left
+	/// unfinished. Nothing is written for a round no funding payment of `channel_id` tracks (no
+	/// local contribution, or no wallet-level activity); a replayed event finds the round marked
+	/// already and only re-runs the merge.
 	pub(crate) async fn record_broadcast_splice_round(
 		&self, channel_id: ChannelId, txid: Txid,
 	) -> Result<(), Error> {
@@ -2832,13 +2937,12 @@ impl Wallet {
 
 		let entries = stores
 			.pending_payments(|entry| {
-				tracks_channel(entry, channel_id)
-					&& entry.candidate(txid).is_some_and(|candidate| candidate.awaiting_broadcast)
+				tracks_channel(entry, channel_id) && entry.candidate(txid).is_some()
 			})
 			.await;
 		for entry in entries {
 			let payment_id = entry.id();
-			stores
+			let marked = stores
 				.mutate_pending_payment(&payment_id, |existing| {
 					let mut entry = existing?.clone();
 					let round = entry
@@ -2849,13 +2953,19 @@ impl Wallet {
 					Some(entry)
 				})
 				.await?;
-			log_debug!(
-				self.logger,
-				"Marked splice round {} of channel {} as broadcast in funding payment {}",
-				txid,
-				channel_id,
-				payment_id,
-			);
+			if marked.is_some() {
+				log_debug!(
+					self.logger,
+					"Marked splice round {} of channel {} as broadcast in funding payment {}",
+					txid,
+					channel_id,
+					payment_id,
+				);
+			}
+			// The round's record is complete, so the duplicates wallet sync created for earlier
+			// rounds can be folded in. A failure replays the event, which re-runs the merge
+			// idempotently.
+			self.merge_duplicate_candidate_records(&stores, payment_id, entry.candidates()).await?;
 		}
 		Ok(())
 	}
@@ -3100,9 +3210,10 @@ impl Wallet {
 	}
 
 	/// Records a funding payment the way the node does: the rounds this node signed supply the
-	/// candidate history, and wallet sync writes the payment record and its pending-store entry
-	/// once it observes the transaction. Composes that sequence for tests that need a recorded
-	/// funding payment to act on.
+	/// candidate history, wallet sync writes the payment record and its pending-store entry once
+	/// it observes the transaction, and the duplicates sync created for those rounds are merged
+	/// into the record. Composes that sequence for tests that need a recorded funding payment to
+	/// act on.
 	#[cfg(test)]
 	async fn record_funding_payment(
 		&self, details: PaymentDetails, candidates: Vec<FundingTxCandidate>,
@@ -3113,7 +3224,7 @@ impl Wallet {
 			stores
 				.mutate_pending_payment(&id, |existing| {
 					let mut entry = existing.cloned().unwrap_or_else(|| {
-						PendingPaymentDetails::signed_rounds(id, Vec::new(), Vec::new())
+						PendingPaymentDetails::signed_rounds(id, Vec::new(), Vec::new(), None)
 					});
 					entry.candidates = candidates.clone();
 					Some(entry)
@@ -3121,7 +3232,72 @@ impl Wallet {
 				.await?;
 		}
 		stores.insert_or_update_payment(details.clone()).await?;
-		self.upsert_pending_payment(&stores, details, Vec::new()).await
+		self.upsert_pending_payment(&stores, details, Vec::new()).await?;
+		self.merge_duplicate_candidate_records(&stores, id, &candidates).await
+	}
+
+	/// Merges duplicate records wallet sync created for this funding payment's candidates before
+	/// they were recorded as such. Sync re-keys an event for a round it cannot attribute to the
+	/// funding record — not yet a candidate, so the funding-status gate reports it foreign — to
+	/// the round's txid-derived id, creating an untyped duplicate whose pending entry then
+	/// shadows the funding record in [`Self::find_payment_by_txid`]'s direct probe. Once the
+	/// round is a recorded candidate, the duplicate's confirmation (if any) belongs on the
+	/// funding record: adopt it, then remove the duplicate and its pending entry.
+	///
+	/// Runs once a record's candidate history is written, so the funding-status gate accepts the
+	/// candidates it adopts, and under the writer's lock acquisition, so sync cannot interleave.
+	/// It is idempotent: a failure at signing time ([`Self::record_signed_funding`]) is left to the
+	/// signed round's `SpliceNegotiated` event ([`Self::record_broadcast_splice_round`]), which
+	/// re-runs the merge and replays on failure. The caller must hold the [`PaymentStores`] lock,
+	/// per [`Self::apply_funding_status_update_locked`]'s contract.
+	async fn merge_duplicate_candidate_records(
+		&self, stores: &PaymentStoresGuard<'_>, id: PaymentId, candidates: &[FundingTxCandidate],
+	) -> Result<(), Error> {
+		for candidate in candidates {
+			let duplicate_id = PaymentId(candidate.txid.to_byte_array());
+			if duplicate_id == id {
+				continue;
+			}
+			let duplicate = match stores.payment(&duplicate_id).await? {
+				Some(duplicate) => duplicate,
+				None => continue,
+			};
+			// Only a duplicate view of this candidate's transaction qualifies: a record wallet sync
+			// created for the round before it was a candidate, left untyped or classified as a
+			// plain funding. Anything else keyed by the txid-derived id is left alone.
+			let status = match &duplicate.kind {
+				PaymentKind::Onchain {
+					txid,
+					status,
+					tx_type: None | Some(TransactionType::Funding { .. }),
+				} if *txid == candidate.txid => status.clone(),
+				_ => continue,
+			};
+			// Only a confirmation is worth adopting; an unconfirmed duplicate carries nothing the
+			// record needs — the actively-broadcast candidate stays the record's current txid.
+			if matches!(status, ConfirmationStatus::Confirmed { .. }) {
+				let outcome = self
+					.apply_funding_status_update_locked(stores, id, candidate.txid, status)
+					.await?;
+				debug_assert!(matches!(outcome, FundingStatusUpdate::Applied));
+				if !matches!(outcome, FundingStatusUpdate::Applied) {
+					// Adoption declined; keep the duplicate rather than discard its confirmation.
+					continue;
+				}
+			}
+			log_debug!(
+				self.logger,
+				"Merging duplicate payment record for funding transaction {}",
+				candidate.txid,
+			);
+			// Pending entry first: the retry of a failure between these two removals rediscovers
+			// the duplicate through its payment record. Removed the other way around, the
+			// leftover pending entry would be unreachable to the retry yet keep shadowing the
+			// funding record in `find_payment_by_txid`'s direct probe.
+			stores.remove_pending_payment(&duplicate_id).await?;
+			stores.remove_payment(&duplicate_id).await?;
+		}
+		Ok(())
 	}
 
 	/// Returns the wallet's view of a transaction as `(amount_msat, fee_msat, direction)`.
@@ -3195,22 +3371,37 @@ impl Wallet {
 	) -> Result<(), Error> {
 		let id = payment.id;
 		stores
-			.mutate_pending_payment(&id, |existing| match existing {
-				None => Some(PendingPaymentDetails::new(payment, conflicting_txids, Vec::new())),
-				// Promote an entry that has no record yet: wallet sync saw the splice
-				// transaction before this node recorded a payment for it. The entry keeps the
-				// rounds signed under it, and gains the record.
-				Some(entry) if entry.details().is_none() => {
-					let mut entry = entry.clone();
-					entry.details = Some(payment);
-					entry.conflicting_txids = conflicting_txids;
-					Some(entry)
-				},
-				Some(tracked) => {
-					let mut tracked = tracked.clone();
-					let fresh = PendingPaymentDetails::new(payment, conflicting_txids, Vec::new());
-					tracked.update(fresh.to_update()).then_some(tracked)
-				},
+			.mutate_pending_payment_async(&id, move |existing| async move {
+				// Only `Pending` payments belong in the pending store. The authoritative
+				// status is re-read inside the store's critical section, where it cannot go
+				// stale against graduation.
+				let is_pending = stores
+					.payment(&id)
+					.await?
+					.map_or(payment.status == PaymentStatus::Pending, |recorded| {
+						recorded.status == PaymentStatus::Pending
+					});
+				if !is_pending {
+					return Ok(None);
+				}
+				Ok(match existing {
+					None => {
+						Some(PendingPaymentDetails::new(payment, conflicting_txids, Vec::new()))
+					},
+					// Promote an entry that has no record yet: wallet sync saw the splice
+					// transaction before this node recorded a payment for it. The entry keeps
+					// the splice intent and the rounds signed under it, and gains the record.
+					Some(mut entry) if entry.details().is_none() => {
+						entry.details = Some(payment);
+						entry.conflicting_txids = conflicting_txids;
+						Some(entry)
+					},
+					Some(mut tracked) => {
+						let fresh =
+							PendingPaymentDetails::new(payment, conflicting_txids, Vec::new());
+						tracked.update(fresh.to_update()).then_some(tracked)
+					},
+				})
 			})
 			.await?;
 		Ok(())
@@ -3236,11 +3427,15 @@ impl Wallet {
 
 	/// The payment the transaction `target_txid` belongs to, as far as anything on record says.
 	///
-	/// A transaction this node signed a round of an interactive funding for identifies its
-	/// payment outright, in the facts the signing recorded about it; that is the only answer that
-	/// holds before the payment record exists. Otherwise the pending store is asked, by the
-	/// record's own transaction, by its candidate history and by the conflicts wallet sync listed
-	/// for it.
+	/// A round of an interactive funding identifies its payment outright, in the facts the
+	/// signing recorded about it — about the round it signed and about every other candidate of
+	/// the history, the rounds this node contributed nothing to included. That is the only answer
+	/// that holds before the payment record exists, and the only one left once the record
+	/// graduated out of the pending store. Otherwise the pending store is asked, by the record's
+	/// own transaction, by its candidate history and by the conflicts wallet sync listed for it.
+	/// The payment store itself is never listed: it is bounded, and a record wallet sync created
+	/// under a transaction's own id is reached through that id, which the wallet-sync arms derive
+	/// from the transaction when nothing resolves it.
 	async fn find_payment_by_txid(&self, target_txid: Txid) -> Result<Option<PaymentId>, Error> {
 		if let Some(figures) =
 			self.channel_tx_facts(&target_txid).await.and_then(|facts| facts.local_figures)
@@ -3258,8 +3453,9 @@ impl Wallet {
 				|d| matches!(d.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid),
 			)
 				// A middle RBF round is not the record's current txid and may never have
-				// received a `TxReplaced` event of its own, so map any of its candidate
-				// txids (an earlier RBF round may confirm) back to the record.
+				// received a `TxReplaced` event of its own, and a splice keyed by a generated
+				// PaymentId is not found by the txid-derived id above: map any of the
+				// candidate txids (an earlier RBF round may confirm) back to the record.
 				|| p.candidate(target_txid).is_some()
 		};
 		let matches = self
@@ -3838,6 +4034,15 @@ enum FundingPaymentFailure {
 	MovedOn,
 }
 
+/// Generates a fresh funding-record [`PaymentId`] from the OS entropy source. A funding record's id
+/// carries no meaning beyond uniqueness: the record is found through its transaction history
+/// ([`Wallet::find_payment_by_txid`]), never re-derived from a txid.
+fn random_payment_id() -> PaymentId {
+	let mut bytes = [0u8; 32];
+	getrandom::fill(&mut bytes).expect("getrandom failed");
+	PaymentId(bytes)
+}
+
 /// The outcome of [`Wallet::apply_funding_status_update_locked`].
 enum FundingStatusUpdate {
 	/// The event's transaction belongs to the funding payment; its refreshed confirmation status
@@ -4200,7 +4405,8 @@ mod tests {
 		PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
 	use crate::payment::pending_payment_store::{
-		test_funding_contribution_with_outputs, test_funding_contribution_with_parts,
+		test_funding_contribution_with_outputs, test_funding_contribution_with_parts, SpliceIntent,
+		SpliceKind,
 	};
 	use crate::types::{DynStore, DynStoreWrapper, UserChannelId};
 	use crate::wallet::provenance::{
@@ -4361,6 +4567,86 @@ mod tests {
 	}
 
 	impl PaginatedKVStore for FailSwitchStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+			PaginatedKVStore::list_paginated(
+				&*self.inner,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+		}
+	}
+
+	/// An in-memory store that fails the next remove issued against an armed namespace, for
+	/// exercising cleanup paths that must survive a failure between two removals.
+	#[derive(Clone)]
+	struct FailRemoveStore {
+		inner: Arc<InMemoryStore>,
+		fail_remove_in: Arc<std::sync::Mutex<Option<String>>>,
+	}
+
+	impl FailRemoveStore {
+		fn new() -> Self {
+			Self {
+				inner: Arc::new(InMemoryStore::new()),
+				fail_remove_in: Arc::new(std::sync::Mutex::new(None)),
+			}
+		}
+
+		fn fail_next_remove_in(&self, primary_namespace: &str) {
+			*self.fail_remove_in.lock().unwrap() = Some(primary_namespace.to_string());
+		}
+	}
+
+	impl KVStore for FailRemoveStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			KVStore::read(&*self.inner, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::write(&*self.inner, primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + 'static + Send {
+			let inner = Arc::clone(&self.inner);
+			let armed = Arc::clone(&self.fail_remove_in);
+			let primary_namespace = primary_namespace.to_string();
+			let secondary_namespace = secondary_namespace.to_string();
+			let key = key.to_string();
+			async move {
+				let fail = {
+					let mut armed = armed.lock().unwrap();
+					if armed.as_deref() == Some(primary_namespace.as_str()) {
+						*armed = None;
+						true
+					} else {
+						false
+					}
+				};
+				if fail {
+					return Err(io::Error::new(io::ErrorKind::Other, "removes disabled"));
+				}
+				KVStore::remove(&*inner, &primary_namespace, &secondary_namespace, &key, lazy).await
+			}
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			KVStore::list(&*self.inner, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for FailRemoveStore {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 			page_token: Option<PageToken>,
@@ -5240,6 +5526,14 @@ mod tests {
 		)
 	}
 
+	fn confirmed_status() -> ConfirmationStatus {
+		ConfirmationStatus::Confirmed {
+			block_hash: bitcoin::BlockHash::from_byte_array([8u8; 32]),
+			height: 100,
+			timestamp: 1,
+		}
+	}
+
 	/// Inserts `tx` into the BDK wallet as canonically confirmed at `height`, extending the
 	/// local chain to that height.
 	fn insert_confirmed_tx(wallet: &Wallet, tx: Transaction, height: u32) {
@@ -5405,6 +5699,126 @@ mod tests {
 		(tx, contribution)
 	}
 
+	/// The intent of a user-initiated splice of `channel_id` with `counterparty_node_id`, anchored
+	/// at the channel's funding `pre_splice_funding` when the splice was submitted.
+	fn splice_intent_for(
+		counterparty_node_id: PublicKey, channel_id: ChannelId, pre_splice_funding: LdkOutPoint,
+	) -> SpliceIntent {
+		SpliceIntent {
+			counterparty_node_id,
+			channel_id,
+			pre_splice_funding_txo: pre_splice_funding,
+			contribution: test_funding_contribution_with_outputs(300, 253, &[]),
+			kind: SpliceKind::Out { outputs: Vec::new() },
+		}
+	}
+
+	/// A round signed under the channel's splice intent that has since locked with zero
+	/// confirmations — clearing its intent — with a second splice submitted against the locked
+	/// funding before the round's `SpliceNegotiated` event was handled: the channel's intent no
+	/// longer belongs to the recorded round.
+	struct LockedRoundWithNewerIntent {
+		first_id: PaymentId,
+		tx: Transaction,
+		candidates: Vec<FundingCandidate>,
+		second_id: PaymentId,
+		second_intent: SpliceIntent,
+	}
+
+	async fn lock_a_signed_round_and_submit_another_splice(
+		wallet: &Wallet,
+	) -> LockedRoundWithNewerIntent {
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let pre_splice_funding = LdkOutPoint { txid: Txid::from_byte_array([0xAA; 32]), index: 0 };
+
+		let first_id = PaymentId([31u8; 32]);
+		let first_intent = splice_intent_for(counterparty_node_id, channel_id, pre_splice_funding);
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert(PendingPaymentDetails::pending_splice(first_id, first_intent))
+			.await
+			.unwrap();
+		let (tx, contribution) = splice_out_round(wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
+		wallet.record_signed_funding(&tx, &candidates).await.unwrap();
+
+		// The round locks with zero confirmations, which clears its intent...
+		let cleared = PendingPaymentDetailsUpdate {
+			id: first_id,
+			payment_update: None,
+			conflicting_txids: None,
+			candidates: Vec::new(),
+			splice_intent: Some(None),
+		};
+		wallet.payment_stores.pending_payment_store().update(cleared).await.unwrap();
+		// ...and a second splice of the channel is submitted against the new funding.
+		let second_id = PaymentId([32u8; 32]);
+		let second_intent =
+			splice_intent_for(counterparty_node_id, channel_id, LdkOutPoint { txid, index: 0 });
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert(PendingPaymentDetails::pending_splice(second_id, second_intent.clone()))
+			.await
+			.unwrap();
+
+		LockedRoundWithNewerIntent { first_id, tx, candidates, second_id, second_intent }
+	}
+
+	/// A recorded round is marked broadcast in its own record once the channel carries the intent
+	/// of a newer splice: after a zero-conf lock, the user may submit a second splice before the
+	/// locked round's `SpliceNegotiated` event is handled, and the event must neither file the
+	/// round under the new splice as a second record nor touch the new splice's intent.
+	#[tokio::test]
+	async fn negotiation_marks_a_recorded_round_broadcast_under_a_newer_intent() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let setup = lock_a_signed_round_and_submit_another_splice(&wallet).await;
+		let txid = setup.tx.compute_txid();
+
+		let channel_id = setup.candidates[0].channels[0].channel_id;
+		wallet.record_broadcast_splice_round(channel_id, txid).await.unwrap();
+
+		let entry = wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&setup.first_id)
+			.await
+			.unwrap()
+			.expect("entry");
+		assert!(!entry.candidate(txid).expect("candidate").awaiting_broadcast);
+		assert_eq!(
+			wallet.payment_stores.pending_payment_store().get(&setup.second_id).await.unwrap(),
+			Some(PendingPaymentDetails::pending_splice(setup.second_id, setup.second_intent)),
+			"the newer splice's intent must be left untouched"
+		);
+	}
+
+	/// The signing event of a recorded round, replayed once the channel carries the intent of a
+	/// newer splice, is a no-op: the round is on record, so the newer intent is not consulted.
+	#[tokio::test]
+	async fn a_replayed_signing_under_a_newer_intent_is_a_no_op() {
+		let fail_store = FailSwitchStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let setup = lock_a_signed_round_and_submit_another_splice(&wallet).await;
+
+		fail_store.fail_writes.store(true, Ordering::Release);
+		wallet.record_signed_funding(&setup.tx, &setup.candidates).await.unwrap();
+		assert_eq!(
+			fail_store.failed_writes.load(Ordering::Acquire),
+			0,
+			"a replayed signing must produce no new write"
+		);
+		assert_eq!(
+			wallet.payment_stores.pending_payment_store().get(&setup.second_id).await.unwrap(),
+			Some(PendingPaymentDetails::pending_splice(setup.second_id, setup.second_intent)),
+		);
+	}
+
 	/// Signing a round writes no payment record. It records what the round is, this node's share
 	/// of it and the funding payment it belongs to, and leaves the record itself to whoever first
 	/// observes the transaction.
@@ -5512,18 +5926,21 @@ mod tests {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let wallet = new_test_wallet(Arc::clone(&store), false).await;
 		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let pre_splice_funding = LdkOutPoint { txid: Txid::from_byte_array([0xAA; 32]), index: 0 };
 
-		// A counterparty round precedes ours, so the payment's id is not the round's own txid.
-		let prior_txid = Txid::from_byte_array([0xAA; 32]);
+		let id = PaymentId([31u8; 32]);
+		let intent = splice_intent_for(counterparty_node_id, channel_id, pre_splice_funding);
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert(PendingPaymentDetails::pending_splice(id, intent))
+			.await
+			.unwrap();
 		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
 		let txid = tx.compute_txid();
-		let candidates = splice_candidates(
-			counterparty_node_id,
-			channel_id,
-			&[(prior_txid, None), (txid, Some(contribution))],
-		);
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
 		wallet.record_signed_funding(&tx, &candidates).await.unwrap();
-		let id = PaymentId(prior_txid.to_byte_array());
 
 		// Our signatures leave the node and the counterparty broadcasts: wallet sync is the first
 		// to see the transaction.
@@ -5645,6 +6062,401 @@ mod tests {
 			Some(id),
 			"the replaced round still identifies the payment it was a candidate of",
 		);
+	}
+
+	/// A round this node contributed nothing to is a candidate of the payment all the same, and
+	/// may be the one that confirms. Once the record graduates, the entry that listed the round
+	/// as a candidate is gone, so the round's facts must identify the payment, as a signed
+	/// round's do.
+	#[tokio::test]
+	async fn a_graduated_records_counterparty_round_still_identifies_its_payment() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		// The counterparty's round, then one of ours signed with it in the history.
+		let (counterparty_tx, _) = splice_out_round(&wallet, 1, 500_000, 300);
+		let counterparty_txid = counterparty_tx.compute_txid();
+		let (tx, contribution) = splice_out_round(&wallet, 2, 499_000, 700);
+		let txid = tx.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(counterparty_txid, None), (txid, Some(contribution))],
+		);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+		let id = wallet.find_payment_by_txid(txid).await.unwrap().expect("id");
+
+		// Graduation: the record settles and its pending entry, with the candidate history, goes.
+		let mut graduated = PaymentDetailsUpdate::new(id);
+		graduated.status = Some(PaymentStatus::Succeeded);
+		wallet.payment_stores.payment_store().update(graduated).await.unwrap();
+		wallet.payment_stores.pending_payment_store().remove(&id).await.unwrap();
+
+		assert_eq!(wallet.find_payment_by_txid(counterparty_txid).await.unwrap(), Some(id));
+		assert_eq!(wallet.find_payment_by_txid(txid).await.unwrap(), Some(id));
+	}
+
+	/// The counterparty's round is the one that confirms: the record adopts it as its transaction
+	/// before graduating, and the round still identifies the payment afterwards.
+	#[tokio::test]
+	async fn a_graduated_record_is_identified_by_the_counterparty_round_it_adopted() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let (counterparty_tx, _) = splice_out_round(&wallet, 1, 500_000, 300);
+		let counterparty_txid = counterparty_tx.compute_txid();
+		let (tx, contribution) = splice_out_round(&wallet, 2, 499_000, 700);
+		let txid = tx.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(counterparty_txid, None), (txid, Some(contribution))],
+		);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+		let id = wallet.find_payment_by_txid(txid).await.unwrap().expect("id");
+
+		let confirmation_height = 100;
+		insert_confirmed_tx(&wallet, counterparty_tx.clone(), confirmation_height);
+		let event = WalletEvent::TxConfirmed {
+			txid: counterparty_txid,
+			tx: Arc::new(counterparty_tx),
+			block_time: confirmed_block_time(confirmation_height),
+			old_block_time: None,
+		};
+		wallet.update_payment_store(vec![event]).await.unwrap();
+		let payment =
+			wallet.payment_stores.payment_store().get(&id).await.unwrap().expect("record");
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Confirmed { .. }, .. }
+				if txid == counterparty_txid
+		));
+		assert_eq!(payment.amount_msat, None);
+
+		let mut graduated = PaymentDetailsUpdate::new(id);
+		graduated.status = Some(PaymentStatus::Succeeded);
+		wallet.payment_stores.payment_store().update(graduated).await.unwrap();
+		wallet.payment_stores.pending_payment_store().remove(&id).await.unwrap();
+
+		assert_eq!(wallet.find_payment_by_txid(counterparty_txid).await.unwrap(), Some(id));
+	}
+
+	/// The first round of a user-initiated splice is on no record when it is signed, so it adopts
+	/// the id of the channel's splice intent: the bare intent entry becomes the round's record and
+	/// keeps carrying the intent.
+	#[tokio::test]
+	async fn signing_a_first_round_adopts_the_intent_id() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let pre_splice_funding = LdkOutPoint { txid: Txid::from_byte_array([0xAA; 32]), index: 0 };
+
+		let id = PaymentId([31u8; 32]);
+		let intent = splice_intent_for(counterparty_node_id, channel_id, pre_splice_funding);
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert(PendingPaymentDetails::pending_splice(id, intent.clone()))
+			.await
+			.unwrap();
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+
+		let payment =
+			wallet.payment_stores.payment_store().get(&id).await.unwrap().expect("record");
+		assert!(matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == txid));
+		let txid_derived_id = PaymentId(txid.to_byte_array());
+		assert!(wallet
+			.payment_stores
+			.payment_store()
+			.get(&txid_derived_id)
+			.await
+			.unwrap()
+			.is_none());
+		let entry =
+			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().expect("entry");
+		assert_eq!(entry.details(), Some(&payment));
+		assert_eq!(entry.splice_intent(), Some(&intent));
+		assert!(entry.candidate(txid).expect("candidate").awaiting_broadcast);
+	}
+
+	/// A fee bump of a round whose payment wallet sync failed — the round lost to a conflicting
+	/// spend confirmed while the channel stayed open — adopts the channel's splice intent rather
+	/// than the failed record: the failed round in its history does not decide the id, so the
+	/// bump is recorded under the intent's id, its entry carrying the intent.
+	#[tokio::test]
+	async fn signing_a_bump_of_a_failed_round_adopts_the_channels_intent() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let pre_splice_funding = LdkOutPoint { txid: Txid::from_byte_array([0xAA; 32]), index: 0 };
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(txid, Some(contribution.clone()))],
+		);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+		let failed_id = wallet.find_payment_by_txid(txid).await.unwrap().expect("record");
+		// Wallet sync failed the payment and removed its entry.
+		wallet
+			.payment_stores
+			.payment_store()
+			.mutate(&failed_id, |existing| {
+				let mut update = PaymentDetailsUpdate::new(failed_id);
+				update.status = Some(PaymentStatus::Failed);
+				let mut updated = existing?.clone();
+				updated.update(update).then_some(updated)
+			})
+			.await
+			.unwrap();
+		wallet.payment_stores.pending_payment_store().remove(&failed_id).await.unwrap();
+
+		// The bump's intent, recorded at submission with no record left to join.
+		let (bump_tx, bump_contribution) = splice_out_round(&wallet, 2, 499_000, 700);
+		let bump_txid = bump_tx.compute_txid();
+		let id = PaymentId([31u8; 32]);
+		let intent = SpliceIntent {
+			contribution: bump_contribution.clone(),
+			kind: SpliceKind::Rbf {},
+			..splice_intent_for(counterparty_node_id, channel_id, pre_splice_funding)
+		};
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert(PendingPaymentDetails::pending_splice(id, intent.clone()))
+			.await
+			.unwrap();
+		let bump_candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(txid, Some(contribution)), (bump_txid, Some(bump_contribution))],
+		);
+		sign_and_observe_round(&wallet, &bump_tx, &bump_candidates).await;
+
+		let payment =
+			wallet.payment_stores.payment_store().get(&id).await.unwrap().expect("record");
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		assert!(matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == bump_txid));
+		let entry =
+			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().expect("entry");
+		assert_eq!(entry.details(), Some(&payment));
+		assert_eq!(entry.splice_intent(), Some(&intent));
+		assert!(entry.candidate(bump_txid).expect("candidate").awaiting_broadcast);
+		let failed = wallet
+			.payment_stores
+			.payment_store()
+			.get(&failed_id)
+			.await
+			.unwrap()
+			.expect("the failed record stays");
+		assert_eq!(failed.status, PaymentStatus::Failed);
+		assert!(matches!(failed.kind, PaymentKind::Onchain { txid: t, .. } if t == txid));
+		assert!(wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&failed_id)
+			.await
+			.unwrap()
+			.is_none());
+	}
+
+	/// A fee bump signed while the channel's intent is still live joins the record of the round
+	/// it replaces: that round is on record, so the history decides the id, and the intent the
+	/// bump shares with the first round stays on the record.
+	#[tokio::test]
+	async fn signing_a_bump_joins_the_replaced_rounds_record() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let pre_splice_funding = LdkOutPoint { txid: Txid::from_byte_array([0xAA; 32]), index: 0 };
+
+		let id = PaymentId([31u8; 32]);
+		let intent = splice_intent_for(counterparty_node_id, channel_id, pre_splice_funding);
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert(PendingPaymentDetails::pending_splice(id, intent.clone()))
+			.await
+			.unwrap();
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(txid, Some(contribution.clone()))],
+		);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+
+		let (bump_tx, bump_contribution) = splice_out_round(&wallet, 2, 499_000, 700);
+		let bump_txid = bump_tx.compute_txid();
+		let bump_candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(txid, Some(contribution)), (bump_txid, Some(bump_contribution))],
+		);
+		sign_and_observe_round(&wallet, &bump_tx, &bump_candidates).await;
+
+		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
+		assert_eq!(payments.len(), 1, "the bump must join the first round's record");
+		assert_eq!(payments[0].id, id);
+		assert!(matches!(payments[0].kind, PaymentKind::Onchain { txid: t, .. } if t == bump_txid));
+		let entry =
+			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().expect("entry");
+		assert_eq!(
+			entry.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(),
+			vec![txid, bump_txid]
+		);
+		assert_eq!(entry.splice_intent(), Some(&intent));
+	}
+
+	/// A fee bump of a round whose payment wallet sync failed — the round lost to a conflicting
+	/// spend confirmed while the channel stayed open, so LDK still tracks it and offers the bump —
+	/// is signed with the failed round among its candidates. The failed record takes no round: its
+	/// status is never revisited, so the bump would go untracked under it. The bump gets a record
+	/// of its own.
+	#[tokio::test]
+	async fn signing_a_bump_of_a_failed_round_gets_a_record_of_its_own() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(txid, Some(contribution.clone()))],
+		);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+		let failed_id = wallet.find_payment_by_txid(txid).await.unwrap().expect("record");
+		// Wallet sync failed the payment and removed its entry.
+		wallet
+			.payment_stores
+			.payment_store()
+			.mutate(&failed_id, |existing| {
+				let mut update = PaymentDetailsUpdate::new(failed_id);
+				update.status = Some(PaymentStatus::Failed);
+				let mut updated = existing?.clone();
+				updated.update(update).then_some(updated)
+			})
+			.await
+			.unwrap();
+		wallet.payment_stores.pending_payment_store().remove(&failed_id).await.unwrap();
+
+		let (bump_tx, bump_contribution) = splice_out_round(&wallet, 2, 499_000, 700);
+		let bump_txid = bump_tx.compute_txid();
+		let bump_candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(txid, Some(contribution)), (bump_txid, Some(bump_contribution))],
+		);
+		sign_and_observe_round(&wallet, &bump_tx, &bump_candidates).await;
+
+		let bump_id = wallet.find_payment_by_txid(bump_txid).await.unwrap().expect("a record");
+		assert_ne!(bump_id, failed_id);
+		let payment =
+			wallet.payment_stores.payment_store().get(&bump_id).await.unwrap().expect("record");
+		assert_eq!(payment.status, PaymentStatus::Pending);
+		assert!(matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == bump_txid));
+		let entry = wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&bump_id)
+			.await
+			.unwrap()
+			.expect("entry");
+		assert_eq!(entry.details(), Some(&payment));
+		assert!(entry.candidate(bump_txid).expect("candidate").awaiting_broadcast);
+		let failed = wallet
+			.payment_stores
+			.payment_store()
+			.get(&failed_id)
+			.await
+			.unwrap()
+			.expect("the failed record stays");
+		assert_eq!(failed.status, PaymentStatus::Failed);
+		assert!(matches!(failed.kind, PaymentKind::Onchain { txid: t, .. } if t == txid));
+		assert!(wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&failed_id)
+			.await
+			.unwrap()
+			.is_none());
+	}
+
+	/// The bump's history carries a round this node contributed nothing to over from the failed
+	/// record, whose signing attributed the round to the failed payment. Facts are immutable, so
+	/// the bump's record lists the round as a candidate and leaves its facts as they are, rather
+	/// than failing the signing over a second attribution.
+	#[tokio::test]
+	async fn a_bump_of_a_failed_round_leaves_a_counterparty_rounds_facts_as_they_are() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let (counterparty_tx, _) = splice_out_round(&wallet, 1, 500_000, 300);
+		let counterparty_txid = counterparty_tx.compute_txid();
+		let (tx, contribution) = splice_out_round(&wallet, 2, 499_000, 700);
+		let txid = tx.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(counterparty_txid, None), (txid, Some(contribution.clone()))],
+		);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+		let failed_id = wallet.find_payment_by_txid(txid).await.unwrap().expect("record");
+		// Wallet sync failed the payment and removed its entry.
+		wallet
+			.payment_stores
+			.payment_store()
+			.mutate(&failed_id, |existing| {
+				let mut update = PaymentDetailsUpdate::new(failed_id);
+				update.status = Some(PaymentStatus::Failed);
+				let mut updated = existing?.clone();
+				updated.update(update).then_some(updated)
+			})
+			.await
+			.unwrap();
+		wallet.payment_stores.pending_payment_store().remove(&failed_id).await.unwrap();
+
+		let (bump_tx, bump_contribution) = splice_out_round(&wallet, 3, 498_000, 1_100);
+		let bump_txid = bump_tx.compute_txid();
+		let bump_candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[
+				(counterparty_txid, None),
+				(txid, Some(contribution)),
+				(bump_txid, Some(bump_contribution)),
+			],
+		);
+		wallet
+			.record_signed_funding(&bump_tx, &bump_candidates)
+			.await
+			.expect("the signing is recorded");
+
+		let bump_id = wallet.find_payment_by_txid(bump_txid).await.unwrap().expect("a record");
+		assert_ne!(bump_id, failed_id);
+		let figures = wallet
+			.channel_tx_facts(&counterparty_txid)
+			.await
+			.expect("facts")
+			.local_figures
+			.expect("figures");
+		assert_eq!(figures.funding_payment_id, failed_id);
+		let entry = wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&bump_id)
+			.await
+			.unwrap()
+			.expect("entry");
+		assert!(entry.candidate(counterparty_txid).is_some());
 	}
 
 	/// Once LDK reports a round recorded at signing negotiated, there is nothing to add but the
@@ -6713,8 +7525,8 @@ mod tests {
 	}
 
 	/// A middle RBF candidate must map back to the funding record: it is neither the record's
-	/// id (derived from the first candidate), nor its current txid (the active candidate), nor
-	/// in `conflicting_txids` (it never got a `TxReplaced` event of its own).
+	/// id (here the txid-derived id of the first candidate), nor its current txid (the active
+	/// candidate), nor in `conflicting_txids` (it never got a `TxReplaced` event of its own).
 	#[tokio::test]
 	async fn find_payment_by_txid_maps_candidate_txids() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -6966,6 +7778,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7184,6 +7997,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7269,6 +8083,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7362,6 +8177,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7447,6 +8263,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7538,6 +8355,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![bumped_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7591,6 +8409,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7658,6 +8477,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![conflict_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7814,18 +8634,20 @@ mod tests {
 		assert_eq!(reads, 2, "recording an unknown transaction re-read the payment store");
 	}
 
-	/// A funding record's id is anchored to its first candidate's txid. Once the payment settles
-	/// and its entry is removed, a wallet event for that candidate no longer resolves through the
-	/// candidate history — the fallback keys it by its own txid, colliding with the record's id.
-	/// Recording the event there would merge a fresh wallet-view `Pending` payment into the
-	/// terminal record; such events must be skipped.
+	/// A funding record wallet sync created for a round this node had not recorded keeps the
+	/// txid-derived id of its first candidate. Once the payment settles and its entry is removed, a
+	/// wallet event for that candidate no longer resolves through the candidate history — the
+	/// fallback keys it by its own txid, colliding with the record's id. Recording the event there
+	/// would merge a fresh wallet-view `Pending` payment into the terminal record; such events must
+	/// be skipped.
 	#[tokio::test]
 	async fn candidate_event_does_not_resurrect_a_settled_funding_payment() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let wallet = new_test_wallet(store, false).await;
 
-		// The record's id derives from the first candidate r1; its txid rotated to the RBF round
-		// r2. The payment failed and its pending entry is gone.
+		// The record keeps the txid-derived id of its first candidate r1, as one created for an
+		// unrecorded round does; its txid rotated to the RBF round r2. The payment failed and its
+		// pending entry is gone.
 		let r1 = Txid::from_byte_array([2u8; 32]);
 		let r2 = Txid::from_byte_array([4u8; 32]);
 		let payment_id = PaymentId(r1.to_byte_array());
@@ -7956,6 +8778,7 @@ mod tests {
 				payment_update: None,
 				conflicting_txids: Some(vec![close_txid]),
 				candidates: Vec::new(),
+				splice_intent: None,
 			})
 			.await
 			.unwrap();
@@ -7981,6 +8804,559 @@ mod tests {
 			.await
 			.unwrap()
 			.is_none());
+	}
+
+	/// Wallet sync can record a genuine replacement round before it is recorded as a candidate:
+	/// the counterparty broadcast a round this node did not contribute to, which is recorded only
+	/// when this node signs a later round of the splice. The funding-status gate then routes the
+	/// round's confirmation to a duplicate record keyed by the round's txid, whose pending entry
+	/// shadows the funding record in `find_payment_by_txid`'s direct probe. Once the round is
+	/// recorded as a candidate, the write must merge the duplicate — adopt its confirmation and
+	/// remove it — so a single record tracks the splice.
+	#[tokio::test]
+	async fn recording_a_round_merges_duplicate_records_for_its_candidates() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let funding_id = PaymentId([21u8; 32]);
+		let txid1 = Txid::from_byte_array([1u8; 32]);
+		let txid2 = Txid::from_byte_array([2u8; 32]);
+
+		// Round 1 recorded normally.
+		let round1 = vec![FundingTxCandidate {
+			txid: txid1,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+			awaiting_broadcast: false,
+		}];
+		let details = interactive_funding_details(funding_id, txid1, Some(1_000_000), Some(500));
+		wallet.record_funding_payment(details, round1).await.unwrap();
+
+		// Wallet sync recorded round 2's confirmation while the round was not yet a candidate: a
+		// duplicate untyped record under the txid-derived id, plus its pending entry.
+		let duplicate_id = PaymentId(txid2.to_byte_array());
+		let duplicate = PaymentDetails::new(
+			duplicate_id,
+			PaymentKind::Onchain { txid: txid2, status: confirmed_status(), tx_type: None },
+			Some(999_000),
+			Some(999),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		wallet.payment_stores.payment_store().insert_or_update(duplicate.clone()).await.unwrap();
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert_or_update(PendingPaymentDetails::new(duplicate, Vec::new(), Vec::new()))
+			.await
+			.unwrap();
+		assert_eq!(wallet.find_payment_by_txid(txid2).await.unwrap(), Some(duplicate_id));
+
+		// Round 2 is recorded as a candidate, with the history of a later round this node signs.
+		let rounds = vec![
+			FundingTxCandidate {
+				txid: txid1,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+				awaiting_broadcast: false,
+			},
+			FundingTxCandidate {
+				txid: txid2,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(400),
+				awaiting_broadcast: false,
+			},
+		];
+		let details = interactive_funding_details(funding_id, txid2, Some(1_000_000), Some(400));
+		wallet.record_funding_payment(details, rounds).await.unwrap();
+
+		// One record: the funding record carries the duplicate's confirmation and the confirmed
+		// candidate's figures; the duplicate and its pending entry are gone, so the round's txid
+		// resolves to the funding record again.
+		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
+		assert_eq!(payments.len(), 1, "the duplicate must be merged away");
+		let payment = &payments[0];
+		assert_eq!(payment.id, funding_id);
+		assert_eq!(payment.amount_msat, Some(1_000_000));
+		assert_eq!(payment.fee_paid_msat, Some(400));
+		match &payment.kind {
+			PaymentKind::Onchain {
+				txid,
+				status: ConfirmationStatus::Confirmed { .. },
+				tx_type: Some(TransactionType::InteractiveFunding { .. }),
+			} => assert_eq!(*txid, txid2),
+			kind => panic!("unexpected kind {:?}", kind),
+		}
+		assert!(wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&duplicate_id)
+			.await
+			.unwrap()
+			.is_none());
+		assert_eq!(wallet.find_payment_by_txid(txid2).await.unwrap(), Some(funding_id));
+	}
+
+	/// A duplicate for an *unconfirmed* round carries no state the funding record needs: the
+	/// merge removes it without touching the record's active txid or figures, and the round's
+	/// txid maps back to the funding record through its candidate history.
+	#[tokio::test]
+	async fn recording_drops_unconfirmed_duplicates_without_adopting_their_txid() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let funding_id = PaymentId([21u8; 32]);
+		let txid1 = Txid::from_byte_array([1u8; 32]);
+		let txid2 = Txid::from_byte_array([2u8; 32]);
+
+		// Wallet sync saw round 1 — still unconfirmed — before any round was recorded.
+		let duplicate_id = PaymentId(txid1.to_byte_array());
+		let duplicate = PaymentDetails::new(
+			duplicate_id,
+			PaymentKind::Onchain {
+				txid: txid1,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: None,
+			},
+			Some(999_000),
+			Some(999),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		wallet.payment_stores.payment_store().insert_or_update(duplicate.clone()).await.unwrap();
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert_or_update(PendingPaymentDetails::new(duplicate, Vec::new(), Vec::new()))
+			.await
+			.unwrap();
+
+		// Round 2 is the active broadcast; its record lists both rounds.
+		let rounds = vec![
+			FundingTxCandidate {
+				txid: txid1,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+				awaiting_broadcast: false,
+			},
+			FundingTxCandidate {
+				txid: txid2,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(400),
+				awaiting_broadcast: false,
+			},
+		];
+		let details = interactive_funding_details(funding_id, txid2, Some(1_000_000), Some(400));
+		wallet.record_funding_payment(details, rounds).await.unwrap();
+
+		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
+		assert_eq!(payments.len(), 1, "the duplicate must be merged away");
+		let payment = &payments[0];
+		assert_eq!(payment.id, funding_id);
+		// The record keeps tracking the actively-broadcast round; a duplicate that never confirmed
+		// has nothing to adopt.
+		match &payment.kind {
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed, .. } => {
+				assert_eq!(*txid, txid2)
+			},
+			kind => panic!("unexpected kind {:?}", kind),
+		}
+		assert_eq!(payment.fee_paid_msat, Some(400));
+		assert_eq!(wallet.find_payment_by_txid(txid1).await.unwrap(), Some(funding_id));
+	}
+
+	/// Removing the duplicate is two store writes, and the failure between them must leave a
+	/// state a re-run of the merge (a replayed `SpliceNegotiated` event) can finish cleaning up.
+	/// If the payment record went first, a failure on the pending-entry removal would orphan that
+	/// entry where the re-run can no longer discover it (the record lookup misses), and it would
+	/// keep shadowing the funding record in `find_payment_by_txid`'s direct probe — re-creating
+	/// the duplicate problem with no further merge coming to fix it.
+	#[tokio::test]
+	async fn a_rerun_merge_completes_a_partially_failed_duplicate_removal() {
+		let fail_store = FailRemoveStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(store, false).await;
+
+		let funding_id = PaymentId([21u8; 32]);
+		let txid1 = Txid::from_byte_array([1u8; 32]);
+		let txid2 = Txid::from_byte_array([2u8; 32]);
+
+		// Round 1 recorded normally.
+		let round1 = vec![FundingTxCandidate {
+			txid: txid1,
+			amount_msat: Some(1_000_000),
+			fee_paid_msat: Some(500),
+			awaiting_broadcast: false,
+		}];
+		let details = interactive_funding_details(funding_id, txid1, Some(1_000_000), Some(500));
+		wallet.record_funding_payment(details, round1).await.unwrap();
+
+		// Wallet sync recorded round 2's confirmation while the round was not yet a candidate.
+		let duplicate_id = PaymentId(txid2.to_byte_array());
+		let duplicate = PaymentDetails::new(
+			duplicate_id,
+			PaymentKind::Onchain { txid: txid2, status: confirmed_status(), tx_type: None },
+			Some(999_000),
+			Some(999),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		wallet.payment_stores.payment_store().insert_or_update(duplicate.clone()).await.unwrap();
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert_or_update(PendingPaymentDetails::new(duplicate, Vec::new(), Vec::new()))
+			.await
+			.unwrap();
+
+		// Round 2 is recorded as a candidate, but one of the duplicate's two removals fails.
+		let rounds = vec![
+			FundingTxCandidate {
+				txid: txid1,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+				awaiting_broadcast: false,
+			},
+			FundingTxCandidate {
+				txid: txid2,
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(400),
+				awaiting_broadcast: false,
+			},
+		];
+		let details = interactive_funding_details(funding_id, txid2, Some(1_000_000), Some(400));
+		fail_store.fail_next_remove_in(PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		let res = wallet.record_funding_payment(details.clone(), rounds.clone()).await;
+		assert!(res.is_err(), "the injected remove failure must surface");
+
+		// The merge re-runs with the record's next write; it must finish the cleanup.
+		wallet.record_funding_payment(details, rounds).await.unwrap();
+
+		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
+		assert_eq!(payments.len(), 1, "the duplicate must be merged away");
+		assert_eq!(payments[0].id, funding_id);
+		assert!(wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&duplicate_id)
+			.await
+			.unwrap()
+			.is_none());
+		assert_eq!(wallet.find_payment_by_txid(txid2).await.unwrap(), Some(funding_id));
+	}
+
+	/// Signing a later round merges the duplicates of earlier rounds as a courtesy: the signed
+	/// round itself can have no duplicate yet, as our signatures have not left the node, and the
+	/// round's own `SpliceNegotiated` event re-runs the merge, replaying on failure. A merge
+	/// failure must therefore not fail the signing, whose record is complete once both stores are
+	/// written, and must not leave the record half rolled back.
+	#[tokio::test]
+	async fn signing_survives_a_failed_duplicate_merge() {
+		let fail_store = FailRemoveStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(store, false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		// Round 1 is recorded at signing; round 2 is a counterparty-initiated replacement the
+		// wallet observed before it was recorded as a candidate, filed as an untyped duplicate.
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(txid, Some(contribution.clone()))],
+		);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+		let id = wallet.find_payment_by_txid(txid).await.unwrap().expect("record");
+		let (replacement_tx, _) = splice_out_round(&wallet, 2, 500_000, 500);
+		let replacement_txid = replacement_tx.compute_txid();
+		let duplicate_id = PaymentId(replacement_txid.to_byte_array());
+		let duplicate = PaymentDetails::new(
+			duplicate_id,
+			PaymentKind::Onchain {
+				txid: replacement_txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: None,
+			},
+			Some(999_000),
+			Some(999),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		wallet.payment_stores.payment_store().insert_or_update(duplicate.clone()).await.unwrap();
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert_or_update(PendingPaymentDetails::new(duplicate.clone(), Vec::new(), Vec::new()))
+			.await
+			.unwrap();
+
+		// This node signs round 3, a bump of the replacement, but the duplicate's removal fails.
+		let (bump_tx, bump_contribution) = splice_out_round(&wallet, 3, 499_000, 700);
+		let bump_txid = bump_tx.compute_txid();
+		let bump_candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[
+				(txid, Some(contribution)),
+				(replacement_txid, None),
+				(bump_txid, Some(bump_contribution)),
+			],
+		);
+		fail_store.fail_next_remove_in(PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		wallet.record_signed_funding(&bump_tx, &bump_candidates).await.unwrap();
+
+		// The signing is recorded in full and the duplicate is left as it was.
+		let entry =
+			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().expect("entry");
+		assert_eq!(
+			entry.candidates().iter().map(|c| c.txid).collect::<Vec<_>>(),
+			vec![txid, replacement_txid, bump_txid]
+		);
+		assert!(entry.candidate(bump_txid).expect("candidate").awaiting_broadcast);
+		// The signing writes no payment record: the one wallet sync made for the first round
+		// still describes that round, and the entry still mirrors it.
+		let payment =
+			wallet.payment_stores.payment_store().get(&id).await.unwrap().expect("payment");
+		assert!(matches!(payment.kind, PaymentKind::Onchain { txid: t, .. } if t == txid));
+		assert_eq!(entry.details(), Some(&payment));
+		assert_eq!(
+			wallet.payment_stores.payment_store().get(&duplicate_id).await.unwrap(),
+			Some(duplicate)
+		);
+		assert!(wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&duplicate_id)
+			.await
+			.unwrap()
+			.is_some());
+
+		// The bump's `SpliceNegotiated` event merges the duplicate away.
+		wallet.record_broadcast_splice_round(channel_id, bump_txid).await.unwrap();
+		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
+		assert_eq!(payments.len(), 1, "the duplicate must be merged away");
+		assert_eq!(payments[0].id, id);
+		assert!(wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&duplicate_id)
+			.await
+			.unwrap()
+			.is_none());
+		assert_eq!(wallet.find_payment_by_txid(replacement_txid).await.unwrap(), Some(id));
+	}
+
+	/// A duplicate merge failing under the `SpliceNegotiated` write must fail that write: the
+	/// replay it triggers is the merge's only re-run. The mark, cleared before the merge, stays
+	/// cleared and the duplicate is left as it was; the replayed write finds the round marked
+	/// already and merges the duplicate away.
+	#[tokio::test]
+	async fn a_failed_duplicate_merge_fails_the_negotiation_write_until_its_replay() {
+		let fail_store = FailRemoveStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(store, false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		// Round 1 is recorded at signing; round 2 is a counterparty-initiated replacement the
+		// wallet observed before it was recorded as a candidate, filed as an untyped duplicate;
+		// round 3, a bump this node signs, records round 2 as a candidate, but the signing's
+		// merge of the duplicate fails and is left to the bump's `SpliceNegotiated` event.
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(txid, Some(contribution.clone()))],
+		);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+		let id = wallet.find_payment_by_txid(txid).await.unwrap().expect("record");
+		let (replacement_tx, _) = splice_out_round(&wallet, 2, 500_000, 500);
+		let replacement_txid = replacement_tx.compute_txid();
+		let duplicate_id = PaymentId(replacement_txid.to_byte_array());
+		let duplicate = PaymentDetails::new(
+			duplicate_id,
+			PaymentKind::Onchain {
+				txid: replacement_txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: None,
+			},
+			Some(999_000),
+			Some(999),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		wallet.payment_stores.payment_store().insert_or_update(duplicate.clone()).await.unwrap();
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert_or_update(PendingPaymentDetails::new(duplicate.clone(), Vec::new(), Vec::new()))
+			.await
+			.unwrap();
+		let (bump_tx, bump_contribution) = splice_out_round(&wallet, 3, 499_000, 700);
+		let bump_txid = bump_tx.compute_txid();
+		let bump_candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[
+				(txid, Some(contribution)),
+				(replacement_txid, None),
+				(bump_txid, Some(bump_contribution)),
+			],
+		);
+		fail_store.fail_next_remove_in(PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		wallet.record_signed_funding(&bump_tx, &bump_candidates).await.unwrap();
+
+		// The event's write meets the same failure: it must surface, so the event is replayed,
+		// with the mark cleared and the duplicate untouched.
+		fail_store.fail_next_remove_in(PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		let res = wallet.record_broadcast_splice_round(channel_id, bump_txid).await;
+		assert!(res.is_err(), "a failed merge must fail the write");
+		let entry =
+			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().expect("entry");
+		assert!(!entry.candidate(bump_txid).expect("candidate").awaiting_broadcast);
+		assert_eq!(
+			wallet.payment_stores.payment_store().get(&duplicate_id).await.unwrap(),
+			Some(duplicate)
+		);
+		assert!(wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&duplicate_id)
+			.await
+			.unwrap()
+			.is_some());
+
+		// The replayed write finds the round marked already and merges the duplicate away.
+		wallet.record_broadcast_splice_round(channel_id, bump_txid).await.unwrap();
+		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
+		assert_eq!(payments.len(), 1, "the duplicate must be merged away");
+		assert_eq!(payments[0].id, id);
+		assert!(wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&duplicate_id)
+			.await
+			.unwrap()
+			.is_none());
+		assert_eq!(wallet.find_payment_by_txid(replacement_txid).await.unwrap(), Some(id));
+	}
+
+	/// A merge cut short between adopting a confirmed duplicate's confirmation and removing the
+	/// duplicate leaves the funding record confirmed on the duplicate's transaction, the pending
+	/// entry at its prior status and the duplicate untouched, and a re-run completes the removal:
+	/// the merge is idempotent, so the record's next write or a replayed `SpliceNegotiated` event
+	/// can finish what a failure cut short. The failure injected is the pending store's, which the
+	/// adoption writes after the payment store.
+	#[tokio::test]
+	async fn a_torn_duplicate_merge_is_completed_by_a_rerun() {
+		let fail_store =
+			FailSwitchStore::failing_only(PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(store, false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		// Round 1 is recorded at signing, round 2 is a counterparty-initiated replacement, and
+		// round 3 is this node's bump of it, recorded with the channel's history when signed.
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(txid, Some(contribution.clone()))],
+		);
+		sign_and_observe_round(&wallet, &tx, &candidates).await;
+		let id = wallet.find_payment_by_txid(txid).await.unwrap().expect("record");
+		let (replacement_tx, _) = splice_out_round(&wallet, 2, 500_000, 500);
+		let replacement_txid = replacement_tx.compute_txid();
+		let (bump_tx, bump_contribution) = splice_out_round(&wallet, 3, 499_000, 700);
+		let bump_txid = bump_tx.compute_txid();
+		let bump_candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[
+				(txid, Some(contribution)),
+				(replacement_txid, None),
+				(bump_txid, Some(bump_contribution)),
+			],
+		);
+		wallet.record_signed_funding(&bump_tx, &bump_candidates).await.unwrap();
+
+		// Wallet sync filed the replacement's confirmation under an untyped record of its own, a
+		// duplicate of the funding record that already lists the replacement as a candidate.
+		let duplicate_id = PaymentId(replacement_txid.to_byte_array());
+		let duplicate = PaymentDetails::new(
+			duplicate_id,
+			PaymentKind::Onchain {
+				txid: replacement_txid,
+				status: confirmed_status(),
+				tx_type: None,
+			},
+			Some(999_000),
+			Some(999),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		wallet.payment_stores.payment_store().insert_or_update(duplicate.clone()).await.unwrap();
+		let duplicate_entry = PendingPaymentDetails::new(duplicate.clone(), Vec::new(), Vec::new());
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert_or_update(duplicate_entry.clone())
+			.await
+			.unwrap();
+		let entry_before =
+			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().expect("entry");
+		let rounds = entry_before.candidates().to_vec();
+
+		// The merge adopts the confirmation onto the payment record, then fails to mirror it onto
+		// the pending entry and stops short of removing the duplicate.
+		fail_store.fail_writes.store(true, Ordering::Release);
+		{
+			let guard = wallet.payment_stores.lock().await;
+			let res = wallet.merge_duplicate_candidate_records(&guard, id, &rounds).await;
+			assert!(res.is_err(), "the injected pending-store failure must surface");
+		}
+		fail_store.fail_writes.store(false, Ordering::Release);
+		let payment =
+			wallet.payment_stores.payment_store().get(&id).await.unwrap().expect("payment");
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Onchain { txid: t, status: ConfirmationStatus::Confirmed { .. }, .. }
+				if t == replacement_txid
+		));
+		assert_eq!(
+			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap(),
+			Some(entry_before)
+		);
+		assert_eq!(
+			wallet.payment_stores.payment_store().get(&duplicate_id).await.unwrap(),
+			Some(duplicate)
+		);
+		assert_eq!(
+			wallet.payment_stores.pending_payment_store().get(&duplicate_id).await.unwrap(),
+			Some(duplicate_entry)
+		);
+
+		// A re-run finds the confirmation adopted, mirrors it, and removes the duplicate.
+		{
+			let guard = wallet.payment_stores.lock().await;
+			wallet.merge_duplicate_candidate_records(&guard, id, &rounds).await.unwrap();
+		}
+		let entry =
+			wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().expect("entry");
+		assert_eq!(entry.details(), Some(&payment));
+		let payments = wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects;
+		assert_eq!(payments.len(), 1, "the duplicate must be merged away");
+		assert_eq!(payments[0].id, id);
+		assert!(wallet
+			.payment_stores
+			.pending_payment_store()
+			.get(&duplicate_id)
+			.await
+			.unwrap()
+			.is_none());
+		assert_eq!(wallet.find_payment_by_txid(replacement_txid).await.unwrap(), Some(id));
 	}
 
 	#[tokio::test]
@@ -10214,5 +11590,36 @@ mod tests {
 			"unexpected kind {:?}",
 			payment.kind,
 		);
+	}
+
+	#[tokio::test]
+	async fn a_payment_that_already_advanced_gets_no_pending_entry() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let id = PaymentId([23u8; 32]);
+		let txid = Txid::from_byte_array([24u8; 32]);
+		// Wallet sync confirmed the payment through `ANTI_REORG_DELAY` before a writer with a
+		// `Pending` copy read earlier got to the pending store: the payment graduated, so no entry
+		// belongs there.
+		wallet
+			.payment_stores
+			.payment_store()
+			.insert(funding_payment(id, txid, PaymentStatus::Succeeded))
+			.await
+			.unwrap();
+
+		let stores = wallet.payment_stores.lock().await;
+		wallet
+			.upsert_pending_payment(
+				&stores,
+				funding_payment(id, txid, PaymentStatus::Pending),
+				Vec::new(),
+			)
+			.await
+			.unwrap();
+		drop(stores);
+
+		assert!(wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().is_none());
 	}
 }

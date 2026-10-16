@@ -8,6 +8,7 @@
 //! The wallet's payment stores behind one API, so that every write the wallet makes to them
 //! happens under the lock that keeps a payment record and its pending-store entry consistent.
 
+use std::future::Future;
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -31,6 +32,10 @@ use crate::Error;
 /// write compiles only for a holder of the lock. The reads are methods of this type and take no
 /// lock; a caller whose write depends on what it read takes the lock first and reads through the
 /// guard.
+///
+/// The payment store is bounded, so nothing here lists it: a transaction is mapped to its payment
+/// through the pending store, which keeps every entry in memory, and through what was recorded
+/// about the transaction, which is read by its id.
 pub(super) struct PaymentStores {
 	payment_store: Arc<PaymentStore>,
 	pending_payment_store: Arc<PendingPaymentStore>,
@@ -145,5 +150,17 @@ impl PaymentStoresGuard<'_> {
 		F: FnOnce(Option<&PendingPaymentDetails>) -> Option<PendingPaymentDetails>,
 	{
 		self.stores.pending_payment_store.mutate(id, f).await
+	}
+
+	/// [`Self::mutate_pending_payment`] with a transformation that awaits fallible reads; see
+	/// [`DataStore::mutate_async`](crate::data_store::DataStore::mutate_async).
+	pub(super) async fn mutate_pending_payment_async<F, Fut>(
+		&self, id: &PaymentId, f: F,
+	) -> Result<Option<PendingPaymentDetails>, Error>
+	where
+		F: FnOnce(Option<PendingPaymentDetails>) -> Fut,
+		Fut: Future<Output = Result<Option<PendingPaymentDetails>, Error>>,
+	{
+		self.stores.pending_payment_store.mutate_async(id, f).await
 	}
 }
