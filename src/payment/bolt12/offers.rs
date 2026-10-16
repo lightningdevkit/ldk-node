@@ -70,8 +70,9 @@ where
 }
 
 const MAX_PENDING_JIT_INVOICE_REQUESTS: usize = 100;
-const MAX_PENDING_JIT_INVOICE_RESPONDERS: usize = 100;
 const MAX_RESPONDERS_PER_JIT_INVOICE_REQUEST: usize = 10;
+const MAX_PENDING_JIT_INVOICE_RESPONDERS: usize =
+	MAX_PENDING_JIT_INVOICE_REQUESTS * MAX_RESPONDERS_PER_JIT_INVOICE_REQUEST;
 const MAX_COMPLETED_JIT_INVOICE_RESPONSES: usize = 100;
 const JIT_INVOICE_RESPONSE_CACHE_LIFETIME: Duration = Duration::from_secs(60);
 
@@ -861,6 +862,47 @@ mod tests {
 		drop(first);
 		assert!(matches!(
 			pending_requests.register(sha256::Hash::from_byte_array([3; 32]), 3),
+			PendingJitInvoiceRequestRegistration::Started(_)
+		));
+	}
+
+	#[test]
+	fn replay_responders_leave_room_for_other_requests() {
+		let pending_requests = PendingJitInvoiceRequests::new(
+			MAX_PENDING_JIT_INVOICE_REQUESTS,
+			MAX_PENDING_JIT_INVOICE_RESPONDERS,
+			MAX_RESPONDERS_PER_JIT_INVOICE_REQUEST,
+		);
+		let mut requests = Vec::new();
+		for index in 0..MAX_PENDING_JIT_INVOICE_REQUESTS {
+			let request_id = sha256::Hash::hash(&index.to_be_bytes());
+			let registration = pending_requests.register(request_id, 0);
+			assert!(
+				matches!(registration, PendingJitInvoiceRequestRegistration::Started(_)),
+				"replay responders exhausted capacity before all request slots were used"
+			);
+			requests.push(started_request(registration));
+			for responder in 1..MAX_RESPONDERS_PER_JIT_INVOICE_REQUEST {
+				assert!(matches!(
+					pending_requests.register(request_id, responder),
+					PendingJitInvoiceRequestRegistration::Joined
+				));
+			}
+			assert!(matches!(
+				pending_requests.register(request_id, MAX_RESPONDERS_PER_JIT_INVOICE_REQUEST),
+				PendingJitInvoiceRequestRegistration::ReplayLimitReached
+			));
+		}
+		let next_id = sha256::Hash::hash(&MAX_PENDING_JIT_INVOICE_REQUESTS.to_be_bytes());
+		assert!(matches!(
+			pending_requests.register(next_id, 0),
+			PendingJitInvoiceRequestRegistration::AtCapacity(0)
+		));
+
+		let responders = requests.pop().unwrap().complete(None);
+		assert_eq!(responders, (0..MAX_RESPONDERS_PER_JIT_INVOICE_REQUEST).collect::<Vec<_>>());
+		assert!(matches!(
+			pending_requests.register(next_id, 0),
 			PendingJitInvoiceRequestRegistration::Started(_)
 		));
 	}
