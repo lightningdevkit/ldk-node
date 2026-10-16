@@ -18,7 +18,7 @@ use lightning::log_warn;
 use lightning::routing::router::{RouteHint, RouteHintHop};
 use lightning::util::ser::Writeable;
 use lightning_invoice::{Bolt11Invoice, Bolt11InvoiceDescription, InvoiceBuilder, RoutingFees};
-use lightning_liquidity::lsps0::ser::LSPSRequestId;
+use lightning_liquidity::lsps0::ser::{LSPSRequestId, LSPSResponseError};
 use lightning_liquidity::lsps2::event::LSPS2ClientEvent;
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
@@ -68,18 +68,69 @@ where
 const DEFAULT_BOLT12_INVOICE_EXPIRY_SECS: u32 = 2 * 60 * 60;
 const LEASE_NEGOTIATION_MAX_ATTEMPTS: usize = 3;
 
-fn should_retry_lease_negotiation(error: Error, attempt: usize) -> bool {
-	error == Error::LiquidityRequestFailed && attempt < LEASE_NEGOTIATION_MAX_ATTEMPTS
+#[derive(Debug, PartialEq, Eq)]
+enum LeaseNegotiationError {
+	Local(Error),
+	Rejected(LSPSResponseError),
 }
 
-async fn try_lease_candidates<T, K, R, E, KF, AF, Fut>(
+impl LeaseNegotiationError {
+	fn is_retryable(&self) -> bool {
+		match self {
+			Self::Local(error) => *error == Error::LiquidityRequestFailed,
+			// bLIP-52: INVALID_OPENING_FEE_PARAMS. Fetch fresh parameters before buying again.
+			Self::Rejected(error) => error.code == 201,
+		}
+	}
+}
+
+impl From<Error> for LeaseNegotiationError {
+	fn from(error: Error) -> Self {
+		Self::Local(error)
+	}
+}
+
+impl From<LeaseNegotiationError> for Error {
+	fn from(error: LeaseNegotiationError) -> Self {
+		match error {
+			LeaseNegotiationError::Local(error) => error,
+			LeaseNegotiationError::Rejected(_) => Self::LiquidityRequestFailed,
+		}
+	}
+}
+
+impl std::fmt::Display for LeaseNegotiationError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::Local(error) => error.fmt(f),
+			Self::Rejected(error) => {
+				write!(f, "LSPS2 request rejected ({}): {}", error.code, error.message)
+			},
+		}
+	}
+}
+
+fn should_retry_lease_negotiation(error: &LeaseNegotiationError, attempt: usize) -> bool {
+	error.is_retryable() && attempt < LEASE_NEGOTIATION_MAX_ATTEMPTS
+}
+
+fn record_negotiation_failure(
+	previous: &mut Option<LeaseNegotiationError>, error: LeaseNegotiationError,
+) {
+	// One LSP's permanent rejection must not suppress retries for another LSP's transient failure.
+	if previous.as_ref().map_or(true, |error| !error.is_retryable()) {
+		*previous = Some(error);
+	}
+}
+
+async fn try_lease_candidates<T, K, R, KF, AF, Fut>(
 	candidates: Vec<T>, candidate_key: KF, mut attempt: AF,
-) -> Result<R, E>
+) -> Result<R, LeaseNegotiationError>
 where
 	K: Copy + Eq + Hash,
 	KF: Fn(&T) -> K,
 	AF: FnMut(T) -> Fut,
-	Fut: Future<Output = Result<R, E>>,
+	Fut: Future<Output = Result<R, LeaseNegotiationError>>,
 {
 	let mut failed_candidates = HashSet::new();
 	let mut last_error = None;
@@ -92,7 +143,7 @@ where
 			Ok(result) => return Ok(result),
 			Err(error) => {
 				failed_candidates.insert(key);
-				last_error = Some(error);
+				record_negotiation_failure(&mut last_error, error);
 			},
 		}
 	}
@@ -128,9 +179,9 @@ where
 {
 	pub(crate) lsp_nodes: Arc<RwLock<Vec<LspNode>>>,
 	pub(crate) pending_lsps2_fee_requests:
-		Mutex<HashMap<LSPSRequestId, PendingRequest<LSPS2FeeResponse>>>,
+		Mutex<HashMap<LSPSRequestId, PendingRequest<Result<LSPS2FeeResponse, LSPSResponseError>>>>,
 	pub(crate) pending_buy_requests:
-		Mutex<HashMap<LSPSRequestId, PendingRequest<LSPS2BuyResponse>>>,
+		Mutex<HashMap<LSPSRequestId, PendingRequest<Result<LSPS2BuyResponse, LSPSResponseError>>>>,
 	pub(crate) lease_store: Arc<PaymentLeaseStore<L>>,
 	pub(crate) lease_state: Mutex<LSPS2LeaseState>,
 	pub(crate) cache_target_store: Arc<LeaseCacheTargetStore<L>>,
@@ -342,7 +393,7 @@ where
 		loop {
 			let result = self.negotiate_fixed_lease_once(amount_msat, connection_manager).await;
 			match result {
-				Err(error) if should_retry_lease_negotiation(error, attempt) => {
+				Err(error) if should_retry_lease_negotiation(&error, attempt) => {
 					log_warn!(
 						self.logger,
 						"LSPS2 lease negotiation attempt {} failed, retrying: {}",
@@ -351,14 +402,14 @@ where
 					);
 					attempt += 1;
 				},
-				result => return result,
+				result => return result.map_err(Error::from),
 			}
 		}
 	}
 
 	async fn negotiate_fixed_lease_once(
 		self: &Arc<Self>, amount_msat: u64, connection_manager: &Arc<ConnectionManager<L>>,
-	) -> Result<(PaymentLease, u64, LspConfig), Error> {
+	) -> Result<(PaymentLease, u64, LspConfig), LeaseNegotiationError> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let mut candidates = all_offers
 			.into_iter()
@@ -397,7 +448,7 @@ where
 					"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our configured fee limit of {}msat",
 					min_total_fee_msat, max_total_lsp_fee_limit_msat
 				);
-				return Err(Error::LiquidityFeeTooHigh);
+				return Err(Error::LiquidityFeeTooHigh.into());
 			}
 			candidates.retain(|(_, fee, _)| *fee <= max_total_lsp_fee_limit_msat);
 		}
@@ -468,7 +519,7 @@ where
 		loop {
 			let result = self.negotiate_variable_lease_once(connection_manager).await;
 			match result {
-				Err(error) if should_retry_lease_negotiation(error, attempt) => {
+				Err(error) if should_retry_lease_negotiation(&error, attempt) => {
 					log_warn!(
 						self.logger,
 						"LSPS2 lease negotiation attempt {} failed, retrying: {}",
@@ -477,14 +528,14 @@ where
 					);
 					attempt += 1;
 				},
-				result => return result,
+				result => return result.map_err(Error::from),
 			}
 		}
 	}
 
 	async fn negotiate_variable_lease_once(
 		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
-	) -> Result<(PaymentLease, u64, LspConfig), Error> {
+	) -> Result<(PaymentLease, u64, LspConfig), LeaseNegotiationError> {
 		let all_offers = self.gather_lsps2_offers(connection_manager).await?;
 		let mut rejected_for_fee = false;
 		let mut candidates = all_offers
@@ -512,10 +563,10 @@ where
 					self.logger,
 					"Failed to request inbound JIT channel as all LSP offers exceed our configured fee limit"
 				);
-				Error::LiquidityFeeTooHigh
+				Error::LiquidityFeeTooHigh.into()
 			} else {
 				log_error!(self.logger, "Failed to handle response from liquidity service",);
-				Error::LiquidityRequestFailed
+				Error::LiquidityRequestFailed.into()
 			});
 		}
 
@@ -621,7 +672,7 @@ where
 
 	async fn gather_lsps2_offers(
 		self: &Arc<Self>, connection_manager: &Arc<ConnectionManager<L>>,
-	) -> Result<Vec<(LspConfig, LSPS2FeeResponse)>, Error> {
+	) -> Result<Vec<(LspConfig, LSPS2FeeResponse)>, LeaseNegotiationError> {
 		let lsps2_nodes = self.get_lsps2_nodes().await?;
 
 		// Connect to all candidate LSPs in parallel.
@@ -641,7 +692,8 @@ where
 
 		let mut all_offers: Vec<(LspConfig, LSPS2FeeResponse)> =
 			Vec::with_capacity(lsps2_nodes.len());
-		let mut fee_set: JoinSet<(LspConfig, Result<LSPS2FeeResponse, Error>)> = JoinSet::new();
+		let mut failure = None;
+		let mut fee_set = JoinSet::new();
 		for lsp_node in &lsps2_nodes {
 			let lsp = lsp_node.clone();
 			let client = Arc::clone(self);
@@ -655,13 +707,20 @@ where
 				Ok((lsp, Ok(fees))) => all_offers.push((lsp, fees)),
 				Ok((lsp, Err(e))) => {
 					log_warn!(self.logger, "Failed to get fees from LSP {}: {}", lsp.node_id, e);
+					record_negotiation_failure(&mut failure, e);
 				},
 				Err(e) => {
 					log_warn!(self.logger, "Failed to get fees from LSP: {}", e);
+					record_negotiation_failure(&mut failure, Error::LiquidityRequestFailed.into());
 				},
 			}
 		}
 
+		if all_offers.is_empty() {
+			if let Some(error) = failure {
+				return Err(error);
+			}
+		}
 		Ok(all_offers)
 	}
 }
@@ -672,7 +731,7 @@ where
 {
 	async fn lsps2_request_opening_fee_params(
 		&self, node_id: Option<&PublicKey>,
-	) -> Result<LSPS2FeeResponse, Error> {
+	) -> Result<LSPS2FeeResponse, LeaseNegotiationError> {
 		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, node_id)
 			.ok_or(Error::LiquiditySourceUnavailable)?;
 
@@ -707,13 +766,14 @@ where
 		.map_err(|e| {
 			log_error!(self.logger, "Failed to handle response from liquidity service: {}", e);
 			Error::LiquidityRequestFailed
-		})
+		})?
+		.map_err(LeaseNegotiationError::Rejected)
 	}
 
 	async fn lsps2_send_buy_request(
 		&self, amount_msat: Option<u64>, opening_fee_params: LSPS2OpeningFeeParams,
 		node_id: Option<&PublicKey>,
-	) -> Result<PaymentLease, Error> {
+	) -> Result<PaymentLease, LeaseNegotiationError> {
 		let lsps2_node = select_lsps_for_protocol(&self.lsp_nodes, 2, node_id)
 			.ok_or(Error::LiquiditySourceUnavailable)?;
 
@@ -755,7 +815,8 @@ where
 		.map_err(|e| {
 			log_error!(self.logger, "Failed to handle response from liquidity service: {:?}", e);
 			Error::LiquidityRequestFailed
-		})?;
+		})?
+		.map_err(LeaseNegotiationError::Rejected)?;
 		let cltv_expiry_delta = state::checked_cltv_expiry_delta(buy_response.cltv_expiry_delta)
 			.ok_or_else(|| {
 				log_error!(
@@ -957,7 +1018,7 @@ where
 					{
 						let response = LSPS2FeeResponse { opening_fee_params_menu };
 
-						match request.sender.send(response) {
+						match request.sender.send(Ok(response)) {
 							Ok(()) => (),
 							Err(_) => {
 								log_error!(
@@ -999,7 +1060,7 @@ where
 					{
 						let response = LSPS2BuyResponse { intercept_scid, cltv_expiry_delta };
 
-						match request.sender.send(response) {
+						match request.sender.send(Ok(response)) {
 							Ok(()) => (),
 							Err(_) => {
 								log_error!(
@@ -1022,9 +1083,51 @@ where
 					);
 				}
 			},
-			_ => {
-				log_error!(self.logger, "Received unexpected LSPS2Client liquidity event!");
+			LSPS2ClientEvent::GetInfoFailed { request_id, counterparty_node_id, error } => {
+				self.handle_request_rejection(
+					&self.pending_lsps2_fee_requests,
+					request_id,
+					counterparty_node_id,
+					error,
+				);
 			},
+			LSPS2ClientEvent::BuyRequestFailed { request_id, counterparty_node_id, error } => {
+				self.handle_request_rejection(
+					&self.pending_buy_requests,
+					request_id,
+					counterparty_node_id,
+					error,
+				);
+			},
+		}
+	}
+
+	fn handle_request_rejection<T>(
+		&self,
+		pending: &Mutex<HashMap<LSPSRequestId, PendingRequest<Result<T, LSPSResponseError>>>>,
+		request_id: LSPSRequestId, counterparty_node_id: PublicKey, error: LSPSResponseError,
+	) {
+		if !self.lsp_nodes.read().expect("lock").iter().any(|n| n.node_id == counterparty_node_id) {
+			log_error!(
+				self.logger,
+				"Received LSPS2 rejection from unexpected peer {}",
+				counterparty_node_id
+			);
+			return;
+		}
+		if let Some(request) = pending.lock().expect("lock").remove(&request_id) {
+			if request.sender.send(Err(error)).is_err() {
+				log_error!(
+					self.logger,
+					"Failed to handle rejection for liquidity request {:?}",
+					request_id
+				);
+			}
+		} else {
+			log_error!(
+				self.logger,
+				"Received rejection from liquidity service for unknown request."
+			);
 		}
 	}
 
@@ -1071,6 +1174,156 @@ pub(crate) struct LSPS2BuyResponse {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::future::poll_fn;
+	use std::task::Poll;
+
+	use crate::builder::NodeBuilder;
+	use crate::entropy::NodeEntropy;
+	use crate::io::test_utils::InMemoryStore;
+
+	fn rejection_test_node() -> (crate::Node, PublicKey) {
+		let node_id =
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993".parse().unwrap();
+		let mut builder = NodeBuilder::new();
+		builder.set_log_facade_logger();
+		// An unsupported address makes connection attempts fail without network I/O.
+		builder.add_liquidity_source(
+			node_id,
+			lightning::ln::msgs::SocketAddress::OnionV2([0; 12]),
+			None,
+			false,
+		);
+		#[cfg(not(feature = "uniffi"))]
+		let entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		let node = builder.build_with_store(entropy, InMemoryStore::new()).unwrap();
+		let client = node.liquidity_source.lsps2_client();
+		client.lsp_nodes.write().unwrap()[0].supported_protocols = Some(vec![2]);
+		(node, node_id)
+	}
+
+	fn check_rejection_completes_request(is_buy: bool, code: i32) {
+		let (node, node_id) = rejection_test_node();
+		let client = node.liquidity_source.lsps2_client();
+		node.runtime.block_on(async {
+			let params = LSPS2OpeningFeeParams {
+				min_fee_msat: 1,
+				proportional: 1,
+				valid_until: (chrono::Utc::now() + chrono::Duration::days(2))
+					.to_rfc3339()
+					.parse()
+					.unwrap(),
+				min_lifetime: 1,
+				max_client_to_self_delay: 1,
+				min_payment_size_msat: 1,
+				max_payment_size_msat: 2_000,
+				promise: String::new(),
+			};
+			let request = async {
+				if is_buy {
+					client
+						.lsps2_send_buy_request(Some(1_000), params, Some(&node_id))
+						.await
+						.map(|_| ())
+				} else {
+					client.lsps2_request_opening_fee_params(Some(&node_id)).await.map(|_| ())
+				}
+			};
+			tokio::pin!(request);
+			poll_fn(|cx| {
+				assert!(request.as_mut().poll(cx).is_pending());
+				Poll::Ready(())
+			})
+			.await;
+			let error = LSPSResponseError { code, message: "request rejected".into(), data: None };
+			let expected_error = error.clone();
+			let event = if is_buy {
+				let request_id =
+					client.pending_buy_requests.lock().unwrap().keys().next().unwrap().clone();
+				LSPS2ClientEvent::BuyRequestFailed {
+					request_id,
+					counterparty_node_id: node_id,
+					error,
+				}
+			} else {
+				let request_id = client
+					.pending_lsps2_fee_requests
+					.lock()
+					.unwrap()
+					.keys()
+					.next()
+					.unwrap()
+					.clone();
+				LSPS2ClientEvent::GetInfoFailed { request_id, counterparty_node_id: node_id, error }
+			};
+			client.handle_event(event).await;
+			let result = poll_fn(|cx| Poll::Ready(request.as_mut().poll(cx))).await;
+			let Poll::Ready(Err(error)) = result else {
+				panic!("rejection must complete the request immediately: {result:?}");
+			};
+			assert_eq!(error, LeaseNegotiationError::Rejected(expected_error));
+			assert_eq!(should_retry_lease_negotiation(&error, 1), code == 201);
+			assert!(!should_retry_lease_negotiation(&error, 3));
+			assert!(client.pending_buy_requests.lock().unwrap().is_empty());
+			assert!(client.pending_lsps2_fee_requests.lock().unwrap().is_empty());
+		});
+	}
+
+	#[test]
+	fn get_info_rejection_completes_request() {
+		for code in [1, 200, -32602] {
+			check_rejection_completes_request(false, code);
+		}
+	}
+
+	#[test]
+	fn buy_rejection_completes_request() {
+		for code in [1, 201, 202, 203, -32602] {
+			check_rejection_completes_request(true, code);
+		}
+	}
+
+	#[test]
+	fn rejected_fee_queries_stop_lease_negotiation() {
+		let (node, node_id) = rejection_test_node();
+		let client = node.liquidity_source.lsps2_client();
+		node.runtime.block_on(async {
+			for fixed_amount in [true, false] {
+				let mut rejection_count = 0;
+				tokio::time::timeout(Duration::from_secs(1), async {
+					let negotiation = async {
+						if fixed_amount {
+							client.negotiate_fixed_lease(1_000, &node.connection_manager).await
+						} else {
+							client.negotiate_variable_lease(&node.connection_manager).await
+						}
+					};
+					let rejections = async {
+						loop {
+							let request_id = client.pending_lsps2_fee_requests.lock().unwrap().keys().next().cloned();
+							if let Some(request_id) = request_id {
+								rejection_count += 1;
+								assert_eq!(rejection_count, 1, "a permanent fee query rejection must not trigger another negotiation round");
+								client.handle_event(LSPS2ClientEvent::GetInfoFailed {
+									request_id, counterparty_node_id: node_id,
+									error: LSPSResponseError { code: 200, message: "unrecognized token".into(), data: None },
+								}).await;
+							} else {
+								tokio::task::yield_now().await;
+							}
+						}
+					};
+					tokio::select! {
+						result = negotiation => assert!(matches!(result, Err(Error::LiquidityRequestFailed))),
+						_ = rejections => unreachable!(),
+					}
+				}).await.expect("rejected fee queries must finish without waiting for request timeouts");
+				assert_eq!(rejection_count, 1);
+				assert!(client.pending_lsps2_fee_requests.lock().unwrap().is_empty());
+			}
+		});
+	}
 
 	#[tokio::test]
 	async fn failed_persisted_removal_restores_value() {
@@ -1089,11 +1342,29 @@ mod tests {
 
 	#[test]
 	fn lease_negotiation_retries_only_transient_failures() {
-		assert!(should_retry_lease_negotiation(Error::LiquidityRequestFailed, 1));
-		assert!(should_retry_lease_negotiation(Error::LiquidityRequestFailed, 2));
-		assert!(!should_retry_lease_negotiation(Error::LiquidityRequestFailed, 3));
-		assert!(!should_retry_lease_negotiation(Error::LiquidityFeeTooHigh, 1));
-		assert!(!should_retry_lease_negotiation(Error::LiquiditySourceUnavailable, 1));
+		assert!(should_retry_lease_negotiation(&Error::LiquidityRequestFailed.into(), 1));
+		assert!(should_retry_lease_negotiation(&Error::LiquidityRequestFailed.into(), 2));
+		assert!(!should_retry_lease_negotiation(&Error::LiquidityRequestFailed.into(), 3));
+		assert!(!should_retry_lease_negotiation(&Error::LiquidityFeeTooHigh.into(), 1));
+		assert!(!should_retry_lease_negotiation(&Error::LiquiditySourceUnavailable.into(), 1));
+	}
+
+	#[tokio::test]
+	async fn lease_negotiation_preserves_retryable_failures() {
+		let candidates =
+			vec![(1, Error::LiquidityRequestFailed), (2, Error::LiquiditySourceUnavailable)];
+		for candidates in [candidates.clone(), candidates.into_iter().rev().collect()] {
+			let result: Result<(), _> = try_lease_candidates(
+				candidates,
+				|candidate| candidate.0,
+				|(_, error)| async move { Err(error.into()) },
+			)
+			.await;
+			assert!(
+				should_retry_lease_negotiation(&result.unwrap_err(), 1),
+				"a permanent failure must not suppress another LSP's retryable failure"
+			);
+		}
 	}
 
 	#[tokio::test]
@@ -1109,7 +1380,7 @@ mod tests {
 				async move {
 					attempted_lsps.lock().unwrap().push(candidate.0);
 					if candidate.0 == 1 {
-						Err(())
+						Err(Error::LiquiditySourceUnavailable.into())
 					} else {
 						Ok(candidate.1)
 					}
