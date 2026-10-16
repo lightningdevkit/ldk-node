@@ -5516,6 +5516,14 @@ mod tests {
 		)
 	}
 
+	fn confirmed_status() -> ConfirmationStatus {
+		ConfirmationStatus::Confirmed {
+			block_hash: bitcoin::BlockHash::from_byte_array([8u8; 32]),
+			height: 100,
+			timestamp: 1,
+		}
+	}
+
 	/// Inserts `tx` into the BDK wallet as canonically confirmed at `height`, extending the
 	/// local chain to that height.
 	fn insert_confirmed_tx(wallet: &Wallet, tx: Transaction, height: u32) {
