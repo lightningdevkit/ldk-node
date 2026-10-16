@@ -67,6 +67,12 @@ pub struct PaymentDetails {
 	pub kind: PaymentKind,
 	/// The amount transferred.
 	///
+	/// For inbound Lightning payments, this excludes any fee withheld by our channel
+	/// counterparty once the payment is observed.
+	///
+	/// Pending invoices created with v0.7 or earlier can retain the requested amount, minus
+	/// any recorded counterparty fee, until another payment event updates them.
+	///
 	/// Will be `None` for variable-amount payments until we receive them.
 	pub amount_msat: Option<u64>,
 	/// The fees that were paid for this payment.
@@ -101,6 +107,18 @@ impl Writeable for PaymentDetails {
 	fn write<W: lightning::util::ser::Writer>(
 		&self, writer: &mut W,
 	) -> Result<(), lightning::io::Error> {
+		// Pending BOLT11 amounts have historically been gross on disk. Keep that encoding
+		// so reads can always subtract the fee exactly once, including after a restart.
+		let mut amount_msat = self.amount_msat;
+		if self.direction == PaymentDirection::Inbound && self.status == PaymentStatus::Pending {
+			if let (
+				Some(amount),
+				PaymentKind::Bolt11 { counterparty_skimmed_fee_msat: Some(fee), .. },
+			) = (amount_msat, &self.kind)
+			{
+				amount_msat = Some(amount.saturating_add(*fee));
+			}
+		}
 		write_tlv_fields!(writer, {
 			(0, self.id, required), // Used to be `hash` for v0.2.1 and prior
 			// 2 used to be `preimage` before it was moved to `kind` in v0.3.0
@@ -109,7 +127,7 @@ impl Writeable for PaymentDetails {
 			// 4 used to be `secret` before it was moved to `kind` in v0.3.0
 			(4, None::<Option<PaymentSecret>>, required),
 			(5, self.latest_update_timestamp, required),
-			(6, self.amount_msat, required),
+			(6, amount_msat, required),
 			(7, self.fee_paid_msat, option),
 			(8, self.direction, required),
 			(10, self.status, required)
@@ -141,7 +159,7 @@ impl Readable for PaymentDetails {
 		let secret: Option<PaymentSecret> = secret.0.ok_or(DecodeError::InvalidValue)?;
 		let latest_update_timestamp: u64 =
 			latest_update_timestamp.0.ok_or(DecodeError::InvalidValue)?;
-		let amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
+		let mut amount_msat: Option<u64> = amount_msat.0.ok_or(DecodeError::InvalidValue)?;
 		let direction: PaymentDirection = direction.0.ok_or(DecodeError::InvalidValue)?;
 		let status: PaymentStatus = status.0.ok_or(DecodeError::InvalidValue)?;
 
@@ -167,6 +185,18 @@ impl Readable for PaymentDetails {
 				PaymentKind::Spontaneous { hash, preimage }
 			}
 		};
+
+		// Only pending inbound BOLT11 records use the historical gross encoding.
+		// Completed amounts already exclude the fee and must not be adjusted again.
+		if direction == PaymentDirection::Inbound && status == PaymentStatus::Pending {
+			if let (
+				Some(amount),
+				PaymentKind::Bolt11 { counterparty_skimmed_fee_msat: Some(fee), .. },
+			) = (amount_msat, &kind)
+			{
+				amount_msat = Some(amount.saturating_sub(*fee));
+			}
+		}
 
 		Ok(PaymentDetails {
 			id,
@@ -783,6 +813,87 @@ mod tests {
 	use lightning::util::ser::{Readable, Writeable};
 
 	use super::*;
+
+	#[test]
+	fn v0_7_pending_bolt11_amounts_roundtrip_as_net() {
+		use ldk_node_070::lightning::util::ser::Writeable as OldWriteable;
+		use ldk_node_070::payment::{
+			LSPFeeLimits as OldFeeLimits, PaymentDetails as OldDetails,
+			PaymentDirection as OldDirection, PaymentKind as OldKind, PaymentStatus as OldStatus,
+		};
+
+		for (status, amount, fee, expected, persisted) in [
+			(OldStatus::Pending, Some(100_000), Some(1_000), Some(99_000), Some(100_000)),
+			(OldStatus::Pending, Some(100_000), Some(100_000), Some(0), Some(100_000)),
+			(OldStatus::Pending, Some(100_000), Some(150_000), Some(0), Some(150_000)),
+			(OldStatus::Pending, Some(100_000), None, Some(100_000), Some(100_000)),
+			(OldStatus::Pending, None, Some(1_000), None, None),
+			(OldStatus::Succeeded, Some(99_000), Some(1_000), Some(99_000), Some(99_000)),
+			(OldStatus::Failed, Some(100_000), Some(1_000), Some(100_000), Some(100_000)),
+		] {
+			let old = OldDetails {
+				id: ldk_node_070::lightning::ln::channelmanager::PaymentId([42; 32]),
+				kind: OldKind::Bolt11Jit {
+					hash: ldk_node_070::lightning_types::payment::PaymentHash([42; 32]),
+					preimage: None,
+					secret: None,
+					counterparty_skimmed_fee_msat: fee,
+					lsp_fee_limits: OldFeeLimits {
+						max_total_opening_fee_msat: Some(fee.unwrap_or(1_000)),
+						max_proportional_opening_fee_ppm_msat: None,
+					},
+				},
+				amount_msat: amount,
+				fee_paid_msat: None,
+				direction: OldDirection::Inbound,
+				status,
+				latest_update_timestamp: 1,
+			};
+			let mut payment = PaymentDetails::read(&mut OldWriteable::encode(&old).as_slice())
+				.expect("legacy payments with excessive fees must remain readable");
+			assert_eq!(
+				payment.amount_msat, expected,
+				"v0.7 pending JIT amounts must exclude the fee"
+			);
+			for _ in 0..3 {
+				let encoded = payment.encode();
+				let raw = <OldDetails as ldk_node_070::lightning::util::ser::Readable>::read(
+					&mut encoded.as_slice(),
+				)
+				.unwrap();
+				assert_eq!(
+					raw.amount_msat, persisted,
+					"the persisted amount must retain its historical meaning"
+				);
+				let decoded = PaymentDetails::read(&mut encoded.as_slice()).unwrap();
+				assert_eq!(decoded, payment, "restarting must not deduct the fee again");
+				payment = decoded;
+			}
+		}
+	}
+
+	#[test]
+	fn pending_bolt11_amount_overflow_remains_writable() {
+		let mut payment = PaymentDetails::new(
+			PaymentId([42; 32]),
+			PaymentKind::Bolt11 {
+				hash: PaymentHash([42; 32]),
+				preimage: None,
+				secret: None,
+				counterparty_skimmed_fee_msat: Some(u64::MAX - 50),
+			},
+			Some(100),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+		let mut encoded = Vec::new();
+		assert!(payment.write(&mut encoded).is_ok(), "excessive fees must not prevent persistence");
+		let decoded = PaymentDetails::read(&mut encoded.as_slice()).unwrap();
+		payment.amount_msat = Some(50);
+		assert_eq!(decoded, payment);
+		assert_eq!(PaymentDetails::read(&mut decoded.encode().as_slice()).unwrap(), decoded);
+	}
 
 	/// We refactored `PaymentDetails` to hold a payment id and moved some required fields into
 	/// `PaymentKind`. Here, we keep the old layout available in order test de/ser compatibility.

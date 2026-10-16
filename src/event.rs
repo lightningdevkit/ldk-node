@@ -224,6 +224,9 @@ pub enum Event {
 	/// If the provided parameters don't match the expectations or the preimage can't be
 	/// retrieved in time, should be failed-back via [`fail_for_id`].
 	///
+	/// For every payment, the caller must verify that `claimable_amount_msat` meets their
+	/// expectations before claiming, including payments for invoices created before upgrading.
+	///
 	/// Note claiming will necessarily fail after the `claim_deadline` has been reached.
 	///
 	/// This event is only emitted for unknown BOLT 11 payments if
@@ -1085,24 +1088,25 @@ where
 						self.fail_claimable_payment(payment_id, &payment_hash).await?;
 						return Ok(());
 					}
+				}
 
-					if let Some(info) = payment_info.as_ref() {
-						match &info.kind {
-							PaymentKind::Bolt11 { .. } => {
-								let update = PaymentDetailsUpdate {
-									counterparty_skimmed_fee_msat: Some(Some(counterparty_skimmed_fee_msat)),
-									..PaymentDetailsUpdate::new(payment_id)
-								};
-								match self.payment_store.update(update).await {
-									Ok(_) => (),
-									Err(e) => {
-										log_error!(self.logger, "Failed to access payment store: {}", e);
-										return Err(ReplayEvent());
-									},
-								};
-							},
-							_ => debug_assert!(false, "We only expect the counterparty to get away with withholding fees for BOLT11 payments."),
-						}
+				if let Some(info) = payment_info.as_ref() {
+					match &info.kind {
+						PaymentKind::Bolt11 { .. } => {
+							let update = PaymentDetailsUpdate {
+								amount_msat: Some(Some(amount_msat)),
+								counterparty_skimmed_fee_msat: Some(
+									(counterparty_skimmed_fee_msat > 0)
+										.then_some(counterparty_skimmed_fee_msat),
+								),
+								..PaymentDetailsUpdate::new(payment_id)
+							};
+							if let Err(e) = self.payment_store.update(update).await {
+								log_error!(self.logger, "Failed to access payment store: {}", e);
+								return Err(ReplayEvent());
+							}
+						},
+						_ => debug_assert_eq!(counterparty_skimmed_fee_msat, 0, "We only expect the counterparty to get away with withholding fees for BOLT11 payments."),
 					}
 				}
 
@@ -1124,8 +1128,6 @@ where
 							return Ok(());
 						}
 
-						let invoice_amount_msat =
-							amount_msat.saturating_add(counterparty_skimmed_fee_msat);
 						let kind = PaymentKind::Bolt11 {
 							hash: payment_hash,
 							preimage: None,
@@ -1139,7 +1141,7 @@ where
 						let payment = PaymentDetails::new(
 							payment_id,
 							kind,
-							Some(invoice_amount_msat),
+							Some(amount_msat),
 							None,
 							PaymentDirection::Inbound,
 							PaymentStatus::Pending,
@@ -1212,8 +1214,6 @@ where
 						..
 					} => {
 						if should_insert_payment {
-							let invoice_amount_msat =
-								amount_msat.saturating_add(counterparty_skimmed_fee_msat);
 							let kind = PaymentKind::Bolt11 {
 								hash: payment_hash,
 								preimage: payment_preimage,
@@ -1229,7 +1229,7 @@ where
 							let payment = PaymentDetails::new(
 								payment_id,
 								kind,
-								Some(invoice_amount_msat),
+								Some(amount_msat),
 								None,
 								PaymentDirection::Inbound,
 								PaymentStatus::Pending,
