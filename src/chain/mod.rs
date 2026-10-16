@@ -38,6 +38,7 @@ use crate::config::EsploraSyncConfig;
 use crate::config::{BackgroundSyncConfig, Config, WALLET_SYNC_INTERVAL_MINIMUM_SECS};
 use crate::fee_estimator::OnchainFeeEstimator;
 use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
+use crate::payment::NodeOffersMessageHandler;
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::BroadcastPackage;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
@@ -166,6 +167,7 @@ enum ChainSourceKind {
 pub(crate) struct ChainListener {
 	pub(crate) onchain_wallet: std::sync::Weak<Wallet>,
 	pub(crate) channel_manager: std::sync::Weak<ChannelManager>,
+	pub(crate) offers_message_handler: std::sync::Weak<NodeOffersMessageHandler>,
 	pub(crate) chain_monitor: std::sync::Weak<ChainMonitor>,
 	pub(crate) output_sweeper: std::sync::Weak<Sweeper>,
 }
@@ -174,10 +176,17 @@ pub(crate) struct ChainListener {
 impl ChainListener {
 	fn upgrade(
 		&self,
-	) -> Option<(Arc<Wallet>, Arc<ChannelManager>, Arc<ChainMonitor>, Arc<Sweeper>)> {
+	) -> Option<(
+		Arc<Wallet>,
+		Arc<ChannelManager>,
+		Arc<NodeOffersMessageHandler>,
+		Arc<ChainMonitor>,
+		Arc<Sweeper>,
+	)> {
 		Some((
 			self.onchain_wallet.upgrade()?,
 			self.channel_manager.upgrade()?,
+			self.offers_message_handler.upgrade()?,
 			self.chain_monitor.upgrade()?,
 			self.output_sweeper.upgrade()?,
 		))
@@ -190,32 +199,50 @@ impl Listen for ChainListener {
 		&self, header: &bitcoin::block::Header,
 		txdata: &lightning::chain::transaction::TransactionData, height: u32,
 	) {
-		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
-			self.upgrade()
+		if let Some((
+			onchain_wallet,
+			channel_manager,
+			offers_message_handler,
+			chain_monitor,
+			output_sweeper,
+		)) = self.upgrade()
 		{
 			onchain_wallet.filtered_block_connected(header, txdata, height);
 			channel_manager.filtered_block_connected(header, txdata, height);
+			offers_message_handler.filtered_block_connected(header, txdata, height);
 			chain_monitor.filtered_block_connected(header, txdata, height);
 			output_sweeper.filtered_block_connected(header, txdata, height);
 		}
 	}
 	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
-		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
-			self.upgrade()
+		if let Some((
+			onchain_wallet,
+			channel_manager,
+			offers_message_handler,
+			chain_monitor,
+			output_sweeper,
+		)) = self.upgrade()
 		{
 			onchain_wallet.block_connected(block, height);
 			channel_manager.block_connected(block, height);
+			offers_message_handler.block_connected(block, height);
 			chain_monitor.block_connected(block, height);
 			output_sweeper.block_connected(block, height);
 		}
 	}
 
 	fn blocks_disconnected(&self, fork_point_block: lightning::chain::BlockLocator) {
-		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
-			self.upgrade()
+		if let Some((
+			onchain_wallet,
+			channel_manager,
+			offers_message_handler,
+			chain_monitor,
+			output_sweeper,
+		)) = self.upgrade()
 		{
 			onchain_wallet.blocks_disconnected(fork_point_block);
 			channel_manager.blocks_disconnected(fork_point_block);
+			offers_message_handler.blocks_disconnected(fork_point_block);
 			chain_monitor.blocks_disconnected(fork_point_block);
 			output_sweeper.blocks_disconnected(fork_point_block);
 		}
@@ -374,7 +401,8 @@ impl ChainSource {
 
 	pub(crate) async fn initialize_wallets(
 		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>, onchain_wallet: Arc<Wallet>,
-		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		channel_manager: Arc<ChannelManager>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>, zero_fee_commitments_support_required: bool,
 	) -> Result<(), Error> {
 		// Replay can broadcast claims, so refresh fees and validate the backend before syncing.
@@ -396,6 +424,7 @@ impl ChainSource {
 						stop_sync_receiver,
 						onchain_wallet,
 						channel_manager,
+						offers_message_handler,
 						chain_monitor,
 						output_sweeper,
 						&self.tx_broadcaster,
@@ -404,18 +433,33 @@ impl ChainSource {
 			},
 			#[cfg(feature = "chain-esplora")]
 			ChainSourceKind::Esplora(source) => {
-				source.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper).await
+				source
+					.sync_lightning_wallet(
+						channel_manager,
+						offers_message_handler,
+						chain_monitor,
+						output_sweeper,
+					)
+					.await
 			},
 			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(source) => {
-				source.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper).await
+				source
+					.sync_lightning_wallet(
+						channel_manager,
+						offers_message_handler,
+						chain_monitor,
+						output_sweeper,
+					)
+					.await
 			},
 		}
 	}
 
 	pub(crate) async fn continuously_sync_wallets(
 		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>, onchain_wallet: Arc<Wallet>,
-		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		channel_manager: Arc<ChannelManager>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) {
 		match &self.kind {
@@ -428,6 +472,7 @@ impl ChainSource {
 						stop_sync_receiver,
 						onchain_wallet,
 						channel_manager,
+						offers_message_handler,
 						chain_monitor,
 						output_sweeper,
 						background_sync_config,
@@ -452,6 +497,7 @@ impl ChainSource {
 						stop_sync_receiver,
 						onchain_wallet,
 						channel_manager,
+						offers_message_handler,
 						chain_monitor,
 						output_sweeper,
 						background_sync_config,
@@ -474,6 +520,7 @@ impl ChainSource {
 						stop_sync_receiver,
 						onchain_wallet,
 						channel_manager,
+						offers_message_handler,
 						chain_monitor,
 						output_sweeper,
 					)
@@ -485,8 +532,9 @@ impl ChainSource {
 	async fn start_tx_based_sync_loop(
 		&self, mut stop_sync_receiver: tokio::sync::watch::Receiver<()>,
 		onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
-		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
-		background_sync_config: &BackgroundSyncConfig, logger: Arc<Logger>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>, background_sync_config: &BackgroundSyncConfig,
+		logger: Arc<Logger>,
 	) {
 		// Setup syncing intervals
 		let onchain_wallet_sync_interval_secs = background_sync_config
@@ -533,6 +581,7 @@ impl ChainSource {
 				_ = lightning_wallet_sync_interval.tick() => {
 					let _ = self.sync_lightning_wallet(
 						Arc::clone(&channel_manager),
+						Arc::clone(&offers_message_handler),
 						Arc::clone(&chain_monitor),
 						Arc::clone(&output_sweeper),
 						).await;
@@ -567,20 +616,31 @@ impl ChainSource {
 	// Synchronize the Lightning wallet via transaction-based protocols (i.e., Esplora, Electrum,
 	// etc.)
 	pub(crate) async fn sync_lightning_wallet(
-		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		&self, channel_manager: Arc<ChannelManager>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		match &self.kind {
 			#[cfg(feature = "chain-esplora")]
 			ChainSourceKind::Esplora(esplora_chain_source) => {
 				esplora_chain_source
-					.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper)
+					.sync_lightning_wallet(
+						channel_manager,
+						offers_message_handler,
+						chain_monitor,
+						output_sweeper,
+					)
 					.await
 			},
 			#[cfg(feature = "chain-electrum")]
 			ChainSourceKind::Electrum(electrum_chain_source) => {
 				electrum_chain_source
-					.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper)
+					.sync_lightning_wallet(
+						channel_manager,
+						offers_message_handler,
+						chain_monitor,
+						output_sweeper,
+					)
 					.await
 			},
 			#[cfg(feature = "chain-bitcoind")]
@@ -594,10 +654,17 @@ impl ChainSource {
 
 	pub(crate) async fn poll_and_update_listeners(
 		&self, onchain_wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>,
-		chain_monitor: Arc<ChainMonitor>, output_sweeper: Arc<Sweeper>,
+		offers_message_handler: Arc<NodeOffersMessageHandler>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
 		#[cfg(not(feature = "chain-bitcoind"))]
-		let _ = (&onchain_wallet, &channel_manager, &chain_monitor, &output_sweeper);
+		let _ = (
+			&onchain_wallet,
+			&channel_manager,
+			&offers_message_handler,
+			&chain_monitor,
+			&output_sweeper,
+		);
 
 		match &self.kind {
 			#[cfg(feature = "chain-esplora")]
@@ -618,6 +685,7 @@ impl ChainSource {
 					.poll_and_update_listeners(
 						onchain_wallet,
 						channel_manager,
+						offers_message_handler,
 						chain_monitor,
 						output_sweeper,
 					)
