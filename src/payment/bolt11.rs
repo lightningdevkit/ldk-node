@@ -188,6 +188,7 @@ mod tests {
 		let lsps2_parameters = LSPS2Parameters {
 			max_total_opening_fee_msat: Some(42_000),
 			max_proportional_opening_fee_ppm_msat: Some(17_000),
+			min_opening_fee_msat: 1_000,
 		};
 		let metadata = PaymentMetadata { lsps2_parameters: Some(lsps2_parameters) };
 

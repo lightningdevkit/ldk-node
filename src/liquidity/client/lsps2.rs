@@ -110,6 +110,11 @@ where
 			min_total_fee_msat
 		);
 
+		let lsps2_parameters = LSPS2Parameters {
+			max_total_opening_fee_msat: Some(min_total_fee_msat),
+			max_proportional_opening_fee_ppm_msat: None,
+			min_opening_fee_msat: min_opening_params.min_fee_msat,
+		};
 		let buy_response = self
 			.lsps2_send_buy_request(
 				Some(amount_msat),
@@ -117,11 +122,6 @@ where
 				Some(&cheapest_lsp.node_id),
 			)
 			.await?;
-		let lsps2_parameters = LSPS2Parameters {
-			max_total_opening_fee_msat: Some(min_total_fee_msat),
-			max_proportional_opening_fee_ppm_msat: None,
-		};
-
 		let invoice = self.lsps2_create_jit_invoice(
 			buy_response,
 			Some(amount_msat),
@@ -178,13 +178,14 @@ where
 			min_prop_fee_ppm_msat
 		);
 
-		let buy_response = self
-			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
-			.await?;
 		let lsps2_parameters = LSPS2Parameters {
 			max_total_opening_fee_msat: None,
 			max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
+			min_opening_fee_msat: min_opening_params.min_fee_msat,
 		};
+		let buy_response = self
+			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
+			.await?;
 		let invoice = self.lsps2_create_jit_invoice(
 			buy_response,
 			None,
