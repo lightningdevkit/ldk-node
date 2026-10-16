@@ -204,10 +204,6 @@ impl Bolt11Payment {
 		route_parameters: Option<RouteParametersConfig>,
 		declared_total_mpp_value_msat_override: Option<u64>, invalid_amount_log: &'static str,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().expect("lock") {
-			return Err(Error::NotRunning);
-		}
-
 		let payment_hash = invoice.payment_hash();
 		let payment_id = PaymentId(invoice.payment_hash().0);
 		if let Some(payment) = self.runtime.block_on(self.payment_store.get(&payment_id))? {

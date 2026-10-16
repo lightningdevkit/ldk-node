@@ -298,6 +298,10 @@ impl UnifiedPayment {
 
 					let payment_result = if let Ok(hrn) = HumanReadableName::from_encoded(uri_str) {
 						let hrn = maybe_wrap(hrn.clone());
+						if !*self.is_running.read().expect("lock") {
+							return Err(Error::NotRunning);
+						}
+
 						self.bolt12_payment.send_using_amount_inner(
 							&offer,
 							amount_msat.unwrap_or(0),
@@ -389,6 +393,10 @@ impl UnifiedPayment {
 						);
 						Error::InvalidAmount
 					})?;
+
+					if !*self.is_running.read().expect("lock") {
+						return Err(Error::NotRunning);
+					}
 
 					let txid = self
 						.onchain_payment

@@ -127,10 +127,6 @@ impl Bolt12Payment {
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>, hrn: Option<HumanReadableName>,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().expect("lock") {
-			return Err(Error::NotRunning);
-		}
-
 		let offer = maybe_deref(offer);
 
 		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
@@ -412,6 +408,10 @@ impl Bolt12Payment {
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let payment_id = self.send_using_amount_inner(
 			offer,
 			amount_msat,
