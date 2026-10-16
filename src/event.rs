@@ -707,15 +707,24 @@ where
 		}
 	}
 
-	fn lsps2_max_total_opening_fee_msat(payment_metadata: &[u8], amount_msat: u64) -> Option<u64> {
+	fn lsps2_max_total_opening_fee_msat(
+		payment_metadata: &[u8], gross_amount_msat: u64,
+	) -> Option<u64> {
 		let metadata = PaymentMetadata::read(&mut &payment_metadata[..]).ok()?;
 		let lsps2_parameters = metadata.lsps2_parameters?;
-		lsps2_parameters.max_total_opening_fee_msat.or_else(|| {
-			lsps2_parameters.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
-				// If it's a variable amount payment, compute the actual fee.
-				compute_opening_fee(amount_msat, 0, max_prop_fee)
+		lsps2_parameters
+			.max_total_opening_fee_msat
+			.or_else(|| {
+				lsps2_parameters.max_proportional_opening_fee_ppm_msat.and_then(|max_prop_fee| {
+					// If it's a variable amount payment, compute the actual fee.
+					compute_opening_fee(
+						gross_amount_msat,
+						lsps2_parameters.min_opening_fee_msat,
+						max_prop_fee,
+					)
+				})
 			})
-		})
+			.filter(|fee| *fee <= gross_amount_msat)
 	}
 
 	async fn resolve_inbound_payment_id(
@@ -1058,7 +1067,9 @@ where
 							.as_ref()
 							.and_then(|fields| fields.payment_metadata.as_ref())
 							.and_then(|metadata| {
-								Self::lsps2_max_total_opening_fee_msat(metadata, amount_msat)
+								let gross_amount_msat =
+									amount_msat.checked_add(counterparty_skimmed_fee_msat)?;
+								Self::lsps2_max_total_opening_fee_msat(metadata, gross_amount_msat)
 							}),
 						_ => None,
 					};
@@ -2803,6 +2814,7 @@ mod tests {
 			lsps2_parameters: Some(LSPS2Parameters {
 				max_total_opening_fee_msat: Some(42_000),
 				max_proportional_opening_fee_ppm_msat: None,
+				min_opening_fee_msat: 1_000,
 			}),
 		};
 
@@ -2816,12 +2828,58 @@ mod tests {
 	}
 
 	#[test]
+	fn lsps2_payment_metadata_honors_minimum_fee() {
+		// Variable-amount metadata with 10,000 ppm (type 2) and a 1,000-msat minimum
+		// (type 3). Use the wire format so this also exercises readers predating the minimum.
+		let metadata =
+			crate::hex_utils::to_vec("1700151402080000000000002710030800000000000003e8").unwrap();
+		for (amount_msat, expected_fee_msat) in
+			[(50_000, 1_000), (100_000, 1_000), (100_001, 1_001), (200_000, 2_000)]
+		{
+			assert_eq!(
+				EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+					&metadata,
+					amount_msat,
+				),
+				Some(expected_fee_msat),
+				"The fee allowance must include the negotiated minimum and round up proportional fees"
+			);
+		}
+	}
+
+	#[test]
+	fn lsps2_payment_metadata_bounds_variable_fees_by_gross_amount() {
+		for (gross_amount_msat, proportional, expected) in [
+			(100_000, 600_000, Some(60_000)),
+			(100_000, 1_000_000, Some(100_000)),
+			(100_000, 1_000_001, None),
+			(100_000, u64::MAX, None),
+		] {
+			let metadata = PaymentMetadata {
+				lsps2_parameters: Some(LSPS2Parameters {
+					max_total_opening_fee_msat: None,
+					max_proportional_opening_fee_ppm_msat: Some(proportional),
+					min_opening_fee_msat: 0,
+				}),
+			};
+			assert_eq!(
+				EventHandler::<Arc<TestLogger>>::lsps2_max_total_opening_fee_msat(
+					&metadata.encode(),
+					gross_amount_msat,
+				),
+				expected
+			);
+		}
+	}
+
+	#[test]
 	fn lsps2_payment_metadata_missing_or_malformed_limit_is_rejected() {
 		let empty_metadata = PaymentMetadata { lsps2_parameters: None }.encode();
 		let metadata_without_fee_limit = PaymentMetadata {
 			lsps2_parameters: Some(LSPS2Parameters {
 				max_total_opening_fee_msat: None,
 				max_proportional_opening_fee_ppm_msat: None,
+				min_opening_fee_msat: 1_000,
 			}),
 		}
 		.encode();

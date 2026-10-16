@@ -5291,7 +5291,7 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		max_payment_size_msat: 1_000_000_000,
 		min_payment_size_msat: 0,
 		min_channel_lifetime: 100,
-		min_channel_opening_fee_msat: 0,
+		min_channel_opening_fee_msat: 1_000,
 		max_client_to_self_delay: 1024,
 		client_trusts_lsp,
 		disable_client_reserve: false,
@@ -5331,6 +5331,26 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
 	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
 	client_node.start().unwrap();
+
+	let fee_test_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("fee limit")).unwrap())
+			.into();
+	// Distinguish client fee rejection from the LSP's LiquidityRequestFailed.
+	for (amount, fee_limit, expected) in [
+		(999, None, Err(NodeError::LiquidityFeeTooHigh)),
+		(999, Some(2_000), Err(NodeError::LiquidityFeeTooHigh)),
+		(1_001, Some(999), Err(NodeError::LiquidityFeeTooHigh)),
+		(1_000, None, Err(NodeError::LiquidityRequestFailed)),
+		(1_001, None, Ok(())),
+	] {
+		assert_eq!(
+			client_node
+				.bolt11_payment()
+				.receive_via_jit_channel(amount, &fee_test_description, 1024, fee_limit)
+				.map(|_| ()),
+			expected
+		);
+	}
 
 	let payer_config = random_config();
 	setup_builder!(payer_builder, payer_config.node_config);
@@ -5569,6 +5589,25 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 		client_node.payment(&client_payment_id).unwrap().unwrap().status,
 		PaymentStatus::Failed
 	);
+
+	// Variable-amount fees must be computed from the gross payment.
+	let variable_invoice = client_node
+		.bolt11_payment()
+		.receive_variable_amount_via_jit_channel(&invoice_description, 1024, None)
+		.unwrap();
+	let variable_amount_msat = 20_000_000;
+	let variable_fee_msat = (variable_amount_msat * channel_opening_fee_ppm as u64) / 1_000_000;
+	let variable_payment_id = payer_node
+		.bolt11_payment()
+		.send_using_amount(&variable_invoice, variable_amount_msat, None)
+		.unwrap();
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+	expect_payment_received_event!(client_node, variable_amount_msat - variable_fee_msat);
+	expect_event!(service_node, PaymentForwarded);
+	expect_payment_successful_event!(payer_node, variable_payment_id, None);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]

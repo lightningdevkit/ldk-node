@@ -689,11 +689,15 @@ pub struct LSPS2Parameters {
 	/// The maximal proportional fee, in parts-per-million millisatoshi, we allow any configured
 	/// LSP withhold from us when forwarding the payment.
 	pub max_proportional_opening_fee_ppm_msat: Option<u64>,
+	/// The minimum opening fee, in millisatoshi, from the selected LSP offer. For variable-amount
+	/// payments, the allowed fee is the greater of this minimum and the proportional fee.
+	pub min_opening_fee_msat: u64,
 }
 
 impl_writeable_tlv_based!(LSPS2Parameters, {
 	(0, max_total_opening_fee_msat, option),
 	(2, max_proportional_opening_fee_ppm_msat, option),
+	(3, min_opening_fee_msat, (default_value, 0)),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -997,12 +1001,23 @@ mod tests {
 	}
 
 	#[derive(Clone, Debug, PartialEq, Eq)]
+	struct LegacyLSPS2Parameters {
+		max_total_opening_fee_msat: Option<u64>,
+		max_proportional_opening_fee_ppm_msat: Option<u64>,
+	}
+
+	impl_writeable_tlv_based!(LegacyLSPS2Parameters, {
+		(0, max_total_opening_fee_msat, option),
+		(2, max_proportional_opening_fee_ppm_msat, option),
+	});
+
+	#[derive(Clone, Debug, PartialEq, Eq)]
 	struct LegacyBolt11JitKind {
 		hash: PaymentHash,
 		counterparty_skimmed_fee_msat: Option<u64>,
 		preimage: Option<PaymentPreimage>,
 		secret: Option<PaymentSecret>,
-		lsp_fee_limits: LSPS2Parameters,
+		lsp_fee_limits: LegacyLSPS2Parameters,
 	}
 
 	impl_writeable_tlv_based!(LegacyBolt11JitKind, {
@@ -1019,7 +1034,7 @@ mod tests {
 		let preimage = Some(PaymentPreimage([43u8; 32]));
 		let secret = Some(PaymentSecret([44u8; 32]));
 		let counterparty_skimmed_fee_msat = Some(7_777u64);
-		let lsp_fee_limits = LSPS2Parameters {
+		let lsp_fee_limits = LegacyLSPS2Parameters {
 			max_total_opening_fee_msat: Some(46_000),
 			max_proportional_opening_fee_ppm_msat: Some(47_000),
 		};
