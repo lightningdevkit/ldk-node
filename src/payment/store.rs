@@ -116,12 +116,7 @@ impl Writeable for PaymentDetails {
 				PaymentKind::Bolt11 { counterparty_skimmed_fee_msat: Some(fee), .. },
 			) = (amount_msat, &self.kind)
 			{
-				amount_msat = Some(amount.checked_add(*fee).ok_or_else(|| {
-					lightning::io::Error::new(
-						lightning::io::ErrorKind::InvalidData,
-						"BOLT11 payment amount and fee overflow",
-					)
-				})?);
+				amount_msat = Some(amount.saturating_add(*fee));
 			}
 		}
 		write_tlv_fields!(writer, {
@@ -199,7 +194,7 @@ impl Readable for PaymentDetails {
 				PaymentKind::Bolt11 { counterparty_skimmed_fee_msat: Some(fee), .. },
 			) = (amount_msat, &kind)
 			{
-				amount_msat = Some(amount.checked_sub(*fee).ok_or(DecodeError::InvalidValue)?);
+				amount_msat = Some(amount.saturating_sub(*fee));
 			}
 		}
 
@@ -827,12 +822,14 @@ mod tests {
 			PaymentDirection as OldDirection, PaymentKind as OldKind, PaymentStatus as OldStatus,
 		};
 
-		for (status, amount, fee, expected) in [
-			(OldStatus::Pending, Some(100_000), Some(1_000), Some(99_000)),
-			(OldStatus::Pending, Some(100_000), None, Some(100_000)),
-			(OldStatus::Pending, None, Some(1_000), None),
-			(OldStatus::Succeeded, Some(99_000), Some(1_000), Some(99_000)),
-			(OldStatus::Failed, Some(100_000), Some(1_000), Some(100_000)),
+		for (status, amount, fee, expected, persisted) in [
+			(OldStatus::Pending, Some(100_000), Some(1_000), Some(99_000), Some(100_000)),
+			(OldStatus::Pending, Some(100_000), Some(100_000), Some(0), Some(100_000)),
+			(OldStatus::Pending, Some(100_000), Some(150_000), Some(0), Some(150_000)),
+			(OldStatus::Pending, Some(100_000), None, Some(100_000), Some(100_000)),
+			(OldStatus::Pending, None, Some(1_000), None, None),
+			(OldStatus::Succeeded, Some(99_000), Some(1_000), Some(99_000), Some(99_000)),
+			(OldStatus::Failed, Some(100_000), Some(1_000), Some(100_000), Some(100_000)),
 		] {
 			let old = OldDetails {
 				id: ldk_node_070::lightning::ln::channelmanager::PaymentId([42; 32]),
@@ -842,7 +839,7 @@ mod tests {
 					secret: None,
 					counterparty_skimmed_fee_msat: fee,
 					lsp_fee_limits: OldFeeLimits {
-						max_total_opening_fee_msat: Some(1_000),
+						max_total_opening_fee_msat: Some(fee.unwrap_or(1_000)),
 						max_proportional_opening_fee_ppm_msat: None,
 					},
 				},
@@ -852,8 +849,8 @@ mod tests {
 				status,
 				latest_update_timestamp: 1,
 			};
-			let mut payment =
-				PaymentDetails::read(&mut OldWriteable::encode(&old).as_slice()).unwrap();
+			let mut payment = PaymentDetails::read(&mut OldWriteable::encode(&old).as_slice())
+				.expect("legacy payments with excessive fees must remain readable");
 			assert_eq!(
 				payment.amount_msat, expected,
 				"v0.7 pending JIT amounts must exclude the fee"
@@ -865,7 +862,7 @@ mod tests {
 				)
 				.unwrap();
 				assert_eq!(
-					raw.amount_msat, amount,
+					raw.amount_msat, persisted,
 					"the persisted amount must retain its historical meaning"
 				);
 				let decoded = PaymentDetails::read(&mut encoded.as_slice()).unwrap();
@@ -873,6 +870,29 @@ mod tests {
 				payment = decoded;
 			}
 		}
+	}
+
+	#[test]
+	fn pending_bolt11_amount_overflow_remains_writable() {
+		let mut payment = PaymentDetails::new(
+			PaymentId([42; 32]),
+			PaymentKind::Bolt11 {
+				hash: PaymentHash([42; 32]),
+				preimage: None,
+				secret: None,
+				counterparty_skimmed_fee_msat: Some(u64::MAX - 50),
+			},
+			Some(100),
+			None,
+			PaymentDirection::Inbound,
+			PaymentStatus::Pending,
+		);
+		let mut encoded = Vec::new();
+		assert!(payment.write(&mut encoded).is_ok(), "excessive fees must not prevent persistence");
+		let decoded = PaymentDetails::read(&mut encoded.as_slice()).unwrap();
+		payment.amount_msat = Some(50);
+		assert_eq!(decoded, payment);
+		assert_eq!(PaymentDetails::read(&mut decoded.encode().as_slice()).unwrap(), decoded);
 	}
 
 	/// We refactored `PaymentDetails` to hold a payment id and moved some required fields into
