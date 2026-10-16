@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
-use bitcoin::FeeRate;
+use bitcoin::{FeeRate, Network};
 use lightning::chain::chaininterface::{
 	ConfirmationTarget as LdkConfirmationTarget, FeeEstimator as LdkFeeEstimator,
 	FEERATE_FLOOR_SATS_PER_KW,
@@ -122,6 +122,36 @@ pub(crate) fn get_fallback_rate_for_ldk_target(target: LdkConfirmationTarget) ->
 	}
 }
 
+/// 1 sat/vb in sats/kwu, i.e. the lowest rate we'd ever consider using. Note this sits just
+/// below LDK's `FEERATE_FLOOR_SATS_PER_KW`, which `estimate_fee_rate` clamps reads to.
+pub(crate) const ONE_SAT_PER_VB_SATS_PER_KWU: u64 = 250;
+
+/// Returns the fee rate to use for `target` when the chain source handed us no usable estimate
+/// for it.
+///
+/// Off `regtest`/`signet` we use the target's own default, as falling back to 1 sat/vb would
+/// silently downgrade urgent targets such as `UrgentOnChainSweep`. We deliberately
+/// don't run that default through `apply_post_estimation_adjustments`, mirroring what
+/// `OnchainFeeEstimator::estimate_fee_rate` returns on a cache miss.
+///
+/// On `regtest`/`signet` there is no fee market to speak of - the backends commonly serve no
+/// estimates there at all - so pulling every target up to a mainnet-sized default would be wrong.
+/// We stand in the 1 sat/vb we have always used there, and adjust it exactly as we would an
+/// estimate, because that is what these networks have always cached: `MaximumFeeEstimate` ends up
+/// at 2775 sats/kwu rather than the raw 250, and LDK derives its per-channel dust exposure limit
+/// from that value.
+pub(crate) fn get_fallback_fee_rate_for_network(
+	target: ConfirmationTarget, network: Network,
+) -> FeeRate {
+	match network {
+		Network::Regtest | Network::Signet => apply_post_estimation_adjustments(
+			target,
+			FeeRate::from_sat_per_kwu(ONE_SAT_PER_VB_SATS_PER_KWU),
+		),
+		_ => FeeRate::from_sat_per_kwu(get_fallback_rate_for_target(target) as u64),
+	}
+}
+
 pub(crate) fn get_all_conf_targets() -> [ConfirmationTarget; 10] {
 	[
 		ConfirmationTarget::OnchainPayment,
@@ -190,6 +220,53 @@ pub(crate) fn rbf_splice_feerates(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn fallback_fee_rates_are_network_aware() {
+		// Mainnet and testnet have a fee market, so a target with no usable estimate gets its own
+		// default rather than the relay floor.
+		for network in [Network::Bitcoin, Network::Testnet, Network::Testnet4] {
+			for target in get_all_conf_targets() {
+				assert_eq!(
+					get_fallback_fee_rate_for_network(target, network).to_sat_per_kwu(),
+					get_fallback_rate_for_target(target) as u64,
+					"{:?} on {}",
+					target,
+					network
+				);
+			}
+		}
+
+		// Regtest and signet don't, so we stand in 1 sat/vb there and avoid pulling every target
+		// up to a mainnet-sized default. The stand-in is adjusted as an estimate would be, which
+		// is what those networks have always cached.
+		for network in [Network::Regtest, Network::Signet] {
+			for target in get_all_conf_targets() {
+				let one_sat_per_vb = FeeRate::from_sat_per_kwu(ONE_SAT_PER_VB_SATS_PER_KWU);
+				assert_eq!(
+					get_fallback_fee_rate_for_network(target, network),
+					apply_post_estimation_adjustments(target, one_sat_per_vb),
+					"{:?} on {}",
+					target,
+					network
+				);
+			}
+
+			// Spelled out for the one target where the adjustment matters, as LDK derives its
+			// per-channel dust exposure limit from it: dropping this to the raw 250 would cut
+			// that limit ~11x on every regtest/signet node.
+			assert_eq!(
+				get_fallback_fee_rate_for_network(
+					ConfirmationTarget::Lightning(LdkConfirmationTarget::MaximumFeeEstimate),
+					network
+				)
+				.to_sat_per_kwu(),
+				2775,
+				"{}",
+				network
+			);
+		}
+	}
 
 	#[test]
 	fn rbf_splice_feerates_target_and_max() {
