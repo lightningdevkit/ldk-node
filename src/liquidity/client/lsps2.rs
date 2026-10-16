@@ -93,14 +93,14 @@ where
 				Error::LiquidityRequestFailed
 			})?;
 
-		if let Some(max_total_lsp_fee_limit_msat) = max_total_lsp_fee_limit_msat {
-			if min_total_fee_msat > max_total_lsp_fee_limit_msat {
-				log_error!(self.logger,
-					"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our fee limit of {}msat",
-					min_total_fee_msat, max_total_lsp_fee_limit_msat
-				);
-				return Err(Error::LiquidityFeeTooHigh);
-			}
+		let max_total_lsp_fee_limit_msat =
+			max_total_lsp_fee_limit_msat.unwrap_or(amount_msat).min(amount_msat);
+		if min_total_fee_msat > max_total_lsp_fee_limit_msat {
+			log_error!(self.logger,
+				"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our fee limit of {}msat",
+				min_total_fee_msat, max_total_lsp_fee_limit_msat
+			);
+			return Err(Error::LiquidityFeeTooHigh);
 		}
 
 		log_debug!(

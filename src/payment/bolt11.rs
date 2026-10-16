@@ -673,8 +673,8 @@ impl Bolt11Payment {
 	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
 	/// to us, supplying just-in-time inbound liquidity.
 	///
-	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
-	/// channel to us. We'll use its cheapest offer otherwise.
+	/// We choose the cheapest offer and return [`Error::LiquidityFeeTooHigh`] if its opening fee
+	/// exceeds `amount_msat` or the optional `max_total_lsp_fee_limit_msat`.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	pub fn receive_via_jit_channel(
@@ -702,8 +702,8 @@ impl Bolt11Payment {
 	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
 	/// to us, supplying just-in-time inbound liquidity.
 	///
-	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
-	/// channel to us. We'll use its cheapest offer otherwise.
+	/// We choose the cheapest offer and return [`Error::LiquidityFeeTooHigh`] if its opening fee
+	/// exceeds `amount_msat` or the optional `max_total_lsp_fee_limit_msat`.
 	///
 	/// The inbound payment will only be accepted if
 	/// [`Config::manually_handle_unknown_bolt11_payments`] is enabled. We will then emit a
