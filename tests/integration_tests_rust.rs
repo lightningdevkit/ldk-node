@@ -3123,11 +3123,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	// Use a custom bitcoind config with a lower incrementalrelayfee so that the +25 sat/kwu
 	// (0.1 sat/vB) RBF feerate bump satisfies BIP125's absolute fee increase requirement.
 	let bitcoind_exe = std::env::var("BITCOIND_EXE")
-		.ok()
-		.or_else(|| corepc_node::downloaded_exe_path().ok())
-		.expect(
-			"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
-		);
+		.expect("set BITCOIND_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
 	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	bitcoind_conf.args.push("-rest");
@@ -3135,9 +3131,7 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = std::env::var("ELECTRS_EXE")
-		.ok()
-		.or_else(electrsd::downloaded_exe_path)
-		.expect("you need to provide env var ELECTRS_EXE or specify an electrsd version feature");
+		.expect("set ELECTRS_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
 	let mut electrsd_conf = electrsd::Conf::default();
 	electrsd_conf.http_enabled = true;
 	electrsd_conf.network = "regtest";

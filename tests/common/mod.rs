@@ -345,19 +345,15 @@ macro_rules! expect_payment_successful_event {
 pub(crate) use expect_payment_successful_event;
 
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
-	let bitcoind_exe =
-		env::var("BITCOIND_EXE").ok().or_else(|| corepc_node::downloaded_exe_path().ok()).expect(
-			"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
-		);
+	let bitcoind_exe = env::var("BITCOIND_EXE")
+		.expect("set BITCOIND_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
 	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	bitcoind_conf.args.push("-rest");
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = env::var("ELECTRS_EXE")
-		.ok()
-		.or_else(electrsd::downloaded_exe_path)
-		.expect("you need to provide env var ELECTRS_EXE or specify an electrsd version feature");
+		.expect("set ELECTRS_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
 	let mut electrsd_conf = electrsd::Conf::default();
 	electrsd_conf.http_enabled = true;
 	electrsd_conf.network = "regtest";

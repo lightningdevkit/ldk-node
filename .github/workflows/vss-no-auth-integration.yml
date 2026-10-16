@@ -37,6 +37,30 @@ jobs:
           repository: lightningdevkit/vss-server
           path: vss-server
 
+      - name: Enable caching for bitcoind
+        id: cache-bitcoind
+        uses: actions/cache@v4
+        with:
+          path: bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
+          key: bitcoind-31.1-${{ runner.os }}-${{ runner.arch }}
+      - name: Enable caching for electrs
+        id: cache-electrs
+        uses: actions/cache@v4
+        with:
+          path: bin/electrs-${{ runner.os }}-${{ runner.arch }}
+          key: electrs-${{ runner.os }}-${{ runner.arch }}
+      - name: Download bitcoind/electrs
+        if: "steps.cache-bitcoind.outputs.cache-hit != 'true' || steps.cache-electrs.outputs.cache-hit != 'true'"
+        run: |
+          source ./ldk-node/scripts/download_bitcoind_electrs.sh
+          mkdir -p bin
+          mv "$BITCOIND_EXE" bin/bitcoind-${{ runner.os }}-${{ runner.arch }}
+          mv "$ELECTRS_EXE" bin/electrs-${{ runner.os }}-${{ runner.arch }}
+      - name: Set bitcoind/electrs environment variables
+        run: |
+          echo "BITCOIND_EXE=$( pwd )/bin/bitcoind-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
+          echo "ELECTRS_EXE=$( pwd )/bin/electrs-${{ runner.os }}-${{ runner.arch }}" >> "$GITHUB_ENV"
+
       - name: Build and Deploy VSS Server
         run: |
           cd vss-server
