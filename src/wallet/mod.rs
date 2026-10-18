@@ -3297,9 +3297,6 @@ impl Wallet {
 	/// that holds before the payment record exists, and the only one left once the record
 	/// graduated out of the pending store. Otherwise the pending store is asked, by the record's
 	/// own transaction, by its candidate history and by the conflicts wallet sync listed for it.
-	/// The payment store itself is never listed: it is bounded, and a record wallet sync created
-	/// under a transaction's own id is reached through that id, which the wallet-sync arms derive
-	/// from the transaction when nothing resolves it.
 	async fn find_payment_by_txid(&self, target_txid: Txid) -> Result<Option<PaymentId>, Error> {
 		if let Some(figures) =
 			self.channel_tx_facts(&target_txid).await.and_then(|facts| facts.local_figures)
@@ -3897,9 +3894,9 @@ enum FundingPaymentFailure {
 	MovedOn,
 }
 
-/// Generates a fresh funding-record [`PaymentId`] from the OS entropy source. A funding record's id
-/// carries no meaning beyond uniqueness: the record is found through its transaction history
-/// ([`Wallet::find_payment_by_txid`]), never re-derived from a txid.
+/// Generates a fresh funding-record [`PaymentId`] from the OS entropy source. The record is found
+/// through its transaction history ([`Wallet::find_payment_by_txid`]), so the id only has to be
+/// unique.
 fn random_payment_id() -> PaymentId {
 	let mut bytes = [0u8; 32];
 	getrandom::fill(&mut bytes).expect("getrandom failed");

@@ -31,10 +31,6 @@ use crate::Error;
 /// write compiles only for a holder of the lock. The reads are methods of this type and take no
 /// lock; a caller whose write depends on what it read takes the lock first and reads through the
 /// guard.
-///
-/// The payment store is bounded, so nothing here lists it: a transaction is mapped to its payment
-/// through the pending store, which keeps every entry in memory, and through what was recorded
-/// about the transaction, which is read by its id.
 pub(super) struct PaymentStores {
 	payment_store: Arc<PaymentStore>,
 	pending_payment_store: Arc<PendingPaymentStore>,
