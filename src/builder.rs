@@ -59,8 +59,7 @@ use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole, Config,
 	ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig, TorConfig,
 	CHANNEL_TX_FACTS_CACHE_CAPACITY, CHANNEL_TX_FACTS_CACHE_WARMUP_COUNT,
-	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
-	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT, PAYMENT_CACHE_CAPACITY,
+	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, PAYMENT_CACHE_CAPACITY,
 	PAYMENT_CACHE_WARMUP_COUNT,
 };
 use crate::connection::ConnectionManager;
@@ -2526,8 +2525,8 @@ fn build_with_store_internal(
 					Arc::clone(&channel_manager),
 					probing_router,
 					*top_node_count,
-					DEFAULT_MIN_PROBE_AMOUNT_MSAT,
-					DEFAULT_MAX_PROBE_AMOUNT_MSAT,
+					probing_cfg.min_amount_msat,
+					probing_cfg.max_amount_msat,
 					probing_cfg.cooldown,
 					config.probing_liquidity_limit_multiplier,
 				))
@@ -2536,8 +2535,8 @@ fn build_with_store_internal(
 				Arc::clone(&network_graph),
 				Arc::clone(&channel_manager),
 				*max_hops,
-				DEFAULT_MIN_PROBE_AMOUNT_MSAT,
-				DEFAULT_MAX_PROBE_AMOUNT_MSAT,
+				probing_cfg.min_amount_msat,
+				probing_cfg.max_amount_msat,
 			)),
 			ProbingStrategyKind::Custom(s) => Arc::clone(s),
 		};
