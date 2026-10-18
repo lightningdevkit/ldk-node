@@ -287,6 +287,15 @@ impl SqliteStoreInner {
 			},
 		}
 
+		#[cfg(unix)]
+		if std::fs::symlink_metadata(&db_file_path).map_or(false, |m| m.file_type().is_symlink()) {
+			let msg = format!(
+				"Refusing to open database file {} as it is a symlink",
+				db_file_path.display()
+			);
+			return Err(io::Error::new(io::ErrorKind::Other, msg));
+		}
+
 		let mut connection = Connection::open(db_file_path.clone()).map_err(|e| {
 			let msg =
 				format!("Failed to open/create database file {}: {}", db_file_path.display(), e);
@@ -911,6 +920,25 @@ mod tests {
 		let file_mode = db_file_path.metadata().unwrap().permissions().mode();
 		assert_eq!(dir_mode & 0o077, 0);
 		assert_eq!(file_mode & 0o077, 0);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn rejects_symlinked_database_file() {
+		let data_dir = random_storage_path();
+		fs::create_dir_all(&data_dir).unwrap();
+		let target = data_dir.join("target.sqlite");
+		fs::write(&target, b"").unwrap();
+		std::os::unix::fs::symlink(&target, data_dir.join("linked.sqlite")).unwrap();
+
+		let result = SqliteStore::new(
+			data_dir.clone(),
+			Some("linked.sqlite".to_string()),
+			Some("test_table".to_string()),
+		);
+		assert!(result.is_err());
+
+		fs::remove_dir_all(data_dir).unwrap();
 	}
 
 	#[test]

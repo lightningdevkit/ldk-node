@@ -60,6 +60,46 @@ pub(crate) fn create_dir_all_private(path: &Path) -> std::io::Result<()> {
 	builder.create(path)
 }
 
+/// Creates the given directory (see [`create_dir_all_private`]) and, on Unix, additionally ensures
+/// that it is safe to store secrets and channel state in.
+///
+/// If the directory already existed (e.g., because it was pre-created by somebody else, as is
+/// possible for the default `/tmp` location), we refuse to use it if it is not owned by us or
+/// `root`, or if it is writable by everybody, as other local users could otherwise read, replace
+/// or roll back our data.
+pub(crate) fn create_dir_all_private_checked(path: &Path) -> std::io::Result<()> {
+	create_dir_all_private(path)?;
+	#[cfg(unix)]
+	verify_dir_not_shared(path)?;
+	Ok(())
+}
+
+#[cfg(unix)]
+fn verify_dir_not_shared(path: &Path) -> std::io::Result<()> {
+	use std::os::unix::fs::MetadataExt;
+
+	let metadata = fs::metadata(path)?;
+	// SAFETY: `geteuid` is always safe to call and can't fail.
+	let euid = unsafe { libc::geteuid() };
+	if metadata.uid() != euid && metadata.uid() != 0 {
+		let msg = format!(
+			"Refusing to use directory {} as it is owned by another user (uid {})",
+			path.display(),
+			metadata.uid()
+		);
+		return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg));
+	}
+	if metadata.mode() & 0o002 != 0 {
+		let msg = format!(
+			"Refusing to use directory {} as it is writable by all users (mode {:o})",
+			path.display(),
+			metadata.mode() & 0o7777
+		);
+		return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg));
+	}
+	Ok(())
+}
+
 pub(crate) fn read_or_generate_seed_file(
 	keys_seed_path: &str,
 ) -> std::io::Result<[u8; WALLET_KEYS_SEED_LEN]> {
@@ -770,7 +810,9 @@ pub(crate) async fn read_bdk_wallet_change_set(
 #[cfg(test)]
 mod tests {
 	use super::test_utils::random_storage_path;
-	use super::{create_dir_all_private, read_or_generate_seed_file};
+	use super::{
+		create_dir_all_private, create_dir_all_private_checked, read_or_generate_seed_file,
+	};
 
 	#[cfg(unix)]
 	#[test]
@@ -785,6 +827,27 @@ mod tests {
 			let mode = path.metadata().unwrap().permissions().mode();
 			assert_eq!(mode & 0o077, 0);
 		}
+
+		std::fs::remove_dir_all(base_path).unwrap();
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn checked_dir_creation_rejects_shared_dirs() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let base_path = random_storage_path();
+		let dir_path = base_path.join("storage");
+		create_dir_all_private_checked(&dir_path).unwrap();
+		// Re-opening our own private directory is fine, as is a group-writable one.
+		create_dir_all_private_checked(&dir_path).unwrap();
+		std::fs::set_permissions(&dir_path, std::fs::Permissions::from_mode(0o770)).unwrap();
+		create_dir_all_private_checked(&dir_path).unwrap();
+
+		// A world-writable directory must be refused.
+		std::fs::set_permissions(&dir_path, std::fs::Permissions::from_mode(0o777)).unwrap();
+		let err = create_dir_all_private_checked(&dir_path).unwrap_err();
+		assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
 
 		std::fs::remove_dir_all(base_path).unwrap();
 	}
