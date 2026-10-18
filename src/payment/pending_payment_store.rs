@@ -139,11 +139,10 @@ pub(crate) struct PendingPaymentDetails {
 	/// RBF history, keyed by each candidate's txid and recorded as each round is signed.
 	/// Empty for non-funding payments.
 	pub candidates: Vec<FundingTxCandidate>,
-	/// The live splice intent, or `None` for a non-splice payment or a splice that has
-	/// locked. Persisted at splice initiation and cleared once the splice locks or its failure
-	/// is surfaced, it outlives the rounds negotiated under it, because a fee bump is a fresh
-	/// negotiation LDK likewise abandons if the peer disconnects before signing, and shares the
-	/// bumped round's record rather than getting one of its own.
+	/// The live splice intent, or `None` for a non-splice payment or a splice that has locked.
+	/// Set when a splice is initiated and cleared once it locks or its failure is surfaced. A fee
+	/// bump shares the entry of the round it replaces, so the intent outlives any single round
+	/// negotiated under it.
 	pub splice_intent: Option<SpliceIntent>,
 	/// The candidates LDK promoted to the channel's funding, as `ChannelReady` reported them.
 	/// A zero-conf splice locks before its transaction confirms, and every later splice builds
