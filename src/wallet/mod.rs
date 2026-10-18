@@ -3242,10 +3242,8 @@ impl Wallet {
 	///
 	/// Runs once a record's candidate history is written, so the funding-status gate accepts the
 	/// candidates it adopts, and under the writer's lock acquisition, so sync cannot interleave.
-	/// It is idempotent: a failure at signing time ([`Self::record_signed_funding`]) is left to the
-	/// signed round's `SpliceNegotiated` event ([`Self::record_broadcast_splice_round`]), which
-	/// re-runs the merge and replays on failure. The caller must hold the [`PaymentStores`] lock,
-	/// per [`Self::apply_funding_status_update_locked`]'s contract.
+	/// It is idempotent, so a caller may re-run it after a failure. The caller must hold the
+	/// [`PaymentStores`] lock, per [`Self::apply_funding_status_update_locked`]'s contract.
 	async fn merge_duplicate_candidate_records(
 		&self, stores: &PaymentStoresGuard<'_>, id: PaymentId, candidates: &[FundingTxCandidate],
 	) -> Result<(), Error> {
