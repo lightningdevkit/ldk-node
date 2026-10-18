@@ -2641,17 +2641,11 @@ impl Wallet {
 	/// whose round lost to a conflicting spend confirmed while the channel stays open, LDK still
 	/// tracks the round and a fee bump of it is signed with the round among its candidates, and a
 	/// failed record's status is never revisited, so the bump filed under it would go untracked.
-	/// Only a history no live record tracks falls back to the channel's splice intent: a
-	/// user-initiated splice adopts the `PaymentId` generated when it was initiated, so its intent,
-	/// funding payment and candidate history share one record. The intent identifies the channel,
-	/// not the round, which is why it must not decide the id of a round already on record: a fee
-	/// bump this node signs of a round wallet sync recorded first must converge on the record sync
-	/// created, not be filed under the bump's intent as a second record. Otherwise a fresh id is
-	/// generated — an id derived from a txid would tie the record's identity to one round of a
-	/// replaceable transaction, and resolution through the record's txid history is what keeps its
-	/// identity stable across RBF replacements. The caller holds the cross-store lock: resolved
-	/// outside it, the id could go stale against a record wallet sync creates for the same
-	/// transaction before the caller's write.
+	/// A history no live record tracks adopts the id of the channel's splice intent
+	/// ([`Self::find_splice_payment_id`]), so a user-initiated splice's intent, funding payment and
+	/// candidate history share one record. Otherwise a fresh id is generated. The caller holds the
+	/// cross-store lock: resolved outside it, the id could go stale against a record wallet sync
+	/// creates for the same transaction before the caller's write.
 	async fn resolve_interactive_funding_id(
 		&self, stores: &PaymentStoresGuard<'_>, candidates: &[FundingCandidate],
 		active: &FundingCandidate,
@@ -3362,9 +3356,8 @@ impl Wallet {
 				|d| matches!(d.kind, PaymentKind::Onchain { txid, .. } if txid == target_txid),
 			)
 				// A middle RBF round is not the record's current txid and may never have
-				// received a `TxReplaced` event of its own, and a splice keyed by a generated
-				// PaymentId is not found by the txid-derived id above: map any of the
-				// candidate txids (an earlier RBF round may confirm) back to the record.
+				// received a `TxReplaced` event of its own, so map any of its candidate txids
+				// (an earlier RBF round may confirm) back to the record.
 				|| p.candidate(target_txid).is_some()
 		};
 		let matches = self
