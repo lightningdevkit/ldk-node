@@ -2034,9 +2034,7 @@ impl Node {
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			let splice_amount_msat =
-				splice_amount_sats.checked_mul(1_000).ok_or(Error::ChannelSplicingFailed)?;
-			if splice_amount_msat > channel_details.outbound_capacity_msat {
+			if splice_amount_sats > channel_details.next_splice_out_maximum_sat {
 				return Err(Error::ChannelSplicingFailed);
 			}
 

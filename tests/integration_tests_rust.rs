@@ -2994,7 +2994,7 @@ async fn splice_channel() {
 	assert_eq!(node_b.list_balances().total_lightning_balance_sats, 0);
 
 	let address = node_a.onchain_payment().new_address().unwrap();
-	let excessive_splice_out_sats = node_a.list_channels()[0].outbound_capacity_msat / 1000 + 1;
+	let excessive_splice_out_sats = node_a.list_channels()[0].next_splice_out_maximum_sat + 1;
 	assert_eq!(
 		node_a.splice_out(
 			&user_channel_id_a,
