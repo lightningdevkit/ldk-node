@@ -159,7 +159,9 @@ pub use lightning::ln::channel_state::{
 	OutboundHTLCStateDetails,
 };
 use lightning::ln::channelmanager::PaymentId;
-use lightning::ln::funding::{FundingContribution, FundingContributionError, FundingTemplate};
+use lightning::ln::funding::{
+	FundingBuilder, FundingContribution, FundingContributionError, FundingTemplate,
+};
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
@@ -1862,84 +1864,12 @@ impl Node {
 						log_error!(self.logger, "Failed to splice channel: {}", e);
 						Error::ChannelSplicingFailed
 					})?,
-				FundingAmount::Max => {
-					let cur_anchor_reserve_sats =
-						total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-					// A reserve below the dust limit cannot be kept as an output of its own, so
-					// keep the dust limit instead.
-					let reserve_output_sats = if cur_anchor_reserve_sats == 0 {
-						0
-					} else {
-						cur_anchor_reserve_sats.max(DUST_LIMIT_SATS)
-					};
-
-					// Splicing in all funds spends every confirmed UTXO in full, so the inputs are
-					// chosen here rather than by coin selection against an amount. The fee is only
-					// known once the contribution is built, so first check that the inputs can at
-					// least retain the anchor reserve and still add a non-dust amount, rather than
-					// asking LDK to build a contribution from nothing.
-					let inputs = self.wallet.list_confirmed_funding_inputs().map_err(|e| {
-						log_error!(self.logger, "Failed to list confirmed UTXOs: {e:?}");
-						Error::ChannelSplicingFailed
-					})?;
-					let input_total_sats: u64 =
-						inputs.iter().map(|input| input.output().value.to_sat()).sum();
-					if input_total_sats.saturating_sub(reserve_output_sats) < DUST_LIMIT_SATS {
-						log_error!(
-							self.logger,
-							"Unable to splice-in due to insufficient funds. Confirmed: {}sats, anchor reserve: {}sats",
-							input_total_sats,
-							reserve_output_sats,
-						);
-						return Err(Error::InsufficientFunds);
-					}
-
-					// Manually selected inputs are consumed in full with no change output: the
-					// amount added to the channel is what remains after fees, and a later fee bump
-					// lowers that amount instead of needing further inputs. The anchor reserve is
-					// retained as an explicit output to one of our own addresses, which stays
-					// fixed across fee bumps. The address is reserved so that other change-address
-					// consumers skip it until the splice transaction reaches the wallet.
-					let reserve_output = if reserve_output_sats > 0 {
-						let script_pubkey = self
-							.runtime
-							.block_on(self.wallet.reserve_internal_address())?
-							.script_pubkey();
-						Some(bitcoin::TxOut {
-							value: Amount::from_sat(reserve_output_sats),
-							script_pubkey,
-						})
-					} else {
-						None
-					};
-
-					let built = self.build_splice_in_with_all_contribution(
-						funding_template,
-						inputs,
-						reserve_output.clone(),
-						feerate,
-						max_feerate,
-					);
-					match built {
-						Ok(contribution) => contribution,
-						Err(e) => {
-							// LDK never took the contribution, so no `DiscardFunding` event will
-							// free the reserved address; release it here instead.
-							if let Some(reserve_output) = reserve_output {
-								if let Err(e) = self
-									.runtime
-									.block_on(self.wallet.release_outputs(vec![reserve_output]))
-								{
-									log_error!(
-										self.logger,
-										"Failed to release the anchor reserve address: {e:?}"
-									);
-								}
-							}
-							return Err(e);
-						},
-					}
-				},
+				FundingAmount::Max => self.splice_in_with_all_contribution(
+					funding_template,
+					Vec::new(),
+					feerate,
+					max_feerate,
+				)?,
 			};
 
 			self.channel_manager
@@ -1964,20 +1894,102 @@ impl Node {
 		}
 	}
 
+	/// Builds a contribution splicing in all confirmed on-chain funds, consumed in full, with any
+	/// anchor reserve retained as an output to one of our own addresses. `pending_inputs` are the
+	/// inputs of a pending splice round to spend as well, which the wallet may already count as
+	/// spent by that round's transaction. The contribution replaces any prior one of the template.
+	fn splice_in_with_all_contribution(
+		&self, funding_template: FundingTemplate, pending_inputs: Vec<ConfirmedUtxo>,
+		feerate: bitcoin::FeeRate, max_feerate: bitcoin::FeeRate,
+	) -> Result<FundingContribution, Error> {
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		// A reserve below the dust limit cannot be kept as an output of its own, so keep the dust
+		// limit instead.
+		let reserve_output_sats = if cur_anchor_reserve_sats == 0 {
+			0
+		} else {
+			cur_anchor_reserve_sats.max(DUST_LIMIT_SATS)
+		};
+
+		// Splicing in all funds spends every confirmed UTXO in full, so the inputs are chosen here
+		// rather than by coin selection against an amount. The fee is only known once the
+		// contribution is built, so first check that the inputs can at least retain the anchor
+		// reserve and still add a non-dust amount, rather than asking LDK to build a contribution
+		// from nothing.
+		let mut inputs = pending_inputs;
+		for input in self.wallet.list_confirmed_funding_inputs().map_err(|e| {
+			log_error!(self.logger, "Failed to list confirmed UTXOs: {e:?}");
+			Error::ChannelSplicingFailed
+		})? {
+			if !inputs.iter().any(|pending| pending.outpoint() == input.outpoint()) {
+				inputs.push(input);
+			}
+		}
+		let input_total_sats: u64 = inputs.iter().map(|input| input.output().value.to_sat()).sum();
+		if input_total_sats.saturating_sub(reserve_output_sats) < DUST_LIMIT_SATS {
+			log_error!(
+				self.logger,
+				"Unable to splice-in due to insufficient funds. Confirmed: {}sats, anchor reserve: {}sats",
+				input_total_sats,
+				reserve_output_sats,
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		// Manually selected inputs are consumed in full with no change output: the amount added to
+		// the channel is what remains after fees, and a later fee bump lowers that amount instead of
+		// needing further inputs. The anchor reserve is retained as an explicit output to one of our
+		// own addresses, which stays fixed across fee bumps. The address is reserved so that other
+		// change-address consumers skip it until the splice transaction reaches the wallet.
+		let reserve_output = if reserve_output_sats > 0 {
+			let script_pubkey =
+				self.runtime.block_on(self.wallet.reserve_internal_address())?.script_pubkey();
+			Some(bitcoin::TxOut { value: Amount::from_sat(reserve_output_sats), script_pubkey })
+		} else {
+			None
+		};
+
+		let builder = funding_template.without_prior_contribution(feerate, max_feerate);
+		let built = self.build_splice_in_with_all_contribution(
+			builder,
+			inputs,
+			reserve_output.clone(),
+			feerate,
+		);
+		match built {
+			Ok(contribution) => Ok(contribution),
+			Err(e) => {
+				// LDK never took the contribution, so no `DiscardFunding` event will free the
+				// reserved address; release it here instead.
+				if let Some(reserve_output) = reserve_output {
+					if let Err(e) =
+						self.runtime.block_on(self.wallet.release_outputs(vec![reserve_output]))
+					{
+						log_error!(
+							self.logger,
+							"Failed to release the anchor reserve address: {e:?}"
+						);
+					}
+				}
+				Err(e)
+			},
+		}
+	}
+
 	/// Builds the contribution for splicing in all on-chain funds: `inputs` are consumed in full
 	/// and `reserve_output`, if any, keeps the anchor reserve on-chain. Fails with
 	/// [`Error::InsufficientFunds`] when the inputs cannot cover the reserve and the fee, or when
-	/// fees would leave less than dust to add to the channel.
+	/// fees would leave less than dust to add to the channel. `feerate` is the builder's, for
+	/// logging.
 	fn build_splice_in_with_all_contribution(
-		&self, funding_template: FundingTemplate, inputs: Vec<ConfirmedUtxo>,
+		&self, builder: FundingBuilder, inputs: Vec<ConfirmedUtxo>,
 		reserve_output: Option<bitcoin::TxOut>, feerate: bitcoin::FeeRate,
-		max_feerate: bitcoin::FeeRate,
 	) -> Result<FundingContribution, Error> {
 		let cur_anchor_reserve_sats =
 			reserve_output.as_ref().map_or(0, |output| output.value.to_sat());
 
-		let contribution = funding_template
-			.with_prior_contribution(feerate, max_feerate)
+		let contribution = builder
 			.add_inputs(inputs)
 			.and_then(|builder| builder.add_outputs(reserve_output.into_iter().collect()).build())
 			.map_err(|e| {
@@ -2270,6 +2282,11 @@ impl Node {
 	/// fees, leaving the channel balance unwithdrawn. This also applies to withdrawals created
 	/// with [`Node::splice_out_max`]; the output is not reduced to cover the higher fee.
 	///
+	/// A splice of all on-chain funds (see [`Node::splice_in_with_all`]) has no amount to preserve:
+	/// the bump is paid by adding less to the channel, or, if the pending splice's maximum feerate
+	/// does not allow that or less than dust would be left to add, the splice is rebuilt from all
+	/// confirmed funds, including any confirmed since.
+	///
 	/// If `min_fee_rate` is set, it will be used as the minimum feerate for the replacement instead
 	/// of a feerate estimate retrieved from the configured chain source. As with the estimate, we
 	/// pay the feerate required to replace the pending splice if it is higher, but no more than 1.5
@@ -2316,17 +2333,50 @@ impl Node {
 				return Err(Error::ChannelSplicingFailed);
 			};
 
-			let contribution = self
-				.runtime
-				.block_on(funding_template.rbf_prior_contribution(
-					Some(target_feerate),
-					max_feerate,
-					Arc::clone(&self.wallet),
-				))
-				.map_err(|e| {
+			let rbf_template = funding_template.clone();
+			let prior_value_added_sats = funding_template
+				.prior_contribution()
+				.map_or(0, |contribution| contribution.value_added().to_sat());
+			let adjusted = match self.runtime.block_on(rbf_template.rbf_prior_contribution(
+				Some(target_feerate),
+				max_feerate,
+				Arc::clone(&self.wallet),
+			)) {
+				// LDK pays the bump of a contribution of manually selected inputs by adding less
+				// to the channel, with no floor on the amount. Rebuild one that would add less
+				// than dust below, where the amount is checked.
+				Ok(contribution)
+					if contribution.value_added().to_sat() < prior_value_added_sats
+						&& contribution.value_added().to_sat() < DUST_LIMIT_SATS =>
+				{
+					None
+				},
+				Ok(contribution) => Some(contribution),
+				// LDK adjusts a contribution of manually selected inputs only up to its maximum
+				// feerate and never supplements it by coin selection.
+				Err(FundingContributionError::ManuallySelectedInputsInsufficient) => None,
+				Err(e) => {
 					log_error!(self.logger, "Failed to RBF channel: {}", e);
-					Error::ChannelSplicingFailed
-				})?;
+					return Err(Error::ChannelSplicingFailed);
+				},
+			};
+			let contribution = match adjusted {
+				Some(contribution) => contribution,
+				// The pending splice spends manually selected inputs, as a splice-in of all funds
+				// does, so replace it with one built the same way from all confirmed funds: its
+				// inputs and any coins confirmed since.
+				None => {
+					let pending_inputs = funding_template
+						.prior_contribution()
+						.map_or(Vec::new(), |contribution| contribution.inputs().to_vec());
+					self.splice_in_with_all_contribution(
+						funding_template,
+						pending_inputs,
+						target_feerate,
+						max_feerate,
+					)?
+				},
+			};
 
 			self.channel_manager
 				.funding_contributed(
