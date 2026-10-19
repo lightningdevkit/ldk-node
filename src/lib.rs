@@ -2058,7 +2058,10 @@ impl Node {
 	/// pending splice that requires a higher feerate to be replaced, or when the counterparty
 	/// initiates a splice concurrently and our contribution is added to theirs.
 	///
-	/// The amount spliced in is determined at `min_fee_rate`, or at the estimate if unset.
+	/// The amount spliced in is what the confirmed on-chain funds leave after the anchor reserve
+	/// and the transaction fee at the feerate used: `min_fee_rate`, or the estimate if unset, or a
+	/// pending splice's RBF minimum if that is higher. A later [`Node::bump_channel_funding_fee`]
+	/// pays its higher fee from the same funds and so reduces the amount spliced in.
 	///
 	/// # Experimental API
 	///
