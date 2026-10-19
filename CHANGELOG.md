@@ -82,7 +82,8 @@
   `Node::splice_in_with_all` without spending the anchor reserve or failing for lack of a change
   output. The splice now spends the wallet's confirmed UTXOs in full, so a bump is paid by adding
   less to the channel, and any required anchor reserve is kept as a fixed output back to the
-  wallet. (#1168)
+  wallet. A bump past the splice's maximum feerate rebuilds it from all confirmed funds,
+  including coins confirmed since. (#1168)
 - Building a fresh node against a Bitcoin Core RPC or REST chain source that fails to return the
   current chain tip now aborts with a new `BuildError::ChainTipFetchFailed` variant instead of
   silently pinning the wallet birthday to genesis, which would have forced a full-history rescan
