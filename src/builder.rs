@@ -2882,7 +2882,7 @@ mod tests {
 		);
 		assert_eq!(node.bolt11_payment().fail_for_id(payment_id), Err(Error::NotRunning));
 		assert_eq!(
-			node.bolt11_payment().claim_for_id(payment_id, 0, PaymentPreimage([0; 32])),
+			node.bolt11_payment().claim_for_id(payment_id, PaymentPreimage([0; 32])),
 			Err(Error::NotRunning)
 		);
 

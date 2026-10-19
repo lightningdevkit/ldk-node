@@ -1565,10 +1565,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let (manual_payment_id, claimable_amount_msat) =
 		expect_payment_claimable_event!(node_b, manual_payment_hash, invoice_amount_3_msat);
 	assert_ne!(manual_payment_id.0, manual_payment_hash.0);
-	node_b
-		.bolt11_payment()
-		.claim_for_id(manual_payment_id, claimable_amount_msat, manual_preimage)
-		.unwrap();
+	node_b.bolt11_payment().claim_for_id(manual_payment_id, manual_preimage).unwrap();
 	let received_payment_id = expect_payment_received_event!(node_b, claimable_amount_msat);
 	assert_eq!(received_payment_id, manual_payment_id);
 	expect_payment_successful_event!(node_a, outbound_manual_payment_id, None);
@@ -1608,10 +1605,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	let (manual_cltv_payment_id, claimable_amount_msat) =
 		expect_payment_claimable_event!(node_b, manual_cltv_payment_hash, manual_cltv_amount_msat);
-	node_b
-		.bolt11_payment()
-		.claim_for_id(manual_cltv_payment_id, claimable_amount_msat, manual_cltv_preimage)
-		.unwrap();
+	node_b.bolt11_payment().claim_for_id(manual_cltv_payment_id, manual_cltv_preimage).unwrap();
 	let received_payment_id = expect_payment_received_event!(node_b, claimable_amount_msat);
 	assert_eq!(received_payment_id, manual_cltv_payment_id);
 	expect_payment_successful_event!(node_a, outbound_manual_cltv_payment_id, None);

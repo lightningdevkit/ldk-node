@@ -410,16 +410,19 @@ impl Bolt11Payment {
 	/// This should be called in response to a [`PaymentClaimable`] event as soon as the preimage is
 	/// available.
 	///
-	/// Will check that the payment is known, and that the given preimage and claimable amount
-	/// match our expectations before attempting to claim the payment, and will return an error
-	/// otherwise.
+	/// For every payment, the caller must verify that the event's `claimable_amount_msat` meets
+	/// their expectations before calling, including payments for invoices created before upgrading.
+	/// Calling this method approves claiming the payment reported by the event.
+	///
+	/// Will check that the payment is known and that the given preimage matches its payment hash
+	/// before attempting to claim the payment, and will return an error otherwise.
 	///
 	/// When claiming the payment has succeeded, a [`PaymentReceived`] event will be emitted.
 	///
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`PaymentReceived`]: crate::Event::PaymentReceived
 	pub fn claim_for_id(
-		&self, payment_id: PaymentId, claimable_amount_msat: u64, preimage: PaymentPreimage,
+		&self, payment_id: PaymentId, preimage: PaymentPreimage,
 	) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
@@ -455,25 +458,6 @@ impl Bolt11Payment {
 				payment_hash
 			);
 			return Err(Error::InvalidPaymentPreimage);
-		}
-
-		// For payments requested via `receive*_via_jit_channel_for_hash()`
-		// `skimmed_fee_msat` held by LSP must be taken into account.
-		let skimmed_fee_msat = match details.kind {
-			PaymentKind::Bolt11 {
-				counterparty_skimmed_fee_msat: Some(skimmed_fee_msat), ..
-			} => skimmed_fee_msat,
-			_ => 0,
-		};
-		if let Some(invoice_amount_msat) = details.amount_msat {
-			if claimable_amount_msat < invoice_amount_msat.saturating_sub(skimmed_fee_msat) {
-				log_error!(
-					self.logger,
-					"Failed to manually claim payment {} as the claimable amount is less than expected",
-					payment_id
-				);
-				return Err(Error::InvalidAmount);
-			}
 		}
 
 		self.channel_manager.claim_funds(preimage);
