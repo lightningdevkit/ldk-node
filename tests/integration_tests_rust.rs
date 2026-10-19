@@ -667,7 +667,7 @@ async fn channel_details_pending_htlcs() {
 	}
 
 	let (outbound_id, inbound_id, _, preimage) = payments[0];
-	node_b.bolt11_payment().claim_for_id(inbound_id, amounts_msat[0], preimage).unwrap();
+	node_b.bolt11_payment().claim_for_id(inbound_id, preimage).unwrap();
 	expect_payment_received_event!(node_b, amounts_msat[0]);
 	expect_payment_successful_event!(node_a, outbound_id, None);
 	let (outbound_channel, inbound_channel) =
