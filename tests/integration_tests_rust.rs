@@ -4819,8 +4819,8 @@ async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let node_b = setup_node(&chain_source, random_config());
-	// Keeping no anchor reserve back from node B, node A's splice-in takes its whole balance and
-	// leaves no change for a fee bump to draw on.
+	// Keeping no anchor reserve back from node B, node A's splice-in takes its whole balance, so
+	// the fee bump has nothing to spend but the first round's own inputs.
 	let mut config_a = random_config();
 	config_a.node_config.anchor_channels_config.trusted_peers_no_reserve.push(node_b.node_id());
 	let (node_a, store_a, logs_a) =
@@ -4853,18 +4853,8 @@ async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
 	let first_round = wait_for_transaction(&bitcoind, &electrsd, first_txo.txid).await;
 	wait_for_classified_funding_payment(&node_a, first_txo.txid).await;
 	assert_eq!(first_round.output.len(), 1, "the splice-in left change");
-	// The wallet learns the round from the sync and gets a fresh coin for the bump, which then
-	// spends nothing of the first round's but the funding.
-	node_a.sync_wallets().unwrap();
-	let coin_address = node_a.onchain_payment().new_address().unwrap();
-	let coin_txid = distribute_funds_unconfirmed(
-		&bitcoind.client,
-		&electrsd.client,
-		vec![coin_address],
-		Amount::from_sat(3_000_000),
-	)
-	.await;
-	mine_block_with(&bitcoind, &electrsd, &[raw_transaction_hex(&bitcoind, coin_txid)]).await;
+	// The wallet learns the round from the sync. The bump keeps the first round's inputs and pays
+	// its higher fee by adding less to the channel.
 	node_a.sync_wallets().unwrap();
 
 	// The bump pays little more than the first round, which bitcoind may refuse to replace for it:
@@ -4875,13 +4865,13 @@ async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
 	assert_ne!(first_txo, bump_txo, "the bump produced the same funding");
 	wait_for_classified_funding_payment(&node_a, bump_txo.txid).await;
 	let bump_round = wait_for_transaction(&bitcoind, &electrsd, bump_txo.txid).await;
-	let shared: Vec<_> = bump_round
-		.input
-		.iter()
-		.map(|input| input.previous_output)
-		.filter(|outpoint| spends(&first_round, *outpoint))
-		.collect();
-	assert_eq!(shared, vec![funding_txo], "the bump reused an input of the first round");
+	let mut first_inputs: Vec<_> =
+		first_round.input.iter().map(|input| input.previous_output).collect();
+	let mut bump_inputs: Vec<_> =
+		bump_round.input.iter().map(|input| input.previous_output).collect();
+	first_inputs.sort();
+	bump_inputs.sort();
+	assert_eq!(bump_inputs, first_inputs, "the bump did not reuse the first round's inputs");
 	let payment_id = PaymentId(first_txo.txid.to_byte_array());
 	let payment = node_a.payment(&payment_id).unwrap().expect("the splice has a payment");
 	assert_eq!(payment.status, PaymentStatus::Pending);
@@ -4929,10 +4919,12 @@ async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
 		kept_before,
 		"a discard while the channel was listed resolved the payment"
 	);
+	// The bump inherited the first round's inputs rather than reserving any of its own, so only
+	// the first round's discard carries a contribution to return.
 	assert_eq!(
 		logs_a.count(RECLAIMED_ADDRESSES),
-		2,
-		"the monitor's events did not each return the round's contribution"
+		1,
+		"the monitor's events did not return the first round's contribution exactly once"
 	);
 	// The record points at the round the wallet last heard of: the sync that delivered the close
 	// saw the mempool drop the first round, and moved the record from the bump to it.
