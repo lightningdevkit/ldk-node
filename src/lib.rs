@@ -1965,7 +1965,8 @@ impl Node {
 
 	/// Builds the contribution for splicing in all on-chain funds: `inputs` are consumed in full
 	/// and `reserve_output`, if any, keeps the anchor reserve on-chain. Fails with
-	/// [`Error::InsufficientFunds`] when fees would leave less than dust to add to the channel.
+	/// [`Error::InsufficientFunds`] when the inputs cannot cover the reserve and the fee, or when
+	/// fees would leave less than dust to add to the channel.
 	fn build_splice_in_with_all_contribution(
 		&self, funding_template: FundingTemplate, inputs: Vec<ConfirmedUtxo>,
 		reserve_output: Option<bitcoin::TxOut>, feerate: bitcoin::FeeRate,
@@ -1980,7 +1981,12 @@ impl Node {
 			.and_then(|builder| builder.add_outputs(reserve_output.into_iter().collect()).build())
 			.map_err(|e| {
 				log_error!(self.logger, "Failed to splice channel: {}", e);
-				Error::ChannelSplicingFailed
+				match e {
+					FundingContributionError::ManuallySelectedInputsInsufficient => {
+						Error::InsufficientFunds
+					},
+					_ => Error::ChannelSplicingFailed,
+				}
 			})?;
 
 		let value_added_sats = contribution.value_added().to_sat();
