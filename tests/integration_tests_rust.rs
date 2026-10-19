@@ -40,8 +40,8 @@ use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::electrum_client::ElectrumApi;
 use electrsd::ElectrsD;
 use ldk_node::config::{
-	AsyncPaymentsRole, EsploraSyncConfig, ForwardedPaymentTrackingMode, ADDRESS_POOL_SIZE,
-	DEFAULT_FULL_SCAN_STOP_GAP,
+	AnchorChannelsConfig, AsyncPaymentsRole, EsploraSyncConfig, ForwardedPaymentTrackingMode,
+	ADDRESS_POOL_SIZE, DEFAULT_FULL_SCAN_STOP_GAP,
 };
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -3710,22 +3710,38 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn splice_in_with_all_bump_fee_retains_anchor_reserve() {
-	run_splice_in_with_all_bump_fee_test(false).await;
+	let default_reserve_sats = AnchorChannelsConfig::default().per_channel_reserve_sats;
+	run_splice_in_with_all_bump_fee_test(Some(default_reserve_sats)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_in_with_all_bump_fee_retains_dust_limit_anchor_reserve() {
+	run_splice_in_with_all_bump_fee_test(Some(546)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn splice_in_with_all_bump_fee_without_anchor_reserve() {
-	run_splice_in_with_all_bump_fee_test(true).await;
+	run_splice_in_with_all_bump_fee_test(None).await;
 }
 
 /// Splices all of node_b's on-chain funds into a channel and then fee-bumps the splice. The
 /// contribution spends every confirmed UTXO in full, so the bump is paid by adding less to the
-/// channel: with an anchor reserve, the reserve stays on-chain untouched; without one, the bump
-/// still succeeds even though there is no change output to pay it from.
-async fn run_splice_in_with_all_bump_fee_test(anchors_trusted_no_reserve: bool) {
+/// channel: with an anchor reserve of `per_channel_reserve_sats`, the reserve stays on-chain
+/// untouched; without one, the bump still succeeds even though there is no change output to pay
+/// it from.
+async fn run_splice_in_with_all_bump_fee_test(per_channel_reserve_sats: Option<u64>) {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd_for_splice_rbf();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
-	let (node_a, node_b) = setup_two_nodes(&chain_source, false, anchors_trusted_no_reserve);
+	let (node_a, node_b) = match per_channel_reserve_sats {
+		Some(reserve_sats) => {
+			let node_a = setup_node(&chain_source, random_config());
+			let mut config_b = random_config();
+			config_b.node_config.anchor_channels_config.per_channel_reserve_sats = reserve_sats;
+			let node_b = setup_node(&chain_source, config_b);
+			(node_a, node_b)
+		},
+		None => setup_two_nodes(&chain_source, false, true),
+	};
 
 	let address_a = node_a.onchain_payment().new_address().unwrap();
 	let address_b = node_b.onchain_payment().new_address().unwrap();
@@ -3755,11 +3771,7 @@ async fn run_splice_in_with_all_bump_fee_test(anchors_trusted_no_reserve: bool) 
 
 	let balances_before = node_b.list_balances();
 	let anchor_reserve_sats = balances_before.total_anchor_channels_reserve_sats;
-	if anchors_trusted_no_reserve {
-		assert_eq!(anchor_reserve_sats, 0);
-	} else {
-		assert!(anchor_reserve_sats > 0, "Anchor reserve should be non-zero after channel open");
-	}
+	assert_eq!(anchor_reserve_sats, per_channel_reserve_sats.unwrap_or(0));
 	assert_eq!(balances_before.total_onchain_balance_sats, premine_amount_sat);
 
 	node_b.splice_in_with_all(&user_channel_id_b, node_a.node_id(), None).unwrap();

@@ -1864,6 +1864,13 @@ impl Node {
 				FundingAmount::Max => {
 					let cur_anchor_reserve_sats =
 						total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+					// A reserve below the dust limit cannot be kept as an output of its own, so
+					// keep the dust limit instead.
+					let reserve_output_sats = if cur_anchor_reserve_sats == 0 {
+						0
+					} else {
+						cur_anchor_reserve_sats.max(DUST_LIMIT_SATS)
+					};
 
 					// Splicing in all funds spends every confirmed UTXO in full, so the inputs are
 					// chosen here rather than by coin selection against an amount. The fee is only
@@ -1876,12 +1883,12 @@ impl Node {
 					})?;
 					let input_total_sats: u64 =
 						inputs.iter().map(|input| input.output().value.to_sat()).sum();
-					if input_total_sats.saturating_sub(cur_anchor_reserve_sats) < DUST_LIMIT_SATS {
+					if input_total_sats.saturating_sub(reserve_output_sats) < DUST_LIMIT_SATS {
 						log_error!(
 							self.logger,
 							"Unable to splice-in due to insufficient funds. Confirmed: {}sats, anchor reserve: {}sats",
 							input_total_sats,
-							cur_anchor_reserve_sats,
+							reserve_output_sats,
 						);
 						return Err(Error::InsufficientFunds);
 					}
@@ -1892,13 +1899,13 @@ impl Node {
 					// retained as an explicit output to one of our own addresses, which stays
 					// fixed across fee bumps. The address is reserved so that other change-address
 					// consumers skip it until the splice transaction reaches the wallet.
-					let reserve_output = if cur_anchor_reserve_sats > DUST_LIMIT_SATS {
+					let reserve_output = if reserve_output_sats > 0 {
 						let script_pubkey = self
 							.runtime
 							.block_on(self.wallet.reserve_internal_address())?
 							.script_pubkey();
 						Some(bitcoin::TxOut {
-							value: Amount::from_sat(cur_anchor_reserve_sats),
+							value: Amount::from_sat(reserve_output_sats),
 							script_pubkey,
 						})
 					} else {
