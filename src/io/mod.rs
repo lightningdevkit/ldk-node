@@ -33,6 +33,10 @@ pub(crate) const PEER_INFO_PERSISTENCE_KEY: &str = "peers";
 pub(crate) const PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "payments";
 pub(crate) const PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
+/// The inbound recurrence information will be persisted under this prefix.
+pub(crate) const INBOUND_RECURRENCE_PRIMARY_NAMESPACE: &str = "inbound_recurrences";
+pub(crate) const INBOUND_RECURRENCE_SECONDARY_NAMESPACE: &str = "";
+
 /// The pending payment information will be persisted under this prefix.
 pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "pending_payments";
 pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";

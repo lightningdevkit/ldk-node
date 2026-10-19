@@ -12,6 +12,7 @@ mod bolt11;
 mod bolt12;
 #[cfg(feature = "unified-payments")]
 mod hrn;
+pub(crate) mod inbound_recurrence;
 mod onchain;
 pub(crate) mod pending_payment_store;
 mod spontaneous;
@@ -24,6 +25,9 @@ pub(crate) use bolt11::PaymentMetadata;
 pub use bolt12::{Bolt12Payment, PayerProofOptions};
 #[cfg(feature = "unified-payments")]
 pub(crate) use hrn::HRNResolver;
+pub use inbound_recurrence::{
+	InboundRecurrenceClaimStatus, InboundRecurrenceDetails, RecurrenceStatus,
+};
 pub use onchain::OnchainPayment;
 pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
 pub use spontaneous::SpontaneousPayment;

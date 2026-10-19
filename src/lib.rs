@@ -159,6 +159,7 @@ pub use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
+use lightning::offers::offer::OfferId;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStore;
@@ -176,8 +177,8 @@ use logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 use payment::{
-	Bolt11Payment, Bolt12Payment, OnchainPayment, PaymentDetails, PaymentDetailsPage,
-	SpontaneousPayment,
+	Bolt11Payment, Bolt12Payment, InboundRecurrenceDetails, OnchainPayment, PaymentDetails,
+	PaymentDetailsPage, SpontaneousPayment,
 };
 #[cfg(feature = "unified-payments")]
 use payment::{HRNResolver, UnifiedPayment};
@@ -189,7 +190,8 @@ use runtime::Runtime;
 pub use tokio;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
-	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
+	InboundRecurrenceStore, KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer,
+	Sweeper, Wallet,
 };
 pub use types::{
 	ChannelCounterparty, ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId,
@@ -271,6 +273,7 @@ pub struct Node {
 	scorer: Arc<Mutex<Scorer>>,
 	peer_store: Arc<PeerStore<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	inbound_recurrence_store: Arc<InboundRecurrenceStore>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
@@ -678,6 +681,7 @@ impl Node {
 			Arc::clone(&self.network_graph),
 			Arc::clone(&self.liquidity_source),
 			Arc::clone(&self.payment_store),
+			Arc::clone(&self.inbound_recurrence_store),
 			Arc::clone(&self.peer_store),
 			Arc::clone(&self.keys_manager),
 			static_invoice_store,
@@ -2156,6 +2160,27 @@ impl Node {
 	/// if the payment could not be retrieved from the store.
 	pub fn payment(&self, payment_id: &PaymentId) -> Result<Option<PaymentDetails>, Error> {
 		self.runtime.block_on(self.payment_store.get(payment_id))
+	}
+
+	/// Returns the saved inbound recurrence for an offer and payer signing public key.
+	///
+	/// Returns `Ok(None)` if no recurrence is stored for this pair, or an error if the store
+	/// could not be read. The returned details are a copy; changing them does not update the
+	/// stored recurrence. This lookup is available before the node starts and after it stops.
+	pub fn inbound_recurrence(
+		&self, offer_id: &OfferId, payer_signing_pubkey: &PublicKey,
+	) -> Result<Option<InboundRecurrenceDetails>, Error> {
+		let id =
+			payment::inbound_recurrence::InboundRecurrenceId::new(*offer_id, *payer_signing_pubkey);
+		self.runtime.block_on(self.inbound_recurrence_store.get(&id))
+	}
+
+	/// Returns copies of all saved inbound recurrences, including inactive ones.
+	///
+	/// Results have no guaranteed order. Changing the returned details does not update the
+	/// stored recurrences. This list is available before the node starts and after it stops.
+	pub fn list_inbound_recurrences(&self) -> Vec<InboundRecurrenceDetails> {
+		self.runtime.block_on(self.inbound_recurrence_store.list_filter(|_| true))
 	}
 
 	/// Remove the payment with the given id from the store.

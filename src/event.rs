@@ -24,7 +24,6 @@ use lightning::events::{
 };
 use lightning::ln::channelmanager::{PaymentId, TrustedChannelFeatures};
 use lightning::ln::types::ChannelId;
-use lightning::offers::offer::OfferId;
 use lightning::routing::gossip::NodeId;
 use lightning::sign::EntropySource;
 use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
@@ -56,7 +55,8 @@ use crate::payment::PaymentMetadata;
 use crate::probing::Prober;
 use crate::runtime::Runtime;
 use crate::types::{
-	CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper, Wallet,
+	CustomTlvRecord, DynStore, InboundRecurrenceStore, KeysManager, OnionMessenger, PaymentStore,
+	Sweeper, Wallet,
 };
 use crate::{
 	hex_utils, BumpTransactionEventHandler, ChannelManager, Error, Graph, PeerInfo, PeerStore,
@@ -552,6 +552,7 @@ where
 	network_graph: Arc<Graph>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
+	inbound_recurrence_store: Arc<InboundRecurrenceStore>,
 	peer_store: Arc<PeerStore<L>>,
 	keys_manager: Arc<KeysManager>,
 	static_invoice_store: Option<StaticInvoiceStore>,
@@ -573,10 +574,10 @@ where
 		channel_manager: Arc<ChannelManager>, connection_manager: Arc<ConnectionManager<L>>,
 		output_sweeper: Arc<Sweeper>, network_graph: Arc<Graph>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
-		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
-		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
-		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
-		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		inbound_recurrence_store: Arc<InboundRecurrenceStore>, peer_store: Arc<PeerStore<L>>,
+		keys_manager: Arc<KeysManager>, static_invoice_store: Option<StaticInvoiceStore>,
+		onion_messenger: Arc<OnionMessenger>, om_mailbox: Option<Arc<OnionMessageMailbox>>,
+		prober: Option<Arc<Prober>>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 	) -> Self {
 		Self {
 			event_queue,
@@ -588,6 +589,7 @@ where
 			network_graph,
 			liquidity_source,
 			payment_store,
+			inbound_recurrence_store,
 			peer_store,
 			keys_manager,
 			static_invoice_store,
@@ -826,12 +828,9 @@ where
 					.lsps2_funding_tx_broadcast_safe(user_channel_id, counterparty_node_id);
 			},
 			LdkEvent::RecurringOfferCancelled { .. } => {
-				// TODO: Mark the corresponding recurrence as cancelled once the
-				// recurrence data store is introduced.
-				debug_assert!(
-					false,
-					"recurrence cancellation handling is not implemented"
-				);
+				// TODO: Apply cancellation to the inbound recurrence store when inbound event
+				// handling is implemented.
+				debug_assert!(false, "recurrence cancellation handling is not implemented");
 			},
 			LdkEvent::PaymentClaimable {
 				payment_id,
