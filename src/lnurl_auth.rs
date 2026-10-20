@@ -87,12 +87,6 @@ impl LnurlAuth {
 			Error::InvalidLnurl
 		})?;
 
-		log_debug!(
-			self.logger,
-			"Starting LNURL-auth process for URL: {}",
-			PrintableString(&lnurl_auth_url)
-		);
-
 		// Parse the URL to extract domain and parameters
 		let url = bitreq::Url::parse(&lnurl_auth_url).map_err(|e| {
 			log_error!(self.logger, "Invalid LNURL-auth URL: {e}");
@@ -100,6 +94,10 @@ impl LnurlAuth {
 		})?;
 
 		let domain = url.base_url();
+
+		// Only log the domain, the full URL carries the k1 challenge and potentially other
+		// credentials.
+		log_debug!(self.logger, "Starting LNURL-auth process for domain: {domain}");
 
 		// Enforce HTTPS for non-localhost URLs per LNURL spec.
 		let is_localhost = domain == "localhost" || domain == "127.0.0.1" || domain == "[::1]";
