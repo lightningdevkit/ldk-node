@@ -854,7 +854,12 @@ impl PostgresStoreInner {
 		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
 		primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> io::Result<()> {
-		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")?;
+		if let Err(e) =
+			check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")
+		{
+			self.clean_locks(&inner_lock_ref, locking_key);
+			return Err(e.into());
+		}
 
 		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
 			let kv_table = &self.kv_table_name_sql;
@@ -914,7 +919,15 @@ impl PostgresStoreInner {
 		&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String, version: u64,
 		primary_namespace: &str, secondary_namespace: &str, key: &str,
 	) -> io::Result<()> {
-		check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "remove")?;
+		if let Err(e) = check_namespace_key_validity(
+			primary_namespace,
+			secondary_namespace,
+			Some(key),
+			"remove",
+		) {
+			self.clean_locks(&inner_lock_ref, locking_key);
+			return Err(e.into());
+		}
 
 		self.execute_locked_write(inner_lock_ref, locking_key, version, async move || {
 			let kv_table = &self.kv_table_name_sql;
