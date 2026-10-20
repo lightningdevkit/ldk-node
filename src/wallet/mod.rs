@@ -17,7 +17,8 @@ use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
 use bdk_wallet::signer::SignersContainer;
 use bdk_wallet::{
-	Balance, KeychainKind, LocalOutput, PersistedWallet, SignOptions, Update, WalletEvent,
+	Balance, FinalizeInputOutcome, KeychainKind, LocalOutput, PersistedWallet, SignOptions, Update,
+	WalletEvent,
 };
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
@@ -2580,6 +2581,7 @@ impl Wallet {
 				return Err(());
 			},
 		}
+		self.finalize_wallet_inputs(&locked_wallet, &mut psbt)?;
 
 		match psbt.extract_tx() {
 			Ok(tx) => Ok(tx),
@@ -2600,17 +2602,12 @@ impl Wallet {
 		let mut sign_options = SignOptions::default();
 		sign_options.trust_witness_utxo = true;
 
-		match locked_wallet.sign_with_signers(&mut psbt, &self.signers.each_ref(), sign_options) {
-			Ok(_finalized) => {
-				// BDK will fail to finalize for all LDK-provided inputs of the PSBT. Unfortunately
-				// we can't check more fine grained if it succeeded for all the other inputs here,
-				// so we just ignore the returned `finalized` bool.
-			},
-			Err(err) => {
+		locked_wallet
+			.sign_with_signers(&mut psbt, &self.signers.each_ref(), sign_options)
+			.map_err(|err| {
 				log_error!(self.logger, "Failed to sign transaction: {}", err);
-				return Err(());
-			},
-		}
+			})?;
+		self.finalize_wallet_inputs(&locked_wallet, &mut psbt)?;
 
 		let tx = psbt.extract_tx().map_err(|e| {
 			log_error!(self.logger, "Failed to extract transaction: {}", e);
@@ -2618,6 +2615,23 @@ impl Wallet {
 		})?;
 
 		Ok(tx)
+	}
+
+	fn finalize_wallet_inputs(
+		&self, wallet: &bdk_wallet::Wallet, psbt: &mut Psbt,
+	) -> Result<(), ()> {
+		let outcome = wallet.try_finalize_psbt(psbt).map_err(|e| {
+			log_error!(self.logger, "Failed to finalize transaction: {}", e);
+		})?;
+		for (index, input_outcome) in outcome.into_outcomes() {
+			// MissingDescriptor is expected for LDK's inputs, which BDK cannot finalize.
+			// A descriptor that BDK recognizes must be satisfied before we return the transaction.
+			if let FinalizeInputOutcome::CouldNotSatisfy(e) = input_outcome {
+				log_error!(self.logger, "Failed to finalize wallet input {}: {}", index, e);
+				return Err(());
+			}
+		}
+		Ok(())
 	}
 
 	/// Builds this node's share of the `active` round of an interactive funding whose negotiated
@@ -4580,6 +4594,63 @@ mod tests {
 					.unwrap();
 			}
 		}
+	}
+
+	#[tokio::test]
+	async fn sign_owned_inputs_requires_wallet_finalization() {
+		let (mut wallet, psbt) = mixed_input_psbt().await;
+		let tx = wallet.sign_owned_inputs(psbt.unsigned_tx.clone()).unwrap();
+		assert_eq!(tx.input[0].witness.len(), 2);
+		assert!(tx.input[1].witness.is_empty(), "foreign inputs may remain unsigned");
+
+		Arc::get_mut(&mut wallet).unwrap().signers = Default::default();
+		assert!(
+			wallet.sign_owned_inputs(psbt.unsigned_tx).is_err(),
+			"an unfinished wallet input must fail signing"
+		);
+	}
+
+	#[tokio::test]
+	async fn sign_psbt_requires_wallet_finalization() {
+		let (mut wallet, psbt) = mixed_input_psbt().await;
+		let tx = wallet.sign_psbt_inner(psbt.clone()).unwrap();
+		assert_eq!(tx.input[0].witness.len(), 2);
+		assert!(tx.input[1].witness.is_empty(), "foreign inputs may remain unsigned");
+
+		Arc::get_mut(&mut wallet).unwrap().signers = Default::default();
+		assert!(
+			wallet.sign_psbt_inner(psbt).is_err(),
+			"an unfinished wallet input must fail signing"
+		);
+	}
+
+	/// A PSBT spending one wallet output and one foreign output awaiting its owner's signature.
+	async fn mixed_input_psbt() -> (Arc<Wallet>, Psbt) {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let funding_tx = wallet_paying_tx(&wallet, 42);
+		insert_confirmed_tx(&wallet, funding_tx.clone(), 1);
+		let foreign_output =
+			TxOut { value: Amount::from_sat(90_000), script_pubkey: ScriptBuf::new().to_p2wsh() };
+		let unsigned_tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: [
+				OutPoint { txid: funding_tx.compute_txid(), vout: 0 },
+				OutPoint { txid: Txid::from_byte_array([43; 32]), vout: 0 },
+			]
+			.into_iter()
+			.map(|previous_output| bitcoin::TxIn { previous_output, ..Default::default() })
+			.collect(),
+			output: vec![TxOut {
+				value: Amount::from_sat(179_000),
+				script_pubkey: foreign_output.script_pubkey.clone(),
+			}],
+		};
+		let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+		psbt.inputs[0].witness_utxo = Some(funding_tx.output[0].clone());
+		psbt.inputs[1].witness_utxo = Some(foreign_output);
+		(wallet, psbt)
 	}
 
 	#[tokio::test]
