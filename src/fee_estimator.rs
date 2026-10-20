@@ -14,6 +14,13 @@ use lightning::chain::chaininterface::{
 	FEERATE_FLOOR_SATS_PER_KW,
 };
 
+/// The highest fee rate we use for any confirmation target (2,000 sats/vB), in sats per 1000
+/// weight units.
+///
+/// This is roughly twice the highest estimates seen on mainnet, so it should never bind in
+/// practice.
+pub(crate) const MAX_FEERATE_SATS_PER_KW: u64 = 2_000 * 250;
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum ConfirmationTarget {
 	/// The default target for onchain payments.
@@ -69,9 +76,14 @@ impl FeeEstimator for OnchainFeeEstimator {
 
 		let estimate = *locked_fee_rate_cache.get(&confirmation_target).unwrap_or(&fallback_rate);
 
-		// Currently we assume every transaction needs to at least be relayable, which is why we
-		// enforce a lower bound of `FEERATE_FLOOR_SATS_PER_KW`.
-		FeeRate::from_sat_per_kwu(estimate.to_sat_per_kwu().max(FEERATE_FLOOR_SATS_PER_KW as u64))
+		// Every transaction needs to be relayable, so we enforce a lower bound of
+		// `FEERATE_FLOOR_SATS_PER_KW`, and an upper bound to limit what a bad chain source can make
+		// us pay.
+		FeeRate::from_sat_per_kwu(
+			estimate
+				.to_sat_per_kwu()
+				.clamp(FEERATE_FLOOR_SATS_PER_KW as u64, MAX_FEERATE_SATS_PER_KW),
+		)
 	}
 }
 
