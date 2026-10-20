@@ -6639,7 +6639,7 @@ enum OldLdkVersion {
 async fn build_0_6_2_node(
 	bitcoind: &BitcoinD, electrsd: &ElectrsD, storage_path: String, esplora_url: String,
 	seed_bytes: [u8; 64],
-) -> (u64, bitcoin::secp256k1::PublicKey) {
+) -> (u64, bitcoin::secp256k1::PublicKey, Txid) {
 	let mut builder_old = ldk_node_062::Builder::new();
 	builder_old.set_network(bitcoin::Network::Regtest);
 	builder_old.set_storage_dir_path(storage_path);
@@ -6658,6 +6658,14 @@ async fn build_0_6_2_node(
 	.await;
 	node_old.sync_wallets().unwrap();
 
+	// Pay ourselves so the upgraded node holds funds on both the external and internal keychains.
+	let self_addr = node_old.onchain_payment().new_address().unwrap();
+	let self_send_txid =
+		node_old.onchain_payment().send_to_address(&self_addr, 50_000, None).unwrap();
+	wait_for_tx(&electrsd.client, self_send_txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_old.sync_wallets().unwrap();
+
 	let balance = node_old.list_balances().spendable_onchain_balance_sats;
 	assert!(balance > 0);
 	let node_id = node_old.node_id();
@@ -6668,13 +6676,13 @@ async fn build_0_6_2_node(
 		drop(node_old);
 	});
 
-	(balance, node_id)
+	(balance, node_id, self_send_txid)
 }
 
 async fn build_0_7_0_node(
 	bitcoind: &BitcoinD, electrsd: &ElectrsD, esplora_url: String, seed_bytes: [u8; 64],
 	config: &TestConfig,
-) -> (u64, bitcoin::secp256k1::PublicKey) {
+) -> (u64, bitcoin::secp256k1::PublicKey, Txid) {
 	let mut builder_old = ldk_node_070::Builder::new();
 	builder_old.set_network(bitcoin::Network::Regtest);
 	builder_old.set_storage_dir_path(config.node_config.storage_dir_path.clone());
@@ -6699,13 +6707,21 @@ async fn build_0_7_0_node(
 	.await;
 	node_old.sync_wallets().unwrap();
 
+	// Pay ourselves so the upgraded node holds funds on both the external and internal keychains.
+	let self_addr = node_old.onchain_payment().new_address().unwrap();
+	let self_send_txid =
+		node_old.onchain_payment().send_to_address(&self_addr, 50_000, None).unwrap();
+	wait_for_tx(&electrsd.client, self_send_txid).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_old.sync_wallets().unwrap();
+
 	let balance = node_old.list_balances().spendable_onchain_balance_sats;
 	assert!(balance > 0);
 	let node_id = node_old.node_id();
 
 	node_old.stop().unwrap();
 
-	(balance, node_id)
+	(balance, node_id, self_send_txid)
 }
 
 async fn do_persistence_backwards_compatibility(version: OldLdkVersion) {
@@ -6715,7 +6731,7 @@ async fn do_persistence_backwards_compatibility(version: OldLdkVersion) {
 	let storage_path = common::random_storage_path().to_str().unwrap().to_owned();
 	let seed_bytes = [42u8; 64];
 
-	let (old_balance, old_node_id) = match version {
+	let (old_balance, old_node_id, self_send_txid) = match version {
 		OldLdkVersion::V0_6_2 => {
 			build_0_6_2_node(
 				&bitcoind,
@@ -6758,6 +6774,28 @@ async fn do_persistence_backwards_compatibility(version: OldLdkVersion) {
 	assert_eq!(old_node_id, new_node_id);
 	assert_eq!(old_balance, new_balance);
 
+	// Spending both outputs of the self-payment requires signing for both keychains with the
+	// keys derived by the upgraded node.
+	let sweep_addr = bitcoind.client.new_address().unwrap();
+	let sweep_txid =
+		node_new.onchain_payment().send_all_to_address(&sweep_addr, false, None).unwrap();
+	wait_for_tx(&electrsd.client, sweep_txid).await;
+	let sweep_tx = electrsd.client.transaction_get(&sweep_txid).unwrap();
+	let mut spent_vouts: Vec<u32> = sweep_tx
+		.input
+		.iter()
+		.map(|input| {
+			assert_eq!(input.previous_output.txid, self_send_txid);
+			input.previous_output.vout
+		})
+		.collect();
+	spent_vouts.sort();
+	assert_eq!(spent_vouts, vec![0, 1]);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_new.sync_wallets().unwrap();
+	assert_eq!(node_new.list_balances().total_onchain_balance_sats, 0);
+
 	node_new.stop().unwrap();
 }
 
@@ -6780,7 +6818,7 @@ async fn fs_store_persistence_backwards_compatibility() {
 	let mut config = TestConfig::default();
 	config.node_config.storage_dir_path = storage_path.clone();
 	config.store_type = TestStoreType::FilesystemStore;
-	let (old_balance, old_node_id) =
+	let (old_balance, old_node_id, _) =
 		build_0_7_0_node(&bitcoind, &electrsd, esplora_url.clone(), seed_bytes, &config).await;
 
 	// Now reopen with current code's build_with_fs_store, which should
