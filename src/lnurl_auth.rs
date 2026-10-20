@@ -14,6 +14,7 @@ use bitcoin::hashes::{sha256, Hash, HashEngine, Hmac, HmacEngine};
 use bitcoin::secp256k1::{All, Message, Secp256k1, SecretKey};
 use bitreq::Client;
 use lightning::util::logger::Logger as LdkLogger;
+use lightning_types::string::PrintableString;
 use serde::{Deserialize, Serialize};
 
 use crate::logger::{log_debug, log_error, Logger};
@@ -86,7 +87,11 @@ impl LnurlAuth {
 			Error::InvalidLnurl
 		})?;
 
-		log_debug!(self.logger, "Starting LNURL-auth process for URL: {lnurl_auth_url}");
+		log_debug!(
+			self.logger,
+			"Starting LNURL-auth process for URL: {}",
+			PrintableString(&lnurl_auth_url)
+		);
 
 		// Parse the URL to extract domain and parameters
 		let url = bitreq::Url::parse(&lnurl_auth_url).map_err(|e| {
@@ -112,7 +117,11 @@ impl LnurlAuth {
 		})?;
 
 		if tag != "login" {
-			log_error!(self.logger, "Invalid tag parameter in LNURL-auth URL: {tag}");
+			log_error!(
+				self.logger,
+				"Invalid tag parameter in LNURL-auth URL: {}",
+				PrintableString(tag)
+			);
 			return Err(Error::InvalidLnurl);
 		}
 
@@ -158,7 +167,11 @@ impl LnurlAuth {
 			Ok(())
 		} else {
 			let reason = response.reason.unwrap_or_else(|| "Unknown error".to_string());
-			log_error!(self.logger, "LNURL-auth authentication failed: {reason}");
+			log_error!(
+				self.logger,
+				"LNURL-auth authentication failed: {}",
+				PrintableString(&reason)
+			);
 			Err(Error::LnurlAuthFailed)
 		}
 	}
