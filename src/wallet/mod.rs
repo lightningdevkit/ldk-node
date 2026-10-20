@@ -8171,6 +8171,44 @@ mod tests {
 	}
 
 	#[tokio::test]
+	async fn max_funding_waits_for_truc_output_confirmation() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let change_script = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::Internal)
+			.address
+			.script_pubkey();
+		let fee_rate = FeeRate::from_sat_per_kwu(250);
+
+		// Both outputs are trusted change, but our v2 funding transactions can only spend
+		// the v2 output while the v3 (TRUC) parent remains unconfirmed.
+		let mut regular_tx = wallet_paying_tx(&wallet, 42);
+		regular_tx.output[0].script_pubkey = change_script.clone();
+		insert_unconfirmed_tx(&wallet, regular_tx);
+		let max_without_truc = wallet.get_max_funding_amount(0, fee_rate).unwrap();
+		assert!(max_without_truc > 0);
+
+		let mut truc_tx = wallet_paying_tx(&wallet, 43);
+		truc_tx.version = bitcoin::transaction::Version(3);
+		truc_tx.output[0].script_pubkey = change_script;
+		insert_unconfirmed_tx(&wallet, truc_tx.clone());
+		assert_eq!(
+			wallet.get_max_funding_amount(0, fee_rate).unwrap(),
+			max_without_truc,
+			"unconfirmed TRUC outputs must not increase the v2 funding amount"
+		);
+
+		insert_confirmed_tx(&wallet, truc_tx, 1);
+		assert!(
+			wallet.get_max_funding_amount(0, fee_rate).unwrap() > max_without_truc,
+			"confirmed TRUC outputs must become available for funding"
+		);
+	}
+
+	#[tokio::test]
 	async fn max_funding_estimate_keeps_reserved_change_address_used() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let wallet = new_test_wallet(store, false).await;
