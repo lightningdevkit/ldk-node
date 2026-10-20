@@ -301,17 +301,10 @@ impl SqliteStoreInner {
 
 		if version_res == 0 {
 			// New database, set our SCHEMA_USER_VERSION and continue
-			connection
-				.pragma(
-					Some(rusqlite::DatabaseName::Main),
-					"user_version",
-					SCHEMA_USER_VERSION,
-					|_| Ok(()),
-				)
-				.map_err(|e| {
-					let msg = format!("Failed to set PRAGMA user_version: {}", e);
-					io::Error::new(io::ErrorKind::Other, msg)
-				})?;
+			connection.pragma_update(None, "user_version", SCHEMA_USER_VERSION).map_err(|e| {
+				let msg = format!("Failed to set PRAGMA user_version: {}", e);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
 		} else if version_res < SCHEMA_USER_VERSION {
 			migrations::migrate_schema(
 				&mut connection,
@@ -553,8 +546,13 @@ impl SqliteStoreInner {
 			self.kv_table_name
 		);
 		let count_sql = format!("SELECT COUNT(*) FROM {}", self.kv_table_name);
-		let count: usize =
-			locked_conn.query_row(&count_sql, [], |row| row.get(0)).map_err(|e| {
+		let count = locked_conn
+			.query_row(&count_sql, [], |row| {
+				let count: i64 = row.get(0)?;
+				usize::try_from(count)
+					.map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, count))
+			})
+			.map_err(|e| {
 				let msg = format!("Failed to count rows: {}", e);
 				io::Error::new(io::ErrorKind::Other, msg)
 			})?;
