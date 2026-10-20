@@ -1402,7 +1402,8 @@ impl Node {
 					total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 				let new_channel_reserve =
 					self.new_channel_anchor_reserve_sats(&peer_info.node_id)?;
-				let total_anchor_reserve_sats = cur_anchor_reserve_sats + new_channel_reserve;
+				let total_anchor_reserve_sats =
+					cur_anchor_reserve_sats.saturating_add(new_channel_reserve);
 
 				let fee_rate = fee_rate.unwrap_or_else(|| {
 					self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
@@ -1529,7 +1530,7 @@ impl Node {
 
 		if for_new_channel {
 			let required_funds_sats =
-				amount_sats + self.new_channel_anchor_reserve_sats(peer_node_id)?;
+				amount_sats.saturating_add(self.new_channel_anchor_reserve_sats(peer_node_id)?);
 
 			if spendable_amount_sats < required_funds_sats {
 				log_error!(self.logger,
@@ -2717,7 +2718,7 @@ impl_writeable_tlv_based!(NodeMetrics, {
 pub(crate) fn total_anchor_channels_reserve_sats(
 	channel_manager: &ChannelManager, config: &Config,
 ) -> u64 {
-	channel_manager
+	let num_reserved_channels = channel_manager
 		.list_channels()
 		.into_iter()
 		.filter(|c| {
@@ -2729,8 +2730,8 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 					.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
 				&& c.channel_type.as_ref().map_or(true, requires_anchor_channel_type)
 		})
-		.count() as u64
-		* config.anchor_channels_config.per_channel_reserve_sats
+		.count() as u64;
+	num_reserved_channels.saturating_mul(config.anchor_channels_config.per_channel_reserve_sats)
 }
 
 pub(crate) fn new_channel_anchor_reserve_sats(

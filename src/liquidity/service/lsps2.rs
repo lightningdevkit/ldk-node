@@ -460,7 +460,8 @@ where
 					&their_network_key,
 					anchor_channel,
 				);
-				let required_funds_sats = channel_amount_sats + additional_reserve_required;
+				let required_funds_sats =
+					channel_amount_sats.saturating_add(additional_reserve_required);
 				if spendable_amount_sats < required_funds_sats {
 					log_error!(self.logger,
 						"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
