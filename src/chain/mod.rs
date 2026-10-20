@@ -111,8 +111,8 @@ impl Drop for WalletSyncGuard<'_> {
 ///
 /// A sync that is already running took its view of the chain when it started, so it might not
 /// include blocks found since then. A caller that wants the current chain state therefore has to
-/// sync again once it is done. If the sync in progress fails or is cancelled, the caller fails
-/// with its error instead.
+/// sync again once it is done. Whether that sync succeeded, failed or was cancelled has no bearing
+/// on the caller's own sync, so a failure is only logged.
 pub(crate) async fn acquire_wallet_sync_guard<'a>(
 	status: &'a Mutex<WalletSyncStatus>, cancellation_error: Error, logger: &Logger,
 ) -> Result<WalletSyncGuard<'a>, Error> {
@@ -125,11 +125,17 @@ pub(crate) async fn acquire_wallet_sync_guard<'a>(
 			}
 		};
 		log_debug!(logger, "Sync in progress, waiting for it to finish before syncing again.");
-		pending_sync.recv().await.map_err(|e| {
-			debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
-			log_error!(logger, "Failed to receive wallet sync result: {:?}", e);
-			cancellation_error
-		})??;
+		match pending_sync.recv().await {
+			Ok(Ok(())) => {},
+			Ok(Err(e)) => {
+				log_debug!(logger, "Sync in progress failed with {}, syncing again regardless.", e);
+			},
+			Err(e) => {
+				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+				log_error!(logger, "Failed to receive wallet sync result: {:?}", e);
+				return Err(cancellation_error);
+			},
+		}
 	}
 }
 
