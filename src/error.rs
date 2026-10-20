@@ -11,7 +11,6 @@ use bdk_chain::bitcoin::psbt::ExtractTxError as BdkExtractTxError;
 use bdk_chain::local_chain::CannotConnectError as BdkChainConnectionError;
 use bdk_chain::tx_graph::CalculateFeeError as BdkChainCalculateFeeError;
 use bdk_wallet::error::CreateTxError as BdkCreateTxError;
-#[allow(deprecated)]
 use bdk_wallet::signer::SignerError as BdkSignerError;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -255,7 +254,6 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-#[allow(deprecated)]
 impl From<BdkSignerError> for Error {
 	fn from(_: BdkSignerError) -> Self {
 		Self::OnchainTxSigningFailed
