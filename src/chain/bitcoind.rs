@@ -1619,8 +1619,12 @@ mod tests {
 		acquired_guard.complete(Ok(()));
 	}
 
-	#[tokio::test]
-	async fn a_sync_waits_for_the_one_in_progress_and_then_runs_its_own() {
+	/// Starts a sync, lets a second caller wait on it, ends the first one with
+	/// `in_progress_result` (`None` drops its guard, as a cancelled sync does) and checks that the
+	/// second caller then runs its own sync.
+	async fn assert_a_sync_runs_after_the_one_in_progress_ends(
+		in_progress_result: Option<Result<(), Error>>,
+	) {
 		let logger = Logger::new_log_facade();
 		let status = Mutex::new(WalletSyncStatus::Completed);
 		assert!(status.lock().expect("lock").register_or_subscribe_pending_sync().is_none());
@@ -1632,7 +1636,10 @@ mod tests {
 			tokio::time::timeout(Duration::from_millis(10), acquire_guard.as_mut()).await;
 		assert!(early_result.is_err(), "the caller should wait for the sync in progress");
 
-		in_progress_guard.complete(Ok(()));
+		match in_progress_result {
+			Some(res) => in_progress_guard.complete(res),
+			None => drop(in_progress_guard),
+		}
 		let acquired_guard = tokio::time::timeout(Duration::from_secs(1), acquire_guard)
 			.await
 			.expect("the caller should resume once the sync in progress is done")
@@ -1646,27 +1653,18 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_sync_fails_when_the_one_in_progress_fails() {
-		let logger = Logger::new_log_facade();
-		let status = Mutex::new(WalletSyncStatus::Completed);
-		assert!(status.lock().expect("lock").register_or_subscribe_pending_sync().is_none());
-		let in_progress_guard = WalletSyncGuard::new(&status, Error::WalletOperationFailed);
-		let mut acquire_guard =
-			Box::pin(acquire_wallet_sync_guard(&status, Error::WalletOperationFailed, &logger));
+	async fn a_sync_waits_for_the_one_in_progress_and_then_runs_its_own() {
+		assert_a_sync_runs_after_the_one_in_progress_ends(Some(Ok(()))).await;
+	}
 
-		let early_result =
-			tokio::time::timeout(Duration::from_millis(10), acquire_guard.as_mut()).await;
-		assert!(early_result.is_err(), "the caller should wait for the sync in progress");
+	#[tokio::test]
+	async fn a_sync_runs_after_the_one_in_progress_fails() {
+		assert_a_sync_runs_after_the_one_in_progress_ends(Some(Err(Error::TxSyncFailed))).await;
+	}
 
-		in_progress_guard.complete(Err(Error::TxSyncFailed));
-		let result = tokio::time::timeout(Duration::from_secs(1), acquire_guard)
-			.await
-			.expect("the caller should resume once the sync in progress is done");
-		assert_eq!(result.err(), Some(Error::TxSyncFailed));
-		assert!(
-			matches!(*status.lock().expect("lock"), WalletSyncStatus::Completed),
-			"a failed caller should not hold the sync status"
-		);
+	#[tokio::test]
+	async fn a_sync_runs_after_the_one_in_progress_is_cancelled() {
+		assert_a_sync_runs_after_the_one_in_progress_ends(None).await;
 	}
 
 	prop_compose! {
