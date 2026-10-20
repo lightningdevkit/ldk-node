@@ -52,14 +52,13 @@ pub(super) fn migrate_schema(
 		})?;
 
 		// Update user_version
-		tx.pragma(Some(rusqlite::DatabaseName::Main), "user_version", to_version, |_| Ok(()))
-			.map_err(|e| {
-				let msg = format!(
-					"Failed to upgrade user_version from {} to {}: {}",
-					from_version, to_version, e
-				);
-				io::Error::new(io::ErrorKind::Other, msg)
-			})?;
+		tx.pragma_update(None, "user_version", to_version).map_err(|e| {
+			let msg = format!(
+				"Failed to upgrade user_version from {} to {}: {}",
+				from_version, to_version, e
+			);
+			io::Error::new(io::ErrorKind::Other, msg)
+		})?;
 
 		tx.commit().map_err(|e| {
 			let msg = format!(
@@ -104,14 +103,7 @@ mod tests {
 
 			let connection = Connection::open(db_file_path.clone()).unwrap();
 
-			connection
-				.pragma(
-					Some(rusqlite::DatabaseName::Main),
-					"user_version",
-					old_schema_version,
-					|_| Ok(()),
-				)
-				.unwrap();
+			connection.pragma_update(None, "user_version", old_schema_version).unwrap();
 
 			let sql = format!(
 				"CREATE TABLE IF NOT EXISTS {} (

@@ -48,7 +48,8 @@ bdk_wallet = { version = "2.2.0", default-features = false, features = ["std", "
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustls = { version = "0.23", default-features = false }
-rusqlite = { version = "0.31.0", features = ["bundled"] }
+# rusqlite 0.40.0 and 0.40.1 do not compile on our MSRV.
+rusqlite = { version = ">=0.31.0, <0.40.0", features = ["bundled"] }
 bitcoin = "0.32.7"
 bip39 = { version = "2.0.0", features = ["rand"] }
 bip21 = { version = "0.5", features = ["std"], default-features = false }
