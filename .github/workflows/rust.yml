@@ -7,6 +7,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  rusqlite-compat:
+    runs-on: self-hosted
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        # Keep these endpoints in sync with the supported range in Cargo.toml.
+        rusqlite: ["0.31.0", "0.39.0"]
+    env:
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install MSRV toolchain
+        run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Test downstream rusqlite compatibility on MSRV
+        run: |
+          export CARGO_TARGET_DIR=$(mktemp -d /tmp/cargo-target-ldk-node-rusqlite-XXXXXX)
+          trap 'rm -rf "$CARGO_TARGET_DIR"' EXIT
+          cargo +1.85.0 add --manifest-path tests/rusqlite-compat/Cargo.toml rusqlite@=${{ matrix.rusqlite }}
+          cargo +1.85.0 test --manifest-path tests/rusqlite-compat/Cargo.toml
+
   build:
     timeout-minutes: 120
     strategy:
