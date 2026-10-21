@@ -87,11 +87,21 @@ jobs:
       - name: Test on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest'"
         run: |
-          RUSTFLAGS="--cfg no_download --cfg cycle_tests --cfg tokio_unstable" cargo test
+          mkdir -p "$RUNNER_TEMP/ldk-node-storage"
+          TMPDIR="$RUNNER_TEMP/ldk-node-storage" RUSTFLAGS="--cfg no_download --cfg cycle_tests --cfg tokio_unstable" cargo test
       - name: Test with UniFFI support on Rust ${{ matrix.toolchain }}
         if: "matrix.platform != 'windows-latest' && matrix.build-uniffi"
         run: |
-          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --no-default-features --features uniffi-default
+          mkdir -p "$RUNNER_TEMP/ldk-node-storage"
+          TMPDIR="$RUNNER_TEMP/ldk-node-storage" RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --no-default-features --features uniffi-default
+      - name: Upload LDK node storage of the test nodes
+        if: "failure() && matrix.platform != 'windows-latest'"
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.platform }}-${{ matrix.toolchain }}-ldk-node-storage
+          path: ${{ runner.temp }}/ldk-node-storage
+          if-no-files-found: ignore
+          retention-days: 14
 
   linting:
     name: Linting
