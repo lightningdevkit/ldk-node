@@ -929,21 +929,26 @@ pub(crate) fn invalidate_blocks(bitcoind: &BitcoindClient, num_blocks: usize) {
 pub(crate) async fn wait_for_block<E: ElectrumApi>(
 	bitcoind: &BitcoindClient, electrs: &E, min_height: usize,
 ) {
-	let expected_block_hash = exponential_backoff_poll(|| {
-		let bitcoind_height =
-			bitcoind.get_blockchain_info().expect("failed to get blockchain info").blocks as usize;
-		if bitcoind_height < min_height {
-			return None;
-		}
-		bitcoind.get_block_hash(min_height as u64).ok()?.block_hash().ok()
-	})
-	.await;
+	let expected_block_hash =
+		exponential_backoff_poll(format!("bitcoind to reach height {}", min_height), || {
+			let bitcoind_height =
+				bitcoind.get_blockchain_info().expect("failed to get blockchain info").blocks
+					as usize;
+			if bitcoind_height < min_height {
+				return None;
+			}
+			bitcoind.get_block_hash(min_height as u64).ok()?.block_hash().ok()
+		})
+		.await;
 	// A height-only wait can return the old header during a same-height reorg. Require the
 	// replacement hash so callers cannot sync against the stale chain by mistake.
-	exponential_backoff_poll(|| {
-		let header = electrs.block_header(min_height).ok()?;
-		(header.block_hash() == expected_block_hash).then_some(())
-	})
+	exponential_backoff_poll(
+		format!("electrs to serve block {} at height {}", expected_block_hash, min_height),
+		|| {
+			let header = electrs.block_header(min_height).ok()?;
+			(header.block_hash() == expected_block_hash).then_some(())
+		},
+	)
 	.await;
 }
 
@@ -952,7 +957,7 @@ pub(crate) async fn wait_for_tx<E: ElectrumApi>(electrs: &E, txid: Txid) {
 		return;
 	}
 
-	exponential_backoff_poll(|| {
+	exponential_backoff_poll(format!("electrs to see transaction {}", txid), || {
 		electrs.ping().unwrap();
 		electrs.transaction_get(&txid).ok()
 	})
@@ -965,7 +970,7 @@ pub(crate) async fn wait_for_outpoint_spend<E: ElectrumApi>(electrs: &E, outpoin
 
 	// Script history already contains the funding transaction itself, so wait until the exact
 	// funding outpoint leaves the unspent set instead of treating any history as a spend.
-	exponential_backoff_poll(|| {
+	exponential_backoff_poll(format!("electrs to see {} spent", outpoint), || {
 		electrs.ping().unwrap();
 
 		let is_spent = !electrs.script_list_unspent(&txout_script).unwrap().iter().any(|output| {
@@ -1007,7 +1012,12 @@ pub(crate) async fn wait_for_channel_ready_to_send(
 	);
 }
 
-pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> T
+/// Polls until `poll` returns a value. `waiting_for` says what the caller is waiting for, so a
+/// timeout names it: the budget is shared by every wait in a test, and the panic line alone
+/// doesn't tell which one ran out.
+pub(crate) async fn exponential_backoff_poll<T, F>(
+	waiting_for: impl std::fmt::Display, mut poll: F,
+) -> T
 where
 	F: FnMut() -> Option<T>,
 {
@@ -1025,7 +1035,12 @@ where
 
 			None => {},
 		}
-		assert!(tokio::time::Instant::now() < deadline, "Timed out after {}s.", POLL_TIMEOUT_SECS);
+		assert!(
+			tokio::time::Instant::now() < deadline,
+			"Timed out after {}s waiting for {}.",
+			POLL_TIMEOUT_SECS,
+			waiting_for
+		);
 		tokio::time::sleep(delay).await;
 	}
 }
