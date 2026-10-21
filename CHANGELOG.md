@@ -37,6 +37,7 @@
   `Event::PaymentClaimable`.
 
 ## Feature and API updates
+- `Node::splice_out_max` withdraws the maximum available channel balance to an on-chain address.
 - All `Node::open_channel` variants now take an optional `FeeRate` (after
   `push_to_counterparty_msat`) that, when set, is used for the channel's funding transaction instead of the internal fee estimation. For the
   `_with_all` variants it also determines the rate at which the maximum funding amount is
