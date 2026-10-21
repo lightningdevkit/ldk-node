@@ -990,10 +990,32 @@ where
 					.lsps2_service()
 					.lsps2_funding_tx_broadcast_safe(user_channel_id, counterparty_node_id);
 			},
-			LdkEvent::RecurringOfferCancelled { .. } => {
-				// TODO: Apply cancellation to the inbound recurrence store when inbound event
-				// handling is implemented.
-				debug_assert!(false, "recurrence cancellation handling is not implemented");
+			LdkEvent::RecurringOfferCancelled { offer_id, payer_signing_pubkey } => {
+				let id = InboundRecurrenceId::new(offer_id, payer_signing_pubkey);
+				// Use the same lock as acceptance. If cancellation saves first, new claims are
+				// blocked. If acceptance saves first, keep its reservation so it can still finish.
+				self.inbound_recurrence_store
+					.mutate_async(&id, |current| async move {
+						// Cancellation requires an existing recurrence. A missing record is an
+						// inconsistency; leave the event pending rather than inventing its terms.
+						let Some(mut details) = current else {
+							log_error!(self.logger, "Cannot cancel an unknown inbound recurrence");
+							return Err(Error::PersistenceFailed);
+						};
+						details.status = RecurrenceStatus::Cancelled;
+						Ok(Some(details))
+					})
+					.await
+					.map_err(|e| {
+						log_error!(
+							self.logger,
+							"Failed to save inbound recurrence cancellation: {}",
+							e
+						);
+						ReplayEvent()
+					})?;
+				// TODO: Stop future invoice issuance through LDK request handling. This record
+				// controls payment acceptance only; it does not prevent invoices being issued.
 			},
 			LdkEvent::PaymentClaimable {
 				payment_id,
