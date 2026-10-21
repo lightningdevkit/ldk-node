@@ -7,7 +7,9 @@
 
 use bitcoin::hashes::{sha256, Hash as BitcoinHash, HashEngine};
 use bitcoin::secp256k1::PublicKey;
+use lightning::blinded_path::payment::Bolt12OfferContext;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::offers::invoice_request::InvoiceRequestRecurrence;
 use lightning::offers::offer::{OfferId, Recurrence};
 use lightning::{impl_ser_tlv_based, impl_ser_tlv_based_enum};
 
@@ -71,6 +73,10 @@ pub enum InboundRecurrenceClaimStatus {
 	/// A confirmed failed attempt for the current expected counter.
 	///
 	/// Retains the payment ID until another attempt replaces it.
+	///
+	/// TODO: Set this state when the whole payment is confirmed to have failed. Failure handling
+	/// is deferred because one failed HTLC does not prove that the payment cannot still succeed.
+	/// Until that outcome is known, keep Pending so another payment cannot take the reservation.
 	Failed(PaymentId),
 }
 
@@ -132,6 +138,45 @@ impl_ser_tlv_based!(InboundRecurrenceDetails, {
 	(14, claim_status, (default_value, InboundRecurrenceClaimStatus::Idle)),
 	(16, completed_payments, required_vec),
 });
+
+impl InboundRecurrenceDetails {
+	/// Reads the recurring payment's terms and schedule from the invoice's payment data.
+	///
+	/// Creates a starting record that expects payment number zero, and returns this payment's
+	/// number separately. Nothing is saved and the expected payment number is not advanced here.
+	/// Returns None if required data is missing, the request cancels recurring payments, or the
+	/// requested period does not fit the offer's schedule or limit.
+	pub(crate) fn from_payment_context(context: &Bolt12OfferContext) -> Option<(Self, u32)> {
+		let recurrence = context.offer_recurrence?;
+		let basetime = context.invoice_recurrence_basetime?;
+		let (counter, initial_start, cancel) =
+			match context.invoice_request.invoice_request_recurrence.as_ref()? {
+				InvoiceRequestRecurrence::WithOfferBasetime(request) => {
+					(request.counter(), Some(request.start()), request.cancel())
+				},
+				InvoiceRequestRecurrence::WithoutOfferBasetime(request) => {
+					(request.counter(), None, request.cancel())
+				},
+			};
+		let period = recurrence.period_index(counter, initial_start).ok()?;
+		if cancel || recurrence.recurrence_limit.is_some_and(|limit| period > limit.0) {
+			return None;
+		}
+		Some((
+			Self {
+				offer_id: context.offer_id,
+				payer_signing_pubkey: context.invoice_request.payer_signing_pubkey,
+				recurrence,
+				status: RecurrenceStatus::Active,
+				basetime: Some(basetime),
+				initial_start,
+				claim_status: InboundRecurrenceClaimStatus::Idle,
+				completed_payments: Vec::new(),
+			},
+			counter,
+		))
+	}
+}
 
 impl StorableObject for InboundRecurrenceDetails {
 	type Id = InboundRecurrenceId;

@@ -36,7 +36,7 @@ use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
 use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
 use crate::connection::ConnectionManager;
-use crate::data_store::DataStoreUpdateResult;
+use crate::data_store::{DataStoreUpdateResult, StorableObject};
 use crate::fee_estimator::ConfirmationTarget;
 #[cfg(feature = "uniffi")]
 use crate::ffi::PaidBolt12Invoice;
@@ -48,6 +48,9 @@ use crate::liquidity::LiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use crate::payment::inbound_recurrence::{
+	InboundRecurrenceClaimStatus, InboundRecurrenceDetails, InboundRecurrenceId, RecurrenceStatus,
+};
 use crate::payment::store::{
 	PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
 };
@@ -721,6 +724,166 @@ where
 		Ok((payment_id, None))
 	}
 
+	/// Saves a reservation so two payments cannot claim the same recurring payment number.
+	///
+	/// Always lock the recurrence store before the payment store to avoid deadlocks. While the
+	/// recurrence store is locked, check its saved state and read the payment details. This makes
+	/// checking and reserving one step that another payment cannot interrupt.
+	///
+	/// The reservation is saved by mutate_async after its closure returns. Wait for that save,
+	/// then save the payment details, then call claim_funds. If saving the payment details fails,
+	/// keep the reservation so another payment cannot take its place.
+	///
+	/// Keep pending payments in the reservation and successful payments in counter order. Repeated
+	/// events must match the saved payment ID for their counter.
+	async fn reserve_inbound_recurrence(
+		&self, payment_id: PaymentId, purpose: &PaymentPurpose, counterparty_skimmed_fee_msat: u64,
+	) -> Result<bool, ReplayEvent> {
+		let context = match purpose {
+			PaymentPurpose::Bolt12OfferPayment { payment_context, .. } => payment_context,
+			_ => return Ok(true),
+		};
+		if context.offer_recurrence.is_none()
+			&& context.invoice_request.invoice_request_recurrence.is_none()
+		{
+			return Ok(true);
+		}
+		// Do not reserve a payment we cannot claim. Claiming needs the secret preimage, and
+		// BOLT12 payments must arrive without a deducted channel-opening fee.
+		if purpose.preimage().is_none() || counterparty_skimmed_fee_msat != 0 {
+			return Ok(false);
+		}
+		let Some((initial, counter)) = InboundRecurrenceDetails::from_payment_context(context)
+		else {
+			return Ok(false);
+		};
+		let id = InboundRecurrenceId::new(initial.offer_id, initial.payer_signing_pubkey);
+		self.inbound_recurrence_store
+			.mutate_async(&id, |current| async move {
+				let mut details = current.unwrap_or_else(|| initial.clone());
+				if details.recurrence != initial.recurrence
+					|| details.basetime != initial.basetime
+					|| details.initial_start != initial.initial_start
+				{
+					return Ok(None);
+				}
+				let payment = self.payment_store.get(&payment_id).await?;
+				if payment.as_ref().is_some_and(|info| info.direction == PaymentDirection::Outbound)
+				{
+					return Ok(None);
+				}
+				let Ok(index) = usize::try_from(counter) else { return Ok(None) };
+				if let Some(completed_id) = details.completed_payments.get(index) {
+					// Replayed success must not replace the current reservation, even after cancellation.
+					return Ok((*completed_id == payment_id).then_some(details));
+				}
+				if index != details.completed_payments.len()
+					|| details.completed_payments.contains(&payment_id)
+				{
+					return Ok(None);
+				}
+				if let InboundRecurrenceClaimStatus::Pending(reserved_id) = details.claim_status {
+					return Ok((reserved_id == payment_id).then_some(details));
+				}
+				if details.status != RecurrenceStatus::Active
+					|| payment.as_ref().is_some_and(|info| info.status == PaymentStatus::Succeeded)
+				{
+					return Ok(None);
+				}
+				details.claim_status = InboundRecurrenceClaimStatus::Pending(payment_id);
+				Ok(Some(details))
+			})
+			.await
+			.map(|reserved| reserved.is_some())
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to reserve inbound recurrence: {}", e);
+				ReplayEvent()
+			})
+	}
+
+	/// Records a successful recurring payment before saving its payment details.
+	///
+	/// Move to the next payment number only when LDK confirms that the reserved payment succeeded.
+	/// If a successful payment is reported again, leave paid progress and any newer reservation
+	/// unchanged. The caller still finishes saving that payment's details and the user event.
+	///
+	/// TODO: Reconcile unfinished reservations at startup when there is no event to replay.
+	/// The stores and LDK state are saved separately, so a missing record does not prove failure.
+	/// Until a final outcome is known, keep the reservation rather than allowing another payment.
+	async fn record_inbound_recurrence_claim(
+		&self, payment_id: PaymentId, purpose: &PaymentPurpose,
+	) -> Result<(), ReplayEvent> {
+		let context = match purpose {
+			PaymentPurpose::Bolt12OfferPayment { payment_context, .. } => payment_context,
+			_ => return Ok(()),
+		};
+		if context.offer_recurrence.is_none()
+			&& context.invoice_request.invoice_request_recurrence.is_none()
+		{
+			return Ok(());
+		}
+		let Some((initial, counter)) = InboundRecurrenceDetails::from_payment_context(context)
+		else {
+			log_error!(self.logger, "Missing or invalid context for confirmed inbound recurrence");
+			return Err(ReplayEvent());
+		};
+		let id = InboundRecurrenceId::new(initial.offer_id, initial.payer_signing_pubkey);
+		let recorded = self
+			.inbound_recurrence_store
+			.mutate_async(&id, |current| async move {
+				let Some(mut details) = current else { return Ok(None) };
+				if details.recurrence != initial.recurrence
+					|| details.basetime != initial.basetime
+					|| details.initial_start != initial.initial_start
+				{
+					return Ok(None);
+				}
+				let Ok(index) = usize::try_from(counter) else { return Ok(None) };
+				if let Some(completed_id) = details.completed_payments.get(index) {
+					// Progress is already saved. Let the caller finish any payment-store or event
+					// write that failed, without changing newer progress or its pending reservation.
+					return Ok((*completed_id == payment_id).then_some(details));
+				}
+				if index != details.completed_payments.len()
+					|| details.completed_payments.contains(&payment_id)
+					|| details.claim_status != InboundRecurrenceClaimStatus::Pending(payment_id)
+				{
+					return Ok(None);
+				}
+				if details.status == RecurrenceStatus::Cancelled {
+					// A payment accepted before cancellation can still succeed. Record its success,
+					// clear its reservation, and advance the counter. Keep Cancelled so new payments
+					// remain blocked.
+				}
+				details.completed_payments.push(payment_id);
+				details.claim_status = InboundRecurrenceClaimStatus::Idle;
+				// The offer's limit counts from the start of its schedule, even if this payer joined
+				// later. Stop when the next period exceeds that limit or its number is too large to
+				// store. Never let the number wrap around and restart at zero.
+				let next_period =
+					u32::try_from(details.completed_payments.len()).ok().and_then(|next| {
+						details.recurrence.period_index(next, details.initial_start).ok()
+					});
+				if details.status == RecurrenceStatus::Active
+					&& next_period.map_or(true, |period| {
+						details.recurrence.recurrence_limit.is_some_and(|limit| period > limit.0)
+					}) {
+					details.status = RecurrenceStatus::Completed;
+				}
+				Ok(Some(details))
+			})
+			.await
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to persist inbound recurrence claim: {}", e);
+				ReplayEvent()
+			})?;
+		if recorded.is_none() {
+			log_error!(self.logger, "Confirmed inbound recurrence has no matching reservation");
+			return Err(ReplayEvent());
+		}
+		Ok(())
+	}
+
 	pub async fn handle_event(&self, event: LdkEvent) -> Result<(), ReplayEvent> {
 		match event {
 			LdkEvent::FundingGenerationReady {
@@ -844,6 +1007,71 @@ where
 			} => {
 				let (payment_id, mut payment_info) =
 					self.resolve_inbound_payment_id(payment_id, &payment_hash).await?;
+				if !self
+					.reserve_inbound_recurrence(payment_id, &purpose, counterparty_skimmed_fee_msat)
+					.await?
+				{
+					log_info!(
+						self.logger,
+						"Refused conflicting or invalid recurring payment {}",
+						payment_id
+					);
+					if let PaymentPurpose::Bolt12OfferPayment { payment_context, .. } = &purpose {
+						let id = InboundRecurrenceId::new(
+							payment_context.offer_id,
+							payment_context.invoice_request.payer_signing_pubkey,
+						);
+						// Lock recurrence state before payment details, just as acceptance does.
+						// Keep an accepted payment's reservation and saved details unchanged.
+						self.inbound_recurrence_store
+							.mutate_async(&id, |current| async move {
+								let accepted = current.as_ref().is_some_and(|details| {
+									details.completed_payments.contains(&payment_id)
+										|| details.claim_status
+											== InboundRecurrenceClaimStatus::Pending(payment_id)
+								});
+								if !accepted {
+									// Unlike the shared failure helper, leave the saved hash alone and
+									// update only this rejected inbound offer payment's status.
+									self.payment_store
+										.mutate(&payment_id, |current| {
+											let mut payment = current?.clone();
+											if payment.direction != PaymentDirection::Inbound
+												|| payment.status == PaymentStatus::Succeeded
+											{
+												return None;
+											}
+											match &payment.kind {
+												PaymentKind::Bolt12Offer {
+													hash, offer_id, ..
+												} if *hash == Some(payment_hash)
+													&& *offer_id == payment_context.offer_id => {},
+												_ => return None,
+											}
+											let update = PaymentDetailsUpdate {
+												status: Some(PaymentStatus::Failed),
+												..PaymentDetailsUpdate::new(payment_id)
+											};
+											payment.update(update).then_some(payment)
+										})
+										.await?;
+								}
+								// Rejection changes payment details only; keep recurrence state intact.
+								Ok(None)
+							})
+							.await
+							.map_err(|e| {
+								log_error!(
+									self.logger,
+									"Failed to record recurring payment rejection: {}",
+									e
+								);
+								ReplayEvent()
+							})?;
+					}
+					self.channel_manager.fail_htlc_backwards(&payment_hash);
+					return Ok(());
+				}
 				if let Some(info) = payment_info.as_ref() {
 					if info.direction == PaymentDirection::Outbound {
 						log_info!(
@@ -1251,6 +1479,10 @@ where
 			} => {
 				let (payment_id, _) =
 					self.resolve_inbound_payment_id(payment_id, &payment_hash).await?;
+				// Save the recurring payment's progress, then its payment details, then the event
+				// for the user. If any save fails, return ReplayEvent so LDK can deliver this event
+				// again. Tell LDK we are done only after all saves succeed.
+				self.record_inbound_recurrence_claim(payment_id, &purpose).await?;
 				log_info!(
 					self.logger,
 					"Claimed payment with ID {} from payment hash {} of {}msat.",
