@@ -3129,6 +3129,253 @@ async fn splice_channel() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_out_max() {
+	do_splice_out_max(false, None, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_out_max_funder_with_fee_rate() {
+	// Also exercise the original channel funder, which must retain commitment fees and anchors.
+	do_splice_out_max(true, Some(FeeRate::from_sat_per_kwu(2_500)), false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rbf_splice_out_max() {
+	do_splice_out_max(false, None, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn rbf_splice_out_max_funder_with_fee_rate() {
+	do_splice_out_max(true, Some(FeeRate::from_sat_per_kwu(2_500)), true).await;
+}
+
+async fn do_splice_out_max(is_funder: bool, fee_rate: Option<FeeRate>, bump_fee: bool) {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![
+			node_a.onchain_payment().new_address().unwrap(),
+			node_b.onchain_payment().new_address().unwrap(),
+		],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	let push_msat = if is_funder { 0 } else { 5_300_000 };
+	let original_txo =
+		open_channel_push_amt(&node_a, &node_b, 500_000, Some(push_msat), false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	let (node, peer) = if is_funder { (&node_a, &node_b) } else { (&node_b, &node_a) };
+	let address = node.onchain_payment().new_address().unwrap();
+	let minimum_output_sat = address.script_pubkey().minimal_non_dust().to_sat();
+	let initial = node.list_channels().remove(0);
+	assert_eq!(
+		node.splice_out_max(
+			&UserChannelId(initial.user_channel_id.0.wrapping_add(1)),
+			peer.node_id(),
+			&address,
+			None
+		),
+		Err(NodeError::ChannelSplicingFailed)
+	);
+	let wrong_network_address =
+		Address::from_script(&address.script_pubkey(), bitcoin::Network::Bitcoin).unwrap();
+	assert_eq!(
+		node.splice_out_max(&initial.user_channel_id, peer.node_id(), &wrong_network_address, None),
+		Err(NodeError::InvalidAddress)
+	);
+	if !is_funder {
+		// The balance covers a non-dust output alone, but fees would leave the output below dust.
+		assert!(initial.next_splice_out_maximum_sat >= minimum_output_sat);
+		assert_eq!(
+			node.splice_out_max(&initial.user_channel_id, peer.node_id(), &address, None),
+			Err(NodeError::ChannelSplicingFailed)
+		);
+	}
+
+	// Leave the funder 450,000 sats for a large withdrawal. For the non-funder, 5,472 sats
+	// allows a 477-sat withdrawal: the 183-sat fee leaves exactly the 294-sat dust threshold.
+	let payment_msat = if is_funder { 50_000_000 } else { 5_472_000 - push_msat };
+	let payment_id =
+		node_a.spontaneous_payment().send(payment_msat, node_b.node_id(), None).unwrap();
+	expect_payment_successful_event!(node_a, payment_id, None);
+	expect_payment_received_event!(node_b, payment_msat);
+	tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), async {
+		loop {
+			if node_a.list_channels()[0].pending_outbound_htlcs.is_empty()
+				&& node_b.list_channels()[0].pending_inbound_htlcs.is_empty()
+			{
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("payment HTLC should settle before splicing");
+	let before = node.list_channels().remove(0);
+	let balance_before = node.list_balances();
+
+	// A fee that consumes the available balance must fail before submitting a contribution.
+	assert_eq!(
+		node.splice_out_max(
+			&before.user_channel_id,
+			peer.node_id(),
+			&address,
+			Some(FeeRate::from_sat_per_kwu(1_000_000).into())
+		),
+		Err(NodeError::ChannelSplicingFailed)
+	);
+	node.splice_out_max(
+		&before.user_channel_id,
+		peer.node_id(),
+		&address,
+		fee_rate.map(Into::into),
+	)
+	.unwrap();
+	let txo = expect_splice_negotiated_event!(node, peer.node_id());
+	// Repeating the request must not append another withdrawal to a pending contribution.
+	assert_eq!(
+		node.splice_out_max(
+			&before.user_channel_id,
+			peer.node_id(),
+			&address,
+			fee_rate.map(Into::into)
+		),
+		Err(NodeError::ChannelSplicingFailed)
+	);
+	wait_for_classified_funding_payment(node, txo.txid).await;
+	wait_for_tx(&electrsd.client, txo.txid).await;
+	let tx = electrsd.client.transaction_get(&txo.txid).unwrap();
+	assert_eq!(tx.input.len(), 1);
+	assert_eq!(tx.input[0].previous_output, original_txo);
+	assert_eq!(tx.output.len(), 2);
+	let output = tx.output.iter().find(|o| o.script_pubkey == address.script_pubkey()).unwrap();
+	let output_sat = output.value.to_sat();
+	assert!(output.value >= output.script_pubkey.minimal_non_dust());
+	let fee_sat =
+		before.channel_value_sats - tx.output.iter().map(|o| o.value.to_sat()).sum::<u64>();
+	assert!(fee_sat > 0);
+	if !is_funder {
+		// The observed fee confirms the earlier failure was a dust remainder, not fee underflow.
+		assert!(initial.next_splice_out_maximum_sat > fee_sat);
+		assert!(initial.next_splice_out_maximum_sat - fee_sat < minimum_output_sat);
+		assert_eq!(output_sat, minimum_output_sat);
+	} else {
+		assert!(output_sat > before.outbound_capacity_msat / 1_000);
+	}
+	assert_eq!(output_sat + fee_sat, before.next_splice_out_maximum_sat);
+	let new_channel_value = tx.output[txo.vout as usize].value.to_sat();
+	assert_eq!(new_channel_value, before.channel_value_sats - before.next_splice_out_maximum_sat);
+
+	if let Some(fee_rate) = fee_rate {
+		assert_splice_pays_fee_rate(node, &electrsd.client, txo.txid, fee_rate);
+	}
+
+	if !bump_fee {
+		generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+		node.sync_wallets().unwrap();
+		peer.sync_wallets().unwrap();
+		expect_channel_ready_event!(node, peer.node_id());
+		expect_channel_ready_event!(peer, node.node_id());
+		let after = node.list_channels().remove(0);
+		assert_eq!(after.funding_txo, Some(txo));
+		assert_eq!(peer.list_channels()[0].funding_txo, Some(txo));
+		assert_eq!(after.channel_value_sats, new_channel_value);
+		assert_eq!(after.next_splice_out_maximum_sat, 0);
+		assert_eq!(
+			node.list_balances().total_onchain_balance_sats,
+			balance_before.total_onchain_balance_sats + output_sat
+		);
+		let payment = funding_payment(node, txo.txid);
+		assert_eq!(payment.status, PaymentStatus::Succeeded);
+		assert_eq!(payment.direction, PaymentDirection::Inbound);
+		assert_eq!(payment.amount_msat, Some(before.next_splice_out_maximum_sat * 1000));
+		assert_eq!(payment.fee_paid_msat, Some(fee_sat * 1000));
+
+		// Draining the available balance still leaves the channel able to receive payments.
+		let payment_id = peer.spontaneous_payment().send(1_000_000, node.node_id(), None).unwrap();
+		expect_payment_successful_event!(peer, payment_id, None);
+		expect_payment_received_event!(node, 1_000_000);
+		return;
+	}
+
+	// Bump by 20%, within the original 1.5x ceiling. With no channel balance left for
+	// fees, RBF currently preserves the withdrawal and funds it entirely from the wallet.
+	let bump_fee_rate = FeeRate::from_sat_per_kwu(
+		fee_rate.unwrap_or(FeeRate::from_sat_per_kwu(250)).to_sat_per_kwu() * 6 / 5,
+	);
+	node.sync_wallets().unwrap();
+	peer.sync_wallets().unwrap();
+	node.bump_channel_funding_fee(
+		&before.user_channel_id,
+		peer.node_id(),
+		Some(bump_fee_rate.into()),
+	)
+	.unwrap();
+	let rbf_txo = expect_splice_negotiated_event!(node, peer.node_id());
+	assert_ne!(rbf_txo.txid, txo.txid);
+	wait_for_classified_funding_payment(node, rbf_txo.txid).await;
+	wait_for_tx(&electrsd.client, rbf_txo.txid).await;
+	let rbf_tx = electrsd.client.transaction_get(&rbf_txo.txid).unwrap();
+	assert!(rbf_tx.input.len() > 1);
+	assert!(rbf_tx.input.iter().any(|input| input.previous_output == original_txo));
+	let withdrawal_outputs: Vec<_> =
+		rbf_tx.output.iter().filter(|o| o.script_pubkey == address.script_pubkey()).collect();
+	assert_eq!(withdrawal_outputs, vec![output]);
+	let rbf_channel_value = rbf_tx.output[rbf_txo.vout as usize].value.to_sat();
+	assert!(rbf_channel_value >= before.channel_value_sats);
+	// If BDK reserves more for fees than LDK charges, the surplus goes into the channel
+	// instead of wallet change. Account for this credit in both balances.
+	let channel_credit_sat = rbf_channel_value - before.channel_value_sats;
+	let input_sat = rbf_tx
+		.input
+		.iter()
+		.map(|input| {
+			let prevout = input.previous_output;
+			electrsd.client.transaction_get(&prevout.txid).unwrap().output[prevout.vout as usize]
+				.value
+				.to_sat()
+		})
+		.sum::<u64>();
+	let rbf_fee_sat = input_sat - rbf_tx.output.iter().map(|o| o.value.to_sat()).sum::<u64>();
+	assert!(rbf_fee_sat > fee_sat);
+	let paid_sat_per_kwu = rbf_fee_sat * 1_000 / rbf_tx.weight().to_wu();
+	assert!(
+		paid_sat_per_kwu.abs_diff(bump_fee_rate.to_sat_per_kwu())
+			<= bump_fee_rate.to_sat_per_kwu() / 100
+	);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node.sync_wallets().unwrap();
+	peer.sync_wallets().unwrap();
+	expect_channel_ready_event!(node, peer.node_id());
+	expect_channel_ready_event!(peer, node.node_id());
+	let after = node.list_channels().remove(0);
+	let balance_after = node.list_balances();
+	assert_eq!(after.funding_txo, Some(rbf_txo));
+	assert_eq!(peer.list_channels()[0].funding_txo, Some(rbf_txo));
+	assert_eq!(after.channel_value_sats, rbf_channel_value);
+	assert!(after.next_splice_out_maximum_sat >= before.next_splice_out_maximum_sat);
+	assert_eq!(
+		balance_after.total_lightning_balance_sats,
+		balance_before.total_lightning_balance_sats + channel_credit_sat
+	);
+	// The withdrawal pays our own wallet, so only the fee and channel credit leave it.
+	assert_eq!(
+		balance_after.total_onchain_balance_sats,
+		balance_before.total_onchain_balance_sats - rbf_fee_sat - channel_credit_sat
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn splice_channel_with_fee_rate() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
@@ -5854,6 +6101,10 @@ async fn live_node_apis_return_not_running_after_stop() {
 	);
 	assert_eq!(
 		node_a.splice_out(&user_channel_id, node_b_id, &btc_address, 10_000, None),
+		Err(NodeError::NotRunning)
+	);
+	assert_eq!(
+		node_a.splice_out_max(&user_channel_id, node_b_id, &btc_address, None),
 		Err(NodeError::NotRunning)
 	);
 	assert_eq!(

@@ -590,6 +590,14 @@ pub struct ChannelDetails {
 	/// route which is valid.
 	pub next_outbound_htlc_minimum_msat: u64,
 	/// The maximum value, in satoshis, of the next splice out from our channel balance.
+	///
+	/// This includes splice transaction fees and accounts for the reserve required after the
+	/// splice. [`Node::splice_out`] takes the destination output value, so its amount plus fees
+	/// must fit within this maximum. [`Node::splice_out_max`] calculates that output value
+	/// automatically. The maximum may change as channel state or fee estimates change.
+	///
+	/// [`Node::splice_out`]: crate::Node::splice_out
+	/// [`Node::splice_out_max`]: crate::Node::splice_out_max
 	pub next_splice_out_maximum_sat: u64,
 	/// The number of blocks (after our commitment transaction confirms) that we will need to wait
 	/// until we can claim our funds after we force-close the channel. During this time our

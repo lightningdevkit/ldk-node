@@ -160,6 +160,7 @@ pub use lightning::ln::channel_state::{
 	OutboundHTLCStateDetails,
 };
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::{FundingContributionError, FundingTemplate};
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
@@ -2004,6 +2005,11 @@ impl Node {
 
 	/// Remove funds from an existing channel, sending them to an on-chain address.
 	///
+	/// `splice_amount_sats` is the value to be sent to the destination address.
+	/// This value plus transaction fees must fit within [`ChannelDetails::next_splice_out_maximum_sat`].
+	/// Use [`Node::splice_out_max`] to send on-chain the maximum available balance from the
+	/// channel.
+	///
 	/// This provides for decreasing a channel's outbound liquidity without re-balancing or closing
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
@@ -2027,15 +2033,75 @@ impl Node {
 			return Err(Error::NotRunning);
 		}
 
-		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
+		self.splice_out_inner(
+			user_channel_id,
+			counterparty_node_id,
+			address,
+			FundingAmount::Exact { amount_sats: splice_amount_sats },
+			maybe_map_fee_rate_opt(min_fee_rate),
+		)
+	}
 
+	/// Remove the maximum available funds from a channel, sending them to an on-chain address.
+	///
+	/// This is similar to [`Node::splice_out`], but calculates the destination output value by
+	/// subtracting splice transaction fees from [`ChannelDetails::next_splice_out_maximum_sat`].
+	/// The channel stays open and retains its required reserve and commitment fee budget.
+	/// Returns [`NodeError::ChannelSplicingFailed`] if the available amount cannot cover fees and
+	/// a non-dust output.
+	///
+	/// `min_fee_rate` has the same meaning as in [`Node::splice_out`]. The output is calculated
+	/// using that rate, or the chain source estimate if unset, raised to the minimum RBF feerate
+	/// when required and within our fee-rate ceiling.
+	///
+	/// The maximum is read when this call constructs the contribution. Changes to channel state
+	/// or fees can cause negotiation to fail. A concurrent peer-initiated splice can change our
+	/// fee share, leaving some of the available balance unwithdrawn. Using the full budget also
+	/// leaves no channel balance available for a higher transaction fee.
+	///
+	/// [`Node::bump_channel_funding_fee`] preserves the destination output value, including for
+	/// maximum withdrawals. If the channel cannot cover the higher fee, it may fund the entire
+	/// output and fees from the on-chain wallet instead, leaving the channel balance unwithdrawn.
+	/// It does not reduce the destination output to pay the additional fee.
+	///
+	/// Success means the contribution was submitted, not that the splice has completed. Monitor
+	/// [`Event::SpliceNegotiated`] or [`Event::SpliceNegotiationFailed`] for the negotiation result,
+	/// and [`Event::ChannelReady`] for the channel's transition to the new funding output.
+	///
+	/// # Experimental API
+	///
+	/// This API is experimental. Currently, a splice-out will be marked as an inbound payment if
+	/// paid to an address associated with the on-chain wallet, but this classification may change
+	/// in the future.
+	pub fn splice_out_max(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
+		min_fee_rate: Option<FfiFeeRate>,
+	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+		self.splice_out_inner(
+			user_channel_id,
+			counterparty_node_id,
+			address,
+			FundingAmount::Max,
+			maybe_map_fee_rate_opt(min_fee_rate),
+		)
+	}
+
+	fn splice_out_inner(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
+		splice_amount: FundingAmount, min_fee_rate: Option<bitcoin::FeeRate>,
+	) -> Result<(), Error> {
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			if splice_amount_sats > channel_details.next_splice_out_maximum_sat {
-				return Err(Error::ChannelSplicingFailed);
+			if let FundingAmount::Exact { amount_sats } = &splice_amount {
+				if *amount_sats > channel_details.next_splice_out_maximum_sat {
+					return Err(Error::ChannelSplicingFailed);
+				}
 			}
 
 			self.wallet.parse_and_validate_address(address)?;
@@ -2071,12 +2137,24 @@ impl Node {
 				_ => min_feerate,
 			};
 
-			let outputs = vec![bitcoin::TxOut {
-				value: Amount::from_sat(splice_amount_sats),
-				script_pubkey: address.script_pubkey(),
-			}];
+			let script_pubkey = address.script_pubkey();
+			let output = match splice_amount {
+				FundingAmount::Exact { amount_sats } => {
+					bitcoin::TxOut { value: Amount::from_sat(amount_sats), script_pubkey }
+				},
+				FundingAmount::Max => max_splice_out_output(
+					&funding_template,
+					script_pubkey,
+					Amount::from_sat(channel_details.next_splice_out_maximum_sat),
+					feerate,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to calculate maximum splice output: {}", e);
+					Error::ChannelSplicingFailed
+				})?,
+			};
 			let contribution =
-				funding_template.splice_out(outputs, feerate, max_feerate).map_err(|e| {
+				funding_template.splice_out(vec![output], feerate, max_feerate).map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
@@ -2106,6 +2184,11 @@ impl Node {
 	/// Fee-bumps the pending splice on a channel by replacing its in-flight funding transaction
 	/// (RBF). The splice's amount and destination are preserved; only the fee rate is raised.
 	/// Errors if the channel has no pending splice to bump.
+	///
+	/// For a splice-out, additional fees are taken from the channel balance when possible. If
+	/// that balance is insufficient, wallet inputs may fund the entire withdrawal output and
+	/// fees, leaving the channel balance unwithdrawn. This also applies to withdrawals created
+	/// with [`Node::splice_out_max`]; the output is not reduced to cover the higher fee.
 	///
 	/// If `min_fee_rate` is set, it will be used as the minimum feerate for the replacement instead
 	/// of a feerate estimate retrieved from the configured chain source. As with the estimate, we
@@ -2577,6 +2660,26 @@ impl Node {
 			| gossip_features
 			| self.liquidity_source.liquidity_manager().provided_node_features()
 	}
+}
+
+// TODO: Replace this helper with upstream LDK drain-output construction so the contribution
+// retains maximum-withdrawal semantics through RBF.
+// See https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/5305
+fn max_splice_out_output(
+	funding_template: &FundingTemplate, script_pubkey: bitcoin::ScriptBuf, maximum: Amount,
+	feerate: bitcoin::FeeRate,
+) -> Result<bitcoin::TxOut, FundingContributionError> {
+	let minimum_output = script_pubkey.minimal_non_dust();
+	let mut output = bitcoin::TxOut { value: minimum_output, script_pubkey };
+	let fee = funding_template
+		.clone()
+		.splice_out(vec![output.clone()], feerate, feerate)?
+		.estimated_fee();
+	output.value = maximum
+		.checked_sub(fee)
+		.filter(|value| *value >= minimum_output)
+		.ok_or(FundingContributionError::InvalidSpliceValue)?;
+	Ok(output)
 }
 
 impl Drop for Node {
