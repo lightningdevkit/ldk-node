@@ -15,9 +15,11 @@ use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_chain::ChainPosition;
 use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
-#[allow(deprecated)]
-use bdk_wallet::SignOptions;
-use bdk_wallet::{Balance, KeychainKind, LocalOutput, PersistedWallet, Update, WalletEvent};
+use bdk_wallet::signer::SignersContainer;
+use bdk_wallet::{
+	Balance, FinalizeInputOutcome, KeychainKind, LocalOutput, PersistedWallet, SignOptions, Update,
+	WalletEvent,
+};
 use bitcoin::address::NetworkUnchecked;
 use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
 use bitcoin::blockdata::locktime::absolute::LockTime;
@@ -160,6 +162,8 @@ impl AddressPool {
 pub(crate) struct Wallet {
 	// A BDK on-chain wallet.
 	inner: Mutex<PersistedWallet<KVStoreWalletPersister>>,
+	// External and internal signing keys are kept outside the BDK wallet.
+	signers: [SignersContainer; 2],
 	persister: tokio::sync::Mutex<KVStoreWalletPersister>,
 	address_pool: Mutex<AddressPool>,
 	// Serializes refill runs so concurrent pops never over-reveal.
@@ -186,10 +190,11 @@ pub(crate) struct Wallet {
 impl Wallet {
 	pub(crate) fn new(
 		wallet: bdk_wallet::PersistedWallet<KVStoreWalletPersister>,
-		wallet_persister: KVStoreWalletPersister, persisted_pool_indices: Vec<u32>,
-		broadcaster: Arc<Broadcaster>, fee_estimator: Arc<OnchainFeeEstimator>,
-		chain_source: Arc<ChainSource>, payment_store: Arc<PaymentStore>, runtime: Arc<Runtime>,
-		config: Arc<Config>, logger: Arc<Logger>, pending_payment_store: Arc<PendingPaymentStore>,
+		signers: [SignersContainer; 2], wallet_persister: KVStoreWalletPersister,
+		persisted_pool_indices: Vec<u32>, broadcaster: Arc<Broadcaster>,
+		fee_estimator: Arc<OnchainFeeEstimator>, chain_source: Arc<ChainSource>,
+		payment_store: Arc<PaymentStore>, runtime: Arc<Runtime>, config: Arc<Config>,
+		logger: Arc<Logger>, pending_payment_store: Arc<PendingPaymentStore>,
 		channel_tx_facts_store: Arc<ChannelTxFactsStore>,
 	) -> Self {
 		let address_pool = Mutex::new(AddressPool::new(persisted_pool_indices, &wallet, &logger));
@@ -198,6 +203,7 @@ impl Wallet {
 		let address_pool_refill_lock = tokio::sync::Mutex::new(());
 		Self {
 			inner,
+			signers,
 			persister,
 			address_pool,
 			address_pool_refill_lock,
@@ -1700,7 +1706,6 @@ impl Wallet {
 		Ok(())
 	}
 
-	#[allow(deprecated)]
 	pub(crate) async fn create_funding_transaction(
 		&self, output_script: ScriptBuf, amount: Amount, confirmation_target: ConfirmationTarget,
 		locktime: LockTime, fee_rate: Option<FeeRate>,
@@ -1725,7 +1730,11 @@ impl Wallet {
 				},
 			};
 
-			match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+			match locked_wallet.sign_with_signers(
+				&mut psbt,
+				&self.signers.each_ref(),
+				SignOptions::default(),
+			) {
 				Ok(finalized) => {
 					if !finalized {
 						return Err(Error::OnchainTxCreationFailed);
@@ -2166,7 +2175,6 @@ impl Wallet {
 			.map_err(|_| Error::InvalidAddress)
 	}
 
-	#[allow(deprecated)]
 	pub(crate) async fn send_to_address(
 		&self, address: &bitcoin::Address, send_amount: OnchainSendAmount,
 		fee_rate: Option<FeeRate>,
@@ -2288,7 +2296,11 @@ impl Wallet {
 				_ => {},
 			}
 
-			match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+			match locked_wallet.sign_with_signers(
+				&mut psbt,
+				&self.signers.each_ref(),
+				SignOptions::default(),
+			) {
 				Ok(finalized) => {
 					if !finalized {
 						return Err(Error::OnchainTxCreationFailed);
@@ -2527,7 +2539,6 @@ impl Wallet {
 		Ok(utxos)
 	}
 
-	#[allow(deprecated)]
 	async fn get_change_script_inner(&self) -> Result<ScriptBuf, ()> {
 		let mut locked_persister = self.persister.lock().await;
 		let (address_info, change_set) = {
@@ -2541,7 +2552,6 @@ impl Wallet {
 		Ok(address_info.address.script_pubkey())
 	}
 
-	#[allow(deprecated)]
 	pub(crate) fn sign_owned_inputs(&self, unsigned_tx: Transaction) -> Result<Transaction, ()> {
 		let locked_wallet = self.inner.lock().expect("lock");
 
@@ -2564,13 +2574,14 @@ impl Wallet {
 		let mut sign_options = SignOptions::default();
 		sign_options.trust_witness_utxo = true;
 
-		match locked_wallet.sign(&mut psbt, sign_options) {
+		match locked_wallet.sign_with_signers(&mut psbt, &self.signers.each_ref(), sign_options) {
 			Ok(finalized) => debug_assert!(!finalized),
 			Err(e) => {
 				log_error!(self.logger, "Failed to sign owned inputs: {}", e);
 				return Err(());
 			},
 		}
+		self.finalize_wallet_inputs(&locked_wallet, &mut psbt)?;
 
 		match psbt.extract_tx() {
 			Ok(tx) => Ok(tx),
@@ -2582,7 +2593,6 @@ impl Wallet {
 		}
 	}
 
-	#[allow(deprecated)]
 	fn sign_psbt_inner(&self, mut psbt: Psbt) -> Result<Transaction, ()> {
 		let locked_wallet = self.inner.lock().expect("lock");
 
@@ -2592,17 +2602,12 @@ impl Wallet {
 		let mut sign_options = SignOptions::default();
 		sign_options.trust_witness_utxo = true;
 
-		match locked_wallet.sign(&mut psbt, sign_options) {
-			Ok(_finalized) => {
-				// BDK will fail to finalize for all LDK-provided inputs of the PSBT. Unfortunately
-				// we can't check more fine grained if it succeeded for all the other inputs here,
-				// so we just ignore the returned `finalized` bool.
-			},
-			Err(err) => {
+		locked_wallet
+			.sign_with_signers(&mut psbt, &self.signers.each_ref(), sign_options)
+			.map_err(|err| {
 				log_error!(self.logger, "Failed to sign transaction: {}", err);
-				return Err(());
-			},
-		}
+			})?;
+		self.finalize_wallet_inputs(&locked_wallet, &mut psbt)?;
 
 		let tx = psbt.extract_tx().map_err(|e| {
 			log_error!(self.logger, "Failed to extract transaction: {}", e);
@@ -2610,6 +2615,23 @@ impl Wallet {
 		})?;
 
 		Ok(tx)
+	}
+
+	fn finalize_wallet_inputs(
+		&self, wallet: &bdk_wallet::Wallet, psbt: &mut Psbt,
+	) -> Result<(), ()> {
+		let outcome = wallet.try_finalize_psbt(psbt).map_err(|e| {
+			log_error!(self.logger, "Failed to finalize transaction: {}", e);
+		})?;
+		for (index, input_outcome) in outcome.into_outcomes() {
+			// MissingDescriptor is expected for LDK's inputs, which BDK cannot finalize.
+			// A descriptor that BDK recognizes must be satisfied before we return the transaction.
+			if let FinalizeInputOutcome::CouldNotSatisfy(e) = input_outcome {
+				log_error!(self.logger, "Failed to finalize wallet input {}: {}", index, e);
+				return Err(());
+			}
+		}
+		Ok(())
 	}
 
 	/// Builds this node's share of the `active` round of an interactive funding whose negotiated
@@ -3367,7 +3389,6 @@ impl Wallet {
 		Ok(FundingStatusUpdate::Applied)
 	}
 
-	#[allow(deprecated)]
 	pub(crate) async fn bump_fee_rbf(
 		&self, payment_id: PaymentId, fee_rate: Option<FeeRate>, cur_anchor_reserve_sats: u64,
 	) -> Result<Txid, Error> {
@@ -3618,7 +3639,11 @@ impl Wallet {
 			return Err(Error::InsufficientFunds);
 		}
 
-		match locked_wallet.sign(&mut psbt, SignOptions::default()) {
+		match locked_wallet.sign_with_signers(
+			&mut psbt,
+			&self.signers.each_ref(),
+			SignOptions::default(),
+		) {
 			Ok(finalized) => {
 				if !finalized {
 					log_error!(self.logger, "Failed to finalize signing for fee bump of {}", txid);
@@ -4176,6 +4201,7 @@ mod tests {
 	use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 	use bdk_chain::{BlockId, CheckPoint, ConfirmationBlockTime, TxUpdate};
+	use bdk_wallet::descriptor::IntoWalletDescriptor;
 	use bdk_wallet::Wallet as BdkWallet;
 	use bitcoin::hashes::Hash;
 	use bitcoin::Network;
@@ -4384,19 +4410,26 @@ mod tests {
 
 		let mut wallet_persister =
 			KVStoreWalletPersister::new(Arc::clone(&store), Arc::clone(&logger));
-		#[allow(deprecated)]
+		let secp_ctx = Secp256k1::new();
+		let (descriptor, keymap) =
+			EXTERNAL_DESCRIPTOR.into_wallet_descriptor(&secp_ctx, config.network.into()).unwrap();
+		let (change_descriptor, change_keymap) =
+			INTERNAL_DESCRIPTOR.into_wallet_descriptor(&secp_ctx, config.network.into()).unwrap();
+		let signers = [
+			SignersContainer::build(keymap, &descriptor, &secp_ctx),
+			SignersContainer::build(change_keymap, &change_descriptor, &secp_ctx),
+		];
 		let bdk_wallet = if load_existing {
 			BdkWallet::load()
-				.descriptor(KeychainKind::External, Some(EXTERNAL_DESCRIPTOR))
-				.descriptor(KeychainKind::Internal, Some(INTERNAL_DESCRIPTOR))
-				.extract_keys()
+				.descriptor(KeychainKind::External, Some(descriptor))
+				.descriptor(KeychainKind::Internal, Some(change_descriptor))
 				.check_network(Network::Regtest)
 				.load_wallet_async(&mut wallet_persister)
 				.await
 				.unwrap()
 				.unwrap()
 		} else {
-			BdkWallet::create(EXTERNAL_DESCRIPTOR, INTERNAL_DESCRIPTOR)
+			BdkWallet::create(descriptor, change_descriptor)
 				.network(Network::Regtest)
 				.create_wallet_async(&mut wallet_persister)
 				.await
@@ -4460,6 +4493,7 @@ mod tests {
 
 		Arc::new(Wallet::new(
 			bdk_wallet,
+			signers,
 			wallet_persister,
 			persisted_pool_indices,
 			broadcaster,
@@ -4491,6 +4525,132 @@ mod tests {
 			PaymentDirection::Outbound,
 			status,
 		)
+	}
+
+	#[tokio::test]
+	async fn sign_both_keychains_before_and_after_reload() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let secp_ctx = Secp256k1::new();
+
+		for reload in [false, true] {
+			if reload {
+				wallet = new_test_wallet(Arc::clone(&store), true).await;
+			}
+
+			let prevouts = {
+				let locked_wallet = wallet.inner.lock().unwrap();
+				[KeychainKind::External, KeychainKind::Internal].map(|keychain| TxOut {
+					value: Amount::from_sat(100_000),
+					script_pubkey: locked_wallet.peek_address(keychain, 0).address.script_pubkey(),
+				})
+			};
+			let unsigned_tx = Transaction {
+				version: bitcoin::transaction::Version::TWO,
+				lock_time: LockTime::ZERO,
+				input: (0..2)
+					.map(|vout| bitcoin::TxIn {
+						previous_output: OutPoint { txid: Txid::from_byte_array([42; 32]), vout },
+						..Default::default()
+					})
+					.collect(),
+				output: vec![TxOut {
+					value: Amount::from_sat(199_000),
+					script_pubkey: prevouts[0].script_pubkey.clone(),
+				}],
+			};
+			let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+			for (input, prevout) in psbt.inputs.iter_mut().zip(&prevouts) {
+				// LDK supplies witness UTXOs without the full previous transactions.
+				input.witness_utxo = Some(prevout.clone());
+			}
+
+			let tx = wallet.sign_psbt_inner(psbt).unwrap();
+			let mut sighash_cache = bitcoin::sighash::SighashCache::new(&tx);
+			for (index, (input, prevout)) in tx.input.iter().zip(&prevouts).enumerate() {
+				assert_eq!(input.witness.len(), 2, "both keychains must be finalized");
+				let signature = bitcoin::ecdsa::Signature::from_slice(&input.witness[0]).unwrap();
+				let public_key = bitcoin::PublicKey::from_slice(&input.witness[1]).unwrap();
+				assert_eq!(
+					ScriptBuf::new_p2wpkh(&public_key.wpubkey_hash().unwrap()),
+					prevout.script_pubkey
+				);
+				assert_eq!(signature.sighash_type, bitcoin::sighash::EcdsaSighashType::All);
+				assert!(input.witness[0].len() <= 71, "ECDSA signatures must use low R");
+				let sighash = sighash_cache
+					.p2wpkh_signature_hash(
+						index,
+						&prevout.script_pubkey,
+						prevout.value,
+						signature.sighash_type,
+					)
+					.unwrap();
+				secp_ctx
+					.verify_ecdsa(
+						&bitcoin::secp256k1::Message::from_digest(sighash.to_byte_array()),
+						&signature.signature,
+						&public_key.inner,
+					)
+					.unwrap();
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn sign_owned_inputs_requires_wallet_finalization() {
+		let (mut wallet, psbt) = mixed_input_psbt().await;
+		let tx = wallet.sign_owned_inputs(psbt.unsigned_tx.clone()).unwrap();
+		assert_eq!(tx.input[0].witness.len(), 2);
+		assert!(tx.input[1].witness.is_empty(), "foreign inputs may remain unsigned");
+
+		Arc::get_mut(&mut wallet).unwrap().signers = Default::default();
+		assert!(
+			wallet.sign_owned_inputs(psbt.unsigned_tx).is_err(),
+			"an unfinished wallet input must fail signing"
+		);
+	}
+
+	#[tokio::test]
+	async fn sign_psbt_requires_wallet_finalization() {
+		let (mut wallet, psbt) = mixed_input_psbt().await;
+		let tx = wallet.sign_psbt_inner(psbt.clone()).unwrap();
+		assert_eq!(tx.input[0].witness.len(), 2);
+		assert!(tx.input[1].witness.is_empty(), "foreign inputs may remain unsigned");
+
+		Arc::get_mut(&mut wallet).unwrap().signers = Default::default();
+		assert!(
+			wallet.sign_psbt_inner(psbt).is_err(),
+			"an unfinished wallet input must fail signing"
+		);
+	}
+
+	/// A PSBT spending one wallet output and one foreign output awaiting its owner's signature.
+	async fn mixed_input_psbt() -> (Arc<Wallet>, Psbt) {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let funding_tx = wallet_paying_tx(&wallet, 42);
+		insert_confirmed_tx(&wallet, funding_tx.clone(), 1);
+		let foreign_output =
+			TxOut { value: Amount::from_sat(90_000), script_pubkey: ScriptBuf::new().to_p2wsh() };
+		let unsigned_tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: [
+				OutPoint { txid: funding_tx.compute_txid(), vout: 0 },
+				OutPoint { txid: Txid::from_byte_array([43; 32]), vout: 0 },
+			]
+			.into_iter()
+			.map(|previous_output| bitcoin::TxIn { previous_output, ..Default::default() })
+			.collect(),
+			output: vec![TxOut {
+				value: Amount::from_sat(179_000),
+				script_pubkey: foreign_output.script_pubkey.clone(),
+			}],
+		};
+		let mut psbt = Psbt::from_unsigned_tx(unsigned_tx).unwrap();
+		psbt.inputs[0].witness_utxo = Some(funding_tx.output[0].clone());
+		psbt.inputs[1].witness_utxo = Some(foreign_output);
+		(wallet, psbt)
 	}
 
 	#[tokio::test]
@@ -7981,6 +8141,44 @@ mod tests {
 			.await
 			.unwrap()
 			.is_none());
+	}
+
+	#[tokio::test]
+	async fn max_funding_waits_for_truc_output_confirmation() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let change_script = wallet
+			.inner
+			.lock()
+			.unwrap()
+			.reveal_next_address(KeychainKind::Internal)
+			.address
+			.script_pubkey();
+		let fee_rate = FeeRate::from_sat_per_kwu(250);
+
+		// Both outputs are trusted change, but our v2 funding transactions can only spend
+		// the v2 output while the v3 (TRUC) parent remains unconfirmed.
+		let mut regular_tx = wallet_paying_tx(&wallet, 42);
+		regular_tx.output[0].script_pubkey = change_script.clone();
+		insert_unconfirmed_tx(&wallet, regular_tx);
+		let max_without_truc = wallet.get_max_funding_amount(0, fee_rate).unwrap();
+		assert!(max_without_truc > 0);
+
+		let mut truc_tx = wallet_paying_tx(&wallet, 43);
+		truc_tx.version = bitcoin::transaction::Version(3);
+		truc_tx.output[0].script_pubkey = change_script;
+		insert_unconfirmed_tx(&wallet, truc_tx.clone());
+		assert_eq!(
+			wallet.get_max_funding_amount(0, fee_rate).unwrap(),
+			max_without_truc,
+			"unconfirmed TRUC outputs must not increase the v2 funding amount"
+		);
+
+		insert_confirmed_tx(&wallet, truc_tx, 1);
+		assert!(
+			wallet.get_max_funding_amount(0, fee_rate).unwrap() > max_without_truc,
+			"confirmed TRUC outputs must become available for funding"
+		);
 	}
 
 	#[tokio::test]

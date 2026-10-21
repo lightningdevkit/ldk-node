@@ -102,7 +102,7 @@ lightning-dns-resolver = { git = "https://github.com/lightningdevkit/rust-lightn
 bdk_chain = { version = "0.23.3", default-features = false, features = ["std"] }
 bdk_esplora = { version = "0.22.2", default-features = false, features = ["async-https-rustls", "tokio"], optional = true }
 bdk_electrum = { version = "0.24.0", default-features = false, features = ["use-rustls-ring"], optional = true }
-bdk_wallet = { version = "3.1.0", default-features = false, features = ["std", "keys-bip39"]}
+bdk_wallet = { version = "3.2.0", default-features = false, features = ["std", "keys-bip39"]}
 
 bitreq = { version = "0.3", default-features = false, features = ["async-https", "json-using-serde"] }
 rustls = { version = "0.23", default-features = false }
@@ -119,7 +119,7 @@ tokio = { version = "1.39", default-features = false, features = [ "rt-multi-thr
 tokio-util = { version = "0.7.10", default-features = false, features = ["rt"] }
 esplora-client = { version = "0.12", default-features = false, features = ["tokio", "async-https-rustls"], optional = true }
 ldk-esplora-client = { package = "esplora-client", version = "0.13", default-features = false, features = ["tokio", "async-https-rustls"], optional = true }
-electrum-client = { version = "0.25", default-features = false, features = ["proxy", "use-rustls-ring"], optional = true }
+electrum-client = { version = "0.25.1", default-features = false, features = ["proxy", "use-rustls-ring"], optional = true }
 libc = "0.2"
 uniffi = { version = "0.29.5", features = ["build"], optional = true }
 serde = { version = "1.0.210", default-features = false, features = ["std", "derive"] }
