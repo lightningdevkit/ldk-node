@@ -119,12 +119,16 @@ impl<'a> PaginatedKVStore for dyn DynStoreTrait + 'a {
 
 pub(crate) type DynStore = dyn DynStoreTrait;
 
+/// A handle to the store a [`Node`] persists its state to, as returned by [`Node::kv_store`].
+///
+/// [`Node`]: crate::Node
+/// [`Node::kv_store`]: crate::Node::kv_store
 // Newtype wrapper that implements `KVStore` for `Arc<DynStore>`. This is needed because `KVStore`
 // methods return `impl Future`, which is not object-safe. `DynStoreTrait` works around this by
 // returning `Pin<Box<dyn Future>>` instead, and this wrapper bridges the two by delegating
 // `KVStore` methods to the corresponding `DynStoreTrait::*_async` methods.
 #[derive(Clone)]
-pub(crate) struct DynStoreRef(pub(crate) Arc<DynStore>);
+pub struct DynStoreRef(pub(crate) Arc<DynStore>);
 
 impl KVStore for DynStoreRef {
 	fn read(
