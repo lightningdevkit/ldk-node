@@ -44,6 +44,16 @@ use crate::PersistedNodeMetrics;
 
 const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
+/// The Electrum protocol version that introduced `blockchain.transaction.broadcast_package`.
+const BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION: (u32, u32) = (1, 6);
+
+/// Parses an Electrum protocol version string of the form `major.minor[.patch]`.
+fn parse_protocol_version(version: &str) -> Option<(u32, u32)> {
+	let mut parts = version.trim().split('.');
+	let major = parts.next()?.parse::<u32>().ok()?;
+	let minor = parts.next().map_or(Some(0), |s| s.parse::<u32>().ok())?;
+	Some((major, minor))
+}
 
 pub(super) struct ElectrumChainSource {
 	server_url: String,
@@ -333,28 +343,33 @@ impl ElectrumChainSource {
 			return Err(Error::ConnectionFailed);
 		};
 
-		// TODO: Use `protocol_version` API once shipped in
-		// https://github.com/bitcoindevkit/rust-electrum-client/pull/213.
+		// The `blockchain.transaction.broadcast_package` method was introduced in Electrum protocol
+		// v1.6, so we check the protocol version negotiated during connection setup.
 		//
 		// This could still accept an Electrum server running against Bitcoin Core v26
 		// through v28, which does not relay ephemeral dust.
 		let spawn_fut = electrum_client.runtime.spawn_blocking({
 			let electrum_client = Arc::clone(&electrum_client.electrum_client);
-			move || electrum_client.transaction_broadcast_package(&super::dummy_package())
+			move || electrum_client.protocol_version()
 		});
 		let timeout_fut = tokio::time::timeout(
-			Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
+			Duration::from_secs(self.sync_config.timeouts_config.per_request_timeout_secs as u64),
 			spawn_fut,
 		);
 
 		match timeout_fut.await {
-			Ok(Ok(Ok(_))) => Ok(()),
-			Ok(Ok(Err(
-				e @ (electrum_client::Error::Protocol(_)
-				| electrum_client::Error::AllAttemptsErrored(_)),
-			))) => {
-				log_error!(self.logger, "Electrum server does not support submitpackage: {:?}", e);
-				Err(Error::ChainSourceNotSupported)
+			Ok(Ok(Ok(version))) => match parse_protocol_version(&version) {
+				Some(v) if v >= BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION => Ok(()),
+				_ => {
+					log_error!(
+						self.logger,
+						"Electrum server does not support submitpackage: negotiated protocol version {} is below v{}.{}",
+						version,
+						BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION.0,
+						BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION.1,
+					);
+					Err(Error::ChainSourceNotSupported)
+				},
 			},
 			e => {
 				log_error!(
@@ -1052,5 +1067,18 @@ mod tests {
 		confirm.best_block_updated(&block.header, 0);
 		assert_eq!(blocking.calls.load(Ordering::Acquire), 1);
 		assert_eq!(trailing.calls.load(Ordering::Acquire), 1);
+	}
+
+	#[test]
+	fn protocol_version_parsing() {
+		assert_eq!(parse_protocol_version("1.6"), Some((1, 6)));
+		assert_eq!(parse_protocol_version("1.4.2"), Some((1, 4)));
+		assert_eq!(parse_protocol_version("2"), Some((2, 0)));
+		assert_eq!(parse_protocol_version("garbage"), None);
+		assert_eq!(parse_protocol_version("1.x"), None);
+
+		assert!(Some((1, 6)) >= Some(BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION));
+		assert!(Some((2, 0)) >= Some(BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION));
+		assert!(Some((1, 5)) < Some(BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION));
 	}
 }
