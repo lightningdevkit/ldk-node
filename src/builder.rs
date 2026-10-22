@@ -72,12 +72,10 @@ use crate::gossip::GossipSource;
 use crate::io::fs_store::open_or_migrate_fs_store;
 #[cfg(feature = "storage-sqlite")]
 use crate::io::sqlite_store::SqliteStore;
-#[cfg(feature = "storage-sqlite")]
-use crate::io::utils::create_dir_all_private;
 use crate::io::utils::{
-	read_all_objects, read_event_queue, read_external_pathfinding_scores_from_cache,
-	read_n_objects, read_network_graph, read_node_metrics, read_output_sweeper, read_peer_info,
-	read_scorer,
+	create_dir_all_private_checked, read_all_objects, read_event_queue,
+	read_external_pathfinding_scores_from_cache, read_n_objects, read_network_graph,
+	read_node_metrics, read_output_sweeper, read_peer_info, read_scorer,
 };
 #[cfg(feature = "storage-vss")]
 use crate::io::vss_store::VssStoreBuilder;
@@ -210,6 +208,9 @@ pub enum BuildError {
 	/// [`KVStore`]: lightning::util::persist::KVStore
 	WriteFailed,
 	/// We failed to access the given `storage_dir_path`.
+	///
+	/// This is also returned on Unix if the directory exists but is owned by another user (other
+	/// than `root`) or is writable by all users.
 	StoragePathAccessFailed,
 	/// We failed to setup our [`KVStore`].
 	///
@@ -711,8 +712,10 @@ impl NodeBuilder {
 	pub fn build(&self, node_entropy: NodeEntropy) -> Result<Node, BuildError> {
 		let logger = setup_logger(&self.log_writer_config, &self.config)?;
 		let storage_dir_path = self.config.storage_dir_path.clone();
-		create_dir_all_private(storage_dir_path.as_ref())
-			.map_err(|_| BuildError::StoragePathAccessFailed)?;
+		create_dir_all_private_checked(storage_dir_path.as_ref()).map_err(|e| {
+			log_error!(logger, "Failed to set up storage directory: {}", e);
+			BuildError::StoragePathAccessFailed
+		})?;
 		let kv_store = SqliteStore::new(
 			storage_dir_path.into(),
 			Some(io::sqlite_store::SQLITE_DB_FILE_NAME.to_string()),
@@ -2633,18 +2636,31 @@ fn optionally_install_rustls_cryptoprovider() {
 	});
 }
 
+/// Makes sure the default log directory, i.e., our storage directory, exists and is safe to use.
+fn setup_default_log_dir(config: &Config) -> Result<(), BuildError> {
+	create_dir_all_private_checked(config.storage_dir_path.as_ref()).map_err(|e| {
+		eprintln!("ERROR: Failed to set up storage directory: {}", e);
+		BuildError::StoragePathAccessFailed
+	})
+}
+
 /// Sets up the node logger.
 fn setup_logger(
 	log_writer_config: &Option<LogWriterConfig>, config: &Config,
 ) -> Result<Arc<Logger>, BuildError> {
 	let logger = match log_writer_config {
 		Some(LogWriterConfig::File { log_file_path, max_log_level }) => {
-			let log_file_path = log_file_path
-				.clone()
-				.unwrap_or_else(|| format!("{}/{}", config.storage_dir_path, DEFAULT_LOG_FILENAME));
+			// Only follow symlinks for log paths the user explicitly asked for.
+			let (log_file_path, follow_symlinks) = match log_file_path {
+				Some(log_file_path) => (log_file_path.clone(), true),
+				None => {
+					setup_default_log_dir(config)?;
+					(format!("{}/{}", config.storage_dir_path, DEFAULT_LOG_FILENAME), false)
+				},
+			};
 			let max_log_level = max_log_level.unwrap_or_else(|| DEFAULT_LOG_LEVEL);
 
-			Logger::new_fs_writer(log_file_path, max_log_level)
+			Logger::new_fs_writer(log_file_path, max_log_level, follow_symlinks)
 				.map_err(|_| BuildError::LoggerSetupFailed)?
 		},
 		Some(LogWriterConfig::Log) => Logger::new_log_facade(),
@@ -2654,9 +2670,10 @@ fn setup_logger(
 		},
 		None => {
 			// Default to use `FileWriter`
+			setup_default_log_dir(config)?;
 			let log_file_path = format!("{}/{}", config.storage_dir_path, DEFAULT_LOG_FILENAME);
 			let log_level = DEFAULT_LOG_LEVEL;
-			Logger::new_fs_writer(log_file_path, log_level)
+			Logger::new_fs_writer(log_file_path, log_level, false)
 				.map_err(|_| BuildError::LoggerSetupFailed)?
 		},
 	};
@@ -2709,6 +2726,26 @@ mod tests {
 	use crate::entropy::NodeEntropy;
 	use crate::io::test_utils::InMemoryStore;
 	use crate::logger::Logger;
+
+	#[cfg(all(unix, feature = "storage-sqlite"))]
+	#[test]
+	fn build_rejects_world_writable_storage_dir() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let storage_dir = crate::io::test_utils::random_storage_path();
+		std::fs::create_dir_all(&storage_dir).unwrap();
+		std::fs::set_permissions(&storage_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+		let mut builder = NodeBuilder::new();
+		builder.set_storage_dir_path(storage_dir.to_str().unwrap().to_string());
+		#[cfg(not(feature = "uniffi"))]
+		let node_entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let node_entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		assert!(matches!(builder.build(node_entropy), Err(BuildError::StoragePathAccessFailed)));
+
+		std::fs::remove_dir_all(storage_dir).unwrap();
+	}
 
 	struct ChannelManagerReadFailingStore(InMemoryStore);
 

@@ -27,6 +27,7 @@ use std::str::FromStr;
 fn main() {
 	let mut builder = Builder::new();
 	builder.set_network(Network::Testnet);
+	builder.set_storage_dir_path("/path/to/ldk_node_data".to_string());
 	builder.set_chain_source_esplora("https://blockstream.info/testnet/api".to_string(), None);
 	builder.set_gossip_source_rgs(
 		"https://rapidsync.lightningdevkit.org/testnet/v2/snapshot".to_string(),

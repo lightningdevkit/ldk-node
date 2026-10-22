@@ -277,6 +277,17 @@ impl Default for ForwardedPaymentTrackingMode {
 /// [`Node`]: crate::Node
 pub struct Config {
 	/// The path where the underlying LDK and BDK persist their data.
+	///
+	/// The default is located in `/tmp`, which is typically cleared on reboot and shared with other
+	/// local users. It is therefore only suitable for testing and **should always be set to a
+	/// dedicated, persistent directory in production**.
+	///
+	/// On Unix, building a [`Node`] fails with [`BuildError::StoragePathAccessFailed`] if the
+	/// directory already exists but is owned by a user other than the current user or `root`, or
+	/// if it is writable by all users.
+	///
+	/// [`Node`]: crate::Node
+	/// [`BuildError::StoragePathAccessFailed`]: crate::BuildError::StoragePathAccessFailed
 	pub storage_dir_path: String,
 	/// The used Bitcoin network.
 	pub network: Network,

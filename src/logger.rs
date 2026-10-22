@@ -26,11 +26,18 @@ use log::{Level as LogFacadeLevel, Record as LogFacadeRecord};
 
 use crate::io::utils::create_dir_all_private;
 
-fn open_log_file(file_path: &str) -> std::io::Result<fs::File> {
+fn open_log_file(file_path: &str, follow_symlinks: bool) -> std::io::Result<fs::File> {
 	let mut options = fs::OpenOptions::new();
 	options.create(true).append(true);
 	#[cfg(unix)]
-	options.mode(0o600);
+	{
+		options.mode(0o600);
+		if !follow_symlinks {
+			options.custom_flags(libc::O_NOFOLLOW);
+		}
+	}
+	#[cfg(not(unix))]
+	let _ = follow_symlinks;
 	options.open(file_path)
 }
 
@@ -189,7 +196,7 @@ pub trait LogWriter: Send + Sync {
 /// Defines a writer for [`Logger`].
 pub(crate) enum Writer {
 	/// Writes logs to the file system.
-	FileWriter { file_path: String, max_log_level: LogLevel },
+	FileWriter { file_path: String, max_log_level: LogLevel, follow_symlinks: bool },
 	/// Forwards logs to the `log` facade.
 	LogFacadeWriter,
 	/// Forwards logs to a custom writer.
@@ -205,7 +212,7 @@ impl LogWriter for Writer {
 		};
 
 		match self {
-			Writer::FileWriter { file_path, max_log_level } => {
+			Writer::FileWriter { file_path, max_log_level, follow_symlinks } => {
 				if record.level < *max_log_level {
 					return;
 				}
@@ -220,7 +227,7 @@ impl LogWriter for Writer {
 					context,
 				);
 
-				open_log_file(file_path)
+				open_log_file(file_path, *follow_symlinks)
 					.expect("Failed to open log file")
 					.write_all(log.as_bytes())
 					.expect("Failed to write to log file")
@@ -274,18 +281,25 @@ pub(crate) struct Logger {
 
 impl Logger {
 	/// Creates a new logger with a filesystem writer. The parameters to this function
-	/// are the path to the log file, and the log level.
-	pub fn new_fs_writer(file_path: String, max_log_level: LogLevel) -> Result<Self, ()> {
+	/// are the path to the log file, the log level, and whether a log file that is a symlink
+	/// should be followed.
+	///
+	/// Following symlinks should only be allowed for log paths that were explicitly configured by
+	/// the user, as otherwise somebody able to write to the log directory could redirect our log
+	/// output to an arbitrary file.
+	pub fn new_fs_writer(
+		file_path: String, max_log_level: LogLevel, follow_symlinks: bool,
+	) -> Result<Self, ()> {
 		if let Some(parent_dir) = Path::new(&file_path).parent() {
 			create_dir_all_private(parent_dir)
 				.map_err(|e| eprintln!("ERROR: Failed to create log parent directory: {}", e))?;
 
 			// make sure the file exists.
-			open_log_file(&file_path)
+			open_log_file(&file_path, follow_symlinks)
 				.map_err(|e| eprintln!("ERROR: Failed to open log file: {}", e))?;
 		}
 
-		Ok(Self { writer: Writer::FileWriter { file_path, max_log_level } })
+		Ok(Self { writer: Writer::FileWriter { file_path, max_log_level, follow_symlinks } })
 	}
 
 	pub fn new_log_facade() -> Self {
@@ -300,7 +314,7 @@ impl Logger {
 impl LdkLogger for Logger {
 	fn log(&self, record: LdkRecord) {
 		match &self.writer {
-			Writer::FileWriter { file_path: _, max_log_level } => {
+			Writer::FileWriter { file_path: _, max_log_level, .. } => {
 				if record.level < *max_log_level {
 					return;
 				}
@@ -332,10 +346,30 @@ mod tests {
 		let log_dir = random_storage_path();
 		let log_path = log_dir.join("ldk_node.log");
 		let _logger =
-			Logger::new_fs_writer(log_path.to_str().unwrap().to_string(), LogLevel::Info).unwrap();
+			Logger::new_fs_writer(log_path.to_str().unwrap().to_string(), LogLevel::Info, false)
+				.unwrap();
 
 		let mode = log_path.metadata().unwrap().permissions().mode();
 		assert_eq!(mode & 0o077, 0);
+		fs::remove_dir_all(log_dir).unwrap();
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn does_not_follow_symlinked_log_file() {
+		let log_dir = random_storage_path();
+		fs::create_dir_all(&log_dir).unwrap();
+		let target = log_dir.join("target.log");
+		fs::write(&target, b"").unwrap();
+		let log_path = log_dir.join("ldk_node.log");
+		std::os::unix::fs::symlink(&target, &log_path).unwrap();
+
+		let log_path_str = log_path.to_str().unwrap().to_string();
+		assert!(Logger::new_fs_writer(log_path_str.clone(), LogLevel::Info, false).is_err());
+		assert!(fs::read(&target).unwrap().is_empty());
+
+		// Explicitly configured log paths may be symlinks.
+		assert!(Logger::new_fs_writer(log_path_str, LogLevel::Info, true).is_ok());
 		fs::remove_dir_all(log_dir).unwrap();
 	}
 
