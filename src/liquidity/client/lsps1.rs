@@ -98,7 +98,7 @@ where
 		})?;
 
 		let lsp_limits = self.lsps1_request_opening_params(node_id).await?.supported_options;
-		let channel_size_sat = lsp_balance_sat + client_balance_sat;
+		let channel_size_sat = lsp_balance_sat.saturating_add(client_balance_sat);
 
 		if channel_size_sat < lsp_limits.min_channel_balance_sat
 			|| channel_size_sat > lsp_limits.max_channel_balance_sat
