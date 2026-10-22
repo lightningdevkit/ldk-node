@@ -63,6 +63,8 @@ use vss_client::headers::{
 	VssHeaderProviderError as VssClientHeaderProviderError,
 };
 
+use crate::time;
+
 /// Errors around providing headers for each VSS request.
 #[derive(Debug, uniffi::Error)]
 pub enum VssHeaderProviderError {
@@ -274,7 +276,7 @@ impl Offer {
 
 	/// Whether the offer has expired.
 	pub fn is_expired(&self) -> bool {
-		self.inner.is_expired()
+		time::duration_since_epoch().map_or(false, |now| self.inner.is_expired_no_std(now))
 	}
 
 	/// A complete description of the purpose of the payment.
@@ -501,7 +503,7 @@ impl Refund {
 
 	/// Whether the refund has expired.
 	pub fn is_expired(&self) -> bool {
-		self.inner.is_expired()
+		time::duration_since_epoch().map_or(false, |now| self.inner.is_expired_no_std(now))
 	}
 
 	/// The issuer of the refund, possibly beginning with `user@domain` or `domain`.
@@ -659,7 +661,7 @@ impl Bolt12Invoice {
 
 	/// Whether the invoice has expired.
 	pub fn is_expired(&self) -> bool {
-		self.inner.is_expired()
+		time::duration_since_epoch().map_or(false, |now| self.inner.is_expired_no_std(now))
 	}
 
 	/// A complete description of the purpose of the originating offer or refund.
@@ -1481,12 +1483,15 @@ impl Bolt11Invoice {
 
 	/// Returns the seconds remaining until the invoice expires.
 	pub fn seconds_until_expiry(&self) -> u64 {
-		self.inner.duration_until_expiry().as_secs()
+		time::duration_since_epoch()
+			.map(|now| self.inner.expiration_remaining_from_epoch(now))
+			.unwrap_or_default()
+			.as_secs()
 	}
 
 	/// Returns whether the invoice has expired.
 	pub fn is_expired(&self) -> bool {
-		self.inner.is_expired()
+		time::duration_since_epoch().map_or(false, |now| self.inner.would_expire(now))
 	}
 
 	/// Returns whether the expiry time would pass at the given point in time.
