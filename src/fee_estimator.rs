@@ -14,6 +14,14 @@ use lightning::chain::chaininterface::{
 	FEERATE_FLOOR_SATS_PER_KW,
 };
 
+/// The highest fee rate we are willing to use for any confirmation target, in sats per 1000 weight
+/// units (i.e., 2,000 sats/vB).
+///
+/// This is well above any fee rate seen in practice, but protects us from blindly following
+/// absurdly high estimates reported by a faulty or malicious chain source, which could otherwise
+/// have us burn (a large part of) our on-chain balance in fees.
+pub(crate) const MAX_FEERATE_SATS_PER_KW: u64 = 2_000 * 250;
+
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) enum ConfirmationTarget {
 	/// The default target for onchain payments.
@@ -70,8 +78,13 @@ impl FeeEstimator for OnchainFeeEstimator {
 		let estimate = *locked_fee_rate_cache.get(&confirmation_target).unwrap_or(&fallback_rate);
 
 		// Currently we assume every transaction needs to at least be relayable, which is why we
-		// enforce a lower bound of `FEERATE_FLOOR_SATS_PER_KW`.
-		FeeRate::from_sat_per_kwu(estimate.to_sat_per_kwu().max(FEERATE_FLOOR_SATS_PER_KW as u64))
+		// enforce a lower bound of `FEERATE_FLOOR_SATS_PER_KW`. Similarly, we never trust estimates
+		// above `MAX_FEERATE_SATS_PER_KW`, as they'd allow our chain source to make us burn funds.
+		FeeRate::from_sat_per_kwu(
+			estimate
+				.to_sat_per_kwu()
+				.clamp(FEERATE_FLOOR_SATS_PER_KW as u64, MAX_FEERATE_SATS_PER_KW),
+		)
 	}
 }
 
@@ -190,6 +203,56 @@ pub(crate) fn rbf_splice_feerates(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn estimates_are_bounded() {
+		let estimator = OnchainFeeEstimator::new();
+		let kwu = FeeRate::from_sat_per_kwu;
+		let targets = get_all_conf_targets();
+
+		// Absurdly high estimates (as might be reported by a malicious chain source) are capped.
+		for absurd_rate in [MAX_FEERATE_SATS_PER_KW + 1, 50_000 * 250, u64::MAX] {
+			let cache = targets.iter().map(|t| (*t, kwu(absurd_rate))).collect();
+			estimator.set_fee_rate_cache(cache);
+			for target in targets {
+				assert_eq!(
+					estimator.estimate_fee_rate(target),
+					kwu(MAX_FEERATE_SATS_PER_KW),
+					"{:?} not capped for {}",
+					target,
+					absurd_rate
+				);
+			}
+			for ldk_target in [
+				LdkConfirmationTarget::UrgentOnChainSweep,
+				LdkConfirmationTarget::MaximumFeeEstimate,
+			] {
+				assert_eq!(
+					estimator.get_est_sat_per_1000_weight(ldk_target),
+					MAX_FEERATE_SATS_PER_KW as u32
+				);
+			}
+		}
+
+		// Reasonable estimates are passed through, and too low estimates are floored.
+		let cache = targets
+			.iter()
+			.enumerate()
+			.map(|(i, t)| (*t, if i % 2 == 0 { kwu(MAX_FEERATE_SATS_PER_KW) } else { kwu(1) }))
+			.collect();
+		estimator.set_fee_rate_cache(cache);
+		for (i, target) in targets.iter().enumerate() {
+			let expected = if i % 2 == 0 {
+				kwu(MAX_FEERATE_SATS_PER_KW)
+			} else {
+				kwu(FEERATE_FLOOR_SATS_PER_KW as u64)
+			};
+			assert_eq!(estimator.estimate_fee_rate(*target), expected);
+		}
+		let cache = targets.iter().map(|t| (*t, kwu(5_000))).collect();
+		estimator.set_fee_rate_cache(cache);
+		assert_eq!(estimator.estimate_fee_rate(ConfirmationTarget::OnchainPayment), kwu(5_000));
+	}
 
 	#[test]
 	fn rbf_splice_feerates_target_and_max() {
