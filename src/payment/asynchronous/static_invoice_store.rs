@@ -33,6 +33,12 @@ impl_writeable_tlv_based!(PersistedStaticInvoice, {
 	(2, request_path, required)
 });
 
+#[derive(Debug)]
+pub(crate) enum StaticInvoiceStoreError {
+	RateLimited,
+	Io(lightning::io::Error),
+}
+
 pub(crate) struct StaticInvoiceStore {
 	kv_store: Arc<DynStore>,
 	request_rate_limiter: Mutex<RateLimiter>,
@@ -62,18 +68,28 @@ impl StaticInvoiceStore {
 
 	fn check_rate_limit(
 		limiter: &Mutex<RateLimiter>, recipient_id: &[u8],
-	) -> Result<(), lightning::io::Error> {
+	) -> Result<(), StaticInvoiceStoreError> {
 		let mut limiter = limiter.lock().expect("lock");
 		if !limiter.allow(recipient_id) {
-			Err(lightning::io::Error::new(lightning::io::ErrorKind::Other, "Rate limit exceeded"))
+			Err(StaticInvoiceStoreError::RateLimited)
 		} else {
 			Ok(())
 		}
 	}
 
+	fn refund_on_io_error(
+		limiter: &Mutex<RateLimiter>, recipient_id: &[u8], error: lightning::io::Error,
+	) -> StaticInvoiceStoreError {
+		// ChannelManager processes these events serially and replays a failed event before handling
+		// later events. Returning its token keeps retries admitted until storage recovers. If these
+		// operations are ever processed concurrently, admission must be tracked per request instead.
+		limiter.lock().expect("lock").refund(recipient_id);
+		StaticInvoiceStoreError::Io(error)
+	}
+
 	pub(crate) async fn handle_static_invoice_requested(
 		&self, recipient_id: &[u8], invoice_slot: u16,
-	) -> Result<Option<(StaticInvoice, BlindedMessagePath)>, lightning::io::Error> {
+	) -> Result<Option<(StaticInvoice, BlindedMessagePath)>, StaticInvoiceStoreError> {
 		Self::check_rate_limit(&self.request_rate_limiter, &recipient_id)?;
 
 		let (secondary_namespace, key) = Self::get_storage_location(invoice_slot, recipient_id);
@@ -97,21 +113,14 @@ impl StaticInvoiceStore {
 					)
 				})
 		})
-		.or_else(
-			|e| {
-				if e.kind() == lightning::io::ErrorKind::NotFound {
-					Ok(None)
-				} else {
-					Err(e)
-				}
-			},
-		)
+		.or_else(|e| if e.kind() == lightning::io::ErrorKind::NotFound { Ok(None) } else { Err(e) })
+		.map_err(|e| Self::refund_on_io_error(&self.request_rate_limiter, recipient_id, e))
 	}
 
 	pub(crate) async fn handle_persist_static_invoice(
 		&self, invoice: StaticInvoice, invoice_request_path: BlindedMessagePath, invoice_slot: u16,
 		recipient_id: Vec<u8>,
-	) -> Result<(), lightning::io::Error> {
+	) -> Result<(), StaticInvoiceStoreError> {
 		Self::check_rate_limit(&self.persist_rate_limiter, &recipient_id)?;
 
 		let (secondary_namespace, key) = Self::get_storage_location(invoice_slot, &recipient_id);
@@ -120,7 +129,9 @@ impl StaticInvoiceStore {
 			PersistedStaticInvoice { invoice, request_path: invoice_request_path };
 
 		let mut buf = Vec::new();
-		persisted_invoice.write(&mut buf)?;
+		persisted_invoice
+			.write(&mut buf)
+			.map_err(|e| Self::refund_on_io_error(&self.persist_rate_limiter, &recipient_id, e))?;
 
 		// Static invoices will be persisted at "static_invoices/<sha256(recipient_id)>/<invoice_slot>".
 		//
@@ -133,6 +144,7 @@ impl StaticInvoiceStore {
 			buf,
 		)
 		.await
+		.map_err(|e| Self::refund_on_io_error(&self.persist_rate_limiter, &recipient_id, e))
 	}
 
 	fn get_storage_location(invoice_slot: u16, recipient_id: &[u8]) -> (String, String) {
@@ -146,6 +158,8 @@ impl StaticInvoiceStore {
 
 #[cfg(test)]
 mod tests {
+	use std::future::Future;
+	use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 	use std::sync::Arc;
 	use std::time::Duration;
 
@@ -154,21 +168,334 @@ mod tests {
 	use lightning::blinded_path::message::BlindedMessagePath;
 	use lightning::blinded_path::payment::{BlindedPayInfo, BlindedPaymentPath};
 	use lightning::blinded_path::BlindedHop;
+	use lightning::events::Event;
+	use lightning::io;
+	use lightning::ln::channelmanager::PaymentId;
 	use lightning::ln::inbound_payment::ExpandedKey;
 	use lightning::offers::nonce::Nonce;
 	use lightning::offers::offer::OfferBuilder;
 	use lightning::offers::static_invoice::{StaticInvoice, StaticInvoiceBuilder};
+	use lightning::onion_message::async_payments::{
+		AsyncPaymentsMessage, AsyncPaymentsMessageHandler,
+	};
+	use lightning::onion_message::messenger::Responder;
+	use lightning::onion_message::offers::OffersMessageHandler;
 	use lightning::sign::EntropySource;
+	use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
+	use lightning::util::ser::{Readable, Writeable};
+	use lightning::util::wallet_utils::Wallet as LdkWallet;
 	use lightning_types::features::BlindedHopFeatures;
 
+	use crate::builder::NodeBuilder;
+	use crate::entropy::NodeEntropy;
+	use crate::event::EventHandler;
 	use crate::io::test_utils::InMemoryStore;
-	use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+	use crate::io::STATIC_INVOICE_STORE_PRIMARY_NAMESPACE;
+	use crate::logger::{LogRecord, LogWriter, Logger};
+	use crate::payment::asynchronous::rate_limiter::RateLimiter;
+	use crate::payment::asynchronous::static_invoice_store::{
+		StaticInvoiceStore, StaticInvoiceStoreError,
+	};
 	use crate::types::{DynStore, DynStoreWrapper};
+	use crate::{BumpTransactionEventHandler, Node};
+
+	#[derive(Default)]
+	struct TestLogWriter {
+		logged: AtomicBool,
+	}
+
+	impl LogWriter for TestLogWriter {
+		fn log(&self, _record: LogRecord) {
+			self.logged.store(true, Ordering::Relaxed);
+		}
+	}
+
+	struct FailingStore {
+		inner: InMemoryStore,
+		fail: Arc<AtomicBool>,
+		attempts: Arc<AtomicUsize>,
+	}
+
+	impl FailingStore {
+		fn check_failure(&self) -> Result<(), io::Error> {
+			self.attempts.fetch_add(1, Ordering::Relaxed);
+			if self.fail.load(Ordering::Relaxed) {
+				Err(io::Error::new(io::ErrorKind::Other, "injected storage failure"))
+			} else {
+				Ok(())
+			}
+		}
+	}
+
+	impl KVStore for FailingStore {
+		fn read(
+			&self, primary: &str, secondary: &str, key: &str,
+		) -> impl Future<Output = Result<Vec<u8>, io::Error>> + Send + 'static {
+			let result = self.check_failure().map(|()| self.inner.read(primary, secondary, key));
+			async move { result?.await }
+		}
+
+		fn write(
+			&self, primary: &str, secondary: &str, key: &str, buf: Vec<u8>,
+		) -> impl Future<Output = Result<(), io::Error>> + Send + 'static {
+			let result =
+				self.check_failure().map(|()| self.inner.write(primary, secondary, key, buf));
+			async move { result?.await }
+		}
+
+		fn remove(
+			&self, primary: &str, secondary: &str, key: &str, lazy: bool,
+		) -> impl Future<Output = Result<(), io::Error>> + Send + 'static {
+			self.inner.remove(primary, secondary, key, lazy)
+		}
+
+		fn list(
+			&self, primary: &str, secondary: &str,
+		) -> impl Future<Output = Result<Vec<String>, io::Error>> + Send + 'static {
+			self.inner.list(primary, secondary)
+		}
+	}
+
+	impl PaginatedKVStore for FailingStore {
+		fn list_paginated(
+			&self, primary: &str, secondary: &str, page_token: Option<PageToken>,
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + Send + 'static {
+			self.inner.list_paginated(primary, secondary, page_token)
+		}
+	}
+
+	fn event_handler(
+		store: StaticInvoiceStore,
+	) -> (Node, EventHandler<Arc<Logger>>, Arc<TestLogWriter>) {
+		let mut builder = NodeBuilder::new();
+		builder.set_log_facade_logger();
+		#[cfg(not(feature = "uniffi"))]
+		let entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		let node = builder.build_with_store(entropy, InMemoryStore::new()).unwrap();
+		let bump_handler = Arc::new(BumpTransactionEventHandler::new(
+			Arc::clone(&node.tx_broadcaster),
+			Arc::new(LdkWallet::new(Arc::clone(&node.wallet), Arc::clone(&node.logger))),
+			Arc::clone(&node.keys_manager),
+			Arc::clone(&node.logger),
+		));
+		let log_writer = Arc::new(TestLogWriter::default());
+		let handler = EventHandler::new(
+			Arc::clone(&node.event_queue),
+			Arc::clone(&node.wallet),
+			bump_handler,
+			Arc::clone(&node.channel_manager),
+			Arc::clone(&node.chain_monitor),
+			Arc::clone(&node.connection_manager),
+			Arc::clone(&node.output_sweeper),
+			Arc::clone(&node.network_graph),
+			Arc::clone(&node.liquidity_source),
+			Arc::clone(&node.payment_store),
+			Arc::clone(&node.forwarding_store),
+			Arc::clone(&node.peer_store),
+			Arc::clone(&node.keys_manager),
+			Some(store),
+			Arc::clone(&node.onion_messenger),
+			None,
+			None,
+			Arc::clone(&node.runtime),
+			Arc::new(Logger::new_custom_writer(log_writer.clone())),
+			Arc::clone(&node.config),
+			Arc::clone(&node.pending_funding_fee_rates),
+		);
+		(node, handler, log_writer)
+	}
+
+	async fn process_events(node: &Node, handler: &EventHandler<Arc<Logger>>) -> bool {
+		let handled_next_event = AtomicBool::new(false);
+		node.channel_manager
+			.process_pending_events_async(|event| async {
+				if matches!(event, Event::PaymentFailed { .. }) {
+					handled_next_event.store(true, Ordering::Relaxed);
+					Ok(())
+				} else {
+					handler.handle_event(event).await
+				}
+			})
+			.await;
+		handled_next_event.load(Ordering::Relaxed)
+	}
+
+	fn queue_events(node: &Node, event: Event) {
+		node.channel_manager.push_pending_event(event);
+		node.channel_manager.push_pending_event(Event::PaymentFailed {
+			payment_id: PaymentId([42; 32]),
+			payment_hash: None,
+			reason: None,
+		});
+	}
+
+	fn responder() -> Responder {
+		// Responder has no public constructor, so use its serialized representation.
+		struct ReplyPath {
+			path: BlindedMessagePath,
+		}
+		lightning::impl_writeable_tlv_based!(ReplyPath, { (0, path, required) });
+		let bytes = ReplyPath { path: blinded_path() }.encode();
+		Responder::read(&mut &bytes[..]).unwrap()
+	}
+
+	fn static_invoice_event(persist: bool) -> Event {
+		if persist {
+			Event::PersistStaticInvoice {
+				invoice: invoice(),
+				invoice_request_path: blinded_path(),
+				invoice_slot: 1,
+				recipient_id: vec![1, 1, 1],
+				invoice_persisted_path: responder(),
+			}
+		} else {
+			let invoice_request = OfferBuilder::new(recipient_pubkey())
+				.amount_msats(1_000)
+				.build()
+				.unwrap()
+				.request_invoice(
+					&ExpandedKey::new([42; 32]),
+					Nonce::from_entropy_source(&FixedEntropy {}),
+					&Secp256k1::new(),
+					PaymentId([42; 32]),
+				)
+				.unwrap()
+				.build_and_sign()
+				.unwrap();
+			Event::StaticInvoiceRequested {
+				recipient_id: vec![1, 1, 1],
+				invoice_slot: 0,
+				reply_path: responder(),
+				invoice_request,
+			}
+		}
+	}
+
+	async fn check_static_invoice_storage_retry(persist: bool) {
+		let fail = Arc::new(AtomicBool::new(false));
+		let attempts = Arc::new(AtomicUsize::new(0));
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore {
+			inner: InMemoryStore::new(),
+			fail: Arc::clone(&fail),
+			attempts: Arc::clone(&attempts),
+		}));
+		let mut store = StaticInvoiceStore::new(Arc::clone(&kv_store));
+		let stored_invoice = invoice();
+		store
+			.handle_persist_static_invoice(stored_invoice.clone(), blinded_path(), 0, vec![1, 1, 1])
+			.await
+			.unwrap();
+		// One admission and no refills during the test: retries must retain their quota.
+		for limiter in [&mut store.request_rate_limiter, &mut store.persist_rate_limiter] {
+			*limiter.get_mut().unwrap() =
+				RateLimiter::new(1, Duration::from_secs(3600), Duration::from_secs(7200));
+		}
+		let (node, handler, log_writer) = event_handler(store);
+		let event = static_invoice_event(persist);
+		let expected_invoice = match &event {
+			Event::PersistStaticInvoice { invoice, .. } => invoice.clone(),
+			_ => stored_invoice,
+		};
+		queue_events(&node, event);
+		fail.store(true, Ordering::Relaxed);
+		attempts.store(0, Ordering::Relaxed);
+		for attempt in 1..=3 {
+			assert!(
+				!process_events(&node, &handler).await,
+				"a storage failure must keep replaying the event, including attempt {attempt}"
+			);
+			assert_eq!(attempts.load(Ordering::Relaxed), attempt);
+			assert!(AsyncPaymentsMessageHandler::release_pending_messages(&*node.channel_manager)
+				.is_empty());
+			assert!(
+				OffersMessageHandler::release_pending_messages(&*node.channel_manager).is_empty()
+			);
+		}
+		assert!(log_writer.logged.load(Ordering::Relaxed));
+
+		fail.store(false, Ordering::Relaxed);
+		assert!(process_events(&node, &handler).await);
+		assert_eq!(attempts.load(Ordering::Relaxed), 4);
+		let messages =
+			AsyncPaymentsMessageHandler::release_pending_messages(&*node.channel_manager);
+		if persist {
+			assert_eq!(messages.len(), 1);
+			assert!(matches!(messages[0].0, AsyncPaymentsMessage::StaticInvoicePersisted(_)));
+		} else {
+			assert!(messages.is_empty());
+		}
+		OffersMessageHandler::release_pending_messages(&*node.channel_manager);
+
+		// Once the event succeeds, a new request must consume a new admission.
+		log_writer.logged.store(false, Ordering::Relaxed);
+		queue_events(&node, static_invoice_event(persist));
+		assert!(
+			process_events(&node, &handler).await,
+			"a rate-limited static invoice event must not delay the next event"
+		);
+		assert!(
+			!log_writer.logged.load(Ordering::Relaxed),
+			"a rate-limited static invoice event must not produce a log message"
+		);
+		assert_eq!(
+			attempts.load(Ordering::Relaxed),
+			4,
+			"a rate-limited request must not access storage"
+		);
+		assert!(AsyncPaymentsMessageHandler::release_pending_messages(&*node.channel_manager)
+			.is_empty());
+		assert!(OffersMessageHandler::release_pending_messages(&*node.channel_manager).is_empty());
+		let store = StaticInvoiceStore::new(kv_store);
+		let stored =
+			store.handle_static_invoice_requested(&[1, 1, 1], u16::from(persist)).await.unwrap();
+		assert_eq!(stored, Some((expected_invoice, blinded_path())));
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn static_invoice_persistence_retries_until_recovery() {
+		check_static_invoice_storage_retry(true).await;
+	}
+
+	#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+	async fn static_invoice_read_retries_until_recovery() {
+		check_static_invoice_storage_retry(false).await;
+	}
+
+	#[tokio::test]
+	async fn static_invoice_decode_error_retains_admission() {
+		let kv_store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let mut store = StaticInvoiceStore::new(Arc::clone(&kv_store));
+		*store.request_rate_limiter.get_mut().unwrap() =
+			RateLimiter::new(1, Duration::from_secs(3600), Duration::from_secs(7200));
+		let (namespace, key) = StaticInvoiceStore::get_storage_location(0, &[1, 1, 1]);
+		kv_store
+			.write(STATIC_INVOICE_STORE_PRIMARY_NAMESPACE, &namespace, &key, vec![0xff])
+			.await
+			.unwrap();
+		for _ in 0..3 {
+			assert!(
+				matches!(store.handle_static_invoice_requested(&[1, 1, 1], 0).await,
+					Err(StaticInvoiceStoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData),
+				"a decode error must not exhaust the request's admission"
+			);
+		}
+		let invoice = invoice();
+		store
+			.handle_persist_static_invoice(invoice.clone(), blinded_path(), 0, vec![1, 1, 1])
+			.await
+			.unwrap();
+		assert_eq!(
+			store.handle_static_invoice_requested(&[1, 1, 1], 0).await.unwrap(),
+			Some((invoice, blinded_path()))
+		);
+	}
 
 	#[tokio::test]
 	async fn static_invoice_store_test() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
-		let static_invoice_store = StaticInvoiceStore::new(Arc::clone(&store));
+		let mut static_invoice_store = StaticInvoiceStore::new(Arc::clone(&store));
 
 		let static_invoice = invoice();
 		let recipient_id = vec![1, 1, 1];
@@ -199,6 +526,27 @@ mod tests {
 			.await
 			.unwrap()
 			.is_none());
+
+		*static_invoice_store.request_rate_limiter.get_mut().unwrap() =
+			RateLimiter::new(1, Duration::from_secs(3600), Duration::from_secs(7200));
+		// Missing invoices consume quota too, and rejected requests must not refund it.
+		assert!(static_invoice_store
+			.handle_static_invoice_requested(&recipient_id, 1)
+			.await
+			.unwrap()
+			.is_none());
+		for _ in 0..2 {
+			assert!(matches!(
+				static_invoice_store.handle_static_invoice_requested(&recipient_id, 0).await,
+				Err(StaticInvoiceStoreError::RateLimited)
+			));
+		}
+		static_invoice_store.request_rate_limiter.get_mut().unwrap().advance_refill_interval();
+		assert!(static_invoice_store
+			.handle_static_invoice_requested(&recipient_id, 0)
+			.await
+			.unwrap()
+			.is_some());
 	}
 
 	fn invoice() -> StaticInvoice {
