@@ -193,7 +193,6 @@ pub use probing::ArcedProbingConfigBuilder as ProbingConfigBuilder;
 pub use probing::ProbingConfigError;
 use probing::{run_prober, Prober};
 use runtime::Runtime;
-pub use tokio;
 use types::{
 	Broadcaster, BumpTransactionEventHandler, ChainMonitor, ChannelManager, DynStore, Graph,
 	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
@@ -204,7 +203,7 @@ pub use types::{
 #[cfg(feature = "storage-vss")]
 pub use vss_client;
 
-use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY};
+use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY, LSPS1_SWEEP_EXPIRED_ORDERS_INTERVAL};
 use crate::ffi::{maybe_deref, maybe_map_fee_rate_opt, maybe_wrap, FfiFeeRate};
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
@@ -396,6 +395,47 @@ impl Node {
 			zero_fee_commitments_support_required,
 		))?;
 
+		// Spawn background task waiting for messages after each wallet sync, so
+		// can check for LSPS1 onchain payments and process them accordingly.
+		let (onchain_sync_tx, mut onchain_sync_rx) = tokio::sync::mpsc::channel::<()>(1);
+		let liquidity_source = self.liquidity_source.clone();
+		let wallet_clone = Arc::clone(&self.wallet);
+
+		self.runtime.spawn_background_task(async move {
+			while let Some(_) = onchain_sync_rx.recv().await {
+				liquidity_source
+					.lsps1_service()
+					.process_lsps1_onchain_payments(&wallet_clone)
+					.await;
+			}
+		});
+
+		// Spawn background task that runs every hour to sweep expired LSPS1
+		// orders from the store.
+		let lsps1_order_sweeper_liquidity_src = self.liquidity_source.clone();
+		let mut stop_lsps1_sweeper_rx = self.stop_sender.subscribe();
+		let lsps1_sweeper_logger = Arc::clone(&self.logger);
+
+		self.runtime.spawn_background_task(async move {
+			let mut interval = tokio::time::interval(LSPS1_SWEEP_EXPIRED_ORDERS_INTERVAL);
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+			loop {
+				tokio::select! {
+					_ = stop_lsps1_sweeper_rx.changed() => {
+						log_debug!(
+							lsps1_sweeper_logger,
+							"Stopping background sweeping of expired LSPS1 orders."
+						);
+						return;
+					}
+					_ = interval.tick() => {
+						lsps1_order_sweeper_liquidity_src.lsps1_service().sweep_expired_orders().await;
+					}
+				}
+			}
+		});
+
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
@@ -411,6 +451,7 @@ impl Node {
 					sync_cman,
 					sync_cmon,
 					sync_sweeper,
+					onchain_sync_tx,
 				)
 				.await;
 		});
@@ -2309,6 +2350,12 @@ impl Node {
 					)
 					.await?;
 			}
+
+			self.liquidity_source
+				.lsps1_service()
+				.process_lsps1_onchain_payments(&Arc::clone(&self.wallet))
+				.await;
+
 			let _ = sync_sweeper.regenerate_and_broadcast_spend_if_necessary().await;
 			Ok(())
 		})
