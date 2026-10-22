@@ -106,3 +106,11 @@ pub(crate) const BDK_WALLET_ADDRESS_POOL_KEY: &str = "address_pool";
 ///
 /// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
 pub(crate) const STATIC_INVOICE_STORE_PRIMARY_NAMESPACE: &str = "static_invoices";
+
+/// The payjoin sessions will be persisted under this key.
+pub(crate) const PAYJOIN_SESSION_STORE_PRIMARY_NAMESPACE: &str = "payjoin_sessions";
+pub(crate) const PAYJOIN_SESSION_STORE_SECONDARY_NAMESPACE: &str = "";
+
+/// The inputs seen in payjoin receive sessions will be persisted under this key.
+pub(crate) const PAYJOIN_SEEN_INPUTS_PRIMARY_NAMESPACE: &str = "payjoin_seen_inputs";
+pub(crate) const PAYJOIN_SEEN_INPUTS_SECONDARY_NAMESPACE: &str = "";
