@@ -205,6 +205,9 @@ impl Bolt12Payment {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				match e {
 					Bolt12SemanticError::DuplicatePaymentId => Err(Error::DuplicatePayment),
+					Bolt12SemanticError::InvalidQuantity
+					| Bolt12SemanticError::MissingQuantity
+					| Bolt12SemanticError::UnexpectedQuantity => Err(Error::InvalidQuantity),
 					_ => {
 						let kind = PaymentKind::Bolt12Offer {
 							hash: None,
@@ -321,6 +324,19 @@ impl Bolt12Payment {
 			},
 		};
 
+		let payment_amount_msat = match quantity {
+			Some(quantity) => offer_amount_msat.checked_mul(quantity).ok_or_else(|| {
+				log_error!(
+					self.logger,
+					"Failed to send payment as the total for {} items of {}msat overflows.",
+					quantity,
+					offer_amount_msat
+				);
+				Error::InvalidAmount
+			})?,
+			None => offer_amount_msat,
+		};
+
 		let params = OptionalOfferPaymentParams {
 			payer_note: payer_note.clone(),
 			retry_strategy,
@@ -339,7 +355,7 @@ impl Bolt12Payment {
 				log_info!(
 					self.logger,
 					"Initiated sending {}msat to {:?}",
-					offer_amount_msat,
+					payment_amount_msat,
 					payee_pubkey
 				);
 
@@ -354,7 +370,7 @@ impl Bolt12Payment {
 				let payment = PaymentDetails::new(
 					payment_id,
 					kind,
-					Some(offer_amount_msat),
+					Some(payment_amount_msat),
 					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
@@ -367,6 +383,9 @@ impl Bolt12Payment {
 				log_error!(self.logger, "Failed to send invoice request: {:?}", e);
 				match e {
 					Bolt12SemanticError::DuplicatePaymentId => Err(Error::DuplicatePayment),
+					Bolt12SemanticError::InvalidQuantity
+					| Bolt12SemanticError::MissingQuantity
+					| Bolt12SemanticError::UnexpectedQuantity => Err(Error::InvalidQuantity),
 					_ => {
 						let kind = PaymentKind::Bolt12Offer {
 							hash: None,
@@ -379,7 +398,7 @@ impl Bolt12Payment {
 						let payment = PaymentDetails::new(
 							payment_id,
 							kind,
-							Some(offer_amount_msat),
+							Some(payment_amount_msat),
 							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
