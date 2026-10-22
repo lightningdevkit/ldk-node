@@ -321,6 +321,13 @@ impl Bolt12Payment {
 			},
 		};
 
+		let payment_amount_msat = match quantity {
+			Some(quantity) => {
+				offer_amount_msat.checked_mul(quantity).ok_or(Error::InvalidAmount)?
+			},
+			None => offer_amount_msat,
+		};
+
 		let params = OptionalOfferPaymentParams {
 			payer_note: payer_note.clone(),
 			retry_strategy,
@@ -339,7 +346,7 @@ impl Bolt12Payment {
 				log_info!(
 					self.logger,
 					"Initiated sending {}msat to {:?}",
-					offer_amount_msat,
+					payment_amount_msat,
 					payee_pubkey
 				);
 
@@ -354,7 +361,7 @@ impl Bolt12Payment {
 				let payment = PaymentDetails::new(
 					payment_id,
 					kind,
-					Some(offer_amount_msat),
+					Some(payment_amount_msat),
 					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
@@ -379,7 +386,7 @@ impl Bolt12Payment {
 						let payment = PaymentDetails::new(
 							payment_id,
 							kind,
-							Some(offer_amount_msat),
+							Some(payment_amount_msat),
 							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,

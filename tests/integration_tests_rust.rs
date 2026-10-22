@@ -5122,6 +5122,66 @@ async fn simple_bolt12_send_receive() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn bolt12_send_with_quantity_records_total_amount() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	open_channel(&node_a, &node_b, 4_000_000, true, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	// Wait until node_b broadcasted a node announcement and node_a received it.
+	let has_node_announcement = |node: &ldk_node::Node, node_id: bitcoin::secp256k1::PublicKey| {
+		node.network_graph()
+			.node(&NodeId::from_pubkey(&node_id))
+			.map_or(false, |info| info.announcement_info.is_some())
+	};
+	while node_b.status().latest_node_announcement_broadcast_timestamp.is_none()
+		|| !has_node_announcement(&node_a, node_b.node_id())
+	{
+		tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+	}
+
+	// Paying for two items of a per-item offer must pay and record the total, not the unit price.
+	let unit_amount_msat = 100_000_000;
+	let quantity = 2;
+	let expected_amount_msat = unit_amount_msat * quantity;
+	let offer = node_b
+		.bolt12_payment()
+		.receive(unit_amount_msat, "multi-item", None, Some(quantity))
+		.unwrap();
+	let payment_id = node_a.bolt12_payment().send(&offer, Some(quantity), None, None).unwrap();
+
+	expect_payment_successful_event!(node_a, payment_id, None);
+	expect_payment_received_event!(node_b, expected_amount_msat);
+
+	let node_a_payment = node_a.payment(&payment_id).unwrap().unwrap();
+	assert_eq!(node_a_payment.amount_msat, Some(expected_amount_msat));
+	assert!(matches!(
+		node_a_payment.kind,
+		PaymentKind::Bolt12Offer { quantity: Some(q), .. } if q == quantity
+	));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn async_payment() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
