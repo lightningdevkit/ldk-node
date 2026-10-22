@@ -76,6 +76,9 @@ pub(crate) use in_memory_store::InMemoryStore;
 /// Shared timeout (in seconds) for waiting on LDK events and external node operations.
 pub(crate) const INTEROP_TIMEOUT_SECS: u64 = 60;
 
+/// How long `exponential_backoff_poll` keeps polling before it gives up.
+pub(crate) const POLL_TIMEOUT_SECS: u64 = 60;
+
 macro_rules! expect_event {
 	($node:expr, $event_type:ident) => {{
 		let event = tokio::time::timeout(
@@ -1008,8 +1011,11 @@ pub(crate) async fn exponential_backoff_poll<T, F>(mut poll: F) -> T
 where
 	F: FnMut() -> Option<T>,
 {
+	// Budgeted by time rather than by tries: a try count gave about nine seconds in all, which a
+	// busy CI runner exceeds just indexing a hundred freshly generated blocks. A condition that
+	// already holds returns at once either way.
+	let deadline = tokio::time::Instant::now() + Duration::from_secs(POLL_TIMEOUT_SECS);
 	let mut delay = Duration::from_millis(64);
-	let mut tries = 0;
 	loop {
 		match poll() {
 			Some(data) => break data,
@@ -1019,8 +1025,7 @@ where
 
 			None => {},
 		}
-		assert!(tries < 20, "Reached max tries.");
-		tries += 1;
+		assert!(tokio::time::Instant::now() < deadline, "Timed out after {}s.", POLL_TIMEOUT_SECS);
 		tokio::time::sleep(delay).await;
 	}
 }
@@ -2017,6 +2022,10 @@ impl PaginatedKVStore for TestSyncStore {
 
 struct TestSyncStoreInner {
 	serializer: tokio::sync::RwLock<()>,
+	// Carries every write and remove through to all stores. A caller may drop its future midway,
+	// as the node does with a cancellable background task when it stops, and the stores would
+	// otherwise end up disagreeing with each other.
+	mirror_runtime: Option<tokio::runtime::Runtime>,
 	test_store: InMemoryStore,
 	fs_store: FilesystemStore,
 	#[cfg(feature = "storage-sqlite")]
@@ -2041,8 +2050,15 @@ impl TestSyncStoreInner {
 		)
 		.unwrap();
 		let test_store = InMemoryStore::new();
+		let mirror_runtime = tokio::runtime::Builder::new_multi_thread()
+			.enable_all()
+			.worker_threads(1)
+			.thread_name("test-sync-store")
+			.build()
+			.unwrap();
 		Self {
 			serializer,
+			mirror_runtime: Some(mirror_runtime),
 			fs_store,
 			#[cfg(feature = "storage-sqlite")]
 			sqlite_store,
@@ -2162,6 +2178,20 @@ impl TestSyncStoreInner {
 	}
 
 	async fn write_internal_async(
+		self: &Arc<Self>, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		buf: Vec<u8>,
+	) -> lightning::io::Result<()> {
+		let inner = Arc::clone(self);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let write = self.mirror_runtime().spawn(async move {
+			inner.do_write_async(&primary_namespace, &secondary_namespace, &key, buf).await
+		});
+		write.await.unwrap_or_else(|e| resume_mirror_panic(e))
+	}
+
+	async fn do_write_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
 	) -> lightning::io::Result<()> {
 		let _guard = self.serializer.write().await;
@@ -2214,6 +2244,19 @@ impl TestSyncStoreInner {
 	}
 
 	async fn remove_internal_async(
+		self: &Arc<Self>, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+	) -> lightning::io::Result<()> {
+		let inner = Arc::clone(self);
+		let primary_namespace = primary_namespace.to_string();
+		let secondary_namespace = secondary_namespace.to_string();
+		let key = key.to_string();
+		let remove = self.mirror_runtime().spawn(async move {
+			inner.do_remove_async(&primary_namespace, &secondary_namespace, &key, lazy).await
+		});
+		remove.await.unwrap_or_else(|e| resume_mirror_panic(e))
+	}
+
+	async fn do_remove_async(
 		&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
 	) -> lightning::io::Result<()> {
 		let _guard = self.serializer.write().await;
@@ -2247,6 +2290,69 @@ impl TestSyncStoreInner {
 				assert!(test_res.is_err());
 				Err(e)
 			},
+		}
+	}
+}
+
+impl TestSyncStoreInner {
+	fn mirror_runtime(&self) -> &tokio::runtime::Handle {
+		self.mirror_runtime.as_ref().expect("the runtime lives as long as the store").handle()
+	}
+}
+
+impl Drop for TestSyncStoreInner {
+	fn drop(&mut self) {
+		// Dropping a runtime from within another runtime's context is not allowed; shutting it
+		// down in the background is.
+		if let Some(runtime) = self.mirror_runtime.take() {
+			runtime.shutdown_background();
+		}
+	}
+}
+
+/// The stores' consistency assertions run on the mirror runtime; a failed one must still fail
+/// the test that issued the operation.
+fn resume_mirror_panic<T>(e: tokio::task::JoinError) -> T {
+	match e.try_into_panic() {
+		Ok(payload) => std::panic::resume_unwind(payload),
+		Err(e) => panic!("the mirrored store operation did not finish: {}", e),
+	}
+}
+
+#[cfg(test)]
+mod test_sync_store_tests {
+	use super::*;
+
+	// When the node stops it drops the futures of its cancellable background tasks wherever they
+	// are suspended, which can be partway through a store operation. Every store must still see
+	// the operation, or the next read trips the consistency assertions.
+	#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+	async fn an_operation_whose_future_is_dropped_still_reaches_every_store() {
+		let store = TestSyncStore::new(random_storage_path());
+		let (ns, key, value) = ("ns", "key", vec![1, 2, 3]);
+
+		// Polls the write once and then drops it.
+		let write = KVStore::write(&store, ns, "", key, value.clone());
+		let _ = tokio::time::timeout(Duration::ZERO, write).await;
+		wait_until(|| async {
+			KVStore::read(&store, ns, "", key).await.ok() == Some(value.clone())
+		})
+		.await;
+
+		let remove = KVStore::remove(&store, ns, "", key, false);
+		let _ = tokio::time::timeout(Duration::ZERO, remove).await;
+		wait_until(|| async { KVStore::read(&store, ns, "", key).await.is_err() }).await;
+	}
+
+	async fn wait_until<F, Fut>(mut condition: F)
+	where
+		F: FnMut() -> Fut,
+		Fut: Future<Output = bool>,
+	{
+		let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+		while !condition().await {
+			assert!(tokio::time::Instant::now() < deadline, "the store operation never landed");
+			tokio::time::sleep(Duration::from_millis(10)).await;
 		}
 	}
 }

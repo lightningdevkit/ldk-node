@@ -48,7 +48,24 @@ jobs:
           CLN_DATA_DIR: ${{ env.CLN_DATA_DIR }}
 
       - name: Run CLN integration tests
-        run: CLN_SOCKET_PATH=$CLN_DATA_DIR/regtest/lightning-rpc
-          RUSTFLAGS="--cfg cln_test" cargo test --test integration_tests_cln -- --show-output --test-threads=1
+        run: |
+          mkdir -p "$RUNNER_TEMP/ldk-node-storage"
+          TMPDIR="$RUNNER_TEMP/ldk-node-storage" CLN_SOCKET_PATH=$CLN_DATA_DIR/regtest/lightning-rpc RUSTFLAGS="--cfg cln_test" cargo test --test integration_tests_cln -- --show-output --test-threads=1
         env:
           CLN_DATA_DIR: ${{ env.CLN_DATA_DIR }}
+
+      - name: Collect service logs
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/ldk-node-storage"
+          docker compose -p ldk-node -f tests/docker/docker-compose-cln.yml logs --no-color --timestamps electrs > "$RUNNER_TEMP/ldk-node-storage/electrs.log" || true
+          docker compose -p ldk-node -f tests/docker/docker-compose-cln.yml logs --no-color --timestamps cln > "$RUNNER_TEMP/ldk-node-storage/cln.log" || true
+
+      - name: Upload LDK node storage and service logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cln-ldk-node-storage
+          path: ${{ runner.temp }}/ldk-node-storage
+          if-no-files-found: ignore
+          retention-days: 14
