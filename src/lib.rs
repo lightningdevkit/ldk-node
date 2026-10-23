@@ -1390,34 +1390,51 @@ impl Node {
 			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		let new_channel_reserve = self.new_channel_anchor_reserve_sats(&peer_info.node_id)?;
+		let total_anchor_reserve_sats = cur_anchor_reserve_sats.saturating_add(new_channel_reserve);
+
+		let funding_fee_rate = fee_rate.unwrap_or_else(|| {
+			self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+		});
+
 		let channel_amount_sats = match channel_amount_sats {
 			FundingAmount::Exact { amount_sats } => {
 				// Check funds availability after connection (includes anchor reserve
 				// calculation).
 				self.check_sufficient_onchain_funds(amount_sats, &peer_info.node_id, true)?;
+
+				// The funding transaction's fee is paid from the same on-chain funds, so we can't
+				// fund more than we would when opening the channel with all of them.
+				let max_amount = self
+					.wallet
+					.get_max_funding_amount(total_anchor_reserve_sats, funding_fee_rate)?;
+				if amount_sats > max_amount {
+					log_error!(
+						self.logger,
+						"Unable to create channel due to insufficient funds. Requested: {}sats, Maximum: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
+						amount_sats,
+						max_amount,
+						funding_fee_rate.to_sat_per_kwu(),
+						total_anchor_reserve_sats,
+					);
+					return Err(Error::InsufficientFunds);
+				}
+
 				amount_sats
 			},
 			FundingAmount::Max => {
 				// Determine max funding amount from all available on-chain funds.
-				let cur_anchor_reserve_sats =
-					total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-				let new_channel_reserve =
-					self.new_channel_anchor_reserve_sats(&peer_info.node_id)?;
-				let total_anchor_reserve_sats =
-					cur_anchor_reserve_sats.saturating_add(new_channel_reserve);
-
-				let fee_rate = fee_rate.unwrap_or_else(|| {
-					self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
-				});
-
-				let amount =
-					self.wallet.get_max_funding_amount(total_anchor_reserve_sats, fee_rate)?;
+				let amount = self
+					.wallet
+					.get_max_funding_amount(total_anchor_reserve_sats, funding_fee_rate)?;
 
 				log_info!(
 					self.logger,
 					"Opening channel with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
 					amount,
-					fee_rate.to_sat_per_kwu(),
+					funding_fee_rate.to_sat_per_kwu(),
 					total_anchor_reserve_sats,
 				);
 
@@ -1560,7 +1577,9 @@ impl Node {
 	/// opening the channel.
 	///
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
-	/// retrieve a reasonable estimate from the configured chain source.
+	/// retrieve a reasonable estimate from the configured chain source. As the funding
+	/// transaction's fee is paid from the same on-chain funds, `channel_amount_sats` can be at most
+	/// what [`Node::open_channel_with_all`] would fund at that fee rate.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
@@ -1606,7 +1625,9 @@ impl Node {
 	/// opening the channel.
 	///
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
-	/// retrieve a reasonable estimate from the configured chain source.
+	/// retrieve a reasonable estimate from the configured chain source. As the funding
+	/// transaction's fee is paid from the same on-chain funds, `channel_amount_sats` can be at most
+	/// what [`Node::open_announced_channel_with_all`] would fund at that fee rate.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
@@ -1740,7 +1761,9 @@ impl Node {
 	/// opening the channel.
 	///
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
-	/// retrieve a reasonable estimate from the configured chain source.
+	/// retrieve a reasonable estimate from the configured chain source. As the funding
+	/// transaction's fee is paid from the same on-chain funds, `channel_amount_sats` can be at most
+	/// what [`Node::open_0reserve_channel_with_all`] would fund at that fee rate.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
