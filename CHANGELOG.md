@@ -93,6 +93,8 @@
   what the corresponding `_with_all` variant would fund at the same fee rate. Previously, a high
   fee rate could spend part of the anchor reserve, or the funding transaction could fail to be
   built after the channel had already been negotiated.
+- When acting as an LSPS2 service, we likewise account for the funding transaction's fee when
+  checking that a JIT channel can be opened while retaining the anchor reserve.
 
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.

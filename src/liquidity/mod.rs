@@ -31,6 +31,7 @@ use tokio::sync::oneshot;
 
 use crate::builder::BuildError;
 use crate::connection::ConnectionManager;
+use crate::fee_estimator::OnchainFeeEstimator;
 use crate::liquidity::client::lsps1::LSPS1Client;
 use crate::liquidity::client::lsps2::LSPS2Client;
 use crate::liquidity::service::lsps2::{LSPS2Service, LSPS2ServiceLiquiditySource};
@@ -251,6 +252,7 @@ where
 	channel_manager: Arc<ChannelManager>,
 	keys_manager: Arc<KeysManager>,
 	tx_broadcaster: Arc<Broadcaster>,
+	fee_estimator: Arc<OnchainFeeEstimator>,
 	kv_store: Arc<DynStore>,
 	config: Arc<Config>,
 	logger: L,
@@ -262,7 +264,8 @@ where
 {
 	pub(crate) fn new(
 		wallet: Arc<Wallet>, channel_manager: Arc<ChannelManager>, keys_manager: Arc<KeysManager>,
-		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>, logger: L,
+		tx_broadcaster: Arc<Broadcaster>, fee_estimator: Arc<OnchainFeeEstimator>,
+		kv_store: Arc<DynStore>, config: Arc<Config>, logger: L,
 	) -> Self {
 		let lsp_nodes = Vec::new();
 		let lsps2_service = None;
@@ -273,6 +276,7 @@ where
 			channel_manager,
 			keys_manager,
 			tx_broadcaster,
+			fee_estimator,
 			kv_store,
 			config,
 			logger,
@@ -367,6 +371,7 @@ where
 			lsps2_service: Arc::new(LSPS2ServiceLiquiditySource {
 				lsps2_service: self.lsps2_service,
 				wallet: self.wallet,
+				fee_estimator: self.fee_estimator,
 				channel_manager: self.channel_manager,
 				peer_manager: RwLock::new(None),
 				keys_manager: self.keys_manager,
