@@ -630,6 +630,11 @@ where
 	}
 
 	fn remove_peer_after_reconnect(&self, peer_info: PeerInfo, closed_channel_id: ChannelId) {
+		if self.config.disable_lightning_connections {
+			// Retain the peer for recovery when Lightning connections are enabled again.
+			return;
+		}
+
 		let channel_manager = Arc::clone(&self.channel_manager);
 		let connection_manager = Arc::clone(&self.connection_manager);
 		let peer_store = Arc::clone(&self.peer_store);

@@ -560,41 +560,48 @@ impl Node {
 			}
 		}
 
-		// Regularly reconnect to persisted peers.
-		let connect_cm = Arc::clone(&self.connection_manager);
-		let connect_pm = Arc::clone(&self.peer_manager);
-		let connect_logger = Arc::clone(&self.logger);
-		let connect_peer_store = Arc::clone(&self.peer_store);
-		let mut stop_connect = self.stop_sender.subscribe();
-		self.runtime.spawn_cancellable_background_task(async move {
-			let mut interval = tokio::time::interval(PEER_RECONNECTION_INTERVAL);
-			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-			loop {
-				tokio::select! {
-						_ = stop_connect.changed() => {
-							log_debug!(
-								connect_logger,
-								"Stopping reconnecting known peers."
-							);
-							return;
-						}
-						_ = interval.tick() => {
-							let pm_peers = connect_pm
-								.list_peers()
-								.iter()
-								.map(|peer| peer.counterparty_node_id)
-								.collect::<Vec<_>>();
-
-							for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
-								let _ = connect_cm.do_connect_peer(
-									peer_info.node_id,
-									peer_info.address.clone(),
-									).await;
+		if !self.config.disable_lightning_connections {
+			// Regularly reconnect to persisted peers.
+			let connect_cm = Arc::clone(&self.connection_manager);
+			let connect_pm = Arc::clone(&self.peer_manager);
+			let connect_logger = Arc::clone(&self.logger);
+			let connect_peer_store = Arc::clone(&self.peer_store);
+			let mut stop_connect = self.stop_sender.subscribe();
+			self.runtime.spawn_cancellable_background_task(async move {
+				let mut interval = tokio::time::interval(PEER_RECONNECTION_INTERVAL);
+				interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+				loop {
+					tokio::select! {
+							_ = stop_connect.changed() => {
+								log_debug!(
+									connect_logger,
+									"Stopping reconnecting known peers."
+								);
+								return;
 							}
-						}
+							_ = interval.tick() => {
+								let pm_peers = connect_pm
+									.list_peers()
+									.iter()
+									.map(|peer| peer.counterparty_node_id)
+									.collect::<Vec<_>>();
+
+								for peer_info in connect_peer_store.list_peers().iter().filter(|info| !pm_peers.contains(&info.node_id)) {
+									let _ = connect_cm.do_connect_peer(
+										peer_info.node_id,
+										peer_info.address.clone(),
+										).await;
+								}
+							}
+					}
 				}
-			}
-		});
+			});
+		} else {
+			log_info!(
+				self.logger,
+				"Lightning peer networking is disabled for both inbound and outbound connections."
+			);
+		}
 
 		// Regularly broadcast node announcements.
 		let bcast_cm = Arc::clone(&self.channel_manager);
@@ -809,17 +816,20 @@ impl Node {
 		let liquidity_handler = Arc::clone(&self.liquidity_source);
 		let liquidity_logger = Arc::clone(&self.logger);
 		let discovery_cm = Arc::clone(&self.connection_manager);
+		let disable_lightning_connections = self.config.disable_lightning_connections;
 		self.runtime.spawn_background_task(async move {
 			// Spawn discovery for configured LSPs in parallel.
 			let discovery_logger = Arc::clone(&liquidity_logger);
 			let mut discovery_set = tokio::task::JoinSet::new();
-			for (node_id, address) in liquidity_handler.get_all_lsp_details() {
-				let cm = Arc::clone(&discovery_cm);
-				let logger = Arc::clone(&discovery_logger);
-				let ls = Arc::clone(&liquidity_handler);
-				discovery_set.spawn(async move {
-					connect_and_discover_lsp(&cm, &ls, &logger, node_id, address).await;
-				});
+			if !disable_lightning_connections {
+				for (node_id, address) in liquidity_handler.get_all_lsp_details() {
+					let cm = Arc::clone(&discovery_cm);
+					let logger = Arc::clone(&discovery_logger);
+					let ls = Arc::clone(&liquidity_handler);
+					discovery_set.spawn(async move {
+						connect_and_discover_lsp(&cm, &ls, &logger, node_id, address).await;
+					});
+				}
 			}
 
 			let mut discovery_done = false;
@@ -848,38 +858,40 @@ impl Node {
 			}
 		});
 
-		// Retry protocol discovery for any LSPs that failed the startup batch, backing off up to a
-		// cap and then retrying at that cap until every configured LSP has been discovered.
-		let mut stop_retry = self.stop_sender.subscribe();
-		let retry_ls = Arc::clone(&self.liquidity_source);
-		let retry_logger = Arc::clone(&self.logger);
-		let retry_cm = Arc::clone(&self.connection_manager);
-		self.runtime.spawn_cancellable_background_task(async move {
-			let mut backoff = LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY;
-			loop {
-				tokio::select! {
-						_ = stop_retry.changed() => return,
-						_ = tokio::time::sleep(backoff) => {},
-				}
+		if !self.config.disable_lightning_connections {
+			// Retry protocol discovery for any LSPs that failed the startup batch, backing off up to a
+			// cap and then retrying at that cap until every configured LSP has been discovered.
+			let mut stop_retry = self.stop_sender.subscribe();
+			let retry_ls = Arc::clone(&self.liquidity_source);
+			let retry_logger = Arc::clone(&self.logger);
+			let retry_cm = Arc::clone(&self.connection_manager);
+			self.runtime.spawn_cancellable_background_task(async move {
+				let mut backoff = LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY;
+				loop {
+					tokio::select! {
+							_ = stop_retry.changed() => return,
+							_ = tokio::time::sleep(backoff) => {},
+					}
 
-				let undiscovered_lsps = retry_ls.get_undiscovered_lsps();
-				if undiscovered_lsps.is_empty() {
-					break;
-				}
+					let undiscovered_lsps = retry_ls.get_undiscovered_lsps();
+					if undiscovered_lsps.is_empty() {
+						break;
+					}
 
-				let mut discovery_set = tokio::task::JoinSet::new();
-				for (node_id, address) in undiscovered_lsps {
-					let cm = Arc::clone(&retry_cm);
-					let ls = Arc::clone(&retry_ls);
-					let logger = Arc::clone(&retry_logger);
-					discovery_set.spawn(async move {
-						connect_and_discover_lsp(&cm, &ls, &logger, node_id, address).await;
-					});
+					let mut discovery_set = tokio::task::JoinSet::new();
+					for (node_id, address) in undiscovered_lsps {
+						let cm = Arc::clone(&retry_cm);
+						let ls = Arc::clone(&retry_ls);
+						let logger = Arc::clone(&retry_logger);
+						discovery_set.spawn(async move {
+							connect_and_discover_lsp(&cm, &ls, &logger, node_id, address).await;
+						});
+					}
+					discovery_set.join_all().await;
+					backoff = (backoff * 2).min(LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY);
 				}
-				discovery_set.join_all().await;
-				backoff = (backoff * 2).min(LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY);
-			}
-		});
+			});
+		}
 
 		log_info!(self.logger, "Startup complete.");
 		*is_running_lock = true;
@@ -1322,6 +1334,8 @@ impl Node {
 	/// Connect to a node on the peer-to-peer network.
 	///
 	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
+	/// Outbound connection attempts fail with [`Error::ConnectionFailed`] if
+	/// [`Config::disable_lightning_connections`] is set to `true`.
 	pub fn connect(
 		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
