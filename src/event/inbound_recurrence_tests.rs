@@ -552,3 +552,88 @@ fn inbound_recurrence_concurrent_reservations() {
 		assert!(handler.payment_store.get(&b).await.unwrap().is_none());
 	});
 }
+
+/// Cancellation of an existing idle relationship must persist before later acceptance is blocked.
+/// Unknown relationships and failed writes must be replayed rather than inventing durable state.
+#[test]
+fn inbound_recurrence_cancel_before_acceptance() {
+	let store = TestStore::new();
+	let node = test_node(&store);
+	let handler = test_handler(&node);
+	node.runtime.block_on(async {
+		let ctx = context(0, None, false);
+		let cancellation = LdkEvent::RecurringOfferCancelled {
+			offer_id: ctx.offer_id,
+			payer_signing_pubkey: ctx.invoice_request.payer_signing_pubkey,
+		};
+		assert!(handler.handle_event(cancellation.clone()).await.is_err());
+		assert!(handler.inbound_recurrence_store.list_filter(|_| true).await.is_empty());
+
+		// Cancellation requires a known relationship, but no pending claim is needed.
+		let (initial, _) = InboundRecurrenceDetails::from_payment_context(&ctx).unwrap();
+		handler.inbound_recurrence_store.insert(initial.clone()).await.unwrap();
+		store.control.lock().unwrap().fail_namespace = Some(INBOUND_RECURRENCE_PRIMARY_NAMESPACE);
+		assert!(handler.handle_event(cancellation.clone()).await.is_err());
+		assert_eq!(details(&handler, &ctx).await, initial);
+		store.control.lock().unwrap().fail_namespace = None;
+		handler.handle_event(cancellation.clone()).await.unwrap();
+		let cancelled = details(&handler, &ctx).await;
+		assert_eq!(
+			cancelled,
+			InboundRecurrenceDetails { status: RecurrenceStatus::Cancelled, ..initial }
+		);
+		handler.handle_event(cancellation).await.unwrap();
+		handler.handle_event(claimable(ctx.clone(), PaymentId([1; 32]))).await.unwrap();
+		assert_eq!(details(&handler, &ctx).await, cancelled);
+		assert!(handler.payment_store.get(&PaymentId([1; 32])).await.unwrap().is_none());
+		assert!(handler.event_queue.next_event().is_none());
+	});
+}
+
+/// A reservation accepted before cancellation may finish, but success must not reactivate it.
+/// Repeated cancellation and old payment notifications must preserve paid history and identity.
+#[test]
+fn inbound_recurrence_cancel_after_reservation() {
+	let store = TestStore::new();
+	let node = test_node(&store);
+	let handler = test_handler(&node);
+	node.runtime.block_on(async {
+		let ctx = context(0, None, false);
+		let a = PaymentId([1; 32]);
+		let b = PaymentId([2; 32]);
+		handler.handle_event(claimable(ctx.clone(), a)).await.unwrap();
+		let reserved = details(&handler, &ctx).await;
+		let accepted_payment = handler.payment_store.get(&a).await.unwrap().unwrap();
+		let cancellation = LdkEvent::RecurringOfferCancelled {
+			offer_id: ctx.offer_id,
+			payer_signing_pubkey: ctx.invoice_request.payer_signing_pubkey,
+		};
+		handler.handle_event(cancellation.clone()).await.unwrap();
+		let cancelled = details(&handler, &ctx).await;
+		assert_eq!(cancelled, InboundRecurrenceDetails {
+			status: RecurrenceStatus::Cancelled, ..reserved
+		});
+		handler.handle_event(cancellation).await.unwrap();
+		handler.handle_event(claimable(ctx.clone(), a)).await.unwrap();
+		assert_eq!(details(&handler, &ctx).await, cancelled);
+		assert_eq!(handler.payment_store.get(&a).await.unwrap(), Some(accepted_payment));
+
+		handler.handle_event(claimed(ctx.clone(), a)).await.unwrap();
+		let finished = details(&handler, &ctx).await;
+		assert_eq!(finished.status, RecurrenceStatus::Cancelled);
+		assert_eq!(finished.completed_payments, vec![a]);
+		assert_eq!(finished.claim_status, InboundRecurrenceClaimStatus::Idle);
+		assert_eq!(handler.payment_store.get(&a).await.unwrap().unwrap().status, PaymentStatus::Succeeded);
+		assert!(matches!(handler.event_queue.next_event(), Some(Event::PaymentReceived { payment_id, .. }) if payment_id == a));
+		handler.event_queue.event_handled().await.unwrap();
+
+		// Success releases A's reservation, but must not let B start the following period.
+		handler.handle_event(claimable(context(1, None, false), b)).await.unwrap();
+		assert!(handler.payment_store.get(&b).await.unwrap().is_none());
+		assert!(handler.event_queue.next_event().is_none());
+		handler.handle_event(claimable(ctx.clone(), a)).await.unwrap();
+		handler.handle_event(claimed(ctx.clone(), a)).await.unwrap();
+		assert_eq!(details(&handler, &ctx).await, finished);
+		assert_eq!(handler.payment_store.get(&a).await.unwrap().unwrap().status, PaymentStatus::Succeeded);
+	});
+}
