@@ -42,7 +42,7 @@ use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 use lightning_types::string::UntrustedString;
 
-use crate::channel::SpliceTracker;
+use crate::channel::{OpenChannelTracker, SpliceTracker};
 use crate::config::{may_announce_channel, Config, PEER_RECONNECTION_INTERVAL};
 use crate::connection::ConnectionManager;
 use crate::data_store::{DataStoreUpdateResult, UpdatableObject};
@@ -70,7 +70,9 @@ use crate::types::{
 	ChainMonitor, CustomTlvRecord, DynStore, KeysManager, OnionMessenger, PaymentStore, Sweeper,
 	Wallet,
 };
-use crate::wallet::provenance::{ChannelOutputRole, ChannelTxFacts, FactsRecordOutcome};
+use crate::wallet::provenance::{
+	ChannelOutputRole, ChannelTxFacts, FactsRecordOutcome, LocalFundingFigures,
+};
 use crate::wallet::{
 	closed_channel_tracked_rounds, funding_candidates, tracked_splice_rounds, SignedFundingRecord,
 };
@@ -761,6 +763,7 @@ where
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	prober: Option<Arc<Prober>>,
 	splice_tracker: Arc<SpliceTracker>,
+	open_channel_tracker: Arc<OpenChannelTracker>,
 	runtime: Arc<Runtime>,
 	logger: L,
 	config: Arc<Config>,
@@ -781,7 +784,8 @@ where
 		peer_store: Arc<PeerStore<L>>, keys_manager: Arc<KeysManager>,
 		static_invoice_store: Option<StaticInvoiceStore>, onion_messenger: Arc<OnionMessenger>,
 		om_mailbox: Option<Arc<OnionMessageMailbox>>, prober: Option<Arc<Prober>>,
-		splice_tracker: Arc<SpliceTracker>, runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
+		splice_tracker: Arc<SpliceTracker>, open_channel_tracker: Arc<OpenChannelTracker>,
+		runtime: Arc<Runtime>, logger: L, config: Arc<Config>,
 		pending_funding_fee_rates: Arc<Mutex<HashMap<u128, FeeRate>>>,
 	) -> Self {
 		Self {
@@ -803,6 +807,7 @@ where
 			om_mailbox,
 			prober,
 			splice_tracker,
+			open_channel_tracker,
 			runtime,
 			logger,
 			config,
@@ -1038,6 +1043,15 @@ where
 				let fee_rate_override =
 					self.pending_funding_fee_rates.lock().expect("lock").remove(&user_channel_id);
 
+				// The payment id the open was given, if this node initiated it through one of the
+				// `open_channel` methods: the funding payment is recorded under it. A channel
+				// this node opens as an LSPS2 service, or an open begun on an older version, has
+				// none, and its payment is recorded under the id wallet sync derives.
+				let funding_payment_id = self
+					.open_channel_tracker
+					.funding_payment_id(counterparty_node_id, UserChannelId(user_channel_id))
+					.await;
+
 				// Sign the final funding transaction and broadcast it.
 				let channel_amount = Amount::from_sat(channel_value_satoshis);
 				let funding_transaction = self
@@ -1072,12 +1086,29 @@ where
 								counterparty_node_id,
 								channel_id: ChannelId::v1_from_funding_outpoint(funding_txo),
 							};
-							let facts = ChannelTxFacts::new(txid).with_outputs(
+							let mut facts = ChannelTxFacts::new(txid).with_outputs(
 								&channel,
 								Some(UserChannelId(user_channel_id)),
 								ChannelOutputRole::Funding,
 								[vout as u32],
 							);
+							// The facts are what survives the open's intent, which settles once
+							// the channel is pending, and the entry's graduation: wallet sync
+							// resolves a transaction's payment from them first, so the funding
+							// payment is filed under the id returned to the caller whenever the
+							// transaction is seen. The figures are the wallet's view of the
+							// transaction, taken while its inputs are still the wallet's own
+							// outputs — the same figures sync would derive.
+							if let Some(funding_payment_id) = funding_payment_id {
+								let (amount_msat, fee_paid_msat, direction) =
+									self.wallet.onchain_payment_fields(&final_tx);
+								facts = facts.with_local_figures(LocalFundingFigures {
+									funding_payment_id,
+									amount_msat,
+									fee_paid_msat,
+									direction,
+								});
+							}
 							match self.wallet.record_own_funding_tx_facts(facts).await {
 								Ok(FactsRecordOutcome::Recorded) => {},
 								// Admitted however full the store is, the report can only be
@@ -2279,6 +2310,21 @@ where
 						);
 					});
 				}
+
+				// An open this node initiated no longer needs its intent: the channel is funded,
+				// and LDK persists a funded channel and reports its closes. That holds because
+				// the chain monitor runs in deferred mode (see the builder): LDK writes the
+				// channel manager holding the funded channel before the channel's initial
+				// monitor persist completes, and this event follows that persist. Settled only
+				// once the user event is queued, so that a crash before then leaves the intent to
+				// be settled by the replay of this event or by the next startup. A failure, which
+				// the tracker logs, does not replay the event: the next startup settles the
+				// intent, as LDK lists the channel funded, whereas a replay would queue the event
+				// to the user a second time.
+				let _ = self
+					.open_channel_tracker
+					.settle(counterparty_node_id, UserChannelId(user_channel_id))
+					.await;
 			},
 			LdkEvent::ChannelReady {
 				channel_id,
@@ -2483,6 +2529,19 @@ where
 				if let Some(peer_info) = peer_to_reconnect {
 					self.remove_peer_after_reconnect(peer_info, channel_id);
 				}
+
+				// An open this node initiated that failed before its channel was funded — the
+				// counterparty rejected it, the peer disconnected, its funding transaction could
+				// not be built, or the restart lost it and this is the close reporting that —
+				// is over once its close is reported. Settled only once the user event is
+				// queued, so that a crash before then leaves the intent for the next startup to
+				// report the open again. A failure, which the tracker logs, replays the event:
+				// an intent left behind would have the next startup report the open as lost once
+				// more, as nothing lists the channel any longer.
+				self.open_channel_tracker
+					.settle(counterparty_node_id, UserChannelId(user_channel_id))
+					.await
+					.map_err(|_| ReplayEvent())?;
 			},
 			LdkEvent::DiscardFunding { channel_id, funding_info } => {
 				// LDK lets a splice round go with this event — a sibling round locked, or the

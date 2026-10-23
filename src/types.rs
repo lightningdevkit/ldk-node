@@ -18,6 +18,7 @@ use lightning::ln::channel_state::{
 	ChannelDetails as LdkChannelDetails, ChannelShutdownState, CounterpartyForwardingInfo,
 	InboundHTLCDetails, OutboundHTLCDetails,
 };
+use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::{RoutingMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::IgnoringMessageHandler;
 use lightning::ln::types::ChannelId;
@@ -350,6 +351,30 @@ pub(crate) type ChannelTxFactsStore = DataStore<ChannelTxFacts, Arc<Logger>, Kee
 /// By default, this will be randomly generated for the user to ensure local uniqueness.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct UserChannelId(pub u128);
+
+/// What one of the `Node::open_channel` methods returns: the identifiers of the channel being
+/// opened and of the payment that will fund it.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct ChannelOpen {
+	/// The local identifier of the channel, allowing to keep track of it before and after it is
+	/// funded.
+	pub user_channel_id: UserChannelId,
+	/// The identifier of the payment that funds the channel.
+	///
+	/// [`Node::payment`] and [`Node::list_payments`] show the payment once the funding
+	/// transaction has been broadcast — the channel becomes pending at that point, see
+	/// [`Event::ChannelPending`] — and recorded, which a background task does shortly after.
+	/// Until then [`Node::payment`] returns `None`. If the open fails before the channel is
+	/// funded, which is reported through [`Event::ChannelClosed`] with this open's
+	/// `user_channel_id`, no payment is ever recorded under this identifier.
+	///
+	/// [`Node::payment`]: crate::Node::payment
+	/// [`Node::list_payments`]: crate::Node::list_payments
+	/// [`Event::ChannelPending`]: crate::Event::ChannelPending
+	/// [`Event::ChannelClosed`]: crate::Event::ChannelClosed
+	pub funding_payment_id: PaymentId,
+}
 
 impl Writeable for UserChannelId {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {

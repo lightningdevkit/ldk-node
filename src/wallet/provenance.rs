@@ -99,8 +99,9 @@ impl ChannelOutputFact {
 	}
 }
 
-/// This node's share of an interactively negotiated funding transaction, and the funding payment
-/// the transaction belongs to.
+/// This node's share of a funding transaction it took part in building — the funding
+/// transaction of a channel it opened, or a round of an interactively negotiated funding — and
+/// the funding payment the transaction belongs to.
 ///
 /// The amount and the fee are `None` for a candidate this node contributed nothing to, e.g. a
 /// counterparty-initiated round before one of ours replaced it.
@@ -243,7 +244,7 @@ impl ChannelTxFacts {
 		self
 	}
 
-	/// Records this node's share of an interactively negotiated funding candidate, and the funding
+	/// Records this node's share of a funding candidate it took part in building, and the funding
 	/// payment the candidate belongs to.
 	pub(crate) fn with_local_figures(mut self, local_figures: LocalFundingFigures) -> Self {
 		self.local_figures = Some(local_figures);
@@ -747,8 +748,8 @@ impl TxProvenance {
 		classify(tx, self.self_facts.as_ref(), &self.parent_facts)
 	}
 
-	/// This node's share of the transaction, for a candidate of an interactively negotiated
-	/// funding a producer reported the figures of.
+	/// This node's share of the transaction, for a funding candidate it took part in building
+	/// that a producer reported the figures of.
 	pub(crate) fn local_figures(&self) -> Option<&LocalFundingFigures> {
 		self.self_facts.as_ref()?.local_figures.as_ref()
 	}

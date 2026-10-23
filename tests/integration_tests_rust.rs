@@ -8674,3 +8674,342 @@ async fn open_channel_with_fee_rate_override() {
 	node_c.stop().unwrap();
 	node_d.stop().unwrap();
 }
+
+/// Asserts that the funding payment of a channel opened through `open_channel` is recorded under
+/// the id the open returned, and under no id derived from the funding transaction's txid.
+fn assert_funding_payment_filed_under(
+	node: &TestNode, payment_id: PaymentId, funding_txid: Txid, funding_amount_sat: u64,
+	status: PaymentStatus,
+) {
+	let payment = node
+		.payment(&payment_id)
+		.unwrap()
+		.expect("the funding payment is recorded under the id the open returned");
+	assert_eq!(payment.status, status);
+	assert_eq!(payment.direction, PaymentDirection::Outbound);
+	assert_eq!(payment.amount_msat, Some(funding_amount_sat * 1000));
+	assert!(payment.fee_paid_msat.is_some(), "this node paid the funding transaction's fee");
+	match payment.kind {
+		PaymentKind::Onchain { txid, tx_type, .. } => {
+			assert_eq!(txid, funding_txid);
+			assert!(
+				matches!(tx_type, Some(TransactionType::Funding { .. })),
+				"unexpected transaction type {tx_type:?}"
+			);
+		},
+		ref kind => panic!("unexpected payment kind {kind:?}"),
+	}
+	assert!(
+		node.payment(&PaymentId(funding_txid.to_byte_array())).unwrap().is_none(),
+		"no record under the txid-derived id"
+	);
+}
+
+/// Waits for the next event of `node`, which must be a `ChannelClosed` for `user_channel_id`
+/// with `counterparty_node_id`, and returns its closure reason.
+async fn expect_channel_closed_event(
+	node: &TestNode, user_channel_id: UserChannelId,
+	counterparty_node_id: bitcoin::secp256k1::PublicKey,
+) -> Option<lightning::events::ClosureReason> {
+	let event = tokio::time::timeout(
+		std::time::Duration::from_secs(common::INTEROP_TIMEOUT_SECS),
+		node.next_event_async(),
+	)
+	.await
+	.unwrap_or_else(|_| panic!("{} timed out waiting for ChannelClosed event", node.node_id()));
+	match event {
+		Event::ChannelClosed {
+			user_channel_id: closed_user_channel_id,
+			counterparty_node_id: closed_counterparty_node_id,
+			reason,
+			..
+		} => {
+			println!("{} got event ChannelClosed with reason {:?}", node.node_id(), reason);
+			assert_eq!(closed_user_channel_id, user_channel_id);
+			assert_eq!(closed_counterparty_node_id, counterparty_node_id);
+			node.event_handled().unwrap();
+			reason
+		},
+		e => panic!("{} got unexpected event!: {:?}", node.node_id(), e),
+	}
+}
+
+/// The keys of the pending-store entries of `storage_dir_path`'s SQLite store that index no
+/// payment: the entries an open or a splice this node initiated is recorded in until it has a
+/// funding transaction. Read while the node is down.
+async fn bare_pending_entry_keys(storage_dir_path: &str) -> Vec<String> {
+	use ldk_node::io::sqlite_store::{SqliteStore, KV_TABLE_NAME, SQLITE_DB_FILE_NAME};
+
+	let store = SqliteStore::new(
+		storage_dir_path.into(),
+		Some(SQLITE_DB_FILE_NAME.to_string()),
+		Some(KV_TABLE_NAME.to_string()),
+	)
+	.unwrap();
+	let payment_keys: HashSet<String> =
+		store.list("payments", "").await.unwrap().into_iter().collect();
+	store
+		.list("pending_payments", "")
+		.await
+		.unwrap()
+		.into_iter()
+		.filter(|key| !payment_keys.contains(key))
+		.collect()
+}
+
+/// The payment funding a channel opened through `open_channel` is recorded under the id the open
+/// returned: once the funding transaction is broadcast, across a restart before it confirms, and
+/// once it confirms — never under an id derived from the funding txid.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn open_channel_funding_payment_is_filed_under_the_returned_id() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	// Set up node_a manually so it can be restarted with the same config.
+	let mut config_a = random_config();
+	config_a.store_type = TestStoreType::Sqlite;
+	let node_a = setup_node(&chain_source, config_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let funding_amount_sat = 500_000;
+	let opened = node_a
+		.open_channel(
+			node_b.node_id(),
+			node_b.listening_addresses().unwrap().first().unwrap().clone(),
+			funding_amount_sat,
+			None,
+			None,
+			None,
+		)
+		.unwrap();
+
+	let funding_txo = expect_channel_pending_event!(node_a, node_b.node_id());
+	expect_channel_pending_event!(node_b, node_a.node_id());
+	// The funding transaction is broadcast, and its payment recorded, by a background task once
+	// LDK hands it over: wait for the transaction to be seen, and let wallet sync record the
+	// payment should the broadcaster not have yet.
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	assert_funding_payment_filed_under(
+		&node_a,
+		opened.funding_payment_id,
+		funding_txo.txid,
+		funding_amount_sat,
+		PaymentStatus::Pending,
+	);
+
+	// The channel being pending ended the open as one in flight: removing the payment leaves no
+	// trace of the open behind that a restart could take for one still in flight. (The pending
+	// store still holds the premine's inbound payment, which has a record.)
+	node_a.remove_payment(&opened.funding_payment_id).unwrap();
+	assert!(node_a.payment(&opened.funding_payment_id).unwrap().is_none());
+	node_a.stop().unwrap();
+	assert!(
+		bare_pending_entry_keys(&config_a.node_config.storage_dir_path).await.is_empty(),
+		"a pending channel's open is settled, so removing its payment leaves no intent behind",
+	);
+
+	// The open is past its funding at the restart, so LDK still lists the channel: the restart
+	// reports nothing for it.
+	let node_a = setup_node(&chain_source, config_a);
+	tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+	assert!(node_a.next_event().is_none(), "an open LDK still lists must not be reported lost");
+
+	// Confirming the funding records the payment again, under the returned id still: the facts
+	// recorded about the funding transaction carry it.
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let user_channel_id = expect_channel_ready_event!(node_a, node_b.node_id());
+	assert_eq!(user_channel_id, opened.user_channel_id);
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	assert_funding_payment_filed_under(
+		&node_a,
+		opened.funding_payment_id,
+		funding_txo.txid,
+		funding_amount_sat,
+		PaymentStatus::Succeeded,
+	);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// An open LDK refuses outright fails without a trace: no event, no payment, nothing persisted.
+/// An open the counterparty rejects is reported through `ChannelClosed` under the returned
+/// `user_channel_id`, leaves no payment under the returned id, and is not reported again after a
+/// restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn refused_and_rejected_opens_leave_no_funding_payment() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	// Set up node_a manually so it can be restarted with the same config.
+	let mut config_a = random_config();
+	config_a.store_type = TestStoreType::Sqlite;
+	let node_a = setup_node(&chain_source, config_a.clone());
+	// Without an alias node_b cannot announce channels, so it rejects an announced open — every
+	// time: LDK retries a rejected open with a less demanding channel type before giving up.
+	let mut config_b = random_config();
+	config_b.node_config.node_alias = None;
+	let node_b = setup_node(&chain_source, config_b);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	let node_b_addr = node_b.listening_addresses().unwrap().first().unwrap().clone();
+
+	// Below the minimum channel value LDK accepts, so the open never gets past LDK.
+	let refused = node_a.open_channel(node_b.node_id(), node_b_addr.clone(), 999, None, None, None);
+	assert!(
+		matches!(refused, Err(NodeError::ChannelCreationFailed)),
+		"unexpected open result {refused:?}"
+	);
+	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+	assert!(node_a.next_event().is_none(), "an open LDK refused must not be reported");
+
+	let opened = node_a
+		.open_announced_channel(node_b.node_id(), node_b_addr, 100_000, None, None, None)
+		.unwrap();
+	let reason =
+		expect_channel_closed_event(&node_a, opened.user_channel_id, node_b.node_id()).await;
+	assert!(
+		matches!(reason, Some(lightning::events::ClosureReason::CounterpartyForceClosed { .. })),
+		"unexpected closure reason {reason:?}"
+	);
+	assert!(
+		node_a.payment(&opened.funding_payment_id).unwrap().is_none(),
+		"a rejected open never gets a funding payment"
+	);
+	assert!(
+		node_a.list_payments_matching(|p| p.direction == PaymentDirection::Outbound).is_empty(),
+		"neither open leaves an outbound payment behind"
+	);
+
+	// Neither open leaves anything for a restart to act on.
+	node_a.stop().unwrap();
+	let leftover_keys = bare_pending_entry_keys(&config_a.node_config.storage_dir_path).await;
+	assert!(
+		leftover_keys.is_empty(),
+		"a refused or rejected open leaves no pending entry; left {leftover_keys:?}, the rejected \
+		open's payment id being {}",
+		opened.funding_payment_id.0.to_lower_hex_string()
+	);
+
+	let node_a = setup_node(&chain_source, config_a);
+	tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+	assert!(node_a.next_event().is_none(), "a settled open must not be reported again");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// An open this node initiated but LDK no longer knows of after a restart — one still waiting for
+/// the counterparty's acceptance at shutdown, which LDK keeps resumable rather than persisting a
+/// close for — is reported at startup through `ChannelClosed` under the open's `user_channel_id`,
+/// with `DisconnectedPeer` as the reason, and is not reported again after a further restart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lost_open_is_reported_after_restart() {
+	use ldk_node::io::sqlite_store::{SqliteStore, KV_TABLE_NAME, SQLITE_DB_FILE_NAME};
+	use lightning::events::ClosureReason;
+	use lightning::ln::types::ChannelId;
+	use lightning::util::ser::Writeable;
+
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+
+	let node_b = setup_node(&chain_source, random_config());
+
+	// Set up node_a manually so it can be restarted with the same config, and stop it right away:
+	// the open below is planted while it is down.
+	let mut config_a = random_config();
+	config_a.store_type = TestStoreType::Sqlite;
+	let node_a = setup_node(&chain_source, config_a.clone());
+	node_a.stop().unwrap();
+
+	// The entry `open_channel` persists before handing the open to LDK, in the layout the node
+	// reads it back in: the payment id it returned, and the intent of the open — with no payment
+	// recorded under it yet, as for an open whose funding was never generated.
+	struct PlantedOpenChannelIntent {
+		counterparty_node_id: bitcoin::secp256k1::PublicKey,
+		user_channel_id: u128,
+		temporary_channel_id: ChannelId,
+	}
+	lightning::impl_writeable_tlv_based!(PlantedOpenChannelIntent, {
+		(0, counterparty_node_id, required),
+		(2, user_channel_id, required),
+		(4, temporary_channel_id, required),
+	});
+	struct PlantedPendingPayment {
+		id: PaymentId,
+		open_channel_intent: Option<PlantedOpenChannelIntent>,
+	}
+	lightning::impl_writeable_tlv_based!(PlantedPendingPayment, {
+		(0, id, required),
+		(14, open_channel_intent, option),
+	});
+
+	let funding_payment_id = PaymentId([0xAB; 32]);
+	let user_channel_id = UserChannelId(0x1234_5678_9ABC_DEF0_u128);
+	let temporary_channel_id = ChannelId::from_bytes([0xCD; 32]);
+	let planted = PlantedPendingPayment {
+		id: funding_payment_id,
+		open_channel_intent: Some(PlantedOpenChannelIntent {
+			counterparty_node_id: node_b.node_id(),
+			user_channel_id: user_channel_id.0,
+			temporary_channel_id,
+		}),
+	};
+	let store = SqliteStore::new(
+		config_a.node_config.storage_dir_path.clone().into(),
+		Some(SQLITE_DB_FILE_NAME.to_string()),
+		Some(KV_TABLE_NAME.to_string()),
+	)
+	.unwrap();
+	let key = funding_payment_id.0.to_lower_hex_string();
+	store.write("pending_payments", "", &key, planted.encode()).await.unwrap();
+	drop(store);
+
+	// LDK lists no channel for the planted open, so startup reports it lost.
+	let node_a = setup_node(&chain_source, config_a.clone());
+	let reason = expect_channel_closed_event(&node_a, user_channel_id, node_b.node_id()).await;
+	assert!(
+		matches!(reason, Some(ClosureReason::DisconnectedPeer)),
+		"unexpected closure reason {reason:?}"
+	);
+	assert!(
+		node_a.payment(&funding_payment_id).unwrap().is_none(),
+		"a lost open has no funding payment"
+	);
+
+	// The report settles the open: the entry is gone, and a further restart stays silent.
+	node_a.stop().unwrap();
+	let leftover_keys = bare_pending_entry_keys(&config_a.node_config.storage_dir_path).await;
+	assert!(leftover_keys.is_empty(), "a reported open leaves no pending entry: {leftover_keys:?}");
+
+	let node_a = setup_node(&chain_source, config_a);
+	tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+	assert!(node_a.next_event().is_none(), "a reported open must not be reported again");
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
