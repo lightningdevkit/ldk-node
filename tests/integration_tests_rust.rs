@@ -52,6 +52,7 @@ use ldk_node::payment::{
 use ldk_node::{BuildError, Builder, Event, Node, NodeError, ReserveType, UserChannelId};
 use lightning::chain::channelmonitor::ANTI_REORG_DELAY;
 use lightning::ln::channelmanager::{PaymentId, BREAKDOWN_TIMEOUT};
+use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::{NodeAlias, NodeId};
 use lightning::routing::router::RouteParametersConfig;
 use lightning::util::persist::{KVStore, PageToken, PaginatedKVStore, PaginatedListResponse};
@@ -2911,6 +2912,113 @@ async fn do_connection_restart_behavior(persist: bool) {
 	} else {
 		assert!(node_a.list_peers().is_empty());
 		assert!(node_b.list_peers().is_empty());
+	}
+}
+
+#[cfg(feature = "storage-sqlite")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn connection_restart_with_lightning_connections_disabled() {
+	for (listening_addresses, use_builder_setter) in [(None, true), (Some(Vec::new()), false)] {
+		do_connection_restart_with_lightning_connections_disabled(
+			listening_addresses,
+			use_builder_setter,
+		)
+		.await;
+	}
+}
+
+#[cfg(feature = "storage-sqlite")]
+async fn do_connection_restart_with_lightning_connections_disabled(
+	listening_addresses: Option<Vec<SocketAddress>>, use_builder_setter: bool,
+) {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let mut config_a = random_config();
+	config_a.store_type = TestStoreType::Sqlite;
+	let node_a = setup_node(&chain_source, config_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+	let node_id_a = node_a.node_id();
+	let node_id_b = node_b.node_id();
+	let node_addrs_a = node_a.listening_addresses().unwrap();
+	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+
+	// Persist the outbound peer while connections are still enabled.
+	assert!(!node_a.config().disable_lightning_connections);
+	node_a.connect(node_id_b, node_addr_b.clone(), true).unwrap();
+	let peers = node_a.list_peers();
+	assert_eq!(peers.len(), 1);
+	assert_eq!(peers[0].node_id, node_id_b);
+	assert!(peers[0].is_persisted);
+	assert!(peers[0].is_connected);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+	drop(node_a);
+
+	// Rebuild from the same storage and entropy with Lightning connections disabled. Node B
+	// did not persist its inbound peer, so it cannot initiate a reconnect of its own.
+	node_b.start().unwrap();
+	assert!(node_b.list_peers().is_empty());
+	config_a.node_config.listening_addresses = listening_addresses;
+	config_a.node_config.node_alias = None;
+	config_a.node_config.disable_lightning_connections = !use_builder_setter;
+	let logger = Arc::new(CollectingLogWriter::new());
+	setup_builder!(builder, config_a.node_config);
+	configure_chain_source(&chain_source, &mut builder, &config_a);
+	builder.set_custom_logger(logger.clone());
+	if use_builder_setter {
+		builder.set_disable_lightning_connections(true);
+	}
+	let node_a = builder.build(config_a.node_entropy.into()).unwrap();
+	assert!(node_a.config().disable_lightning_connections);
+	node_a.start().unwrap();
+	assert_eq!(node_a.node_id(), node_id_a);
+
+	// Chain access remains available while Lightning peer networking is disabled.
+	node_a.sync_wallets().unwrap();
+
+	// Wait for the background reconnect to hit the gate, so a slow task cannot make the
+	// disconnected assertions pass without actually exercising reconnection.
+	assert!(logger.wait_for("Lightning peer connections are disabled.").await);
+	let peers = node_a.list_peers();
+	assert_eq!(peers.len(), 1);
+	assert_eq!(peers[0].node_id, node_id_b);
+	assert_eq!(peers[0].address, node_addr_b);
+	assert!(peers[0].is_persisted);
+	assert!(!peers[0].is_connected);
+	assert!(node_b.list_peers().is_empty());
+
+	assert_eq!(node_a.connect(node_id_b, node_addr_b, true), Err(NodeError::ConnectionFailed));
+
+	// The peer cannot reconnect inbound on any of the node's previous listening addresses.
+	for node_addr_a in node_addrs_a {
+		assert_eq!(node_b.connect(node_id_a, node_addr_a, false), Err(NodeError::ConnectionFailed));
+	}
+	assert!(!node_a.list_peers()[0].is_connected);
+	assert!(node_b.list_peers().is_empty());
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn connection_build_rejects_inbound_when_lightning_connections_disabled() {
+	for use_builder_setter in [false, true] {
+		let mut config = random_config();
+		assert!(!config.node_config.listening_addresses.as_ref().unwrap().is_empty());
+		config.node_config.disable_lightning_connections = !use_builder_setter;
+		let builder = Builder::from_config(config.node_config);
+		#[cfg(not(feature = "uniffi"))]
+		let mut builder = builder;
+		// Configuration rejection must not depend on reaching a chain source.
+		builder.set_chain_source_esplora("http://127.0.0.1:0".to_string(), None);
+		if use_builder_setter {
+			builder.set_disable_lightning_connections(true);
+		}
+		assert!(matches!(
+			builder.build_with_store(config.node_entropy.into(), InMemoryStore::new()),
+			Err(BuildError::InvalidListeningAddresses)
+		));
 	}
 }
 

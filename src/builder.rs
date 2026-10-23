@@ -610,6 +610,19 @@ impl NodeBuilder {
 		self
 	}
 
+	/// Sets whether to disable all Lightning peer-to-peer (P2P) connections.
+	///
+	/// Updates [`Config::disable_lightning_connections`].
+	///
+	/// Defaults to `false`. If `true`, automatic reconnections and explicit outbound connection
+	/// attempts are disabled for the built node. Inbound listening must also be disabled by
+	/// setting [`Config::listening_addresses`] to `None` or an empty list;
+	/// otherwise building fails with [`BuildError::InvalidListeningAddresses`].
+	pub fn set_disable_lightning_connections(&mut self, disable: bool) -> &mut Self {
+		self.config.disable_lightning_connections = disable;
+		self
+	}
+
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
 	pub fn set_listening_addresses(
 		&mut self, listening_addresses: Vec<SocketAddress>,
@@ -1259,6 +1272,18 @@ impl Builder {
 		self.inner.write().expect("lock").set_network(network);
 	}
 
+	/// Sets whether to disable all Lightning peer-to-peer (P2P) connections.
+	///
+	/// Updates [`Config::disable_lightning_connections`].
+	///
+	/// Defaults to `false`. If `true`, automatic reconnections and explicit outbound connection
+	/// attempts are disabled for the built node. Inbound listening must also be disabled by
+	/// setting [`Config::listening_addresses`] to `None` or an empty list;
+	/// otherwise building fails with [`BuildError::InvalidListeningAddresses`].
+	pub fn set_disable_lightning_connections(&self, disable: bool) {
+		self.inner.write().expect("lock").set_disable_lightning_connections(disable);
+	}
+
 	/// Sets the IP address and TCP port on which [`Node`] will listen for incoming network connections.
 	pub fn set_listening_addresses(
 		&self, listening_addresses: Vec<SocketAddress>,
@@ -1530,6 +1555,16 @@ fn build_with_store_internal(
 	seed_bytes: [u8; 64], runtime: Arc<Runtime>, logger: Arc<Logger>, kv_store: Arc<DynStore>,
 ) -> Result<Node, BuildError> {
 	optionally_install_rustls_cryptoprovider();
+
+	if config.disable_lightning_connections
+		&& config.listening_addresses.as_ref().is_some_and(|addresses| !addresses.is_empty())
+	{
+		log_error!(
+			logger,
+			"Listening addresses must be unset or empty when Lightning connections are disabled."
+		);
+		return Err(BuildError::InvalidListeningAddresses);
+	}
 
 	if let Err(err) = may_announce_channel(&config) {
 		if config.announcement_addresses.is_some() {
@@ -2431,6 +2466,7 @@ fn build_with_store_internal(
 
 	let connection_manager = Arc::new(ConnectionManager::new(
 		Arc::clone(&peer_manager),
+		config.disable_lightning_connections,
 		config.tor_config.clone(),
 		Arc::clone(&keys_manager),
 		Arc::clone(&logger),
