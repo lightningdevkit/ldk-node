@@ -7473,3 +7473,183 @@ async fn open_channel_with_fee_rate_override() {
 	node_c.stop().unwrap();
 	node_d.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn open_channel_fee_does_not_spend_anchor_reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	// Node B needs funds of its own to retain an anchor reserve, otherwise it rejects the anchor
+	// channel and we fall back to a channel type without one.
+	let premine_amount_sat = 1_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![
+			node_a.onchain_payment().new_address().unwrap(),
+			node_b.onchain_payment().new_address().unwrap(),
+		],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// The channel amount and the anchor reserve fit in our funds, but at 100 sat/vB the funding
+	// transaction's fee of about 15,000 sats would have to come out of the reserve.
+	let anchor_reserve_sat = 25_000;
+	let channel_amount_sat = premine_amount_sat - anchor_reserve_sat - 5_000;
+	let fee_rate = bitcoin::FeeRate::from_sat_per_vb(100).unwrap();
+	let address_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	assert_eq!(
+		Err(NodeError::InsufficientFunds),
+		node_a.open_channel(
+			node_b.node_id(),
+			address_b.clone(),
+			channel_amount_sat,
+			None,
+			Some(fee_rate.into()),
+			None,
+		)
+	);
+	assert!(node_a.list_channels().is_empty());
+
+	// At the ~1 sat/vB the estimator yields on regtest, the fee fits next to the reserve.
+	node_a.open_channel(node_b.node_id(), address_b, channel_amount_sat, None, None, None).unwrap();
+	let funding_txo = expect_channel_pending_event!(node_a, node_b.node_id());
+	expect_channel_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+
+	node_a.sync_wallets().unwrap();
+	let balances = node_a.list_balances();
+	assert!(
+		balances.total_onchain_balance_sats >= anchor_reserve_sat,
+		"the funding transaction left {}sats on-chain, less than the {}sats anchor reserve",
+		balances.total_onchain_balance_sats,
+		anchor_reserve_sat,
+	);
+	assert_eq!(balances.total_anchor_channels_reserve_sats, anchor_reserve_sat);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_service_funding_fee_does_not_spend_anchor_reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let channel_opening_fee_ppm = 10_000;
+	let channel_over_provisioning_ppm = 100_000;
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm,
+		channel_over_provisioning_ppm,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 1_000,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: false,
+		disable_client_reserve: false,
+	};
+
+	let service_config = random_config();
+	let service_logs = Arc::new(CollectingLogWriter::new());
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(lsps2_service_config);
+	service_builder.set_custom_logger(service_logs.clone());
+	let service_node = service_builder.build(service_config.node_entropy.into()).unwrap();
+	service_node.start().unwrap();
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config();
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	let payer_config = random_config();
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	// The service opens a channel for the payment minus the opening fee, plus over-provisioning.
+	let jit_amount_msat = 100_000_000;
+	let opening_fee_msat = jit_amount_msat * channel_opening_fee_ppm as u64 / 1_000_000;
+	let amt_to_forward_msat = jit_amount_msat - opening_fee_msat;
+	let over_provisioning_msat =
+		amt_to_forward_msat * channel_over_provisioning_ppm as u64 / 1_000_000;
+	let channel_amount_sat = (amt_to_forward_msat + over_provisioning_msat) / 1000;
+
+	// The service's funds cover the channel and the anchor reserves of both the payer's channel
+	// and the new one, but not the funding transaction's fee on top.
+	let anchor_reserve_sat = 25_000;
+	let service_funds_sat = channel_amount_sat + 2 * anchor_reserve_sat + 100;
+
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![payer_node.onchain_payment().new_address().unwrap()],
+		Amount::from_sat(10_000_000),
+	)
+	.await;
+	distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![service_node.onchain_payment().new_address().unwrap()],
+		Amount::from_sat(service_funds_sat),
+	)
+	.await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+
+	open_channel(&payer_node, &service_node, 5_000_000, false, &electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("reserve")).unwrap());
+	let jit_invoice = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel(jit_amount_msat, &invoice_description.into(), 1024, None)
+		.unwrap();
+	payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+
+	// The check for the channel amount plus the anchor reserves passes, but the one counting the
+	// funding fee doesn't, so the service doesn't open the channel.
+	assert!(
+		service_logs
+			.wait_for("Unable to create channel due to insufficient funds. Requested:")
+			.await,
+		"the service didn't refuse to open the channel"
+	);
+	assert!(
+		!service_logs.contains("Unable to create channel due to insufficient funds. Available:")
+	);
+	assert!(service_node
+		.list_channels()
+		.iter()
+		.all(|channel| channel.counterparty.node_id != client_node.node_id()));
+	assert_eq!(
+		service_node.list_balances().spendable_onchain_balance_sats,
+		service_funds_sat - anchor_reserve_sat
+	);
+
+	service_node.stop().unwrap();
+	client_node.stop().unwrap();
+	payer_node.stop().unwrap();
+}
