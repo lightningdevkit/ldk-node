@@ -731,7 +731,7 @@ impl NodeBuilder {
 	/// previously configured.
 	///
 	/// Connects to the PostgreSQL database at the given `connection_string`, e.g.,
-	/// `"postgres://user:password@localhost/ldk_db"`.
+	/// `"postgres://<user>:<password>@localhost/ldk_db"`.
 	///
 	/// The given `db_name` will be used or default to
 	/// [`DEFAULT_DB_NAME`](io::postgres_store::DEFAULT_DB_NAME). The `connection_string` must
@@ -1334,7 +1334,7 @@ impl Builder {
 	/// previously configured.
 	///
 	/// Connects to the PostgreSQL database at the given `connection_string`, e.g.,
-	/// `"postgres://user:password@localhost/ldk_db"`.
+	/// `"postgres://<user>:<password>@localhost/ldk_db"`.
 	///
 	/// The given `db_name` will be used or default to
 	/// [`DEFAULT_DB_NAME`](io::postgres_store::DEFAULT_DB_NAME). The `connection_string` must
