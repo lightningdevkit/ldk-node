@@ -1392,11 +1392,20 @@ impl Node {
 			con_cm.connect_peer_if_necessary(con_node_id, con_addr).await
 		})?;
 
+		let funding_fee_rate = fee_rate.unwrap_or_else(|| {
+			self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+		});
+
 		let channel_amount_sats = match channel_amount_sats {
 			FundingAmount::Exact { amount_sats } => {
-				// Check funds availability after connection (includes anchor reserve
-				// calculation).
-				self.check_sufficient_onchain_funds(amount_sats, &peer_info.node_id, true)?;
+				// Check funds availability after connection (includes anchor reserve and
+				// funding fee calculation).
+				self.check_sufficient_onchain_funds(
+					amount_sats,
+					&peer_info.node_id,
+					true,
+					funding_fee_rate,
+				)?;
 				amount_sats
 			},
 			FundingAmount::Max => {
@@ -1408,18 +1417,15 @@ impl Node {
 				let total_anchor_reserve_sats =
 					cur_anchor_reserve_sats.saturating_add(new_channel_reserve);
 
-				let fee_rate = fee_rate.unwrap_or_else(|| {
-					self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
-				});
-
-				let amount =
-					self.wallet.get_max_funding_amount(total_anchor_reserve_sats, fee_rate)?;
+				let amount = self
+					.wallet
+					.get_max_funding_amount(total_anchor_reserve_sats, funding_fee_rate)?;
 
 				log_info!(
 					self.logger,
 					"Opening channel with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
 					amount,
-					fee_rate.to_sat_per_kwu(),
+					funding_fee_rate.to_sat_per_kwu(),
 					total_anchor_reserve_sats,
 				);
 
@@ -1513,6 +1519,7 @@ impl Node {
 
 	fn check_sufficient_onchain_funds(
 		&self, amount_sats: u64, peer_node_id: &PublicKey, for_new_channel: bool,
+		fee_rate: bitcoin::FeeRate,
 	) -> Result<(), Error> {
 		let action_str = if for_new_channel { "create channel" } else { "splice-in" };
 		let cur_anchor_reserve_sats =
@@ -1532,13 +1539,31 @@ impl Node {
 		}
 
 		if for_new_channel {
-			let required_funds_sats =
-				amount_sats.saturating_add(self.new_channel_anchor_reserve_sats(peer_node_id)?);
+			let new_channel_reserve = self.new_channel_anchor_reserve_sats(peer_node_id)?;
+			let required_funds_sats = amount_sats.saturating_add(new_channel_reserve);
 
 			if spendable_amount_sats < required_funds_sats {
 				log_error!(self.logger,
 					"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
 					spendable_amount_sats, required_funds_sats
+				);
+				return Err(Error::InsufficientFunds);
+			}
+
+			// The funding transaction's fee is paid from the same on-chain funds, so we can't
+			// fund more than we would when opening the channel with all of them.
+			let total_anchor_reserve_sats =
+				cur_anchor_reserve_sats.saturating_add(new_channel_reserve);
+			let max_amount =
+				self.wallet.get_max_funding_amount(total_anchor_reserve_sats, fee_rate)?;
+			if amount_sats > max_amount {
+				log_error!(
+					self.logger,
+					"Unable to create channel due to insufficient funds. Requested: {}sats, Maximum: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
+					amount_sats,
+					max_amount,
+					fee_rate.to_sat_per_kwu(),
+					total_anchor_reserve_sats,
 				);
 				return Err(Error::InsufficientFunds);
 			}
@@ -1562,7 +1587,9 @@ impl Node {
 	/// opening the channel.
 	///
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
-	/// retrieve a reasonable estimate from the configured chain source.
+	/// retrieve a reasonable estimate from the configured chain source. As the funding
+	/// transaction's fee is paid from the same on-chain funds, `channel_amount_sats` can be at most
+	/// what [`Node::open_channel_with_all`] would fund at that fee rate.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
@@ -1608,7 +1635,9 @@ impl Node {
 	/// opening the channel.
 	///
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
-	/// retrieve a reasonable estimate from the configured chain source.
+	/// retrieve a reasonable estimate from the configured chain source. As the funding
+	/// transaction's fee is paid from the same on-chain funds, `channel_amount_sats` can be at most
+	/// what [`Node::open_announced_channel_with_all`] would fund at that fee rate.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
@@ -1742,7 +1771,9 @@ impl Node {
 	/// opening the channel.
 	///
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
-	/// retrieve a reasonable estimate from the configured chain source.
+	/// retrieve a reasonable estimate from the configured chain source. As the funding
+	/// transaction's fee is paid from the same on-chain funds, `channel_amount_sats` can be at most
+	/// what [`Node::open_0reserve_channel_with_all`] would fund at that fee rate.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
@@ -1822,7 +1853,12 @@ impl Node {
 			let max_feerate = max_funding_feerate(min_feerate);
 
 			if let FundingAmount::Exact { amount_sats } = splice_amount_sats {
-				self.check_sufficient_onchain_funds(amount_sats, &counterparty_node_id, false)?;
+				self.check_sufficient_onchain_funds(
+					amount_sats,
+					&counterparty_node_id,
+					false,
+					min_feerate,
+				)?;
 			}
 
 			let funding_template = self
