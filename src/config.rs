@@ -257,6 +257,7 @@ impl Default for ForwardedPaymentTrackingMode {
 /// | `storage_dir_path`                     | /tmp/ldk_node/                       |
 /// | `network`                              | Bitcoin                              |
 /// | `listening_addresses`                  | None                                 |
+/// | `disable_lightning_connections`        | false                                |
 /// | `announcement_addresses`               | None                                 |
 /// | `node_alias`                           | None                                 |
 /// | `trusted_peers_0conf`                  | []                                   |
@@ -286,6 +287,15 @@ pub struct Config {
 	/// `listening_addresses` are set. When both are set, we also accept payment forwards over
 	/// unannounced channels.
 	pub listening_addresses: Option<Vec<SocketAddress>>,
+	/// Whether to disable all Lightning peer-to-peer (P2P) connections.
+	///
+	/// If `true`, automatic reconnections and explicit outbound connection attempts are disabled.
+	/// [`Config::listening_addresses`] must also be `None` or an empty list; otherwise building
+	/// fails with [`BuildError::InvalidListeningAddresses`]. Chain synchronization and other
+	/// non-peer networking are unaffected.
+	///
+	/// [`BuildError::InvalidListeningAddresses`]: crate::BuildError::InvalidListeningAddresses
+	pub disable_lightning_connections: bool,
 	/// The addresses which the node will announce to the gossip network that it accepts connections on.
 	///
 	/// **Note**: If unset, the [`listening_addresses`] will be used as the list of addresses to announce.
@@ -358,6 +368,7 @@ impl Default for Config {
 			storage_dir_path: DEFAULT_STORAGE_DIR_PATH.to_string(),
 			network: DEFAULT_NETWORK,
 			listening_addresses: None,
+			disable_lightning_connections: false,
 			announcement_addresses: None,
 			trusted_peers_0conf: Vec::new(),
 			probing_liquidity_limit_multiplier: DEFAULT_PROBING_LIQUIDITY_LIMIT_MULTIPLIER,
