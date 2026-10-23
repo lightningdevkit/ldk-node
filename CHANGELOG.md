@@ -28,8 +28,22 @@
   `Config::manually_handle_unknown_bolt11_payments` to `true`. Otherwise
   matching inbound HTLCs will be failed back instead of emitting
   `Event::PaymentClaimable`.
+- The funding payment of a channel opened through a `Node::open_channel` variant is now
+  recorded under the `PaymentId` returned in the `ChannelOpen` result, rather than under an id
+  derived from the funding transaction's txid. Channels opened before upgrading, and channels
+  this node opens as an LSPS2 service, keep the txid-derived id. Applications that derived the
+  payment id from the funding txid should use the returned id instead.
+- An outbound channel open that is still in flight at shutdown may be reported through
+  `Event::ChannelClosed` at the next startup, with the `user_channel_id` of the open and the
+  `ClosureReason::DisconnectedPeer` reason. Such an event may be emitted more than once for the
+  same open. Applications should handle a `ChannelClosed` event for a `user_channel_id` they do
+  not hold a channel for.
 
 ## Feature and API updates
+- All `Node::open_channel` variants now return a `ChannelOpen` holding the `user_channel_id`
+  of the channel and the `PaymentId` the funding payment is recorded under. Once a variant
+  returns `Ok`, the open is tracked across restarts: an open the node loses while shut down is
+  reported through `Event::ChannelClosed` rather than disappearing silently.
 - All `Node::open_channel` variants now take an optional `FeeRate` (after
   `push_to_counterparty_msat`) that, when set, is used for the channel's funding transaction instead of the internal fee estimation. For the
   `_with_all` variants it also determines the rate at which the maximum funding amount is

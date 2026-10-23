@@ -8,6 +8,8 @@
 //! Persistence of in-flight user-initiated splices, so a splice LDK has not durably learned of
 //! yet can be recognized — and whatever it reserved recovered — after a restart.
 
+mod open;
+
 use std::fmt;
 use std::sync::Arc;
 
@@ -31,6 +33,8 @@ use crate::payment::{PaymentKind, TransactionType};
 use crate::types::{ChannelManager, PendingPaymentStore};
 use crate::wallet::{funding_candidates, random_payment_id, SignedFundingRecord, Wallet};
 use crate::Error;
+
+pub(crate) use open::{lost_open_close_event, ListedChannel, OpenChannelTracker};
 
 /// Whether two contributions describe the same splice attempt. LDK may adjust a contribution
 /// during negotiation — the quiescence tie-breaker rebuilds the acceptor's copy at a fresh
@@ -477,6 +481,7 @@ impl SpliceTracker {
 					conflicting_txids: None,
 					candidates: Vec::new(),
 					splice_intent: Some(prior),
+					open_channel_intent: None,
 				})
 				.await
 				.map(|result| {
@@ -673,6 +678,7 @@ impl SpliceTracker {
 					conflicting_txids: None,
 					candidates: Vec::new(),
 					splice_intent: Some(Some(refreshed)),
+					open_channel_intent: None,
 				};
 				record.update(update).then_some(record)
 			})
@@ -922,6 +928,7 @@ async fn write_intent(
 				conflicting_txids: None,
 				candidates: Vec::new(),
 				splice_intent: Some(Some(intent.clone())),
+				open_channel_intent: None,
 			})
 			.await?;
 		if result != DataStoreUpdateResult::NotFound {
@@ -1042,6 +1049,7 @@ fn record_with_intent_cleared(existing: &PendingPaymentDetails) -> Option<Pendin
 		conflicting_txids: None,
 		candidates: Vec::new(),
 		splice_intent: Some(None),
+		open_channel_intent: None,
 	};
 	record.update(update);
 	(!record.is_empty()).then_some(record)

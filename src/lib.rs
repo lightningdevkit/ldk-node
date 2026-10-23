@@ -119,6 +119,7 @@ mod util;
 mod wallet;
 
 use std::default::Default;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 #[cfg(cycle_tests)]
@@ -133,7 +134,7 @@ pub use bitcoin::FeeRate;
 use bitcoin::{Address, Amount, BlockHash, Network};
 pub use builder::{BuildError, Builder};
 use chain::ChainSource;
-use channel::SpliceTracker;
+use channel::{lost_open_close_event, ListedChannel, OpenChannelTracker, SpliceTracker};
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
 	LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
@@ -161,6 +162,7 @@ pub use lightning::ln::channel_state::ChannelShutdownState;
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
+use lightning::ln::types::ChannelId;
 use lightning::routing::gossip::NodeAlias;
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStore;
@@ -179,7 +181,7 @@ use payment::asynchronous::om_mailbox::OnionMessageMailbox;
 use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 pub use payment::forwarding_store::aggregate_channel_pair_stats;
 use payment::forwarding_store::{run_forwarded_payment_aggregation, ForwardingStore};
-use payment::pending_payment_store::SpliceKind;
+use payment::pending_payment_store::{OpenChannelIntent, SpliceKind};
 use payment::{
 	Bolt11Payment, Bolt12Payment, ForwardingAnalytics, OnchainPayment, PaymentDetails,
 	PaymentDetailsPage, SpontaneousPayment,
@@ -197,7 +199,8 @@ use types::{
 	KeysManager, OnionMessenger, PaymentStore, PeerManager, Router, Scorer, Sweeper, Wallet,
 };
 pub use types::{
-	ChannelCounterparty, ChannelDetails, CustomTlvRecord, PeerDetails, ReserveType, UserChannelId,
+	ChannelCounterparty, ChannelDetails, ChannelOpen, CustomTlvRecord, PeerDetails, ReserveType,
+	UserChannelId,
 };
 #[cfg(feature = "storage-vss")]
 pub use vss_client;
@@ -279,6 +282,7 @@ pub struct Node {
 	forwarding_store: Arc<ForwardingStore>,
 	forwarded_payment_aggregation_retention_secs: u64,
 	splice_tracker: Arc<SpliceTracker>,
+	open_channel_tracker: Arc<OpenChannelTracker>,
 	lnurl_auth: Arc<LnurlAuth>,
 	is_running: Arc<RwLock<bool>>,
 	node_metrics: Arc<PersistedNodeMetrics>,
@@ -733,6 +737,7 @@ impl Node {
 			self.om_mailbox.clone(),
 			self.prober.clone(),
 			Arc::clone(&self.splice_tracker),
+			Arc::clone(&self.open_channel_tracker),
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
@@ -749,11 +754,55 @@ impl Node {
 		// Consume any events LDK replays from its last persisted state (e.g. a `DiscardFunding`
 		// for a splice that died before the node stopped) before the node is running: a replayed
 		// event describes pre-restart state and must act before new user operations build on it.
+		// An event the handler fails on stays queued in LDK, along with every event behind it,
+		// for the background processor to deliver; the reconciliation below must know that.
 		let replay_handler = &event_handler;
-		self.runtime.block_on(
-			self.channel_manager
-				.process_pending_events_async(|event| replay_handler.handle_event(event)),
+		let replay_failed = AtomicBool::new(false);
+		self.runtime.block_on(self.channel_manager.process_pending_events_async(|event| async {
+			let result = replay_handler.handle_event(event).await;
+			if result.is_err() {
+				replay_failed.store(true, Ordering::Release);
+			}
+			result
+		}));
+
+		// A channel open this node initiated that LDK no longer lists did not survive the restart:
+		// LDK persists a channel only once it is funded, so an outbound channel still waiting for
+		// the counterparty's acceptance is gone once the process restarts, with no event
+		// reporting it. (Across a disconnect alone — which a stop and start of this node without
+		// a process restart amounts to — LDK keeps such a channel in memory to resume it, and
+		// still lists it, unfunded.) Report a lost open as closed through the handler, as LDK
+		// would have reported a close it persisted, so the report takes the same path as one —
+		// the peer is dropped from the peer store, the user event is queued, and the open's
+		// intent is settled. After the replay, so that a close LDK did persist is not reported
+		// twice, and before the node runs, so that no new open can be mistaken for a lost one.
+		let listed_channels: Vec<ListedChannel> = self
+			.channel_manager
+			.list_channels()
+			.into_iter()
+			.map(|channel| ListedChannel {
+				counterparty_node_id: channel.counterparty.node_id,
+				user_channel_id: UserChannelId(channel.user_channel_id),
+				funded: channel.funding_txo.is_some(),
+			})
+			.collect();
+		let lost_opens = self.runtime.block_on(
+			self.open_channel_tracker
+				.reconcile(!replay_failed.load(Ordering::Acquire), listed_channels),
 		);
+		for intent in lost_opens {
+			let event = lost_open_close_event(&intent);
+			if self.runtime.block_on(event_handler.handle_event(event)).is_err() {
+				// The intent stays on record, so the next startup reports the open again.
+				log_error!(
+					self.logger,
+					"Failed to report the loss of channel open {} with {}; it will be reported at \
+					the next startup",
+					intent.user_channel_id.0,
+					intent.counterparty_node_id,
+				);
+			}
+		}
 
 		// Setup background processing
 		let background_persister = Arc::clone(&self.kv_store);
@@ -1391,7 +1440,7 @@ impl Node {
 		push_to_counterparty_msat: Option<u64>, fee_rate: Option<bitcoin::FeeRate>,
 		channel_config: Option<ChannelConfig>, announce_for_forwarding: bool,
 		disable_counterparty_reserve: bool,
-	) -> Result<UserChannelId, Error> {
+	) -> Result<ChannelOpen, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
@@ -1470,13 +1519,34 @@ impl Node {
 			self.pending_funding_fee_rates.lock().expect("lock").insert(user_channel_id, fee_rate);
 		}
 
+		// Record the open before handing it to LDK, for the same reason: the funding payment is
+		// filed under the record's id from the first event about the channel on, and an open LDK
+		// forgets at a restart before the channel is funded is recognized by the record. An open
+		// whose record cannot be written is not attempted, so that every open this node initiates
+		// is one a restart can account for.
+		let temporary_channel_id = ChannelId::temporary_from_entropy_source(&*self.keys_manager);
+		let intent = OpenChannelIntent {
+			counterparty_node_id: peer_info.node_id,
+			user_channel_id: UserChannelId(user_channel_id),
+			temporary_channel_id,
+		};
+		let funding_payment_id =
+			match self.runtime.block_on(self.open_channel_tracker.persist_intent(intent.clone())) {
+				Ok(payment_id) => payment_id,
+				Err(e) => {
+					log_error!(self.logger, "Failed to record the channel open: {}", e);
+					self.pending_funding_fee_rates.lock().expect("lock").remove(&user_channel_id);
+					return Err(e);
+				},
+			};
+
 		let result = if disable_counterparty_reserve {
 			self.channel_manager.create_channel_to_trusted_peer_0reserve(
 				peer_info.node_id,
 				channel_amount_sats,
 				push_msat,
 				user_channel_id,
-				None,
+				Some(temporary_channel_id),
 				Some(user_config),
 			)
 		} else {
@@ -1485,7 +1555,7 @@ impl Node {
 				channel_amount_sats,
 				push_msat,
 				user_channel_id,
-				None,
+				Some(temporary_channel_id),
 				Some(user_config),
 			)
 		};
@@ -1500,8 +1570,21 @@ impl Node {
 					zero_reserve_string,
 					peer_info.node_id
 				);
-				self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
-				Ok(UserChannelId(user_channel_id))
+				// The open is under way whatever happens from here on, so the caller gets its
+				// identifiers. The peer is already in the in-memory peer map, so reconnecting
+				// to it keeps working this session; the next successful write persists it.
+				if let Err(e) = self.runtime.block_on(self.peer_store.add_peer(peer_info)) {
+					log_error!(
+						self.logger,
+						"Failed to add peer {} to peer store: {}",
+						intent.counterparty_node_id,
+						e
+					);
+				}
+				Ok(ChannelOpen {
+					user_channel_id: UserChannelId(user_channel_id),
+					funding_payment_id,
+				})
 			},
 			Err(e) => {
 				log_error!(
@@ -1511,6 +1594,9 @@ impl Node {
 					e
 				);
 				self.pending_funding_fee_rates.lock().expect("lock").remove(&user_channel_id);
+				self.runtime.block_on(
+					self.open_channel_tracker.discard_persisted_intent(funding_payment_id, &intent),
+				);
 				Err(Error::ChannelCreationFailed)
 			},
 		}
@@ -1579,14 +1665,19 @@ impl Node {
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
 	/// retrieve a reasonable estimate from the configured chain source.
 	///
-	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	/// Returns a [`ChannelOpen`] holding the [`UserChannelId`] allowing to locally keep track of
+	/// the channel and the [`PaymentId`] of the payment that funds it; see
+	/// [`ChannelOpen::funding_payment_id`] for when that payment is recorded. An open this node
+	/// does not remember after a restart because it stopped before the channel was funded is
+	/// reported through [`Event::ChannelClosed`] at the next startup — possibly more than once,
+	/// should the node stop, or a persistence failure occur, right after the report is queued.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
 		channel_config: Option<ChannelConfig>,
-	) -> Result<UserChannelId, Error> {
+	) -> Result<ChannelOpen, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
@@ -1625,14 +1716,19 @@ impl Node {
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
 	/// retrieve a reasonable estimate from the configured chain source.
 	///
-	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	/// Returns a [`ChannelOpen`] holding the [`UserChannelId`] allowing to locally keep track of
+	/// the channel and the [`PaymentId`] of the payment that funds it; see
+	/// [`ChannelOpen::funding_payment_id`] for when that payment is recorded. An open this node
+	/// does not remember after a restart because it stopped before the channel was funded is
+	/// reported through [`Event::ChannelClosed`] at the next startup — possibly more than once,
+	/// should the node stop, or a persistence failure occur, right after the report is queued.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
 		channel_config: Option<ChannelConfig>,
-	) -> Result<UserChannelId, Error> {
+	) -> Result<ChannelOpen, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
@@ -1669,13 +1765,18 @@ impl Node {
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
 	/// retrieve a reasonable estimate from the configured chain source.
 	///
-	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	/// Returns a [`ChannelOpen`] holding the [`UserChannelId`] allowing to locally keep track of
+	/// the channel and the [`PaymentId`] of the payment that funds it; see
+	/// [`ChannelOpen::funding_payment_id`] for when that payment is recorded. An open this node
+	/// does not remember after a restart because it stopped before the channel was funded is
+	/// reported through [`Event::ChannelClosed`] at the next startup — possibly more than once,
+	/// should the node stop, or a persistence failure occur, right after the report is queued.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
-	) -> Result<UserChannelId, Error> {
+	) -> Result<ChannelOpen, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
@@ -1711,13 +1812,18 @@ impl Node {
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
 	/// retrieve a reasonable estimate from the configured chain source.
 	///
-	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	/// Returns a [`ChannelOpen`] holding the [`UserChannelId`] allowing to locally keep track of
+	/// the channel and the [`PaymentId`] of the payment that funds it; see
+	/// [`ChannelOpen::funding_payment_id`] for when that payment is recorded. An open this node
+	/// does not remember after a restart because it stopped before the channel was funded is
+	/// reported through [`Event::ChannelClosed`] at the next startup — possibly more than once,
+	/// should the node stop, or a persistence failure occur, right after the report is queued.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
-	) -> Result<UserChannelId, Error> {
+	) -> Result<ChannelOpen, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
@@ -1759,14 +1865,19 @@ impl Node {
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
 	/// retrieve a reasonable estimate from the configured chain source.
 	///
-	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	/// Returns a [`ChannelOpen`] holding the [`UserChannelId`] allowing to locally keep track of
+	/// the channel and the [`PaymentId`] of the payment that funds it; see
+	/// [`ChannelOpen::funding_payment_id`] for when that payment is recorded. An open this node
+	/// does not remember after a restart because it stopped before the channel was funded is
+	/// reported through [`Event::ChannelClosed`] at the next startup — possibly more than once,
+	/// should the node stop, or a persistence failure occur, right after the report is queued.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_0reserve_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
 		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
 		channel_config: Option<ChannelConfig>,
-	) -> Result<UserChannelId, Error> {
+	) -> Result<ChannelOpen, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
@@ -1800,11 +1911,16 @@ impl Node {
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
 	/// retrieve a reasonable estimate from the configured chain source.
 	///
-	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
+	/// Returns a [`ChannelOpen`] holding the [`UserChannelId`] allowing to locally keep track of
+	/// the channel and the [`PaymentId`] of the payment that funds it; see
+	/// [`ChannelOpen::funding_payment_id`] for when that payment is recorded. An open this node
+	/// does not remember after a restart because it stopped before the channel was funded is
+	/// reported through [`Event::ChannelClosed`] at the next startup — possibly more than once,
+	/// should the node stop, or a persistence failure occur, right after the report is queued.
 	pub fn open_0reserve_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
 		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
-	) -> Result<UserChannelId, Error> {
+	) -> Result<ChannelOpen, Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
 		}
@@ -2446,6 +2562,10 @@ impl Node {
 	}
 
 	/// Remove the payment with the given id from the store.
+	///
+	/// This does not cancel a channel open or a splice still in flight whose funding payment the
+	/// id identifies: it is still tracked, and the payment may be recorded under the id again once
+	/// its funding transaction is seen.
 	pub fn remove_payment(&self, payment_id: &PaymentId) -> Result<(), Error> {
 		self.runtime.block_on(self.wallet.remove_payment(payment_id))
 	}

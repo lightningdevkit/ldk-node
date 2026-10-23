@@ -16,6 +16,7 @@ use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use crate::data_store::{StorableObject, StorableObjectUpdate, UpdatableObject};
 use crate::payment::store::{Channel, PaymentDetailsUpdate, TransactionType};
 use crate::payment::{PaymentDetails, PaymentKind};
+use crate::types::UserChannelId;
 
 /// One candidate transaction in an interactive-funding (splice) RBF history, holding this node's
 /// share of the funding amount and fee for that candidate. Both are `None` for a candidate this
@@ -108,6 +109,28 @@ impl_writeable_tlv_based!(SpliceIntent, {
 	(8, kind, required),
 });
 
+/// A channel open this node initiated through one of the `Node::open_channel` methods that is not
+/// yet guaranteed to survive a restart. LDK persists a channel only once it is funded: an
+/// unfunded outbound channel whose `accept_channel` has not arrived when the peer disconnects is
+/// kept in memory to be resumed, so a restart of the process loses it without reporting its loss.
+/// Until the channel is pending we keep enough state to recognize an open LDK no longer knows
+/// about and to report its loss in terms of the original request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OpenChannelIntent {
+	/// The channel counterparty.
+	pub counterparty_node_id: PublicKey,
+	/// The local identifier of the channel, returned to the caller of the open.
+	pub user_channel_id: UserChannelId,
+	/// The channel's id before it is funded, chosen by this node when the open was initiated.
+	pub temporary_channel_id: ChannelId,
+}
+
+impl_writeable_tlv_based!(OpenChannelIntent, {
+	(0, counterparty_node_id, required),
+	(2, user_channel_id, required),
+	(4, temporary_channel_id, required),
+});
+
 /// A pending payment tracked by LDK Node, keyed by [`PaymentId`].
 ///
 /// Each part of an entry is written by a different subsystem and is present on its own schedule,
@@ -116,8 +139,10 @@ impl_writeable_tlv_based!(SpliceIntent, {
 /// round to `candidates` and lists the `funding_channels` it belongs to, still without a
 /// transaction anyone has seen; wallet sync adds `details` once it observes the transaction, and
 /// records `conflicting_txids` for any wallet transaction; the `ChannelReady` arm records
-/// `locked_rounds`. A splice uses all of them; the fields do not partition by payment type. An
-/// entry with none of them tracks no payment and is removed.
+/// `locked_rounds`. A splice uses all of them; the fields do not partition by payment type. A
+/// channel open this node initiated is persisted with nothing but its [`OpenChannelIntent`]
+/// under the payment id returned to the caller, and wallet sync adds `details` once it observes
+/// the funding transaction. An entry with none of them tracks no payment and is removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PendingPaymentDetails {
 	/// The payment this entry tracks.
@@ -144,6 +169,11 @@ pub(crate) struct PendingPaymentDetails {
 	/// tracker once it locks or its failure is surfaced. A fee bump shares the entry of the round
 	/// it replaces, so the intent outlives any single round negotiated under it.
 	pub splice_intent: Option<SpliceIntent>,
+	/// The live intent of a channel open this node initiated, or `None` for any other payment and
+	/// for an open whose channel became pending or closed. Written by the `open_channel` entry
+	/// points before the open is handed to LDK and cleared by the open-channel tracker once LDK
+	/// reports the channel pending or closed.
+	pub open_channel_intent: Option<OpenChannelIntent>,
 	/// The candidates LDK promoted to the channel's funding, as `ChannelReady` reported them.
 	/// A zero-conf splice locks before its transaction confirms, and every later splice builds
 	/// on it, so such a round can still confirm once the channel's funding has moved on from
@@ -170,6 +200,7 @@ impl PendingPaymentDetails {
 			funding_channels: Vec::new(),
 			candidates,
 			splice_intent,
+			open_channel_intent: None,
 			locked_rounds: Vec::new(),
 		}
 	}
@@ -182,6 +213,22 @@ impl PendingPaymentDetails {
 			funding_channels: Vec::new(),
 			candidates: Vec::new(),
 			splice_intent: Some(intent),
+			open_channel_intent: None,
+			locked_rounds: Vec::new(),
+		}
+	}
+
+	/// An entry for a channel open this node initiated, before the funding transaction exists and
+	/// therefore before a payment record for it does.
+	pub(crate) fn pending_open(id: PaymentId, intent: OpenChannelIntent) -> Self {
+		Self {
+			id,
+			details: None,
+			conflicting_txids: Vec::new(),
+			funding_channels: Vec::new(),
+			candidates: Vec::new(),
+			splice_intent: None,
+			open_channel_intent: Some(intent),
 			locked_rounds: Vec::new(),
 		}
 	}
@@ -200,6 +247,7 @@ impl PendingPaymentDetails {
 			funding_channels,
 			candidates,
 			splice_intent,
+			open_channel_intent: None,
 			locked_rounds: Vec::new(),
 		}
 	}
@@ -234,6 +282,11 @@ impl PendingPaymentDetails {
 		self.splice_intent.as_ref()
 	}
 
+	/// The intent of the channel open this record tracks, if its channel is not yet pending.
+	pub(crate) fn open_channel_intent(&self) -> Option<&OpenChannelIntent> {
+		self.open_channel_intent.as_ref()
+	}
+
 	/// Returns this node's recorded funding figures for the candidate with the given txid, if any.
 	pub(crate) fn candidate(&self, txid: Txid) -> Option<&FundingTxCandidate> {
 		self.candidates.iter().find(|candidate| candidate.txid == txid)
@@ -264,6 +317,7 @@ impl PendingPaymentDetails {
 	pub(crate) fn is_empty(&self) -> bool {
 		self.details.is_none()
 			&& self.splice_intent.is_none()
+			&& self.open_channel_intent.is_none()
 			&& self.candidates.is_empty()
 			&& self.locked_rounds.is_empty()
 	}
@@ -277,6 +331,7 @@ impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(8, candidates, optional_vec),
 	(10, splice_intent, option),
 	(12, locked_rounds, optional_vec),
+	(14, open_channel_intent, option),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -289,6 +344,10 @@ pub(crate) struct PendingPaymentDetailsUpdate {
 	/// unchanged. Clearing the intent of an entry that carries only the intent is done by removing
 	/// the entry, not through this field.
 	pub splice_intent: Option<Option<SpliceIntent>>,
+	/// The open-channel intent to set (`Some(Some(..))`) or clear (`Some(None)`), or `None` to
+	/// leave it unchanged. As with `splice_intent`, an entry carrying only the intent is removed
+	/// rather than cleared through this field.
+	pub open_channel_intent: Option<Option<OpenChannelIntent>>,
 }
 
 impl StorableObject for PendingPaymentDetails {
@@ -346,6 +405,13 @@ impl UpdatableObject for PendingPaymentDetails {
 			}
 		}
 
+		if let Some(new_open_channel_intent) = update.open_channel_intent {
+			if self.open_channel_intent != new_open_channel_intent {
+				self.open_channel_intent = new_open_channel_intent;
+				updated = true;
+			}
+		}
+
 		updated
 	}
 
@@ -371,6 +437,7 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 				conflicting_txids: None,
 				candidates: value.candidates.clone(),
 				splice_intent: value.splice_intent.clone().map(Some),
+				open_channel_intent: value.open_channel_intent.clone().map(Some),
 			},
 			Some(details) => {
 				let conflicting_txids = if value.conflicting_txids.is_empty() {
@@ -378,16 +445,17 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 				} else {
 					Some(value.conflicting_txids.clone())
 				};
-				// Leave the splice intent unchanged: it is owned by the splice entry points and the
-				// splice tracker, never by a payment-tracking merge. Emitting the current value
-				// here would let an `insert_or_update` of a payment record (e.g. from wallet sync,
-				// built without an intent) clobber a live intent to `None`.
+				// Leave the intents unchanged: they are owned by the splice and open-channel entry
+				// points and their trackers, never by a payment-tracking merge. Emitting the
+				// current value here would let an `insert_or_update` of a payment record (e.g.
+				// from wallet sync, built without an intent) clobber a live intent to `None`.
 				Self {
 					id: details.id,
 					payment_update: Some(details.to_update()),
 					conflicting_txids,
 					candidates: value.candidates.clone(),
 					splice_intent: None,
+					open_channel_intent: None,
 				}
 			},
 		}
@@ -698,6 +766,77 @@ mod tests {
 		assert_eq!(record.splice_intent(), Some(&intent));
 	}
 
+	fn test_open_intent() -> OpenChannelIntent {
+		use std::str::FromStr;
+
+		OpenChannelIntent {
+			counterparty_node_id: PublicKey::from_str(
+				"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+			)
+			.unwrap(),
+			user_channel_id: UserChannelId(42),
+			temporary_channel_id: ChannelId([5u8; 32]),
+		}
+	}
+
+	/// Wallet sync files the funding payment of an open under the open's entry while the open
+	/// is still in flight, and merges its later view of the transaction through `to_update()` of
+	/// a fresh record built without an intent; neither may clear the live intent.
+	#[test]
+	fn payment_tracking_merge_preserves_a_live_open_channel_intent() {
+		let payment_id = PaymentId([7u8; 32]);
+		let txid = test_txid(8);
+		let intent = test_open_intent();
+		let mut record = PendingPaymentDetails::pending_open(payment_id, intent.clone());
+		assert!(!record.is_empty(), "an entry carrying an open intent tracks the open");
+
+		record.details = Some(pending_onchain_payment(payment_id, txid));
+		let fresh = PendingPaymentDetails::new(
+			pending_onchain_payment(payment_id, txid),
+			vec![test_txid(9)],
+			Vec::new(),
+		);
+		assert!(record.update(fresh.to_update()));
+		assert_eq!(record.open_channel_intent(), Some(&intent));
+
+		// Only an update that clears the intent does so, and a record left with nothing else is
+		// then empty.
+		let mut bare = PendingPaymentDetails::pending_open(payment_id, intent.clone());
+		assert!(bare.update(PendingPaymentDetailsUpdate {
+			id: payment_id,
+			payment_update: None,
+			conflicting_txids: None,
+			candidates: Vec::new(),
+			splice_intent: None,
+			open_channel_intent: Some(None),
+		}));
+		assert!(bare.is_empty());
+	}
+
+	/// An open's entry round-trips with its intent, bare and once the payment is recorded, and an
+	/// entry written before open intents were kept reads with none.
+	#[test]
+	fn open_channel_intent_round_trips() {
+		let payment_id = PaymentId([7u8; 32]);
+		let intent = test_open_intent();
+		let bare = PendingPaymentDetails::pending_open(payment_id, intent.clone());
+		let decoded: PendingPaymentDetails =
+			Readable::read(&mut &bare.encode()[..]).expect("encoding must round-trip");
+		assert_eq!(decoded, bare);
+		assert_eq!(decoded.open_channel_intent(), Some(&intent));
+
+		let mut tracked = bare.clone();
+		tracked.details = Some(pending_onchain_payment(payment_id, test_txid(8)));
+		let decoded: PendingPaymentDetails =
+			Readable::read(&mut &tracked.encode()[..]).expect("encoding must round-trip");
+		assert_eq!(decoded, tracked);
+
+		let stored = entry(vec![candidate(2, false)]);
+		let decoded: PendingPaymentDetails =
+			Readable::read(&mut &stored.encode()[..]).expect("encoding must round-trip");
+		assert!(decoded.open_channel_intent().is_none());
+	}
+
 	#[test]
 	fn splice_kind_round_trips() {
 		for kind in [
@@ -882,6 +1021,7 @@ mod tests {
 			.expect("an entry written before the rounds and the intent were kept still reads");
 		assert!(decoded.locked_rounds().is_empty());
 		assert!(decoded.splice_intent.is_none());
+		assert!(decoded.open_channel_intent.is_none());
 		assert_eq!(decoded, stored);
 	}
 
