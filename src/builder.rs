@@ -2380,6 +2380,7 @@ fn build_with_store_internal(
 			Arc::clone(&channel_manager),
 			Arc::clone(&keys_manager),
 			Arc::clone(&tx_broadcaster),
+			Arc::clone(&fee_estimator),
 			Arc::clone(&kv_store),
 			Arc::downgrade(&runtime),
 			Arc::clone(&config),
