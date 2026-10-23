@@ -2691,6 +2691,98 @@ mod tests {
 		assert!(matches!(result, Err(BuildError::ReadFailed)));
 	}
 
+	/// Rebuilding a node must restore relationship identity, pending ownership, and paid history.
+	/// Seed snapshots directly so this test does not depend on payment event handling.
+	#[test]
+	fn inbound_recurrence_snapshots_survive_rebuild() {
+		use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+		use lightning::ln::channelmanager::PaymentId;
+		use lightning::offers::offer::{OfferId, Recurrence, RecurrencePeriod, RecurrenceType};
+
+		use crate::payment::{
+			InboundRecurrenceClaimStatus, InboundRecurrenceDetails, RecurrenceStatus,
+		};
+		use crate::runtime::Runtime;
+		use crate::types::{DynStore, DynStoreWrapper};
+
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let logger = Arc::new(Logger::new_log_facade());
+		let build = || {
+			let runtime = Arc::new(Runtime::new(Arc::clone(&logger)).unwrap());
+			super::build_with_store_internal(
+				Arc::new(crate::Config::default()),
+				None,
+				None,
+				None,
+				None,
+				None,
+				None,
+				[42; 64],
+				runtime,
+				Arc::clone(&logger),
+				Arc::clone(&store),
+			)
+			.unwrap()
+		};
+		let node = build();
+		assert!(node.list_inbound_recurrences().is_empty());
+		let payer = PublicKey::from_secret_key(
+			&Secp256k1::new(),
+			&SecretKey::from_slice(&[1; 32]).unwrap(),
+		);
+		let other_payer = PublicKey::from_secret_key(
+			&Secp256k1::new(),
+			&SecretKey::from_slice(&[2; 32]).unwrap(),
+		);
+		let pending = InboundRecurrenceDetails {
+			offer_id: OfferId([1; 32]),
+			payer_signing_pubkey: payer,
+			recurrence: Recurrence {
+				recurrence_type: RecurrenceType::Compulsory(None),
+				recurrence_period: RecurrencePeriod::Days(1),
+				recurrence_paywindow: None,
+				recurrence_limit: None,
+			},
+			status: RecurrenceStatus::Active,
+			basetime: Some(1_700_000_000),
+			initial_start: None,
+			claim_status: InboundRecurrenceClaimStatus::Pending(PaymentId([3; 32])),
+			completed_payments: vec![PaymentId([1; 32]), PaymentId([2; 32])],
+		};
+		// Changing either component of the relationship key must select a different record.
+		let cancelled = InboundRecurrenceDetails {
+			payer_signing_pubkey: other_payer,
+			status: RecurrenceStatus::Cancelled,
+			..pending.clone()
+		};
+		let completed = InboundRecurrenceDetails {
+			offer_id: OfferId([2; 32]),
+			status: RecurrenceStatus::Completed,
+			claim_status: InboundRecurrenceClaimStatus::Idle,
+			..pending.clone()
+		};
+		let expected = vec![pending, cancelled, completed];
+		for details in &expected {
+			node.runtime.block_on(node.inbound_recurrence_store.insert(details.clone())).unwrap();
+		}
+		drop(node);
+
+		// Build through the production loader, not by reusing the previous store's cache.
+		let restored = build();
+		let listed = restored.list_inbound_recurrences();
+		assert_eq!(listed.len(), expected.len());
+		for details in expected {
+			assert_eq!(
+				restored
+					.inbound_recurrence(&details.offer_id, &details.payer_signing_pubkey)
+					.unwrap(),
+				Some(details.clone()),
+			);
+			assert!(listed.contains(&details));
+		}
+		assert_eq!(restored.inbound_recurrence(&OfferId([9; 32]), &payer).unwrap(), None);
+	}
+
 	#[test]
 	fn sanitize_empty_node_alias() {
 		// Empty node alias
