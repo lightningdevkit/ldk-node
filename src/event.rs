@@ -2767,3 +2767,7 @@ mod tests {
 		assert_eq!(event_queue.next_event(), None);
 	}
 }
+
+#[cfg(test)]
+#[path = "event/inbound_recurrence_tests.rs"]
+mod inbound_recurrence_tests;
