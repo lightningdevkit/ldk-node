@@ -22,6 +22,7 @@ use lightning_liquidity::lsps2::msgs::LSPS2RawOpeningFeeParams;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_types::payment::PaymentHash;
 
+use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_error, LdkLogger};
 use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
 use crate::{total_anchor_channels_reserve_sats, Config};
@@ -40,6 +41,7 @@ where
 {
 	pub(crate) lsps2_service: Option<LSPS2Service>,
 	pub(crate) wallet: Arc<Wallet>,
+	pub(crate) fee_estimator: Arc<OnchainFeeEstimator>,
 	pub(crate) channel_manager: Arc<ChannelManager>,
 	pub(crate) peer_manager: RwLock<Option<Weak<PeerManager>>>,
 	pub(crate) keys_manager: Arc<KeysManager>,
@@ -471,6 +473,24 @@ where
 					// TODO: We just silently fail here. Eventually we will need to remember
 					// the pending requests and regularly retry opening the channel until we
 					// succeed.
+					return;
+				}
+
+				// The funding transaction's fee is paid from the same on-chain funds, so we can't
+				// fund more than we would when opening a channel with all of them.
+				let total_anchor_reserve_sats =
+					cur_anchor_reserve_sats.saturating_add(additional_reserve_required);
+				let funding_fee_rate =
+					self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+				let max_amount = self
+					.wallet
+					.get_max_funding_amount(total_anchor_reserve_sats, funding_fee_rate)
+					.unwrap_or(0);
+				if channel_amount_sats > max_amount {
+					log_error!(self.logger,
+						"Unable to create channel due to insufficient funds. Requested: {}sats, Maximum: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
+						channel_amount_sats, max_amount, funding_fee_rate.to_sat_per_kwu(), total_anchor_reserve_sats,
+					);
 					return;
 				}
 
