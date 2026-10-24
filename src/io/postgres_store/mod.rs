@@ -857,7 +857,7 @@ impl PostgresStoreInner {
 		if let Err(e) =
 			check_namespace_key_validity(primary_namespace, secondary_namespace, Some(key), "write")
 		{
-			self.clean_locks(&inner_lock_ref, locking_key);
+			self.clean_locks(inner_lock_ref, locking_key);
 			return Err(e.into());
 		}
 
@@ -925,7 +925,7 @@ impl PostgresStoreInner {
 			Some(key),
 			"remove",
 		) {
-			self.clean_locks(&inner_lock_ref, locking_key);
+			self.clean_locks(inner_lock_ref, locking_key);
 			return Err(e.into());
 		}
 
@@ -1131,22 +1131,24 @@ impl PostgresStoreInner {
 			}
 		};
 
-		self.clean_locks(&inner_lock_ref, locking_key);
+		self.clean_locks(inner_lock_ref, locking_key);
 
 		res
 	}
 
-	fn clean_locks(&self, inner_lock_ref: &Arc<tokio::sync::Mutex<u64>>, locking_key: String) {
+	fn clean_locks(&self, inner_lock_ref: Arc<tokio::sync::Mutex<u64>>, locking_key: String) {
 		// If there are no arcs in use elsewhere, this means that there are no in-flight writes. We can remove the map
-		// entry to prevent leaking memory. The two arcs that are expected are the one in the map and the one held here
-		// in inner_lock_ref. The outer lock is obtained first, to avoid a new arc being cloned after we've already
-		// counted.
+		// entry to prevent leaking memory. The outer lock is obtained first, to avoid a new arc being cloned after we've
+		// already counted. Our own arc is dropped before counting, so two operations finishing at the same time can't
+		// each count the other's arc and both keep the entry.
 		let mut outer_lock = self.write_version_locks.lock().unwrap();
+		debug_assert!(
+			Arc::strong_count(&inner_lock_ref) >= 2,
+			"Unexpected PostgresStore strong count"
+		);
+		drop(inner_lock_ref);
 
-		let strong_count = Arc::strong_count(inner_lock_ref);
-		debug_assert!(strong_count >= 2, "Unexpected PostgresStore strong count");
-
-		if strong_count == 2 {
+		if outer_lock.get(&locking_key).is_some_and(|lock| Arc::strong_count(lock) == 1) {
 			outer_lock.remove(&locking_key);
 		}
 	}
@@ -1805,5 +1807,22 @@ mod tests {
 	fn test_tls_config_invalid_pem_returns_error() {
 		let result = PostgresStore::build_tls_connector(Some("not-a-valid-pem".to_string()));
 		assert!(result.is_err());
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn test_postgres_reclaims_lock_after_overlapping_cleanups() {
+		let store = create_test_store("test_pg_reclaims_lock").await;
+		let locking_key = store.build_locking_key("namespace", "", "key");
+
+		// Two overlapping operations on the same key reach their final cleanup while both still hold
+		// a reference. The first cleanup must keep the entry for the second, which must remove it.
+		let (first_lock_ref, _) = store.get_new_version_and_lock_ref(locking_key.clone());
+		let (second_lock_ref, _) = store.get_new_version_and_lock_ref(locking_key.clone());
+		store.inner.clean_locks(first_lock_ref, locking_key.clone());
+		assert!(store.inner.write_version_locks.lock().unwrap().contains_key(&locking_key));
+		store.inner.clean_locks(second_lock_ref, locking_key);
+		assert!(store.inner.write_version_locks.lock().unwrap().is_empty());
+
+		cleanup_store(&store).await;
 	}
 }
