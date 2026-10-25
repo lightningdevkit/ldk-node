@@ -1429,6 +1429,17 @@ impl Node {
 		user_config.channel_handshake_config.announce_for_forwarding = announce_for_forwarding;
 		user_config.channel_config = (channel_config.unwrap_or_default()).clone().into();
 
+		// An LSPS2 service must be able to receive every part of an initial
+		// JIT payment before it can open the channel to the client. The
+		// announced-channel default (25%) can prevent that on an otherwise
+		// sufficiently funded inbound channel, locking the received HTLCs
+		// until expiry. Raise the inbound limit only when serving LSPS2.
+		if announce_for_forwarding && self.liquidity_source.lsps2_service().is_enabled() {
+			user_config
+				.channel_handshake_config
+				.announced_channel_max_inbound_htlc_value_in_flight_percentage = 100;
+		}
+
 		// Unannounced channels rely on LDK's default of 100% inbound HTLC value-in-flight
 		// to support large initial payments via LSPS2.
 		if !announce_for_forwarding {
