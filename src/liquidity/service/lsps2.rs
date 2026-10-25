@@ -112,6 +112,11 @@ impl<L: Deref> LSPS2ServiceLiquiditySource<L>
 where
 	L::Target: LdkLogger,
 {
+	/// Whether this node serves LSPS2 JIT payments.
+	pub(crate) fn is_enabled(&self) -> bool {
+		self.lsps2_service.is_some()
+	}
+
 	pub(crate) fn set_peer_manager(&self, peer_manager: Weak<PeerManager>) {
 		*self.peer_manager.write().expect("lock") = Some(peer_manager);
 	}
