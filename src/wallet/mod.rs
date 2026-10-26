@@ -1399,11 +1399,11 @@ impl Wallet {
 		// (`find_splice_payment_id`), and under this record's id it would take a `Failed`
 		// record and go untracked. The drop pass (`drop_abandoned_splice_rounds_locked`) keeps
 		// the intent under the record's id instead, having removed the record. Keeping the
-		// intent before removing the entry loses nothing to a crash in between: the replay
-		// finds the intent kept and adds no second copy. A settlement the splice tracker has
-		// under way, one that read the intent before this routine ran or that lands between the
-		// read above and the insert, leaves a bare copy of a settled intent behind; the
-		// channel's next lock, close or startup reconciliation settles the copy.
+		// intent before removing the entry means a crash in between doesn't lose anything: the
+		// replay finds the intent kept and doesn't add a second copy. A settlement the splice
+		// tracker has under way, one that read the intent before this routine ran or that lands
+		// between the read above and the insert, leaves a bare copy of a settled intent behind;
+		// the channel's next lock, close or startup reconciliation settles the copy.
 		let intent =
 			stores.pending_payment(&payment_id).await?.and_then(|entry| entry.splice_intent);
 		if let Some(intent) = intent {
@@ -7279,10 +7279,10 @@ mod tests {
 			.is_none());
 	}
 
-	/// The bump's history carries a round this node contributed nothing to over from the failed
-	/// record, whose signing attributed the round to the failed payment. Facts are immutable, so
-	/// the bump's record lists the round as a candidate and leaves its facts as they are, rather
-	/// than failing the signing over a second attribution.
+	/// The bump's history still lists a round this node didn't contribute to, carried over from
+	/// the failed record whose signing attributed the round to the failed payment. Facts are
+	/// immutable, so the bump's record lists the round as a candidate and leaves its facts as they
+	/// are, rather than failing the signing over a second attribution.
 	#[tokio::test]
 	async fn a_bump_of_a_failed_round_leaves_a_counterparty_rounds_facts_as_they_are() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));

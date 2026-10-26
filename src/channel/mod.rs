@@ -1051,7 +1051,7 @@ mod tests {
 		let other = vec![TxOut { value: Amount::from_sat(2_000), script_pubkey: ScriptBuf::new() }];
 		assert!(!is_same_splice(&a, &test_funding_contribution_with_outputs(0, 253, &other)));
 
-		// Contributions moving nothing (no inputs, no outputs) only match themselves exactly.
+		// A contribution without inputs or outputs only matches another empty one.
 		assert!(is_same_splice(&test_funding_contribution(), &test_funding_contribution()));
 		assert!(!is_same_splice(
 			&test_funding_contribution(),
@@ -1361,8 +1361,9 @@ mod tests {
 	/// Releasing a contribution spares the parts another contribution uses as well: a fee bump
 	/// built by adjusting the fee of the round it replaces shares that round's inputs and change
 	/// address — the change differing in amount only — so against that round every part is kept;
-	/// against a candidate using only some of the parts, the rest is released, a counterparty-only
-	/// alongside claiming nothing; against no other contribution, everything is.
+	/// against a candidate using only some of the parts, the rest is released, even with a
+	/// counterparty-only round alongside that doesn't claim any part; against no other
+	/// contribution, everything is.
 	#[test]
 	fn unclaimed_parts_spare_what_other_contributions_use() {
 		use bitcoin::WPubkeyHash;
