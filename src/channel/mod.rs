@@ -151,7 +151,7 @@ impl SpliceTracker {
 				// without a record either: keep the intent when the release fails. One case stays:
 				// a hand-off LDK never wrote — the node stopped before the manager's next write —
 				// whose channel is force-closed as stale at this start and whose round the monitor
-				// never watched. LDK knows nothing of that round and reports no event for it;
+				// never watched. LDK doesn't know of that round and won't report an event for it;
 				// release its contribution here, which takes the monitor's watched transactions to
 				// tell such a round from a watched one, as `closed_channel_tracked_rounds` does at
 				// `ChannelClosed`.
@@ -1066,8 +1066,8 @@ fn decide_reconcile(candidates: &[SpliceCandidateDetails]) -> ReconcileDecision 
 }
 
 /// The inputs `contribution` reserved that no candidate's own contribution still claims — extras
-/// a splice attempt lost with the restart had reserved. A counterparty-only round carries no
-/// contribution and claims nothing.
+/// a splice attempt lost with the restart had reserved. A counterparty-only round doesn't have
+/// a contribution, so it doesn't claim any input.
 fn unclaimed_inputs(
 	contribution: &FundingContribution, candidates: &[SpliceCandidateDetails],
 ) -> Vec<OutPoint> {
@@ -1647,7 +1647,7 @@ mod tests {
 	}
 
 	/// The inputs a kept record reserves beyond what LDK's candidates still claim are identified
-	/// for release; a counterparty-only round claims nothing and must not suppress the
+	/// for release; a counterparty-only round doesn't claim any input and must not suppress the
 	/// difference.
 	#[test]
 	fn unclaimed_inputs_are_those_no_candidate_contribution_uses() {
