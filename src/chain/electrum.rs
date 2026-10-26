@@ -934,13 +934,99 @@ impl Filter for ElectrumRuntimeClient {
 
 #[cfg(test)]
 mod tests {
+	use std::io::{BufRead, BufReader, Write};
+	use std::net::{Shutdown, TcpListener};
 	use std::sync::atomic::{AtomicUsize, Ordering};
-	use std::sync::mpsc;
+	use std::sync::{mpsc, Barrier};
 	use std::thread;
 
 	use bitcoin::blockdata::constants::genesis_block;
 
 	use super::*;
+
+	#[test]
+	fn clean_eof_wakes_concurrent_electrum_requests() {
+		const REQUEST_COUNT: usize = 8;
+		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+		let server_address = listener.local_addr().unwrap();
+		let (client_sender, client_receiver) = mpsc::channel::<Arc<ElectrumClient>>();
+		let server = thread::spawn(move || {
+			let (stream, _) = listener.accept().unwrap();
+			let mut reader = BufReader::new(stream);
+			let mut version_request = String::new();
+			assert!(reader.read_line(&mut version_request).unwrap() > 0);
+			let version_request: serde_json::Value =
+				serde_json::from_str(&version_request).unwrap();
+			let version_response = serde_json::json!({
+				"jsonrpc": "2.0",
+				"id": version_request["id"],
+				"result": ["test-server", "1.4"],
+			});
+			writeln!(reader.get_mut(), "{version_response}").unwrap();
+			reader.get_mut().flush().unwrap();
+			let client = client_receiver.recv().unwrap();
+
+			// The client's reader thread holds the shared stream while it blocks on a read, so
+			// other requests can't be written meanwhile. Send notifications to repeatedly
+			// unblock it until every request was fully written and flushed (excluding the
+			// version handshake).
+			let nudge = serde_json::json!({"jsonrpc": "2.0", "method": "test.nudge", "params": []});
+			let deadline = std::time::Instant::now() + Duration::from_secs(30);
+			while client.calls_made().unwrap() - 1 < REQUEST_COUNT {
+				assert!(std::time::Instant::now() < deadline, "requests weren't all sent");
+				writeln!(reader.get_mut(), "{nudge}").unwrap();
+				thread::sleep(Duration::from_millis(10));
+			}
+			drop(client);
+			// Give the requests time to start waiting for their responses.
+			thread::sleep(Duration::from_millis(50));
+
+			// Only shut down our sending side so the client observes a clean EOF. Closing the
+			// entire socket with unread requests could send a TCP reset instead, which older
+			// clients already handled.
+			reader.get_ref().shutdown(Shutdown::Write).unwrap();
+
+			// Keep reading until the client hangs up so unread requests don't trigger a reset.
+			reader.get_mut().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+			let mut remaining = String::new();
+			while matches!(reader.read_line(&mut remaining), Ok(n) if n > 0) {
+				remaining.clear();
+			}
+		});
+
+		let config = ElectrumConfigBuilder::new().retry(0).build();
+		let client = Arc::new(
+			ElectrumClient::from_config(&format!("tcp://{server_address}"), config).unwrap(),
+		);
+		client_sender.send(Arc::clone(&client)).unwrap();
+		let start = Arc::new(Barrier::new(REQUEST_COUNT + 1));
+		let (finished_sender, finished_receiver) = mpsc::channel();
+		let mut requests = Vec::new();
+		for _ in 0..REQUEST_COUNT {
+			let client = Arc::clone(&client);
+			let start = Arc::clone(&start);
+			let finished_sender = finished_sender.clone();
+			requests.push(thread::spawn(move || {
+				start.wait();
+				let result = client.raw_call("server.ping", Vec::<electrum_client::Param>::new());
+				finished_sender.send(result.is_err()).unwrap();
+			}));
+		}
+		start.wait();
+
+		for _ in 0..REQUEST_COUNT {
+			let failed_as_expected = finished_receiver
+				.recv_timeout(Duration::from_secs(60))
+				.expect("clean EOF must wake every concurrent Electrum request");
+			assert!(failed_as_expected);
+		}
+		for request in requests {
+			request.join().unwrap();
+		}
+		// Hang up so the server stops reading.
+		drop(client);
+		server.join().unwrap();
+	}
 
 	struct RecordingConfirm {
 		calls: AtomicUsize,

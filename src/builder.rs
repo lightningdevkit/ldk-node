@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
 
+use bdk_wallet::descriptor::IntoWalletDescriptor;
+use bdk_wallet::signer::SignersContainer;
 use bdk_wallet::template::Bip84;
 use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
 use bitcoin::bip32::{ChildNumber, Xpriv};
@@ -1758,17 +1760,30 @@ fn build_with_store_internal(
 		BuildError::WalletSetupFailed
 	})?;
 
-	let descriptor = Bip84(xprv, KeychainKind::External);
-	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
+	let secp_ctx = Secp256k1::new();
+	let (descriptor, keymap) = Bip84(xprv, KeychainKind::External)
+		.into_wallet_descriptor(&secp_ctx, config.network.into())
+		.map_err(|e| {
+			log_error!(logger, "Failed to derive external wallet descriptor: {}", e);
+			BuildError::WalletSetupFailed
+		})?;
+	let (change_descriptor, change_keymap) = Bip84(xprv, KeychainKind::Internal)
+		.into_wallet_descriptor(&secp_ctx, config.network.into())
+		.map_err(|e| {
+			log_error!(logger, "Failed to derive internal wallet descriptor: {}", e);
+			BuildError::WalletSetupFailed
+		})?;
+	let signers = [
+		SignersContainer::build(keymap, &descriptor, &secp_ctx),
+		SignersContainer::build(change_keymap, &change_descriptor, &secp_ctx),
+	];
 	let mut wallet_persister =
 		KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger));
-	#[allow(deprecated)]
 	let wallet_opt = runtime
 		.block_on(async {
 			BdkWallet::load()
 				.descriptor(KeychainKind::External, Some(descriptor.clone()))
 				.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
-				.extract_keys()
 				.check_network(config.network)
 				.load_wallet_async(&mut wallet_persister)
 				.await
@@ -1957,6 +1972,7 @@ fn build_with_store_internal(
 
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
+		signers,
 		wallet_persister,
 		persisted_pool_indices,
 		Arc::clone(&tx_broadcaster),
