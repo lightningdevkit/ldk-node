@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -12,6 +13,8 @@ use bip157::{
 use bitcoin::{BlockHash, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
 use electrum_client::{Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder};
 use lightning::chain::{BlockLocator, Listen, WatchedOutput};
+use lightning_block_sync::init::validate_best_block_header;
+use lightning_block_sync::{BlockData, BlockHeaderData, BlockSource, BlockSourceError};
 
 use tokio::sync::{mpsc, watch};
 
@@ -42,6 +45,9 @@ const DEFAULT_RESPONSE_TIMEOUT_SECS: u64 = 5;
 
 /// Number of peers that must agree on filter headers before they're accepted.
 const DEFAULT_REQUIRED_PEERS: u8 = 1;
+
+/// How long a first-ever start waits for the headers-only sync that discovers the chain tip.
+const STABLE_TIP_FETCH_TIMEOUT_SECS: u64 = 600;
 
 /// Maximum consecutive `node.run()` failures before the restart loop gives up.
 const MAX_RESTART_RETRIES: u32 = 5;
@@ -341,9 +347,6 @@ impl CbfChainSource {
 	) -> (KyotoNode, Client) {
 		let mut kyoto_builder = KyotoBuilder::new(config.network);
 
-		let data_dir = std::path::PathBuf::from(&config.storage_dir_path).join("bip157_data");
-		kyoto_builder = kyoto_builder.data_dir(data_dir);
-
 		if !trusted_peers.is_empty() {
 			kyoto_builder = kyoto_builder.add_peers(trusted_peers.to_vec());
 		}
@@ -364,6 +367,106 @@ impl CbfChainSource {
 		}
 
 		kyoto_builder.build()
+	}
+
+	/// Syncs kyoto on headers_only mode (fast sync) to get the current tip (and walk back reorg
+	/// safety window) to use it as a wallet birthday.
+	pub(crate) async fn fetch_stable_tip(&self) -> Result<BlockLocator, Error> {
+		log_info!(self.logger, "CBF: finding a stable tip for the first start.");
+
+		let mut kyoto_builder = KyotoBuilder::new(self.config.network).headers_only_sync();
+
+		if !self.trusted_peers.is_empty() {
+			kyoto_builder = kyoto_builder.add_peers(self.trusted_peers.to_vec());
+		}
+
+		kyoto_builder = kyoto_builder.required_peers(DEFAULT_REQUIRED_PEERS);
+		kyoto_builder =
+			kyoto_builder.response_timeout(Duration::from_secs(DEFAULT_RESPONSE_TIMEOUT_SECS));
+
+		// The mainnet headers before taproot activation tell us nothing we need, so skip them.
+		if self.config.network == Network::Bitcoin {
+			kyoto_builder = kyoto_builder
+				.chain_state(ChainState::Checkpoint(HashCheckpoint::taproot_activation()));
+		}
+
+		let (node, client) = kyoto_builder.build();
+		let Client { requester, info_rx, warn_rx, mut event_rx } = client;
+		tokio::spawn(Self::process_info_messages(info_rx, Arc::clone(&self.logger)));
+		tokio::spawn(Self::process_warn_messages(warn_rx, Arc::clone(&self.logger)));
+		let node_handle = tokio::spawn(node.run());
+
+		let source = KyotoBlockSource(requester.clone());
+		let stable_tip_discovery = async {
+			loop {
+				match event_rx.recv().await {
+					Some(KyotoEvent::FiltersSynced(_)) => break,
+					Some(KyotoEvent::ChainUpdate(BlockHeaderChanges::Connected(header))) => {
+						if header.height % 50_000 == 0 {
+							log_info!(
+								self.logger,
+								"CBF: tip discovery at height {}.",
+								header.height
+							);
+						}
+					},
+					Some(_) => {},
+					None => {
+						return Err(BlockSourceError::persistent(
+							"kyoto stopped before reaching the tip",
+						))
+					},
+				}
+			}
+
+			// A chain no longer than the safety window has no stable tip other than genesis, and
+			// kyoto holds no header for genesis itself, so start from there.
+			let (_, tip_height) = source.get_best_block().await?;
+			if tip_height.map_or(false, |height| height <= REORG_SAFETY_BLOCKS) {
+				return Ok(BlockLocator::from_network(self.config.network));
+			}
+
+			let validated_tip = validate_best_block_header(&source).await?;
+			let mut header_data = *validated_tip;
+			// Kyoto cannot report reorgs below its start checkpoint, so start a few blocks back.
+			for _ in 0..REORG_SAFETY_BLOCKS {
+				if header_data.height == 0 {
+					break;
+				}
+				header_data = source
+					.get_header(&header_data.header.prev_blockhash, Some(header_data.height - 1))
+					.await?;
+			}
+			Ok(BlockLocator::new(header_data.header.block_hash(), header_data.height))
+		};
+		let result = tokio::time::timeout(
+			Duration::from_secs(STABLE_TIP_FETCH_TIMEOUT_SECS),
+			stable_tip_discovery,
+		)
+		.await;
+
+		// Stop the temporary node before the real one starts.
+		let _ = requester.shutdown();
+		let _ = node_handle.await;
+
+		match result {
+			Ok(Ok(stable_tip)) => {
+				log_info!(self.logger, "CBF: first start at height {}.", stable_tip.height);
+				Ok(stable_tip)
+			},
+			Ok(Err(e)) => {
+				log_error!(self.logger, "Failed to discover the chain tip: {:?}", e);
+				Err(Error::TxSyncFailed)
+			},
+			Err(_) => {
+				log_error!(
+					self.logger,
+					"Timed out after {}s discovering the chain tip.",
+					STABLE_TIP_FETCH_TIMEOUT_SECS
+				);
+				Err(Error::TxSyncTimeout)
+			},
+		}
 	}
 
 	pub(crate) fn start(&self, chain_listener: ChainListener) {
@@ -586,9 +689,7 @@ impl CbfChainSource {
 		}
 	}
 
-	async fn process_warn_messages(
-		mut warn_rx: mpsc::UnboundedReceiver<Warning>, logger: Arc<Logger>,
-	) {
+	async fn process_warn_messages(mut warn_rx: mpsc::Receiver<Warning>, logger: Arc<Logger>) {
 		while let Some(warning) = warn_rx.recv().await {
 			log_debug!(logger, "CBF node warning: {}", warning);
 		}
@@ -1047,6 +1148,71 @@ impl CbfChainSource {
 	}
 }
 
+/// Exposes kyoto's [`KyotoRequester`] as a [`BlockSource`], so that the tip can be discovered with
+/// the same code path as for the Bitcoin Core sources.
+struct KyotoBlockSource(KyotoRequester);
+
+impl BlockSource for KyotoBlockSource {
+	fn get_header<'a>(
+		&'a self, header_hash: &'a BlockHash, height_hint: Option<u32>,
+	) -> impl Future<Output = Result<BlockHeaderData, BlockSourceError>> + 'a {
+		async move {
+			// Kyoto looks headers up by height, so resolve the height first if we weren't given it.
+			let height = match height_hint {
+				Some(height) => height,
+				None => self
+					.0
+					.height_of_hash(*header_hash)
+					.await
+					.map_err(|e| BlockSourceError::transient(format!("{:?}", e)))?
+					.ok_or_else(|| BlockSourceError::persistent("unknown block hash"))?,
+			};
+			let indexed_header = self
+				.0
+				.get_header(height)
+				.await
+				.map_err(|e| BlockSourceError::transient(format!("{:?}", e)))?
+				.ok_or_else(|| BlockSourceError::persistent("no header at height"))?;
+			if indexed_header.header.block_hash() != *header_hash {
+				return Err(BlockSourceError::persistent("header does not match requested hash"));
+			}
+			// Kyoto does not expose the accumulated chain work. Only the work of this block is
+			// filled in, which is enough for validating a single tip but not for comparing tips.
+			Ok(BlockHeaderData {
+				header: indexed_header.header,
+				height,
+				chainwork: indexed_header.header.work(),
+			})
+		}
+	}
+
+	fn get_block<'a>(
+		&'a self, header_hash: &'a BlockHash,
+	) -> impl Future<Output = Result<BlockData, BlockSourceError>> + 'a {
+		async move {
+			let indexed_block = self
+				.0
+				.get_block(*header_hash)
+				.await
+				.map_err(|e| BlockSourceError::transient(format!("{:?}", e)))?;
+			Ok(BlockData::FullBlock(indexed_block.block))
+		}
+	}
+
+	fn get_best_block<'a>(
+		&'a self,
+	) -> impl Future<Output = Result<(BlockHash, Option<u32>), BlockSourceError>> + 'a {
+		async move {
+			let tip = self
+				.0
+				.chain_tip()
+				.await
+				.map_err(|e| BlockSourceError::transient(format!("{:?}", e)))?;
+			Ok((tip.hash, Some(tip.height)))
+		}
+	}
+}
+
 ///Fork point which might have occured when we were offline
 async fn startup_fork_point(
 	requester: &KyotoRequester, chain_listener: &ChainListener,
@@ -1106,15 +1272,18 @@ fn resume_checkpoint(logger: &Logger, chain_listener: &ChainListener) -> Option<
 		}
 	}
 
-	// Walk BDK's checkpoint chain back to the reorg-safe anchor height.
+	// Walk BDK's checkpoint chain back to the reorg-safe anchor height. Don't step onto genesis:
+	// a wallet created at a birthday has no checkpoints below it, so its lowest one is the start.
 	let target_height = min_best_block.height.saturating_sub(REORG_SAFETY_BLOCKS);
 	let mut cursor = bdk_cp;
 	while cursor.height() > target_height {
 		match cursor.prev() {
-			Some(prev) => cursor = prev,
-			None => break,
+			Some(prev) if prev.height() > 0 => cursor = prev,
+			_ => break,
 		}
 	}
 
-	(cursor.height() > 0).then(|| HashCheckpoint::new(cursor.height(), cursor.hash()))
+	// Kyoto must not start above any listener, or that listener would miss the blocks in between.
+	(cursor.height() > 0 && cursor.height() <= min_best_block.height)
+		.then(|| HashCheckpoint::new(cursor.height(), cursor.hash()))
 }
