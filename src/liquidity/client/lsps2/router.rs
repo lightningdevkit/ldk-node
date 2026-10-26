@@ -42,11 +42,11 @@ pub struct LSPS2LeaseParameters {
 }
 
 impl_writeable_tlv_based!(LSPS2LeaseParameters, {
-	(0, lsp_node_id, required),
-	(2, intercept_scid, required),
-	(4, cltv_expiry_delta, required),
-	(6, payment_size_msat, option),
-	(8, valid_until, required),
+	(1, lsp_node_id, required),
+	(3, intercept_scid, required),
+	(5, cltv_expiry_delta, required),
+	(7, payment_size_msat, option),
+	(9, valid_until, required),
 });
 
 /// A router wrapper that uses ordinary payment paths when available and LSPS2 JIT paths otherwise.
@@ -150,6 +150,9 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 		}
 
 		let Some(params) = parameters else {
+			// Without a lease we cannot offer a JIT path either. Rather than returning a direct path
+			// that cannot receive the amount, fail invoice creation. This intentionally applies to any
+			// invoice built with an amount, including refunds and nodes without a configured LSP.
 			return if is_direct_recipient_path { Err(()) } else { inner_paths };
 		};
 		let Some(amount_msats) = amount_msats else {

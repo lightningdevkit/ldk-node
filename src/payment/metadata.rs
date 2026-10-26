@@ -42,7 +42,7 @@ impl PaymentMetadata {
 
 impl_writeable_tlv_based!(PaymentMetadata, {
 	(0, lsps2_parameters, option),
-	(2, lsps2_lease_parameters, option),
+	(1, lsps2_lease_parameters, option),
 });
 
 #[cfg(test)]
