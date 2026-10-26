@@ -59,6 +59,16 @@ pub(crate) enum LeaseCacheTargetId {
 	Variable,
 }
 
+impl LeaseCacheTargetId {
+	/// Returns whether the given lease may be used to serve this target.
+	pub(crate) fn matches(&self, lease: &PaymentLease) -> bool {
+		match self {
+			Self::Fixed { amount_msat } => lease.payment_size_msat == Some(*amount_msat),
+			Self::Variable => lease.payment_size_msat.is_none(),
+		}
+	}
+}
+
 impl_writeable_tlv_based_enum!(LeaseCacheTargetId,
 	(0, Fixed) => {
 		(1, amount_msat, required),
@@ -206,24 +216,29 @@ where
 		}
 	}
 
-	pub(crate) async fn register(&self, target: LeaseCacheTarget) -> Result<(), Error> {
+	/// Registers the given target, returning the target evicted to make room for it, if any.
+	pub(crate) async fn register(
+		&self, target: LeaseCacheTarget,
+	) -> Result<Option<LeaseCacheTargetId>, Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let mut updated_state = self.state.lock().expect("lock").clone();
-		updated_state.register(target);
+		let evicted = updated_state.register(target);
 		self.persist_state(&updated_state).await?;
 		*self.state.lock().expect("lock") = updated_state;
-		Ok(())
+		Ok(evicted)
 	}
 
-	pub(crate) async fn prune(&self, now: u64) -> Result<(), Error> {
+	/// Removes expired targets, returning their identifiers.
+	pub(crate) async fn prune(&self, now: u64) -> Result<Vec<LeaseCacheTargetId>, Error> {
 		let _guard = self.mutation_lock.lock().await;
 		let mut updated_state = self.state.lock().expect("lock").clone();
-		if updated_state.prune(now).is_empty() {
-			return Ok(());
+		let removed = updated_state.prune(now);
+		if removed.is_empty() {
+			return Ok(removed);
 		}
 		self.persist_state(&updated_state).await?;
 		*self.state.lock().expect("lock") = updated_state;
-		Ok(())
+		Ok(removed)
 	}
 
 	pub(crate) async fn persist(&self) -> Result<(), Error> {
@@ -396,6 +411,21 @@ impl LSPS2LeaseState {
 
 	pub(crate) fn insert(&mut self, lease: PaymentLease) {
 		self.leases.insert(lease.id, lease);
+	}
+
+	pub(crate) fn remove(&mut self, id: &PaymentLeaseId) {
+		self.leases.remove(id);
+	}
+
+	/// Returns the identifiers of all leases that may serve any of the given targets.
+	pub(crate) fn lease_ids_for_targets(
+		&self, target_ids: &[LeaseCacheTargetId],
+	) -> Vec<PaymentLeaseId> {
+		self.leases
+			.values()
+			.filter(|lease| target_ids.iter().any(|target_id| target_id.matches(lease)))
+			.map(|lease| lease.id)
+			.collect()
 	}
 
 	pub(crate) fn take_valid(&mut self, id: &PaymentLeaseId) -> Option<PaymentLease> {

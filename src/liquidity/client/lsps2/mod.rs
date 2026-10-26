@@ -138,7 +138,22 @@ where
 	}
 
 	pub(crate) async fn prune_stale_cache_targets(&self) -> Result<(), Error> {
-		self.cache_target_store.prune(now_secs()).await
+		let removed_target_ids = self.cache_target_store.prune(now_secs()).await?;
+		self.drop_cached_leases(&removed_target_ids).await
+	}
+
+	/// Drops the cached leases of targets we no longer track, as otherwise every lease negotiated
+	/// for a since-removed target would remain stored until it expires.
+	async fn drop_cached_leases(&self, target_ids: &[LeaseCacheTargetId]) -> Result<(), Error> {
+		if target_ids.is_empty() {
+			return Ok(());
+		}
+		let lease_ids = self.lease_state.lock().expect("lock").lease_ids_for_targets(target_ids);
+		for id in lease_ids {
+			self.lease_store.remove(&id).await?;
+			self.lease_state.lock().expect("lock").remove(&id);
+		}
+		Ok(())
 	}
 
 	pub(crate) async fn register_cache_target(
@@ -149,7 +164,10 @@ where
 			return Ok(());
 		}
 		let target = LeaseCacheTarget::new(id, absolute_expiry);
-		self.cache_target_store.register(target).await
+		if let Some(evicted_id) = self.cache_target_store.register(target).await? {
+			self.drop_cached_leases(&[evicted_id]).await?;
+		}
+		Ok(())
 	}
 
 	/// Returns whether any configured LSP supports LSPS2, or may support it once protocol
@@ -997,6 +1015,92 @@ mod tests {
 
 		assert_eq!(result, Err(()));
 		assert_eq!(*restored.lock().unwrap(), Some(42));
+	}
+
+	#[test]
+	fn removed_cache_targets_drop_their_leases() {
+		use crate::builder::NodeBuilder;
+		use crate::entropy::NodeEntropy;
+		use crate::io::test_utils::InMemoryStore;
+		use crate::liquidity::LSPS2_LEASE_CACHE_TARGET_SIZE;
+
+		let lsp_node_id: PublicKey =
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993".parse().unwrap();
+		let mut builder = NodeBuilder::new();
+		builder.set_log_facade_logger();
+		builder.add_liquidity_source(
+			lsp_node_id,
+			lightning::ln::msgs::SocketAddress::OnionV2([0; 12]),
+			None,
+			false,
+		);
+		#[cfg(not(feature = "uniffi"))]
+		let entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		let node = builder.build_with_store(entropy, InMemoryStore::new()).unwrap();
+		let client = node.liquidity_source.lsps2_client();
+		client.lsp_nodes.write().unwrap()[0].supported_protocols = Some(vec![2]);
+
+		let valid_until = now_secs() + 2 * state::MIN_LEASE_REMAINING_SECS;
+		let lease = |intercept_scid, amount_msat| PaymentLease {
+			id: PaymentLeaseId { lsp_node_id, intercept_scid },
+			params: LSPS2OpeningFeeParams {
+				min_fee_msat: 1,
+				proportional: 1,
+				valid_until: chrono::DateTime::from_timestamp(valid_until as i64, 0)
+					.unwrap()
+					.to_rfc3339()
+					.parse()
+					.unwrap(),
+				min_lifetime: 1,
+				max_client_to_self_delay: 1,
+				min_payment_size_msat: 1,
+				max_payment_size_msat: 1_000_000,
+				promise: String::new(),
+			},
+			cltv_expiry_delta: 144,
+			payment_size_msat: Some(amount_msat),
+			valid_until,
+		};
+		let (evicted, expired, retained) = (lease(1, 1_000), lease(2, 2_000), lease(3, 3_000));
+
+		node.runtime.block_on(async {
+			for lease in [&evicted, &expired, &retained] {
+				client.lease_store.insert(lease.clone()).await.unwrap();
+				client.lease_state.lock().unwrap().insert(lease.clone());
+			}
+			let fixed = |amount_msat| LeaseCacheTargetId::Fixed { amount_msat };
+			client.register_cache_target(fixed(1_000), None).await.unwrap();
+			client.register_cache_target(fixed(2_000), Some(now_secs())).await.unwrap();
+			client.register_cache_target(fixed(3_000), None).await.unwrap();
+			// Fill the cache so that registering one more target evicts the least recently used one.
+			for amount_msat in 0..(LSPS2_LEASE_CACHE_TARGET_SIZE as u64 - 3) {
+				client.register_cache_target(fixed(10_000 + amount_msat), None).await.unwrap();
+			}
+			client.register_cache_target(fixed(999_999), None).await.unwrap();
+			client.prune_stale_cache_targets().await.unwrap();
+
+			for (lease, expect_retained) in
+				[(&evicted, false), (&expired, false), (&retained, true)]
+			{
+				let amount_msat = lease.payment_size_msat.unwrap();
+				assert_eq!(
+					client.lease_state.lock().unwrap().has_fixed_amount(
+						amount_msat,
+						None,
+						&[lsp_node_id]
+					),
+					expect_retained,
+					"unexpected cached lease state for {amount_msat} msat"
+				);
+				assert_eq!(
+					client.lease_store.get(&lease.id).await.unwrap().is_some(),
+					expect_retained,
+					"unexpected persisted lease state for {amount_msat} msat"
+				);
+			}
+		});
 	}
 
 	#[test]
