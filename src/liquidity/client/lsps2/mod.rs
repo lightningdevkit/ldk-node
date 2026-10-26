@@ -164,6 +164,20 @@ where
 		self.cache_target_store.targets()
 	}
 
+	/// Records a cache target and starts negotiating a matching lease in the background, so that
+	/// the first payer does not have to wait for the negotiation.
+	pub(crate) async fn register_cache_target_and_refill(
+		self: &Arc<Self>, id: LeaseCacheTargetId, absolute_expiry: Option<u64>,
+		connection_manager: &Arc<ConnectionManager<L>>,
+	) -> Result<(), Error> {
+		if !self.may_have_lsps2_nodes() {
+			return Ok(());
+		}
+		let res = self.register_cache_target(id, absolute_expiry).await;
+		self.schedule_lease_refill(id, connection_manager);
+		res
+	}
+
 	pub(crate) async fn commit_invoice_cache_target(
 		self: &Arc<Self>, request: JitInvoiceRequest,
 		connection_manager: &Arc<ConnectionManager<L>>,
