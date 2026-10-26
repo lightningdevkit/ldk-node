@@ -109,9 +109,9 @@ impl OpenChannelTracker {
 	/// Clears the persisted intent of the open of `user_channel_id` with `counterparty_node_id`
 	/// once LDK reported its channel pending — LDK persists the channel from then on — or closed.
 	/// A record that tracks anything else stays with the intent cleared; one left with nothing to
-	/// track is removed. Idempotent, so a replayed event settles nothing twice. Every record of
-	/// the open is attempted; the first failure is logged and returned, and the intent it left
-	/// behind is settled, or reported again, by the next startup's [`Self::reconcile`].
+	/// track is removed. Idempotent, so a replayed event doesn't settle anything twice. Every
+	/// record of the open is attempted; the first failure is logged and returned, and the intent
+	/// it left behind is settled, or reported again, by the next startup's [`Self::reconcile`].
 	pub(crate) async fn settle(
 		&self, counterparty_node_id: PublicKey, user_channel_id: UserChannelId,
 	) -> Result<(), Error> {

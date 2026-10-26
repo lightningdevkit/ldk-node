@@ -2537,7 +2537,7 @@ where
 				// queued, so that a crash before then leaves the intent for the next startup to
 				// report the open again. A failure, which the tracker logs, replays the event:
 				// an intent left behind would have the next startup report the open as lost once
-				// more, as nothing lists the channel any longer.
+				// more, as LDK no longer lists the channel.
 				self.open_channel_tracker
 					.settle(counterparty_node_id, UserChannelId(user_channel_id))
 					.await

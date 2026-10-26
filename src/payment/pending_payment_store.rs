@@ -142,7 +142,7 @@ impl_writeable_tlv_based!(OpenChannelIntent, {
 /// `locked_rounds`. A splice uses all of them; the fields do not partition by payment type. A
 /// channel open this node initiated is persisted with nothing but its [`OpenChannelIntent`]
 /// under the payment id returned to the caller, and wallet sync adds `details` once it observes
-/// the funding transaction. An entry with none of them tracks no payment and is removed.
+/// the funding transaction. An entry carrying none of them doesn't track a payment and is removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PendingPaymentDetails {
 	/// The payment this entry tracks.

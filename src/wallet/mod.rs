@@ -9385,7 +9385,7 @@ mod tests {
 		assert!(matches!(result, Err(Error::PersistenceFailed)), "{:?}", result);
 		assert!(
 			wallet.payment_stores.payment_store().list_page(None).await.unwrap().objects.is_empty(),
-			"a pass that cannot read the facts files nothing",
+			"a pass that cannot read the facts doesn't file a payment",
 		);
 
 		fail_store.fail_reads.store(false, Ordering::Release);
