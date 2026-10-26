@@ -176,7 +176,7 @@ impl PaymentStoresGuard<'_> {
 	}
 
 	/// [`Self::mutate_pending_payment`] with a transformation that awaits fallible reads; see
-	/// [`DataStore::mutate_async`](crate::data_store::DataStore::mutate_async).
+	/// [`DataStore::mutate_with`](crate::data_store::DataStore::mutate_with).
 	pub(super) async fn mutate_pending_payment_async<F, Fut>(
 		&self, id: &PaymentId, f: F,
 	) -> Result<Option<PendingPaymentDetails>, Error>
@@ -184,6 +184,6 @@ impl PaymentStoresGuard<'_> {
 		F: FnOnce(Option<PendingPaymentDetails>) -> Fut,
 		Fut: Future<Output = Result<Option<PendingPaymentDetails>, Error>>,
 	{
-		self.stores.pending_payment_store.mutate_async(id, f).await
+		self.stores.pending_payment_store.mutate_with(id, f).await
 	}
 }
