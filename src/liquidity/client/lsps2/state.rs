@@ -504,7 +504,7 @@ impl LSPS2LeaseState {
 	}
 
 	pub(crate) fn prune(&mut self) {
-		self.leases.retain(|_, lease| is_lease_cacheable(lease));
+		self.leases.retain(|_, lease| is_lease_usable(lease));
 	}
 }
 
@@ -703,13 +703,21 @@ mod tests {
 	}
 
 	#[test]
-	fn prunes_leases_close_to_expiry() {
-		let lease = lease(2, 43, 1, Some(1_000), now_secs() + MIN_CACHED_LEASE_REMAINING_SECS - 1);
-		let available_lsps = [lease.id.lsp_node_id];
+	fn prunes_only_expired_leases() {
+		let expired = lease(2, 43, 1, Some(1_000), now_secs());
+		// Too close to expiry to be worth caching, but still usable for a short-lived invoice.
+		let expiring =
+			lease(2, 44, 1, Some(2_000), now_secs() + MIN_CACHED_LEASE_REMAINING_SECS - 1);
+		let available_lsps = [expired.id.lsp_node_id];
 		let mut state = LSPS2LeaseState::default();
-		state.insert(lease);
+		state.insert(expired);
+		state.insert(expiring.clone());
 		state.prune();
-		assert!(state.fixed_amount(1_000, None, 1, &available_lsps).is_none());
+		assert_eq!(state.leases.len(), 1, "only the expired lease must be pruned");
+		assert_eq!(
+			state.fixed_amount(2_000, None, 1, &available_lsps).map(|(lease, _)| lease),
+			Some(expiring)
+		);
 	}
 
 	#[test]

@@ -46,7 +46,7 @@ use crate::{Config, Error};
 
 use self::router::LSPS2LeaseParameters;
 use self::state::{
-	is_lease_cacheable, is_lease_valid_for, now_secs, LSPS2LeaseState, LeaseCacheTarget,
+	is_lease_usable, is_lease_valid_for, now_secs, LSPS2LeaseState, LeaseCacheTarget,
 	LeaseCacheTargetId, LeaseCacheTargetStore, PaymentLease, PaymentLeaseId, PaymentLeaseStore,
 	PendingLeaseRequestState, MIN_CACHED_LEASE_REMAINING_SECS,
 };
@@ -223,7 +223,7 @@ where
 	pub(crate) async fn prune_stale_leases(&self) -> Result<(), Error> {
 		let stale_ids = self
 			.lease_store
-			.list_filter(|lease| !is_lease_cacheable(lease))
+			.list_filter(|lease| !is_lease_usable(lease))
 			.await
 			.into_iter()
 			.map(|lease| lease.id)
@@ -1008,7 +1008,6 @@ where
 	async fn take_cached_fixed_lease(
 		&self, amount_msat: u64, min_remaining_secs: u64,
 	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
-		let min_remaining_secs = min_remaining_secs.max(MIN_CACHED_LEASE_REMAINING_SECS);
 		let lsps2_nodes = self.get_lsps2_nodes().await?;
 		let available_lsps = lsps2_nodes.iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
 		let Some((lease, fee_msat)) = self.lease_state.lock().expect("lock").fixed_amount(
@@ -1030,7 +1029,6 @@ where
 	async fn take_cached_variable_lease(
 		&self, amount_msat: Option<u64>, min_remaining_secs: u64,
 	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
-		let min_remaining_secs = min_remaining_secs.max(MIN_CACHED_LEASE_REMAINING_SECS);
 		let lsps2_nodes = self.get_lsps2_nodes().await?;
 		let available_lsps = lsps2_nodes.iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
 		let Some((lease, fee)) = self.lease_state.lock().expect("lock").variable_amount(
@@ -1401,6 +1399,62 @@ mod tests {
 			assert!(!should_retry_lease_negotiation(&error, 3));
 			assert!(client.pending_buy_requests.lock().unwrap().is_empty());
 			assert!(client.pending_lsps2_fee_requests.lock().unwrap().is_empty());
+		});
+	}
+
+	#[test]
+	fn cached_leases_only_need_to_outlive_the_invoice() {
+		let (node, node_id) = rejection_test_node();
+		let client = node.liquidity_source.lsps2_client();
+		// Shorter than the margin we require when refilling the cache, but long enough to back an
+		// invoice that expires within two hours.
+		let valid_until = now_secs() + MIN_CACHED_LEASE_REMAINING_SECS - 3_600;
+		let lease = |intercept_scid, payment_size_msat| PaymentLease {
+			id: PaymentLeaseId { lsp_node_id: node_id, intercept_scid },
+			params: LSPS2OpeningFeeParams {
+				min_fee_msat: 1,
+				proportional: 1,
+				valid_until: chrono::DateTime::from_timestamp(valid_until as i64, 0)
+					.unwrap()
+					.to_rfc3339()
+					.parse()
+					.unwrap(),
+				min_lifetime: 1,
+				max_client_to_self_delay: 1,
+				min_payment_size_msat: 1,
+				max_payment_size_msat: 2_000,
+				promise: String::new(),
+			},
+			cltv_expiry_delta: 144,
+			payment_size_msat,
+			valid_until,
+		};
+		node.runtime.block_on(async {
+			client.store_cached_lease(lease(1, Some(1_000))).await.unwrap();
+			client.store_cached_lease(lease(2, None)).await.unwrap();
+			client.prune_stale_leases().await.unwrap();
+
+			let invoice_expiry_secs = 2 * 3_600;
+			assert!(
+				client
+					.take_cached_fixed_lease(1_000, MIN_CACHED_LEASE_REMAINING_SECS)
+					.await
+					.unwrap()
+					.is_none(),
+				"a lease expiring before the invoice must not be used"
+			);
+			assert!(
+				client.take_cached_fixed_lease(1_000, invoice_expiry_secs).await.unwrap().is_some(),
+				"a cached fixed-amount lease outliving the invoice must be usable"
+			);
+			assert!(
+				client
+					.take_cached_variable_lease(Some(1_000), invoice_expiry_secs)
+					.await
+					.unwrap()
+					.is_some(),
+				"a cached variable-amount lease outliving the invoice must be usable"
+			);
 		});
 	}
 
