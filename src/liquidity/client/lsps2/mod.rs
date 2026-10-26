@@ -111,8 +111,20 @@ where
 	pub(crate) async fn register_cache_target(
 		&self, id: LeaseCacheTargetId, absolute_expiry: Option<u64>,
 	) -> Result<(), Error> {
+		// Without an LSPS2 liquidity source, no lease could ever be negotiated for the target.
+		if !self.may_have_lsps2_nodes() {
+			return Ok(());
+		}
 		let target = LeaseCacheTarget::new(id, absolute_expiry);
 		self.cache_target_store.register(target).await
+	}
+
+	/// Returns whether any configured LSP supports LSPS2, or may support it once protocol
+	/// discovery completes.
+	fn may_have_lsps2_nodes(&self) -> bool {
+		self.lsp_nodes.read().expect("lock").iter().any(|lsp_node| {
+			lsp_node.supported_protocols.as_ref().map_or(true, |protocols| protocols.contains(&2))
+		})
 	}
 
 	pub(crate) fn cache_targets(&self) -> Vec<LeaseCacheTarget> {
@@ -760,6 +772,52 @@ mod tests {
 
 		assert_eq!(result, Err(()));
 		assert_eq!(*restored.lock().unwrap(), Some(42));
+	}
+
+	#[test]
+	fn cache_targets_require_lsps2_liquidity_source() {
+		use crate::builder::NodeBuilder;
+		use crate::entropy::NodeEntropy;
+		use crate::io::test_utils::InMemoryStore;
+
+		let lsp_node_id: PublicKey =
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993".parse().unwrap();
+		// Protocol discovery may not have completed yet, in which case the LSP may support LSPS2.
+		for (lsp_protocols, expect_registered) in [
+			(None, false),
+			(Some(Some(vec![1])), false),
+			(Some(None), true),
+			(Some(Some(vec![1, 2])), true),
+		] {
+			let mut builder = NodeBuilder::new();
+			builder.set_log_facade_logger();
+			if lsp_protocols.is_some() {
+				builder.add_liquidity_source(
+					lsp_node_id,
+					lightning::ln::msgs::SocketAddress::OnionV2([0; 12]),
+					None,
+					false,
+				);
+			}
+			#[cfg(not(feature = "uniffi"))]
+			let entropy = NodeEntropy::from_seed_bytes([42; 64]);
+			#[cfg(feature = "uniffi")]
+			let entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+			let node = builder.build_with_store(entropy, InMemoryStore::new()).unwrap();
+			let client = node.liquidity_source.lsps2_client();
+			if let Some(protocols) = lsp_protocols.clone() {
+				client.lsp_nodes.write().unwrap()[0].supported_protocols = protocols;
+			}
+
+			node.runtime
+				.block_on(client.register_cache_target(LeaseCacheTargetId::Variable, None))
+				.unwrap();
+			assert_eq!(
+				!client.cache_targets().is_empty(),
+				expect_registered,
+				"unexpected cache target registration with LSP protocols {lsp_protocols:?}"
+			);
+		}
 	}
 }
 
