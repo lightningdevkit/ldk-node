@@ -5,6 +5,12 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+//! The client side of the LSPS2 just-in-time channel protocol.
+//!
+//! Receiving over a just-in-time channel requires negotiating a payment lease with an LSP, i.e.,
+//! obtaining an intercept SCID for accepted opening fee parameters. See the [`state`] module for
+//! how leases are tracked.
+
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, RwLock};

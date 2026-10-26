@@ -5,6 +5,17 @@
 // http://opensource.org/licenses/MIT>, at your option. You may not use this file except in
 // accordance with one or both of these licenses.
 
+//! Single-use LSPS2 payment leases.
+//!
+//! A payment lease is the outcome of a successful LSPS2 `buy` request: the opening fee parameters
+//! we accepted, together with the intercept SCID and CLTV expiry delta the LSP assigned to them.
+//! An invoice that routes payers through the intercept SCID lets the LSP open a just-in-time
+//! channel to us once the payment arrives.
+//!
+//! The LSP opens a single channel per intercept SCID, so each lease may back at most one invoice.
+//! Leases are therefore consumed when an invoice is built from them, and become unusable once the
+//! opening fee parameters they were negotiated for expire.
+
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -19,6 +30,7 @@ pub(crate) const MIN_LEASE_REMAINING_SECS: u64 = 24 * 60 * 60;
 
 pub(crate) type PaymentLeaseStore<L> = DataStore<PaymentLease, L>;
 
+/// Identifies a [`PaymentLease`] by the LSP that granted it and the intercept SCID it assigned.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub(crate) struct PaymentLeaseId {
 	pub(crate) lsp_node_id: PublicKey,
@@ -26,8 +38,8 @@ pub(crate) struct PaymentLeaseId {
 }
 
 impl_writeable_tlv_based!(PaymentLeaseId, {
-	(0, lsp_node_id, required),
-	(2, intercept_scid, required),
+	(1, lsp_node_id, required),
+	(3, intercept_scid, required),
 });
 
 impl StorableObjectId for PaymentLeaseId {
@@ -50,21 +62,28 @@ impl StorableObjectId for PaymentLeaseId {
 	}
 }
 
+/// A negotiated, single-use right to receive a payment over a just-in-time channel.
+///
+/// See the module-level documentation for details.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PaymentLease {
 	pub(crate) id: PaymentLeaseId,
+	/// The opening fee parameters the LSP agreed to when granting this lease.
 	pub(crate) params: LSPS2OpeningFeeParams,
+	/// The CLTV expiry delta the LSP requires for payments to the intercept SCID.
 	pub(crate) cltv_expiry_delta: u32,
+	/// The exact payment amount for a fixed-amount lease, or `None` for a variable-amount lease.
 	pub(crate) payment_size_msat: Option<u64>,
+	/// The UNIX timestamp, in seconds, at which the opening fee parameters expire.
 	pub(crate) valid_until: u64,
 }
 
 impl_writeable_tlv_based!(PaymentLease, {
-	(0, id, required),
-	(2, params, required),
-	(4, valid_until, required),
-	(6, cltv_expiry_delta, required),
-	(8, payment_size_msat, option),
+	(1, id, required),
+	(3, params, required),
+	(5, valid_until, required),
+	(7, cltv_expiry_delta, required),
+	(9, payment_size_msat, option),
 });
 
 impl StorableObject for PaymentLease {
@@ -75,6 +94,7 @@ impl StorableObject for PaymentLease {
 	}
 }
 
+/// The set of [`PaymentLease`]s that are available to be consumed.
 #[derive(Default)]
 pub(crate) struct LSPS2LeaseState {
 	leases: HashMap<PaymentLeaseId, PaymentLease>,
