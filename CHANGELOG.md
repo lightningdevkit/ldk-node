@@ -21,6 +21,10 @@
   change once after such a migration. Payment contents and completeness are unaffected.
 - Pending JIT-channel payments created before upgrading may fail after upgrade because the
   prior LSPS2 fee-limit state stored in `PaymentKind::Bolt11Jit` is not migrated.
+- Creating a BOLT 12 invoice for a known amount, including for refunds, now fails instead of
+  falling back to a direct path to the node if its channels cannot receive that amount and no
+  LSPS2 just-in-time channel is available. Such invoices could not be paid. This also applies
+  to nodes without a configured LSP.
 - Upgrading from LDK Node v0.1 is no longer supported if the event queue still contains
   a persisted `ChannelClosed` event.
 - Users of the VSS storage backend must upgrade their VSS server to at least version
