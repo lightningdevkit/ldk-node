@@ -16,6 +16,10 @@
 //! Leases are therefore consumed as soon as they are selected for an invoice, even if building that
 //! invoice fails afterwards, and become unusable once the opening fee parameters they were
 //! negotiated for expire.
+//!
+//! Negotiating a lease takes several round trips to the LSP. To avoid that latency when a payer
+//! is waiting, we record [`LeaseCacheTarget`]s for the amounts we expect to receive, so that
+//! matching leases can be negotiated ahead of time.
 
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -45,19 +49,26 @@ const BOLT12_FINAL_CLTV_EXPIRY_DELTA: u16 = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
 
 pub(crate) type PaymentLeaseStore<L> = DataStore<PaymentLease, L>;
 
+/// Identifies the kind of [`PaymentLease`] a [`LeaseCacheTarget`] asks us to keep available.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum LeaseCacheTargetId {
+	/// A lease for receiving exactly `amount_msat`.
 	Fixed { amount_msat: u64 },
+	/// A lease for receiving an amount that is only determined by the payer.
 	Variable,
 }
 
 impl_writeable_tlv_based_enum!(LeaseCacheTargetId,
 	(0, Fixed) => {
-		(0, amount_msat, required),
+		(1, amount_msat, required),
 	},
 	(2, Variable) => {},
 );
 
+/// A kind of [`PaymentLease`] we expect to need and therefore try to negotiate ahead of time.
+///
+/// Targets are retained in least-recently-used order up to a fixed capacity, and are dropped once
+/// their `absolute_expiry` passes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LeaseCacheTarget {
 	pub(crate) id: LeaseCacheTargetId,
@@ -72,9 +83,9 @@ impl LeaseCacheTarget {
 }
 
 impl_writeable_tlv_based!(LeaseCacheTarget, {
-	(0, id, required),
-	(2, absolute_expiry, option),
-	(4, last_accessed, required),
+	(1, id, required),
+	(3, absolute_expiry, option),
+	(5, last_accessed, required),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,7 +94,7 @@ struct LeaseCacheTargets {
 }
 
 impl_writeable_tlv_based!(LeaseCacheTargets, {
-	(0, targets, required_vec),
+	(1, targets, required_vec),
 });
 
 #[derive(Clone)]
