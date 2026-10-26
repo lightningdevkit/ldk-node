@@ -481,6 +481,17 @@ impl ChainSource {
 		self.registered_txids.lock().expect("lock").clone()
 	}
 
+	/// Discovers a stable (reorg-safe) tip for a first-ever start to begin from. Only the CBF
+	/// source needs this, as it has no trusted node to ask for the tip, so it must only be called
+	/// when the CBF source is configured.
+	#[cfg(feature = "chain-cbf")]
+	pub(crate) async fn fetch_stable_tip(&self) -> Result<BlockLocator, Error> {
+		match &self.kind {
+			ChainSourceKind::Cbf(cbf_chain_source) => cbf_chain_source.fetch_stable_tip().await,
+			_ => unreachable!("a stable tip is only fetched for the CBF chain source"),
+		}
+	}
+
 	pub(crate) fn is_transaction_based(&self) -> bool {
 		match &self.kind {
 			#[cfg(feature = "chain-esplora")]

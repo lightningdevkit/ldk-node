@@ -1679,7 +1679,8 @@ fn build_with_store_internal(
 		},
 	};
 
-	let (chain_source, chain_tip_opt) = match chain_data_source_config {
+	#[allow(unused_mut)]
+	let (chain_source, mut chain_tip_opt) = match chain_data_source_config {
 		#[cfg(feature = "chain-esplora")]
 		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
@@ -1867,6 +1868,18 @@ fn build_with_store_internal(
 			wallet
 		},
 		None => {
+			// A CBF node has no trusted node to ask for the tip, so a fresh wallet discovers it
+			// with a short headers-only sync and starts there, as everything below it is empty.
+			#[cfg(feature = "chain-cbf")]
+			if chain_tip_opt.is_none()
+				&& matches!(chain_data_source_config, Some(ChainDataSourceConfig::Cbf { .. }))
+			{
+				let stable_tip = runtime
+					.block_on(chain_source.fetch_stable_tip())
+					.map_err(|_| BuildError::ChainTipFetchFailed)?;
+				chain_tip_opt = Some(stable_tip);
+			}
+
 			// Guard against silently setting the wallet birthday to genesis on a fresh node:
 			// if we are creating a new wallet but failed to learn the current chain tip from
 			// a Bitcoin Core RPC/REST backend, we'd otherwise persist fresh wallet state
