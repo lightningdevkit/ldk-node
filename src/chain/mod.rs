@@ -544,8 +544,12 @@ impl ChainSource {
 				source.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper).await
 			},
 			#[cfg(feature = "chain-cbf")]
-			ChainSourceKind::Cbf { .. } => {
-				todo!();
+			ChainSourceKind::Cbf(source) => {
+				// The kyoto node was already started by `ChainSource::start` and feeds every
+				// listener, so there is nothing to sync here: just hold the start until it has
+				// caught up to the network tip, before peers or event processing can act on
+				// stale confirmations.
+				source.wait_until_synced().await
 			},
 		}
 	}
