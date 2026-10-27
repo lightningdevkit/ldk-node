@@ -155,13 +155,18 @@ impl WalletSyncStatus {
 /// By default CBF derives fee rates from recent blocks' coinbase outputs.
 /// Setting an external source provides more accurate, per-target estimates
 /// from a mempool-aware server.
+///
+/// Each source is available only with its own chain source feature (`chain-esplora`,
+/// `chain-electrum`), so CBF can be built with either, both or neither.
 #[cfg(feature = "chain-cbf")]
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "uniffi", derive(uniffi::Enum))]
 pub enum CbfFeeSourceConfig {
 	/// Use an Esplora HTTP server for fee rate estimation.
+	#[cfg(feature = "chain-esplora")]
 	Esplora(String),
 	/// Use an Electrum server for fee rate estimation.
+	#[cfg(feature = "chain-electrum")]
 	Electrum(String),
 }
 

@@ -11,6 +11,7 @@ use bip157::{
 	Requester as KyotoRequester, TrustedPeer, Warning,
 };
 use bitcoin::{BlockHash, FeeRate, Network, Script, ScriptBuf, Transaction, Txid};
+#[cfg(feature = "chain-electrum")]
 use electrum_client::{Client as ElectrumClient, ConfigBuilder as ElectrumConfigBuilder};
 use lightning::chain::{BlockLocator, Listen, WatchedOutput};
 use lightning_block_sync::init::validate_best_block_header;
@@ -18,13 +19,16 @@ use lightning_block_sync::{BlockData, BlockHeaderData, BlockSource, BlockSourceE
 
 use tokio::sync::{mpsc, watch};
 
+#[cfg(feature = "chain-electrum")]
 use crate::chain::electrum::get_electrum_fee_rate_cache_update;
 use crate::chain::{CbfFeeSourceConfig, ChainListener};
 use crate::config::{Config, DEFAULT_FEE_RATE_CACHE_UPDATE_INTERVAL_SECS};
 use crate::error::Error;
+#[cfg(feature = "chain-esplora")]
+use crate::fee_estimator::get_num_block_defaults_for_target;
 use crate::fee_estimator::{
 	apply_post_estimation_adjustments, get_all_conf_targets, get_fallback_rate_for_target,
-	get_num_block_defaults_for_target, ConfirmationTarget, OnchainFeeEstimator,
+	ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::update_and_persist_node_metrics;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
@@ -58,10 +62,13 @@ const INITIAL_BACKOFF_MS: u64 = 500;
 /// Retry matched block downloads before surfacing a CBF sync failure.
 const CBF_BLOCK_FETCH_RETRIES: u8 = 3;
 
+#[cfg(feature = "chain-esplora")]
 const ESPLORA_TIMEOUT: u64 = 2;
 
 /// Retries and per-request timeout for the fresh Electrum connection opened each fee cycle.
+#[cfg(feature = "chain-electrum")]
 const ELECTRUM_FEE_NUM_RETRIES: u8 = 3;
+#[cfg(feature = "chain-electrum")]
 const ELECTRUM_FEE_TIMEOUT_SECS: u64 = 10;
 
 /// Runtime status of the underlying kyoto node.
@@ -289,10 +296,12 @@ enum FeeSource {
 	/// downloads on a filter match, saving a re-download in the reconciliation loop.
 	Cbf { block_fee_cache: BlockFeeCache },
 	/// Delegate fee estimation to an Esplora HTTP server.
+	#[cfg(feature = "chain-esplora")]
 	Esplora { client: esplora_client::AsyncClient },
 	/// Delegate fee estimation to an Electrum server.
 	///
 	/// A fresh connection is opened for each estimation cycle.
+	#[cfg(feature = "chain-electrum")]
 	Electrum { server_url: String },
 }
 
@@ -310,6 +319,7 @@ impl CbfChainSource {
 			.collect();
 
 		let fee_source = match fee_source_config {
+			#[cfg(feature = "chain-esplora")]
 			Some(CbfFeeSourceConfig::Esplora(server_url)) => {
 				let mut esplora_builder = esplora_client::Builder::new(&server_url);
 				esplora_builder = esplora_builder.timeout(ESPLORA_TIMEOUT);
@@ -319,6 +329,7 @@ impl CbfChainSource {
 				})?;
 				FeeSource::Esplora { client }
 			},
+			#[cfg(feature = "chain-electrum")]
 			Some(CbfFeeSourceConfig::Electrum(server_url)) => FeeSource::Electrum { server_url },
 			None => FeeSource::Cbf { block_fee_cache: Arc::new(Mutex::new(BTreeMap::new())) },
 		};
@@ -486,6 +497,7 @@ impl CbfChainSource {
 		let (ops_tx, ops_rx) = mpsc::unbounded_channel();
 		let block_fee_cache = match &self.fee_source {
 			FeeSource::Cbf { block_fee_cache } => Some(Arc::clone(block_fee_cache)),
+			#[cfg(any(feature = "chain-esplora", feature = "chain-electrum"))]
 			_ => None,
 		};
 		let best_block_height = chain_listener.get_best_block().height;
@@ -901,6 +913,7 @@ impl CbfChainSource {
 
 	pub(crate) async fn update_fee_rate_estimates(&self) -> Result<(), Error> {
 		let new_fee_rate_cache = match &self.fee_source {
+			#[cfg(feature = "chain-esplora")]
 			FeeSource::Esplora { client } => {
 				let estimates = client.get_fee_estimates().await.map_err(|e| {
 					log_error!(self.logger, "Failed to retrieve fee rate estimates: {}", e);
@@ -930,6 +943,7 @@ impl CbfChainSource {
 				}
 				new_fee_rate_cache
 			},
+			#[cfg(feature = "chain-electrum")]
 			FeeSource::Electrum { server_url } => {
 				let electrum_config = ElectrumConfigBuilder::new()
 					.retry(ELECTRUM_FEE_NUM_RETRIES)
