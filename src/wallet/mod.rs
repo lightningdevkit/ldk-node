@@ -10,6 +10,7 @@ use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_chain::ChainPosition;
@@ -75,6 +76,8 @@ use crate::payment::{
 	PendingPaymentDetails, TransactionType,
 };
 use crate::runtime::Runtime;
+#[cfg(feature = "chain-cbf")]
+use crate::tx_broadcaster::SortedTransactions;
 use crate::types::{Broadcaster, ChannelTxFactsStore, PaymentStore, PendingPaymentStore};
 use crate::wallet::provenance::{
 	ChannelLiveness, ChannelTxFacts, ChannelTxFactsRejection, FactsRecordOutcome, FactsRetention,
@@ -99,6 +102,12 @@ pub(crate) mod provenance;
 pub(crate) mod ser;
 
 const DUST_LIMIT_SATS: u64 = 546;
+
+/// Fallback deadline for CBF, which has no mempool to check eviction against directly: matches
+/// Core's default mempool expiry (336h). Funding-typed payments are exempt, as their lifecycle
+/// follows the channel rather than this deadline. Compared against block time, not wall-clock
+/// time.
+const STALE_BROADCAST_EVICTION_SECS: u64 = 336 * 60 * 60;
 
 /// The number of external addresses kept revealed, persisted, and ready for handout via
 /// [`Wallet::pop_pooled_address`] and [`Wallet::get_new_address`].
@@ -507,7 +516,8 @@ impl Wallet {
 				},
 			}
 		};
-		self.update_payment_store(events).await.map_err(|e| {
+		let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+		self.update_payment_store(events, now).await.map_err(|e| {
 			log_error!(self.logger, "Failed to update payment store: {}", e);
 			Error::PersistenceFailed
 		})?;
@@ -520,7 +530,15 @@ impl Wallet {
 		Ok(())
 	}
 
-	#[cfg(feature = "chain-bitcoind")]
+	/// Applies a set of unconfirmed transactions (and evicts a set of now-superseded ones) to the
+	/// on-chain wallet's own graph, reconciling the payment store accordingly.
+	///
+	/// Bitcoind's mempool poll calls this with a live mempool snapshot. On CBF it is also how a
+	/// transaction we ourselves just built is applied as unconfirmed immediately, rather than
+	/// waiting on a chain-source sync that has no mempool to observe it from at all. Without
+	/// this, BDK's own coin selection would still see the just-spent inputs as spendable until
+	/// the transaction is mined, risking a second send double-spending the first.
+	#[cfg(any(feature = "chain-bitcoind", feature = "chain-cbf"))]
 	pub(crate) async fn apply_mempool_txs(
 		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
 	) -> Result<(), Error> {
@@ -540,7 +558,8 @@ impl Wallet {
 				.expect("applying mempool updates cannot fail")
 		};
 
-		self.update_payment_store(events).await.map_err(|e| {
+		let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+		self.update_payment_store(events, now).await.map_err(|e| {
 			log_error!(self.logger, "Failed to update payment store: {}", e);
 			Error::PersistenceFailed
 		})?;
@@ -554,6 +573,57 @@ impl Wallet {
 		Ok(())
 	}
 
+	/// On CBF, applies a transaction we ourselves are about to broadcast to the wallet as
+	/// unconfirmed, evicting the ones it replaces. Other chain sources observe the broadcast
+	/// transaction in their mempool, so this does nothing there.
+	///
+	/// CBF has no mempool to observe the broadcast from, so without this BDK's coin selection
+	/// would still see the transaction's inputs as spendable and a second send could double-spend
+	/// them. It must not be called with the persister or the payment stores locked, as it takes
+	/// both itself.
+	#[cfg(feature = "chain-cbf")]
+	pub(crate) async fn apply_own_unconfirmed_tx(
+		&self, tx: &Transaction, replaced: Vec<Txid>,
+	) -> Result<(), Error> {
+		if !self.chain_source.is_cbf() {
+			return Ok(());
+		}
+		let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+		let evicted = replaced.into_iter().map(|txid| (txid, now)).collect();
+		self.apply_mempool_txs(vec![(tx.clone(), now)], evicted).await
+	}
+
+	/// Applies the transactions of a package this node is about to broadcast, which the wallet
+	/// has a stake in, as unconfirmed: those it has recorded facts about, such as a splice LDK
+	/// negotiated and broadcasts without us ever holding it, and those spending or paying one of
+	/// its scripts. Transactions it has no stake in are left out of the wallet's graph.
+	///
+	/// The transactions this node builds itself are applied as it builds them, which is earlier
+	/// than any broadcast; doing it again here changes nothing. It must not be called with the
+	/// persister or the payment stores locked, for the reason [`Self::apply_own_unconfirmed_tx`]
+	/// gives.
+	#[cfg(feature = "chain-cbf")]
+	pub(crate) async fn apply_broadcast_package(&self, package: &SortedTransactions) {
+		if !self.chain_source.is_cbf() {
+			return;
+		}
+		for tx in package.iter() {
+			let txid = tx.compute_txid();
+			let is_relevant = self.inner.lock().expect("lock").spk_index().inner().is_relevant(tx);
+			if !is_relevant && self.channel_tx_facts(&txid).await.is_none() {
+				continue;
+			}
+			if let Err(e) = self.apply_own_unconfirmed_tx(tx, Vec::new()).await {
+				log_error!(
+					self.logger,
+					"Failed to apply the transaction {} we are broadcasting to the wallet: {}",
+					txid,
+					e,
+				);
+			}
+		}
+	}
+
 	/// Returns every script pubkey the wallet is watching for on-chain activity: all revealed
 	/// SPKs plus the lookahead window BDK derives beyond the last revealed index on each keychain.
 	/// A block may pay an address we have not explicitly revealed yet (e.g. on recovery, where a fresh
@@ -562,7 +632,16 @@ impl Wallet {
 		self.inner.lock().expect("lock").spk_index().inner().all_spks().values().cloned().collect()
 	}
 
-	async fn update_payment_store(&self, mut events: Vec<WalletEvent>) -> Result<(), Error> {
+	/// `reference_time` is what the `ChainTipChanged` arm's staleness check compares a pending
+	/// payment's `first_seen` against. Pass the connecting block's own header time where one
+	/// exists (`block_connected`); otherwise the current wall-clock time. Using the block's own
+	/// time matters during catch-up (e.g. CBF replaying many blocks after being offline): each
+	/// replayed block calls this once, and `SystemTime::now()` would compare a historic
+	/// `first_seen` against today's clock on every one of them, evicting (or not) based on how
+	/// long the catch-up took rather than how long the transaction has actually been unconfirmed.
+	async fn update_payment_store(
+		&self, mut events: Vec<WalletEvent>, reference_time: u64,
+	) -> Result<(), Error> {
 		if events.is_empty() {
 			return Ok(());
 		}
@@ -698,6 +777,7 @@ impl Wallet {
 						.await;
 
 					let mut unconfirmed_outbound_txids: Vec<Txid> = Vec::new();
+					let mut stale_outbound_txids: Vec<Txid> = Vec::new();
 					let mut unclassified_transactions: Vec<(PaymentId, Txid)> = Vec::new();
 
 					for payment in pending_payments {
@@ -763,7 +843,7 @@ impl Wallet {
 							PaymentKind::Onchain {
 								txid,
 								status: ConfirmationStatus::Unconfirmed,
-								..
+								ref tx_type,
 							} => {
 								if self
 									.fail_funding_payment_lost_to_conflict(&payment, new_tip.height)
@@ -772,7 +852,35 @@ impl Wallet {
 									continue;
 								}
 								if details.direction == PaymentDirection::Outbound {
-									unconfirmed_outbound_txids.push(txid);
+									// Funding transactions are exempt: their lifecycle follows the
+									// channel rather than our stale-broadcast eviction.
+									let is_funding = matches!(
+										tx_type,
+										Some(
+											TransactionType::Funding { .. }
+												| TransactionType::InteractiveFunding { .. }
+										)
+									);
+									let first_seen =
+										self.inner.lock().expect("lock").get_tx(txid).and_then(
+											|tx| match tx.chain_position {
+												ChainPosition::Unconfirmed {
+													first_seen, ..
+												} => first_seen,
+												_ => None,
+											},
+										);
+									let is_stale =
+										self.chain_source.is_cbf()
+											&& !is_funding && first_seen.is_some_and(|first_seen| {
+											reference_time.saturating_sub(first_seen)
+												>= STALE_BROADCAST_EVICTION_SECS
+										});
+									if is_stale {
+										stale_outbound_txids.push(txid);
+									} else {
+										unconfirmed_outbound_txids.push(txid);
+									}
 								}
 							},
 							_ => {},
@@ -784,6 +892,19 @@ impl Wallet {
 					// After the classification above, so that facts are dropped only after the
 					// records they could still classify have been classified.
 					self.prune_channel_tx_facts(new_tip.height).await;
+
+					if !stale_outbound_txids.is_empty() {
+						let evicted_txids = stale_outbound_txids
+							.into_iter()
+							.map(|txid| (txid, reference_time))
+							.collect::<Vec<_>>();
+						let eviction_events = {
+							let mut locked_wallet = self.inner.lock().expect("lock");
+							locked_wallet.apply_evicted_txs_events(evicted_txids)
+						};
+						Box::pin(self.update_payment_store(eviction_events, reference_time))
+							.await?;
+					}
 
 					if !unconfirmed_outbound_txids.is_empty() {
 						let txs_to_broadcast: Vec<Transaction> = {
@@ -953,6 +1074,26 @@ impl Wallet {
 								},
 							}
 						},
+					}
+
+					// CBF has no mempool poll that could evict a transaction, so a drop there is
+					// our own stale-broadcast deadline (`ChainTipChanged`, above) giving up
+					// waiting on it, and nothing takes its place. Mark the payment failed rather
+					// than resurrecting it as still-pending, which would just leave it stuck
+					// forever. Other backends have a mempool that can bring it back, so they keep
+					// re-creating the payment below and rebroadcasting it.
+					if self.chain_source.is_cbf() {
+						stores
+							.mutate_payment(&payment_id, |existing| {
+								let current = existing?;
+								let mut update = PaymentDetailsUpdate::new(payment_id);
+								update.status = Some(PaymentStatus::Failed);
+								let mut updated = current.clone();
+								updated.update(update).then_some(updated)
+							})
+							.await?;
+						stores.remove_pending_payment(&payment_id).await?;
+						continue;
 					}
 
 					// See `TxConfirmed`: a fact that cannot be read fails the pass.
@@ -2351,6 +2492,9 @@ impl Wallet {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
 		})?;
+		// `apply_own_unconfirmed_tx` below re-acquires this same (non-reentrant) lock itself.
+		#[cfg(feature = "chain-cbf")]
+		drop(locked_persister);
 
 		let tx = psbt.extract_tx().map_err(|e| {
 			log_error!(self.logger, "Failed to extract transaction: {}", e);
@@ -2358,6 +2502,8 @@ impl Wallet {
 		})?;
 
 		let txid = tx.compute_txid();
+		#[cfg(feature = "chain-cbf")]
+		self.apply_own_unconfirmed_tx(&tx, Vec::new()).await?;
 		self.broadcaster.broadcast(tx);
 
 		match send_amount {
@@ -3735,7 +3881,13 @@ impl Wallet {
 		let stores = self.payment_stores.lock().await;
 		stores.insert_or_update_payment(new_payment.clone()).await?;
 		self.upsert_pending_payment(&stores, new_payment, Vec::new()).await?;
-
+		// `apply_own_unconfirmed_tx` below takes both locks itself, in this same order.
+		#[cfg(feature = "chain-cbf")]
+		{
+			drop(stores);
+			drop(locked_persister);
+			self.apply_own_unconfirmed_tx(&fee_bumped_tx, vec![txid]).await?;
+		}
 		self.broadcaster.broadcast(fee_bumped_tx);
 
 		log_info!(self.logger, "RBF successful: replaced {} with {}", txid, new_txid);
@@ -3977,7 +4129,8 @@ impl Listen for Wallet {
 				}
 			};
 
-			if let Err(e) = self.update_payment_store(events).await {
+			// Use the connecting block's own time, not the wall clock: see `update_payment_store`.
+			if let Err(e) = self.update_payment_store(events, block.header.time as u64).await {
 				log_error!(self.logger, "Failed to update payment store: {}", e);
 				return;
 			}
@@ -5560,7 +5713,7 @@ mod tests {
 			tx: Arc::new(tx.clone()),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 	}
 
 	/// Records the payment wallet sync creates for `tx` without the wallet taking the transaction
@@ -5572,7 +5725,7 @@ mod tests {
 			tx: Arc::new(tx.clone()),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 	}
 
 	/// Signs a splice round and lets wallet sync observe its transaction, as the node does: the
@@ -5806,7 +5959,7 @@ mod tests {
 			block_time: confirmed_block_time(confirmation_height),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&id).await.unwrap().expect("record");
@@ -6369,7 +6522,7 @@ mod tests {
 			block_time: confirmed_block_time(105),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 		let payment =
 			wallet.payment_stores.payment_store().get(&id).await.unwrap().expect("payment");
 		assert!(matches!(
@@ -6857,7 +7010,7 @@ mod tests {
 		let block_id =
 			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
 		let event = WalletEvent::ChainTipChanged { old_tip: block_id(9), new_tip: block_id(10) };
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -6914,7 +7067,7 @@ mod tests {
 		let block_id =
 			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
 		let event = WalletEvent::ChainTipChanged { old_tip: block_id(9), new_tip: block_id(10) };
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7023,7 +7176,7 @@ mod tests {
 			tx: Arc::new(dummy_tx()),
 			conflicts: vec![(0, conflicting_txid)],
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 		assert!(wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().is_none());
 	}
 
@@ -7076,7 +7229,7 @@ mod tests {
 				old_block_time: None,
 			},
 		];
-		wallet.update_payment_store(events).await.unwrap();
+		wallet.update_payment_store(events, 0).await.unwrap();
 
 		assert!(
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().is_none(),
@@ -7197,7 +7350,7 @@ mod tests {
 			block_time: confirmed_block_time(5),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let funding =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7332,7 +7485,7 @@ mod tests {
 				block_time: confirmed_block_time(5),
 				old_block_time: None,
 			};
-			wallet.update_payment_store(vec![event]).await.unwrap();
+			wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 			let funding =
 				wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7420,7 +7573,7 @@ mod tests {
 			old_tip: block_id(9),
 			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7502,7 +7655,7 @@ mod tests {
 			old_tip: block_id(9),
 			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7520,7 +7673,7 @@ mod tests {
 			old_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 			new_tip: block_id(6 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7594,7 +7747,7 @@ mod tests {
 			old_tip: block_id(9),
 			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7612,7 +7765,7 @@ mod tests {
 			old_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 			new_tip: block_id(6 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7679,7 +7832,7 @@ mod tests {
 			old_tip: block_id(9),
 			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		// The first round confirms.
 		insert_confirmed_tx(&wallet, first_tx.clone(), 6);
@@ -7689,7 +7842,7 @@ mod tests {
 			block_time: confirmed_block_time(6),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7771,7 +7924,7 @@ mod tests {
 			old_tip: block_id(9),
 			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7824,7 +7977,7 @@ mod tests {
 			old_tip: block_id(9),
 			new_tip: block_id(5 + ANTI_REORG_DELAY - 2),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7892,7 +8045,7 @@ mod tests {
 			old_tip: block_id(9),
 			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -7943,7 +8096,7 @@ mod tests {
 			old_tip: block_id(9),
 			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -8002,7 +8155,7 @@ mod tests {
 				new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 			},
 		];
-		wallet.update_payment_store(events).await.unwrap();
+		wallet.update_payment_store(events, 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -8027,7 +8180,7 @@ mod tests {
 		let txid = tx.compute_txid();
 		let reads_before = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE);
 		let event = WalletEvent::TxUnconfirmed { txid, tx: Arc::new(tx), old_block_time: None };
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 		let reads = counting_store.reads(PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE) - reads_before;
 
 		let payment_id = PaymentId(txid.to_byte_array());
@@ -8058,7 +8211,7 @@ mod tests {
 		// r1 reappears in the mempool after the failure...
 		let event =
 			WalletEvent::TxUnconfirmed { txid: r1, tx: Arc::new(dummy_tx()), old_block_time: None };
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -8080,7 +8233,7 @@ mod tests {
 			block_time: confirmed_block_time(5),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -8128,7 +8281,7 @@ mod tests {
 
 		let event =
 			WalletEvent::TxUnconfirmed { txid: r1, tx: Arc::new(dummy_tx()), old_block_time: None };
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&settled_id).await.unwrap().unwrap();
@@ -8190,7 +8343,7 @@ mod tests {
 			old_tip: block_id(9),
 			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment =
 			wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().unwrap();
@@ -8706,7 +8859,7 @@ mod tests {
 			tx: Arc::new(dummy_tx()),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 		let payment = wallet.payment_stores.payment_store().get(&id).await.unwrap().unwrap();
 		assert!(
 			matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == counterparty_txid)
@@ -8753,7 +8906,7 @@ mod tests {
 			tx: Arc::new(dummy_tx()),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 		let payment = wallet.payment_stores.payment_store().get(&id).await.unwrap().unwrap();
 		assert!(
 			matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == counterparty_txid)
@@ -9407,7 +9560,7 @@ mod tests {
 
 		let event =
 			WalletEvent::TxUnconfirmed { txid, tx: Arc::new(tx.clone()), old_block_time: None };
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		// The reported share identifies the funding payment the transaction belongs to, so the
 		// record is filed under that payment rather than under the transaction's own id.
@@ -9506,7 +9659,7 @@ mod tests {
 
 		fail_store.fail_reads.store(true, Ordering::Release);
 		for event in [unconfirmed(), confirmed_at(tip_height), confirmed_at(confirmation_height)] {
-			let result = wallet.update_payment_store(vec![event]).await;
+			let result = wallet.update_payment_store(vec![event], 0).await;
 			assert!(matches!(result, Err(Error::PersistenceFailed)), "{:?}", result);
 			assert!(
 				wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().is_none(),
@@ -9517,7 +9670,7 @@ mod tests {
 		// The replay with the reads back records the transaction as the channel reported it,
 		// under the funding payment the report identifies.
 		fail_store.fail_reads.store(false, Ordering::Release);
-		wallet.update_payment_store(vec![confirmed_at(confirmation_height)]).await.unwrap();
+		wallet.update_payment_store(vec![confirmed_at(confirmation_height)], 0).await.unwrap();
 		assert!(wallet.payment_stores.payment_store().get(&payment_id).await.unwrap().is_none());
 		let payment = wallet
 			.payment_stores
@@ -9564,14 +9717,14 @@ mod tests {
 			block_time: confirmed_block_time(5),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![confirmed]).await.unwrap();
+		wallet.update_payment_store(vec![confirmed], 0).await.unwrap();
 		let block_id =
 			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
 		let graduated = WalletEvent::ChainTipChanged {
 			old_tip: block_id(5),
 			new_tip: block_id(5 + ANTI_REORG_DELAY - 1),
 		};
-		wallet.update_payment_store(vec![graduated]).await.unwrap();
+		wallet.update_payment_store(vec![graduated], 0).await.unwrap();
 
 		let payment_id = PaymentId(claim_txid.to_byte_array());
 		let unclassified = wallet
@@ -9648,7 +9801,7 @@ mod tests {
 		insert_unconfirmed_tx(wallet, spend.clone());
 		let seen =
 			WalletEvent::TxUnconfirmed { txid, tx: Arc::new(spend.clone()), old_block_time: None };
-		wallet.update_payment_store(vec![seen]).await.unwrap();
+		wallet.update_payment_store(vec![seen], 0).await.unwrap();
 
 		let payment_id = PaymentId(txid.to_byte_array());
 		let recorded =
@@ -9828,7 +9981,7 @@ mod tests {
 			tx: Arc::new(sweep.clone()),
 			old_block_time: None,
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let payment_id = PaymentId(sweep_txid.to_byte_array());
 		let unclassified = wallet
@@ -9857,7 +10010,7 @@ mod tests {
 		let block_id =
 			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
 		let event = WalletEvent::ChainTipChanged { old_tip: block_id(1), new_tip: block_id(2) };
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 
 		let classified = wallet
 			.payment_stores
@@ -9996,7 +10149,7 @@ mod tests {
 			old_tip: block_id_at(height - 1),
 			new_tip: block_id_at(height),
 		};
-		wallet.update_payment_store(vec![event]).await.unwrap();
+		wallet.update_payment_store(vec![event], 0).await.unwrap();
 	}
 
 	/// A chain tip far enough past both the age cap and the burial of the spend above.
@@ -10454,11 +10607,14 @@ mod tests {
 		let close_txid = close.compute_txid();
 		insert_unconfirmed_tx(&wallet, close.clone());
 		wallet
-			.update_payment_store(vec![WalletEvent::TxUnconfirmed {
-				txid: close_txid,
-				tx: Arc::new(close),
-				old_block_time: None,
-			}])
+			.update_payment_store(
+				vec![WalletEvent::TxUnconfirmed {
+					txid: close_txid,
+					tx: Arc::new(close),
+					old_block_time: None,
+				}],
+				0,
+			)
 			.await
 			.unwrap();
 		let payment = wallet

@@ -694,8 +694,9 @@ impl Node {
 
 		let stop_tx_bcast = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
+		let onchain_wallet = Arc::clone(&self.wallet);
 		self.runtime.spawn_cancellable_background_task(async move {
-			chain_source.continuously_process_broadcast_queue(stop_tx_bcast).await
+			chain_source.continuously_process_broadcast_queue(stop_tx_bcast, onchain_wallet).await
 		});
 
 		let retention_secs = self.forwarded_payment_aggregation_retention_secs;

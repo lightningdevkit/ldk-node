@@ -901,6 +901,22 @@ where
 							);
 						}
 
+						// On CBF, apply the transaction to the wallet as unconfirmed before LDK can
+						// treat a 0conf channel as ready, which it may do synchronously as part of
+						// the funding-signed handshake, without waiting on our broadcast queue.
+						// After the facts above, so the payment this creates is classified.
+						#[cfg(feature = "chain-cbf")]
+						if let Err(e) =
+							self.wallet.apply_own_unconfirmed_tx(&final_tx, Vec::new()).await
+						{
+							log_error!(
+								self.logger,
+								"Failed to apply the funding transaction of channel {} to the wallet: {}",
+								temporary_channel_id,
+								e,
+							);
+						}
+
 						let needs_manual_broadcast = self
 							.liquidity_source
 							.lsps2_service()

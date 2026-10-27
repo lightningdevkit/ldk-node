@@ -481,6 +481,17 @@ impl ChainSource {
 		self.registered_txids.lock().expect("lock").clone()
 	}
 
+	pub(crate) fn is_cbf(&self) -> bool {
+		#[cfg(feature = "chain-cbf")]
+		{
+			matches!(self.kind, ChainSourceKind::Cbf(_))
+		}
+		#[cfg(not(feature = "chain-cbf"))]
+		{
+			false
+		}
+	}
+
 	/// Discovers a stable (reorg-safe) tip for a first-ever start to begin from. Only the CBF
 	/// source needs this, as it has no trusted node to ask for the tip, so it must only be called
 	/// when the CBF source is configured.
@@ -835,7 +846,9 @@ impl ChainSource {
 
 	/// Hands the package to the configured chain source, parents before their child so a CPFP
 	/// package a chain source submits one transaction at a time is still accepted.
-	async fn broadcast(&self, package: BroadcastPackage) {
+	async fn broadcast(&self, package: BroadcastPackage, onchain_wallet: &Wallet) {
+		#[cfg(not(feature = "chain-cbf"))]
+		let _ = onchain_wallet;
 		let package = package.into_sorted_transactions();
 		match &self.kind {
 			#[cfg(feature = "chain-esplora")]
@@ -852,6 +865,9 @@ impl ChainSource {
 			},
 			#[cfg(feature = "chain-cbf")]
 			ChainSourceKind::Cbf(cbf_chain_source) => {
+				// CBF has no mempool to show the wallet what we broadcast, so apply it before
+				// handing it over, which may wait on a peer.
+				onchain_wallet.apply_broadcast_package(&package).await;
 				cbf_chain_source.process_broadcast_package(package.into_inner()).await
 			},
 		}
@@ -859,6 +875,7 @@ impl ChainSource {
 
 	pub(crate) async fn continuously_process_broadcast_queue(
 		&self, mut stop_tx_bcast_receiver: tokio::sync::watch::Receiver<()>,
+		onchain_wallet: Arc<Wallet>,
 	) {
 		loop {
 			let package = tokio::select! {
@@ -874,7 +891,7 @@ impl ChainSource {
 				}
 				package = self.tx_broadcaster.next_package() => package,
 			};
-			self.broadcast(package).await;
+			self.broadcast(package, &onchain_wallet).await;
 		}
 	}
 }
