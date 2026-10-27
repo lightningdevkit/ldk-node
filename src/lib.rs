@@ -84,7 +84,8 @@
 #[cfg(not(any(
 	feature = "chain-esplora",
 	feature = "chain-electrum",
-	feature = "chain-bitcoind"
+	feature = "chain-bitcoind",
+	feature = "chain-cbf"
 )))]
 compile_error!("at least one chain source feature must be enabled");
 
