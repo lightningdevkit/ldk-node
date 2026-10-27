@@ -55,6 +55,8 @@ use lightning_dns_resolver::OMDomainResolver;
 use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
+#[cfg(feature = "chain-cbf")]
+use crate::chain::CbfFeeSourceConfig;
 #[cfg(feature = "chain-bitcoind")]
 use crate::config::BitcoindRestClientConfig;
 use crate::config::{
@@ -138,6 +140,11 @@ enum ChainDataSourceConfig {
 		rpc_password: String,
 		rest_client_config: Option<BitcoindRestClientConfig>,
 		wallet_rescan_from_height: Option<u32>,
+	},
+	#[cfg(feature = "chain-cbf")]
+	Cbf {
+		peers: Vec<String>,
+		fee_source_config: Option<CbfFeeSourceConfig>,
 	},
 }
 
@@ -437,6 +444,20 @@ impl NodeBuilder {
 	) -> &mut Self {
 		self.chain_data_source_config =
 			Some(ChainDataSourceConfig::Electrum { server_url, sync_config });
+		self
+	}
+
+	/// Configures the [`Node`] instance to source chain data via compact block filters
+	/// (BIP157/BIP158), connecting to the given peers (`ip:port`).
+	///
+	/// `fee_source_config` optionally delegates fee estimation to an Esplora or Electrum server;
+	/// if `None`, fee rates are derived from recent blocks.
+	#[cfg(feature = "chain-cbf")]
+	pub fn set_chain_source_cbf(
+		&mut self, peers: Vec<String>, fee_source_config: Option<CbfFeeSourceConfig>,
+	) -> &mut Self {
+		self.chain_data_source_config =
+			Some(ChainDataSourceConfig::Cbf { peers, fee_source_config });
 		self
 	}
 
@@ -1101,6 +1122,21 @@ impl Builder {
 	}
 }
 
+#[cfg(all(feature = "uniffi", feature = "chain-cbf"))]
+#[uniffi::export]
+impl Builder {
+	/// Configures the [`Node`] instance to source chain data via compact block filters
+	/// (BIP157/BIP158), connecting to the given peers (`ip:port`).
+	///
+	/// `fee_source_config` optionally delegates fee estimation to an Esplora or Electrum server;
+	/// if `None`, fee rates are derived from recent blocks.
+	pub fn set_chain_source_cbf(
+		&self, peers: Vec<String>, fee_source_config: Option<CbfFeeSourceConfig>,
+	) {
+		self.inner.write().expect("lock").set_chain_source_cbf(peers, fee_source_config);
+	}
+}
+
 #[cfg(all(feature = "uniffi", feature = "chain-bitcoind"))]
 #[uniffi::export]
 impl Builder {
@@ -1643,7 +1679,8 @@ fn build_with_store_internal(
 		},
 	};
 
-	let (chain_source, chain_tip_opt) = match chain_data_source_config {
+	#[allow(unused_mut)]
+	let (chain_source, mut chain_tip_opt) = match chain_data_source_config {
 		#[cfg(feature = "chain-esplora")]
 		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
 			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
@@ -1674,6 +1711,19 @@ fn build_with_store_internal(
 				Arc::clone(&node_metrics),
 			)
 		},
+		#[cfg(feature = "chain-cbf")]
+		Some(ChainDataSourceConfig::Cbf { peers, fee_source_config }) => ChainSource::new_cbf(
+			peers.clone(),
+			fee_source_config.clone(),
+			Arc::clone(&runtime),
+			Arc::clone(&fee_estimator),
+			Arc::clone(&tx_broadcaster),
+			Arc::clone(&kv_store),
+			Arc::clone(&config),
+			Arc::clone(&logger),
+			Arc::clone(&node_metrics),
+		)
+		.map_err(|_| BuildError::ChainSourceSetupFailed)?,
 		#[cfg(feature = "chain-bitcoind")]
 		Some(ChainDataSourceConfig::Bitcoind {
 			rpc_host,
@@ -1818,6 +1868,18 @@ fn build_with_store_internal(
 			wallet
 		},
 		None => {
+			// A CBF node has no trusted node to ask for the tip, so a fresh wallet discovers it
+			// with a short headers-only sync and starts there, as everything below it is empty.
+			#[cfg(feature = "chain-cbf")]
+			if chain_tip_opt.is_none()
+				&& matches!(chain_data_source_config, Some(ChainDataSourceConfig::Cbf { .. }))
+			{
+				let stable_tip = runtime
+					.block_on(chain_source.fetch_stable_tip())
+					.map_err(|_| BuildError::ChainTipFetchFailed)?;
+				chain_tip_opt = Some(stable_tip);
+			}
+
 			// Guard against silently setting the wallet birthday to genesis on a fresh node:
 			// if we are creating a new wallet but failed to learn the current chain tip from
 			// a Bitcoin Core RPC/REST backend, we'd otherwise persist fresh wallet state

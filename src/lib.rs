@@ -84,7 +84,8 @@
 #[cfg(not(any(
 	feature = "chain-esplora",
 	feature = "chain-electrum",
-	feature = "chain-bitcoind"
+	feature = "chain-bitcoind",
+	feature = "chain-cbf"
 )))]
 compile_error!("at least one chain source feature must be enabled");
 
@@ -132,6 +133,8 @@ pub use bitcoin::FeeRate;
 use bitcoin::{Address, Amount, BlockHash, Network};
 pub use builder::{BuildError, Builder};
 use chain::ChainSource;
+#[cfg(feature = "chain-cbf")]
+pub use chain::CbfFeeSourceConfig;
 use config::{
 	default_user_config, may_announce_channel, AsyncPaymentsRole, ChannelConfig, Config,
 	LNURL_AUTH_TIMEOUT_SECS, NODE_ANN_BCAST_INTERVAL, PEER_RECONNECTION_INTERVAL,
@@ -331,11 +334,19 @@ impl Node {
 
 		self.runtime.allow_cancellable_background_task_spawns();
 
-		// Start up any runtime-dependant chain sources (e.g. Electrum)
-		self.chain_source.start(Arc::clone(&self.runtime)).map_err(|e| {
-			log_error!(self.logger, "Failed to start chain syncing: {}", e);
-			e
-		})?;
+		// Start up any runtime-dependant chain sources (e.g. Electrum, CBF)
+		self.chain_source
+			.start(
+				Arc::clone(&self.runtime),
+				Arc::clone(&self.wallet),
+				Arc::clone(&self.channel_manager),
+				Arc::clone(&self.chain_monitor),
+				Arc::clone(&self.output_sweeper),
+			)
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to start chain syncing: {}", e);
+				e
+			})?;
 
 		let manager_owns_any_0fc_channels =
 			self.channel_manager.list_channels().into_iter().any(|channel| {
@@ -684,8 +695,9 @@ impl Node {
 
 		let stop_tx_bcast = self.stop_sender.subscribe();
 		let chain_source = Arc::clone(&self.chain_source);
+		let onchain_wallet = Arc::clone(&self.wallet);
 		self.runtime.spawn_cancellable_background_task(async move {
-			chain_source.continuously_process_broadcast_queue(stop_tx_bcast).await
+			chain_source.continuously_process_broadcast_queue(stop_tx_bcast, onchain_wallet).await
 		});
 
 		let retention_secs = self.forwarded_payment_aggregation_retention_secs;
@@ -928,12 +940,14 @@ impl Node {
 		self.peer_manager.disconnect_all_peers();
 		log_debug!(self.logger, "Disconnected all network peers.");
 
-		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
-		self.runtime.wait_on_background_tasks();
-
-		// Stop any runtime-dependant chain sources.
+		// Stop any runtime-dependant chain sources before waiting on non-cancellable
+		// background tasks. Some chain sources own background tasks that only exit
+		// after their client/requester is shut down.
 		self.chain_source.stop();
 		log_debug!(self.logger, "Stopped chain sources.");
+
+		// Wait until non-cancellable background tasks (mod LDK's background processor) are done.
+		self.runtime.wait_on_background_tasks();
 
 		// Stop the background processor.
 		match self.background_processor_stop_sender.send(()) {
@@ -2279,6 +2293,9 @@ impl Node {
 	/// is almost always redundant when background syncing is enabled and should be avoided where possible.
 	/// However, if background syncing is disabled (i.e., `background_sync_config` is set to `None`),
 	/// this method must be called manually to keep wallets in sync with the chain state.
+	///
+	/// When using the CBF chain source, syncing always runs in the background. In that mode this
+	/// method waits until the background sync has applied chain updates through the current tip.
 	///
 	/// [`EsploraSyncConfig::background_sync_config`]: crate::config::EsploraSyncConfig::background_sync_config
 	pub fn sync_wallets(&self) -> Result<(), Error> {
