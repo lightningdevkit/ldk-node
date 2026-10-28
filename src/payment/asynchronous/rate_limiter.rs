@@ -7,8 +7,9 @@
 
 //! [`RateLimiter`] to control the rate of requests from users.
 
+use crate::time::Instant;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Implements a leaky-bucket style rate limiter parameterized by the max capacity of the bucket, the refill interval,
 /// and the max idle duration.

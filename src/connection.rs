@@ -8,13 +8,16 @@
 use std::collections::hash_map::{self, HashMap};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "net-tokio")]
 use std::time::Duration;
 
 use bitcoin::secp256k1::PublicKey;
 use lightning::ln::msgs::SocketAddress;
 
 use crate::config::TorConfig;
-use crate::logger::{log_debug, log_error, log_info, LdkLogger};
+#[cfg(feature = "net-tokio")]
+use crate::logger::{log_debug, log_info};
+use crate::logger::{log_error, LdkLogger};
 use crate::types::{KeysManager, PeerManager};
 use crate::Error;
 
@@ -57,7 +60,9 @@ where
 {
 	pending_connections: PendingConnections,
 	peer_manager: Arc<PeerManager>,
+	#[cfg_attr(not(feature = "net-tokio"), allow(dead_code))]
 	tor_proxy_config: Option<TorConfig>,
+	#[cfg_attr(not(feature = "net-tokio"), allow(dead_code))]
 	keys_manager: Arc<KeysManager>,
 	logger: L,
 }
@@ -112,6 +117,20 @@ where
 		res
 	}
 
+	#[cfg(not(feature = "net-tokio"))]
+	async fn do_connect_peer_internal(
+		&self, node_id: PublicKey, addr: SocketAddress,
+	) -> Result<(), Error> {
+		log_error!(
+			self.logger,
+			"Failed to connect to peer {}@{}: no network transport is enabled.",
+			node_id,
+			addr
+		);
+		Err(Error::ConnectionFailed)
+	}
+
+	#[cfg(feature = "net-tokio")]
 	async fn do_connect_peer_internal(
 		&self, node_id: PublicKey, addr: SocketAddress,
 	) -> Result<(), Error> {
@@ -242,6 +261,7 @@ where
 		}
 	}
 
+	#[cfg(feature = "net-tokio")]
 	async fn await_connection<F, CF>(
 		&self, connection_future: F, node_id: PublicKey, addr: SocketAddress,
 	) -> Result<(), Error>
@@ -306,6 +326,24 @@ where
 				});
 			}
 		}
+	}
+}
+
+/// Placeholder socket type used when no network transport is enabled.
+///
+/// It has no values, so no peer connection can ever be created with it.
+#[cfg(not(feature = "net-tokio"))]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum SocketDescriptor {}
+
+#[cfg(not(feature = "net-tokio"))]
+impl lightning::ln::peer_handler::SocketDescriptor for SocketDescriptor {
+	fn send_data(&mut self, _data: &[u8], _continue_read: bool) -> usize {
+		match *self {}
+	}
+
+	fn disconnect_socket(&mut self) {
+		match *self {}
 	}
 }
 

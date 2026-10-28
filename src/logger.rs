@@ -16,7 +16,6 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bitcoin::secp256k1::PublicKey;
-use chrono::Utc;
 use lightning::ln::types::ChannelId;
 use lightning::types::payment::PaymentHash;
 pub use lightning::util::logger::Level as LogLevel;
@@ -25,6 +24,7 @@ pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace,
 use log::{Level as LogFacadeLevel, Record as LogFacadeRecord};
 
 use crate::io::utils::create_dir_all_private;
+use crate::time;
 
 fn open_log_file(file_path: &str) -> std::io::Result<fs::File> {
 	let mut options = fs::OpenOptions::new();
@@ -212,7 +212,7 @@ impl LogWriter for Writer {
 
 				let log = format!(
 					"{} {:<5} [{}:{}] {}{}\n",
-					Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+					time::now_utc().format("%Y-%m-%d %H:%M:%S%.3f"),
 					record.level.to_string(),
 					record.module_path,
 					record.line,
