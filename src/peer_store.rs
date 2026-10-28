@@ -12,7 +12,7 @@ use std::sync::{Arc, RwLock};
 use bitcoin::secp256k1::PublicKey;
 use lightning::impl_writeable_tlv_based;
 use lightning::util::persist::KVStore;
-use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use lightning::util::ser::{CollectionLength, Readable, ReadableArgs, Writeable, Writer};
 
 use crate::io::{
 	PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -133,7 +133,7 @@ impl Readable for PeerStoreDeserWrapper {
 	fn read<R: lightning::io::Read>(
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
-		let len: u16 = Readable::read(reader)?;
+		let len: u64 = CollectionLength::read(reader)?.0;
 		let mut peers = HashMap::with_capacity(len as usize);
 		for _ in 0..len {
 			let k: PublicKey = Readable::read(reader)?;
@@ -148,7 +148,7 @@ pub(crate) struct PeerStoreSerWrapper<'a>(&'a HashMap<PublicKey, PeerInfo>);
 
 impl Writeable for PeerStoreSerWrapper<'_> {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-		(self.0.len() as u16).write(writer)?;
+		CollectionLength(self.0.len() as u64).write(writer)?;
 		for (k, v) in self.0.iter() {
 			k.write(writer)?;
 			v.write(writer)?;

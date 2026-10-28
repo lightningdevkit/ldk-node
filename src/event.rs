@@ -32,7 +32,7 @@ use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
-use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use lightning::util::ser::{CollectionLength, Readable, ReadableArgs, Writeable, Writer};
 use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
@@ -519,7 +519,7 @@ impl Readable for EventQueueDeserWrapper {
 	fn read<R: lightning::io::Read>(
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
-		let len: u16 = Readable::read(reader)?;
+		let len: u64 = CollectionLength::read(reader)?.0;
 		let mut queue = VecDeque::with_capacity(len as usize);
 		for _ in 0..len {
 			queue.push_back(Readable::read(reader)?);
@@ -532,7 +532,7 @@ struct EventQueueSerWrapper<'a>(&'a VecDeque<Event>);
 
 impl Writeable for EventQueueSerWrapper<'_> {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-		(self.0.len() as u16).write(writer)?;
+		CollectionLength(self.0.len() as u64).write(writer)?;
 		for e in self.0.iter() {
 			e.write(writer)?;
 		}
@@ -2945,6 +2945,75 @@ mod tests {
 
 		event_queue.event_handled().await.unwrap();
 		assert_eq!(event_queue.next_event(), None);
+	}
+
+	#[test]
+	fn event_queue_round_trips_across_u16_boundary() {
+		// Regression test for #1138: the persisted event queue length must not be
+		// truncated to `u16`. Queues holding `u16::MAX` or more events must round-trip
+		// without losing entries. On the old `(len as u16)` encoding, a queue of 65_536
+		// events writes a length of zero, so this assertion fails.
+		let template = Event::ChannelReady {
+			channel_id: ChannelId([7u8; 32]),
+			user_channel_id: UserChannelId(7),
+			counterparty_node_id: None,
+			funding_txo: None,
+		};
+
+		for count in [65_534usize, 65_535, 65_536, 65_540] {
+			let mut queue = VecDeque::with_capacity(count);
+			for _ in 0..count {
+				queue.push_back(template.clone());
+			}
+
+			let mut bytes = Vec::new();
+			EventQueueSerWrapper(&queue).write(&mut bytes).unwrap();
+
+			let read: EventQueueDeserWrapper = Readable::read(&mut &bytes[..]).unwrap();
+			assert_eq!(
+				read.0.len(),
+				count,
+				"a queue of {count} events must round-trip without truncation"
+			);
+			assert_eq!(read.0.front(), Some(&template));
+			assert_eq!(read.0.back(), Some(&template));
+		}
+	}
+
+	#[test]
+	fn event_queue_decodes_legacy_u16_length_prefix() {
+		// Below 65_535 the `CollectionLength` encoding is byte-identical to the previous
+		// bare `u16` length prefix, so snapshots written by older versions still decode
+		// and small queues keep their two-byte length prefix.
+		let template = Event::ChannelReady {
+			channel_id: ChannelId([9u8; 32]),
+			user_channel_id: UserChannelId(9),
+			counterparty_node_id: None,
+			funding_txo: None,
+		};
+		let count = 3usize;
+
+		let mut legacy = Vec::new();
+		(count as u16).write(&mut legacy).unwrap();
+		for _ in 0..count {
+			template.write(&mut legacy).unwrap();
+		}
+
+		let read: EventQueueDeserWrapper = Readable::read(&mut &legacy[..]).unwrap();
+		assert_eq!(read.0.len(), count);
+		assert_eq!(read.0.front(), Some(&template));
+
+		let mut queue = VecDeque::new();
+		for _ in 0..count {
+			queue.push_back(template.clone());
+		}
+		let mut bytes = Vec::new();
+		EventQueueSerWrapper(&queue).write(&mut bytes).unwrap();
+		assert_eq!(
+			&bytes[..2],
+			&legacy[..2],
+			"a small queue's length prefix must stay a two-byte encoding"
+		);
 	}
 
 	#[derive(Clone, Debug, PartialEq, Eq)]
