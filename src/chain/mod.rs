@@ -37,7 +37,7 @@ use crate::config::ElectrumSyncConfig;
 use crate::config::EsploraSyncConfig;
 use crate::config::{BackgroundSyncConfig, Config, WALLET_SYNC_INTERVAL_MINIMUM_SECS};
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::tx_broadcaster::BroadcastPackage;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
@@ -103,6 +103,38 @@ impl Drop for WalletSyncGuard<'_> {
 				.lock()
 				.expect("lock")
 				.propagate_result_to_subscribers(Err(self.cancellation_error));
+		}
+	}
+}
+
+/// Waits for any sync that is already in progress and then registers the caller as the next one.
+///
+/// A sync that is already running took its view of the chain when it started, so it might not
+/// include blocks found since then. A caller that wants the current chain state therefore has to
+/// sync again once it is done. Whether that sync succeeded, failed or was cancelled has no bearing
+/// on the caller's own sync, so a failure is only logged.
+pub(crate) async fn acquire_wallet_sync_guard<'a>(
+	status: &'a Mutex<WalletSyncStatus>, cancellation_error: Error, logger: &Logger,
+) -> Result<WalletSyncGuard<'a>, Error> {
+	loop {
+		let mut pending_sync = {
+			let mut status_lock = status.lock().expect("lock");
+			match status_lock.register_or_subscribe_pending_sync() {
+				Some(pending_sync) => pending_sync,
+				None => return Ok(WalletSyncGuard::new(status, cancellation_error)),
+			}
+		};
+		log_debug!(logger, "Sync in progress, waiting for it to finish before syncing again.");
+		match pending_sync.recv().await {
+			Ok(Ok(())) => {},
+			Ok(Err(e)) => {
+				log_debug!(logger, "Sync in progress failed with {}, syncing again regardless.", e);
+			},
+			Err(e) => {
+				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
+				log_error!(logger, "Failed to receive wallet sync result: {:?}", e);
+				return Err(cancellation_error);
+			},
 		}
 	}
 }

@@ -18,7 +18,7 @@ use lightning::chain::{Confirm, Filter, WatchedOutput};
 use lightning::util::ser::Writeable;
 use lightning_transaction_sync::EsploraSyncClient;
 
-use super::{WalletSyncGuard, WalletSyncStatus};
+use super::{acquire_wallet_sync_guard, WalletSyncStatus};
 use crate::config::{
 	clamp_full_scan_stop_gap, Config, EsploraSyncConfig, BDK_CLIENT_CONCURRENCY,
 	MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
@@ -121,20 +121,12 @@ impl EsploraChainSource {
 	pub(super) async fn sync_onchain_wallet(
 		&self, onchain_wallet: Arc<Wallet>,
 	) -> Result<(), Error> {
-		let receiver_res = {
-			let mut status_lock = self.onchain_wallet_sync_status.lock().expect("lock");
-			status_lock.register_or_subscribe_pending_sync()
-		};
-		if let Some(mut sync_receiver) = receiver_res {
-			log_debug!(self.logger, "Sync in progress, skipping.");
-			return sync_receiver.recv().await.map_err(|e| {
-				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
-				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
-				Error::WalletOperationFailed
-			})?;
-		}
-		let sync_guard =
-			WalletSyncGuard::new(&self.onchain_wallet_sync_status, Error::WalletOperationFailed);
+		let sync_guard = acquire_wallet_sync_guard(
+			&self.onchain_wallet_sync_status,
+			Error::WalletOperationFailed,
+			&self.logger,
+		)
+		.await?;
 
 		let res = self.sync_onchain_wallet_inner(onchain_wallet).await;
 
@@ -273,20 +265,12 @@ impl EsploraChainSource {
 		&self, channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
 		output_sweeper: Arc<Sweeper>,
 	) -> Result<(), Error> {
-		let receiver_res = {
-			let mut status_lock = self.lightning_wallet_sync_status.lock().expect("lock");
-			status_lock.register_or_subscribe_pending_sync()
-		};
-		if let Some(mut sync_receiver) = receiver_res {
-			log_debug!(self.logger, "Sync in progress, skipping.");
-			return sync_receiver.recv().await.map_err(|e| {
-				debug_assert!(false, "Failed to receive wallet sync result: {:?}", e);
-				log_error!(self.logger, "Failed to receive wallet sync result: {:?}", e);
-				Error::WalletOperationFailed
-			})?;
-		}
-		let sync_guard =
-			WalletSyncGuard::new(&self.lightning_wallet_sync_status, Error::WalletOperationFailed);
+		let sync_guard = acquire_wallet_sync_guard(
+			&self.lightning_wallet_sync_status,
+			Error::WalletOperationFailed,
+			&self.logger,
+		)
+		.await?;
 
 		let res =
 			self.sync_lightning_wallet_inner(channel_manager, chain_monitor, output_sweeper).await;
