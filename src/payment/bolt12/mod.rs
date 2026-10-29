@@ -271,6 +271,10 @@ impl Bolt12Payment {
 			Error::OfferCreationFailed
 		})?;
 
+		if !self.has_sufficient_inbound_liquidity(amount_msat) {
+			self.register_cache_target(&finalized_offer, LeaseCacheTargetId::Fixed { amount_msat });
+		}
+
 		Ok(finalized_offer)
 	}
 
@@ -556,9 +560,6 @@ impl Bolt12Payment {
 		&self, amount_msat: u64, description: &str, expiry_secs: Option<u32>, quantity: Option<u64>,
 	) -> Result<Offer, Error> {
 		let offer = self.receive_inner(amount_msat, description, expiry_secs, quantity)?;
-		if !self.has_sufficient_inbound_liquidity(amount_msat) {
-			self.register_cache_target(&offer, LeaseCacheTargetId::Fixed { amount_msat });
-		}
 		Ok(maybe_wrap(offer))
 	}
 
