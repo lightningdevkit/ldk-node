@@ -13,8 +13,9 @@
 //! channel to us once the payment arrives.
 //!
 //! The LSP opens a single channel per intercept SCID, so each lease may back at most one invoice.
-//! Leases are therefore consumed when an invoice is built from them, and become unusable once the
-//! opening fee parameters they were negotiated for expire.
+//! Leases are therefore consumed as soon as they are selected for an invoice, even if building that
+//! invoice fails afterwards, and become unusable once the opening fee parameters they were
+//! negotiated for expire.
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
