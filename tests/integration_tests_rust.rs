@@ -31,17 +31,17 @@ use common::{
 	generate_blocks_and_wait, generate_listening_addresses, invalidate_blocks, open_channel,
 	open_channel_no_wait, open_channel_push_amt, open_channel_with_all,
 	premine_and_distribute_funds, premine_blocks, prepare_rbf, random_chain_source, random_config,
-	setup_bitcoind_and_electrsd, setup_builder, setup_node, setup_node_with_store, setup_two_nodes,
-	splice_in_with_all, wait_for_block, wait_for_channel_ready_to_send, wait_for_outpoint_spend,
-	wait_for_tx, InMemoryStore, NodePaymentExt, TestChainSource, TestConfig, TestNode,
-	TestStoreType, TestSyncStore,
+	setup_bitcoind_and_electrsd, setup_bitcoind_and_electrsd_for_splice_rbf, setup_builder,
+	setup_node, setup_node_with_store, setup_two_nodes, splice_in_with_all, wait_for_block,
+	wait_for_channel_ready_to_send, wait_for_outpoint_spend, wait_for_tx, InMemoryStore,
+	NodePaymentExt, TestChainSource, TestConfig, TestNode, TestStoreType, TestSyncStore,
 };
-use electrsd::corepc_node::{self, Node as BitcoinD};
+use electrsd::corepc_node::Node as BitcoinD;
 use electrsd::electrum_client::ElectrumApi;
 use electrsd::ElectrsD;
 use ldk_node::config::{
-	AsyncPaymentsRole, EsploraSyncConfig, ForwardedPaymentTrackingMode, ADDRESS_POOL_SIZE,
-	DEFAULT_FULL_SCAN_STOP_GAP,
+	AnchorChannelsConfig, AsyncPaymentsRole, EsploraSyncConfig, ForwardedPaymentTrackingMode,
+	ADDRESS_POOL_SIZE, DEFAULT_FULL_SCAN_STOP_GAP,
 };
 use ldk_node::entropy::NodeEntropy;
 use ldk_node::liquidity::LSPS2ServiceConfig;
@@ -3512,22 +3512,7 @@ async fn rbf_splice_channel_original_candidate_confirms() {
 }
 
 async fn run_rbf_splice_channel_test(confirm_original: bool) {
-	// Use a custom bitcoind config with a lower incrementalrelayfee so that the +25 sat/kwu
-	// (0.1 sat/vB) RBF feerate bump satisfies BIP125's absolute fee increase requirement.
-	let bitcoind_exe = std::env::var("BITCOIND_EXE")
-		.expect("set BITCOIND_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
-	let mut bitcoind_conf = corepc_node::Conf::default();
-	bitcoind_conf.network = "regtest";
-	bitcoind_conf.args.push("-rest");
-	bitcoind_conf.args.push("-incrementalrelayfee=0.00000100");
-	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
-
-	let electrs_exe = std::env::var("ELECTRS_EXE")
-		.expect("set ELECTRS_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
-	let mut electrsd_conf = electrsd::Conf::default();
-	electrsd_conf.http_enabled = true;
-	electrsd_conf.network = "regtest";
-	let electrsd = ElectrsD::with_conf(electrs_exe, &bitcoind, &electrsd_conf).unwrap();
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd_for_splice_rbf();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
 
 	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
@@ -3718,6 +3703,392 @@ async fn run_rbf_splice_channel_test(confirm_original: bool) {
 		assert!(expected_fee.is_some());
 		assert_eq!(payment.fee_paid_msat, expected_fee);
 	}
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_in_with_all_bump_fee_retains_anchor_reserve() {
+	let default_reserve_sats = AnchorChannelsConfig::default().per_channel_reserve_sats;
+	run_splice_in_with_all_bump_fee_test(Some(default_reserve_sats)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_in_with_all_bump_fee_retains_dust_limit_anchor_reserve() {
+	run_splice_in_with_all_bump_fee_test(Some(546)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_in_with_all_bump_fee_without_anchor_reserve() {
+	run_splice_in_with_all_bump_fee_test(None).await;
+}
+
+/// Splices all of node_b's on-chain funds into a channel and then fee-bumps the splice. The
+/// contribution spends every confirmed UTXO in full, so the bump is paid by adding less to the
+/// channel: with an anchor reserve of `per_channel_reserve_sats`, the reserve stays on-chain
+/// untouched; without one, the bump still succeeds even though there is no change output to pay
+/// it from.
+async fn run_splice_in_with_all_bump_fee_test(per_channel_reserve_sats: Option<u64>) {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd_for_splice_rbf();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = match per_channel_reserve_sats {
+		Some(reserve_sats) => {
+			let node_a = setup_node(&chain_source, random_config());
+			let mut config_b = random_config();
+			config_b.node_config.anchor_channels_config.per_channel_reserve_sats = reserve_sats;
+			let node_b = setup_node(&chain_source, config_b);
+			(node_a, node_b)
+		},
+		None => setup_two_nodes(&chain_source, false, true),
+	};
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// node_a funds the channel, so node_b's premine stays untouched for the splice-in.
+	let channel_amount_sat = 1_000_000;
+	open_channel(&node_a, &node_b, channel_amount_sat, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let _user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let balances_before = node_b.list_balances();
+	let anchor_reserve_sats = balances_before.total_anchor_channels_reserve_sats;
+	assert_eq!(anchor_reserve_sats, per_channel_reserve_sats.unwrap_or(0));
+	assert_eq!(balances_before.total_onchain_balance_sats, premine_amount_sat);
+
+	node_b.splice_in_with_all(&user_channel_id_b, node_a.node_id(), None).unwrap();
+
+	let original_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, original_txo.txid).await;
+	wait_for_classified_funding_payment(&node_b, original_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// Everything but the anchor reserve and the fee was added to the channel.
+	let payment_id = funding_payment(&node_b, original_txo.txid).id;
+	let original = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+	assert_eq!(original.direction, PaymentDirection::Outbound);
+	let original_amount_msat = original.amount_msat.expect("splice payment has an amount");
+	let original_fee_msat = original.fee_paid_msat.expect("splice payment has a fee");
+	assert_eq!(
+		original_amount_msat + original_fee_msat,
+		(premine_amount_sat - anchor_reserve_sats) * 1000,
+	);
+
+	node_b.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id(), None).unwrap();
+
+	let rbf_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
+	assert_ne!(original_txo, rbf_txo, "RBF should produce a different funding txo");
+	wait_for_tx(&electrsd.client, rbf_txo.txid).await;
+	wait_for_classified_funding_payment(&node_b, rbf_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// The higher fee is paid by adding less to the channel, not out of the anchor reserve.
+	let bumped = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+	let bumped_amount_msat = bumped.amount_msat.expect("splice payment has an amount");
+	let bumped_fee_msat = bumped.fee_paid_msat.expect("splice payment has a fee");
+	assert!(bumped_fee_msat > original_fee_msat, "RBF should pay a higher fee");
+	assert_eq!(original_amount_msat - bumped_amount_msat, bumped_fee_msat - original_fee_msat);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let channels = node_b.list_channels();
+	assert_eq!(channels.len(), 1);
+	assert_eq!(channels[0].funding_txo, Some(rbf_txo));
+	assert_eq!(channels[0].channel_value_sats, channel_amount_sat + bumped_amount_msat / 1000);
+
+	let payment = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	assert_eq!(payment.amount_msat, Some(bumped_amount_msat));
+	assert_eq!(payment.fee_paid_msat, Some(bumped_fee_msat));
+
+	// The anchor reserve is all that remains on-chain, in full.
+	let balances = node_b.list_balances();
+	assert_eq!(balances.total_onchain_balance_sats, anchor_reserve_sats);
+	assert_eq!(balances.spendable_onchain_balance_sats, 0);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// Splices all of node_b's on-chain funds into a channel and then fee-bumps the splice to a
+/// feerate above the first round's maximum, after a new coin confirmed in the meantime. LDK
+/// cannot adjust a contribution of manually selected inputs past its maximum, so the bump has to
+/// be rebuilt from all confirmed funds: the first round's inputs and the new coin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_in_with_all_bump_fee_above_max_feerate_adds_new_coins() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd_for_splice_rbf();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	let premine_amount_sat = 5_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a, address_b],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// node_a funds the channel, so node_b's premine stays untouched for the splice-in.
+	let channel_amount_sat = 1_000_000;
+	open_channel(&node_a, &node_b, channel_amount_sat, false, &electrsd).await;
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let anchor_reserve_sats = node_b.list_balances().total_anchor_channels_reserve_sats;
+	assert!(anchor_reserve_sats > 0);
+
+	// Well above the regtest estimate, so the bump below exceeds 1.5 times this feerate without
+	// the estimate having a say.
+	let fee_rate = FeeRate::from_sat_per_kwu(1_000);
+	node_b.splice_in_with_all(&user_channel_id_b, node_a.node_id(), Some(fee_rate.into())).unwrap();
+
+	let original_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, original_txo.txid).await;
+	wait_for_classified_funding_payment(&node_b, original_txo.txid).await;
+
+	// A new coin confirms while the splice transaction stays in the mempool.
+	let coin_amount_sat = 200_000;
+	let coin_address = node_b.onchain_payment().new_address().unwrap();
+	let coin_txid = distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![coin_address],
+		Amount::from_sat(coin_amount_sat),
+	)
+	.await;
+	let coin_tx_hex: String = bitcoind
+		.client
+		.call::<serde_json::Value>("getrawtransaction", &[json!(coin_txid.to_string())])
+		.unwrap()
+		.as_str()
+		.unwrap()
+		.to_string();
+	mine_block_with(&bitcoind, &electrsd, &[coin_tx_hex]).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	let payment_id = funding_payment(&node_b, original_txo.txid).id;
+	let original = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+	let original_amount_msat = original.amount_msat.expect("splice payment has an amount");
+	let original_fee_msat = original.fee_paid_msat.expect("splice payment has a fee");
+	assert_eq!(
+		original_amount_msat + original_fee_msat,
+		(premine_amount_sat - anchor_reserve_sats) * 1000,
+	);
+
+	// Above the first round's maximum feerate.
+	// TODO: Once the LDK pin includes
+	// https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/pulls/5297, the adjustment is
+	// bounded by the bump's own maximum and succeeds in place, so the bump keeps the first round's
+	// inputs and the coin assertion below fails. Make the first round's inputs unable to cover the
+	// bump's fee instead, sized as in `splice_in_with_all_bump_fee_leaving_dust_fails`, so the
+	// rebuild is still what adds the coin.
+	let bump_fee_rate = FeeRate::from_sat_per_kwu(2_000);
+	node_b
+		.bump_channel_funding_fee(&user_channel_id_b, node_a.node_id(), Some(bump_fee_rate.into()))
+		.unwrap();
+
+	let rbf_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
+	assert_ne!(original_txo, rbf_txo, "RBF should produce a different funding txo");
+	wait_for_tx(&electrsd.client, rbf_txo.txid).await;
+	wait_for_classified_funding_payment(&node_b, rbf_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// The bump spends the new coin on top of the first round's inputs, so it adds more to the
+	// channel despite the higher fee.
+	let rbf_tx = electrsd.client.transaction_get(&rbf_txo.txid).unwrap();
+	assert!(
+		rbf_tx.input.iter().any(|input| input.previous_output.txid == coin_txid),
+		"the bump did not spend the new coin"
+	);
+	let bumped = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+	let bumped_amount_msat = bumped.amount_msat.expect("splice payment has an amount");
+	let bumped_fee_msat = bumped.fee_paid_msat.expect("splice payment has a fee");
+	assert!(bumped_fee_msat > original_fee_msat, "RBF should pay a higher fee");
+	assert!(bumped_amount_msat > original_amount_msat, "the new coin was not added");
+	assert_eq!(
+		bumped_amount_msat + bumped_fee_msat,
+		(premine_amount_sat + coin_amount_sat - anchor_reserve_sats) * 1000,
+	);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let channels = node_b.list_channels();
+	assert_eq!(channels.len(), 1);
+	assert_eq!(channels[0].funding_txo, Some(rbf_txo));
+	assert_eq!(channels[0].channel_value_sats, channel_amount_sat + bumped_amount_msat / 1000);
+	assert_splice_pays_fee_rate(&node_b, &electrsd.client, rbf_txo.txid, bump_fee_rate);
+
+	let payment = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	assert_eq!(payment.amount_msat, Some(bumped_amount_msat));
+	assert_eq!(payment.fee_paid_msat, Some(bumped_fee_msat));
+
+	// The anchor reserve is all that remains on-chain, in full.
+	let balances = node_b.list_balances();
+	assert_eq!(balances.total_onchain_balance_sats, anchor_reserve_sats);
+	assert_eq!(balances.spendable_onchain_balance_sats, 0);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// Splices all of node_b's on-chain funds into a channel from a coin that covers the fee with
+/// little more than dust to spare, then fee-bumps the splice to its maximum feerate. Paid from the
+/// same inputs, the bump would leave less than dust to add to the channel, which LDK does not
+/// check for: the bump fails instead, and the pending splice confirms as it is.
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn splice_in_with_all_bump_fee_leaving_dust_fails() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd_for_splice_rbf();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	// The splice transaction weighs about 1_000 weight units, so at `fee_rate` it pays about
+	// 2_000 sats in fees. Beyond the anchor reserve for the one channel, node_b's coin then leaves
+	// about 1_000 sats to splice in, above dust, while a bump to 1.5 times `fee_rate`, the most a
+	// bump may pay, would leave only a few.
+	let anchor_reserve_sats = node_b.config().anchor_channels_config.per_channel_reserve_sats;
+	let fee_rate = FeeRate::from_sat_per_kwu(2_000);
+	let coin_amount_sat = anchor_reserve_sats + 3_050;
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	let address_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(5_000_000),
+	)
+	.await;
+	distribute_funds_unconfirmed(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_b],
+		Amount::from_sat(coin_amount_sat),
+	)
+	.await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// node_a funds the channel, so node_b's coin stays untouched for the splice-in, and pushes
+	// node_b a balance above the channel reserve, which the little the splice adds would not reach.
+	let channel_amount_sat = 1_000_000;
+	open_channel_push_amt(
+		&node_a,
+		&node_b,
+		channel_amount_sat,
+		Some(100_000_000),
+		false,
+		&electrsd,
+	)
+	.await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	let user_channel_id_b = expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let balances = node_b.list_balances();
+	assert_eq!(balances.total_onchain_balance_sats, coin_amount_sat);
+	assert_eq!(balances.total_anchor_channels_reserve_sats, anchor_reserve_sats);
+
+	node_b.splice_in_with_all(&user_channel_id_b, node_a.node_id(), Some(fee_rate.into())).unwrap();
+	let original_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, original_txo.txid).await;
+	wait_for_classified_funding_payment(&node_b, original_txo.txid).await;
+
+	let payment_id = funding_payment(&node_b, original_txo.txid).id;
+	let original = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+	let original_amount_sat = original.amount_msat.expect("splice payment has an amount") / 1000;
+	let original_fee_sat = original.fee_paid_msat.expect("splice payment has a fee") / 1000;
+	assert_eq!(original_amount_sat + original_fee_sat, coin_amount_sat - anchor_reserve_sats);
+	// The same inputs can pay half the fee more only by adding less than dust to the channel.
+	assert!(original_amount_sat >= 546, "the splice added dust: {original_amount_sat} sats");
+	assert!(
+		original_amount_sat < 546 + original_fee_sat / 2,
+		"the bump could still add dust: {original_amount_sat} sats after a fee of {original_fee_sat}"
+	);
+
+	// At the pending splice's maximum feerate, LDK pays the bump from the same inputs.
+	let bump_fee_rate = FeeRate::from_sat_per_kwu(3_000);
+	assert_eq!(
+		node_b.bump_channel_funding_fee(
+			&user_channel_id_b,
+			node_a.node_id(),
+			Some(bump_fee_rate.into())
+		),
+		Err(NodeError::InsufficientFunds)
+	);
+	let payment = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+	assert_eq!(payment.status, PaymentStatus::Pending);
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+
+	let channels = node_b.list_channels();
+	assert_eq!(channels.len(), 1);
+	assert_eq!(channels[0].funding_txo, Some(original_txo));
+	assert_eq!(channels[0].channel_value_sats, channel_amount_sat + original_amount_sat);
+
+	let payment = node_b.payment(&payment_id).unwrap().expect("splice payment exists");
+	assert_eq!(payment.status, PaymentStatus::Succeeded);
+	assert_eq!(payment.amount_msat, Some(original_amount_sat * 1000));
+
+	// The anchor reserve is all that remains on-chain, in full.
+	let balances = node_b.list_balances();
+	assert_eq!(balances.total_onchain_balance_sats, anchor_reserve_sats);
+	assert_eq!(balances.spendable_onchain_balance_sats, 0);
 
 	node_a.stop().unwrap();
 	node_b.stop().unwrap();
@@ -4708,19 +5079,20 @@ async fn superseded_zero_conf_splice_round_keeps_its_payment_at_close() {
 /// pass and on peer traffic, and the monitor's own events are handled right after the manager's.
 /// Each event then finds the channel listed and, both rounds having been broadcast, only returns
 /// the round's contribution, leaving the payment to the `ChannelClosed` that follows, which fails
-/// it, no round of ours being watched anymore. Node A splices into its channel with node B and
-/// bumps the round's fee from another coin, so the two rounds are contributions of their own; node
-/// B closes while node A's event handler sits in a blocked event-queue write — for a channel node C
-/// opened to it — until the close and its maturity are synced. Pinned to Esplora so the wallet
-/// syncs only on demand.
+/// it, no round of ours being watched anymore. Node A splices into its channel with node B and,
+/// once another coin has confirmed, bumps the round's fee past its maximum feerate, so the bump is
+/// rebuilt with that coin and the two rounds are contributions of their own; node B closes while
+/// node A's event handler sits in a blocked event-queue write — for a channel node C opened to it —
+/// until the close and its maturity are synced. Pinned to Esplora so the wallet syncs only on
+/// demand.
 #[cfg(feature = "chain-esplora")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = TestChainSource::Esplora(&electrsd);
 	let node_b = setup_node(&chain_source, random_config());
-	// Keeping no anchor reserve back from node B, node A's splice-in takes its whole balance and
-	// leaves no change for a fee bump to draw on.
+	// Keeping no anchor reserve back from node B, node A's splice-in takes its whole balance into
+	// the funding, with no output of its own.
 	let mut config_a = random_config();
 	config_a.node_config.anchor_channels_config.trusted_peers_no_reserve.push(node_b.node_id());
 	let (node_a, store_a, logs_a) =
@@ -4753,8 +5125,8 @@ async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
 	let first_round = wait_for_transaction(&bitcoind, &electrsd, first_txo.txid).await;
 	wait_for_classified_funding_payment(&node_a, first_txo.txid).await;
 	assert_eq!(first_round.output.len(), 1, "the splice-in left change");
-	// The wallet learns the round from the sync and gets a fresh coin for the bump, which then
-	// spends nothing of the first round's but the funding.
+	// The wallet learns the round from the sync and gets a fresh coin. The bump asks for more than
+	// the round's maximum feerate allows, so it is rebuilt from the round's inputs and the coin.
 	node_a.sync_wallets().unwrap();
 	let coin_address = node_a.onchain_payment().new_address().unwrap();
 	let coin_txid = distribute_funds_unconfirmed(
@@ -4767,21 +5139,31 @@ async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
 	mine_block_with(&bitcoind, &electrsd, &[raw_transaction_hex(&bitcoind, coin_txid)]).await;
 	node_a.sync_wallets().unwrap();
 
-	// The bump pays little more than the first round, which bitcoind may refuse to replace for it:
-	// have it replaced, so the mempool serves the bump.
-	deprioritise_transaction(&bitcoind, first_txo.txid);
-	node_a.bump_channel_funding_fee(&user_channel_id_a, node_b.node_id(), None).unwrap();
+	// Past the first round's maximum feerate, so the bump is rebuilt with the coin.
+	// TODO: Once the LDK pin includes
+	// https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/pulls/5297, the adjustment is
+	// bounded by the bump's own maximum and succeeds in place, so the bump keeps the first round's
+	// inputs and the input assertions below fail. Make the first round a fixed-amount `splice_in`
+	// that leaves no change instead, with coin selection then drawing the bump's fee from the coin.
+	let bump_fee_rate = FeeRate::from_sat_per_kwu(1_000);
+	node_a
+		.bump_channel_funding_fee(&user_channel_id_a, node_b.node_id(), Some(bump_fee_rate.into()))
+		.unwrap();
 	let bump_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	assert_ne!(first_txo, bump_txo, "the bump produced the same funding");
 	wait_for_classified_funding_payment(&node_a, bump_txo.txid).await;
 	let bump_round = wait_for_transaction(&bitcoind, &electrsd, bump_txo.txid).await;
-	let shared: Vec<_> = bump_round
-		.input
-		.iter()
-		.map(|input| input.previous_output)
-		.filter(|outpoint| spends(&first_round, *outpoint))
-		.collect();
-	assert_eq!(shared, vec![funding_txo], "the bump reused an input of the first round");
+	let first_inputs: Vec<_> =
+		first_round.input.iter().map(|input| input.previous_output).collect();
+	let bump_inputs: Vec<_> = bump_round.input.iter().map(|input| input.previous_output).collect();
+	assert!(
+		first_inputs.iter().all(|outpoint| bump_inputs.contains(outpoint)),
+		"the bump did not reuse the first round's inputs"
+	);
+	let added_inputs: Vec<_> =
+		bump_inputs.iter().filter(|outpoint| !first_inputs.contains(outpoint)).collect();
+	assert_eq!(added_inputs.len(), 1, "the bump added more than the coin");
+	assert_eq!(added_inputs[0].txid, coin_txid, "the bump did not spend the coin");
 	let payment = funding_payment(&node_a, bump_txo.txid);
 	assert_eq!(payment.status, PaymentStatus::Pending);
 	let payment_id = payment.id;
@@ -4829,6 +5211,8 @@ async fn splice_rounds_discarded_while_the_channel_is_listed_fail_at_close() {
 		kept_before,
 		"a discard while the channel was listed resolved the payment"
 	);
+	// The bump added the coin to the first round's inputs, so each round's discard carries a
+	// contribution of its own to return.
 	assert_eq!(
 		logs_a.count(RECLAIMED_ADDRESSES),
 		2,

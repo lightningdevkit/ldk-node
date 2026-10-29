@@ -21,7 +21,7 @@ use bdk_wallet::{
 	WalletEvent,
 };
 use bitcoin::address::NetworkUnchecked;
-use bitcoin::blockdata::constants::WITNESS_SCALE_FACTOR;
+use bitcoin::blockdata::constants::{COINBASE_MATURITY, WITNESS_SCALE_FACTOR};
 use bitcoin::blockdata::locktime::absolute::LockTime;
 use bitcoin::hashes::Hash;
 use bitcoin::key::XOnlyPublicKey;
@@ -98,7 +98,7 @@ pub(crate) mod persist;
 pub(crate) mod provenance;
 pub(crate) mod ser;
 
-const DUST_LIMIT_SATS: u64 = 546;
+pub(crate) const DUST_LIMIT_SATS: u64 = 546;
 
 /// The number of external addresses kept revealed, persisted, and ready for handout via
 /// [`Wallet::pop_pooled_address`] and [`Wallet::get_new_address`].
@@ -1942,11 +1942,33 @@ impl Wallet {
 		let _ = locked_persister.persist_address_pool(indices).await;
 	}
 
-	pub(crate) async fn get_new_internal_address(&self) -> Result<bitcoin::Address, Error> {
+	/// Returns the lowest-index internal address that no transaction known to the wallet pays,
+	/// revealing a fresh one only once every revealed address is used. Calling this repeatedly
+	/// returns the same address until a transaction paying it reaches the wallet or
+	/// [`Self::reserve_internal_address`] marks it used.
+	pub(crate) async fn next_unused_internal_address(&self) -> Result<bitcoin::Address, Error> {
+		self.next_unused_internal_address_inner(false).await
+	}
+
+	/// Like [`Self::next_unused_internal_address`], but also marks the returned address used, so
+	/// that neither method hands it out again while the transaction paying it is still being built
+	/// or negotiated. The mark is held in memory only and is derived again from the wallet's
+	/// transactions after a restart; [`Self::release_outputs`] clears it if the transaction is
+	/// abandoned.
+	pub(crate) async fn reserve_internal_address(&self) -> Result<bitcoin::Address, Error> {
+		self.next_unused_internal_address_inner(true).await
+	}
+
+	async fn next_unused_internal_address_inner(
+		&self, mark_used: bool,
+	) -> Result<bitcoin::Address, Error> {
 		let mut locked_persister = self.persister.lock().await;
 		let (address_info, change_set) = {
 			let mut locked_wallet = self.inner.lock().expect("lock");
 			let address_info = locked_wallet.next_unused_address(KeychainKind::Internal);
+			if mark_used {
+				locked_wallet.mark_used(KeychainKind::Internal, address_info.index);
+			}
 			(address_info, locked_wallet.take_staged().unwrap_or_default())
 		};
 		locked_persister.persist_changeset(change_set).await.map_err(|e| {
@@ -1956,11 +1978,20 @@ impl Wallet {
 		Ok(address_info.address)
 	}
 
-	pub(crate) async fn cancel_tx(&self, tx: Transaction) -> Result<(), Error> {
+	/// Frees the wallet addresses paid by `outputs` for reuse, for a transaction that will not be
+	/// made after all.
+	pub(crate) async fn release_outputs(&self, outputs: Vec<TxOut>) -> Result<(), Error> {
 		let mut locked_persister = self.persister.lock().await;
 		let change_set = {
 			let mut locked_wallet = self.inner.lock().expect("lock");
-			Self::cancel_tx_inner(&mut locked_wallet, tx);
+			for txout in outputs {
+				if let Some((keychain, index)) =
+					locked_wallet.derivation_of_spk(txout.script_pubkey)
+				{
+					// This mirrors the removed BDK helper: it only frees superficial usage marks.
+					locked_wallet.unmark_used(keychain, index);
+				}
+			}
 			locked_wallet.take_staged().unwrap_or_default()
 		};
 		locked_persister.persist_changeset(change_set).await.map_err(|e| {
@@ -1969,17 +2000,6 @@ impl Wallet {
 		})?;
 
 		Ok(())
-	}
-
-	fn cancel_tx_inner(
-		locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>, tx: Transaction,
-	) {
-		for txout in tx.output {
-			if let Some((keychain, index)) = locked_wallet.derivation_of_spk(txout.script_pubkey) {
-				// This mirrors the removed BDK helper: it only frees superficial usage marks.
-				locked_wallet.unmark_used(keychain, index);
-			}
-		}
 	}
 
 	pub(crate) fn get_balances(
@@ -2020,7 +2040,6 @@ impl Wallet {
 	fn build_drain_psbt(
 		&self, locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>,
 		drain_script: ScriptBuf, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
-		shared_input: Option<&Input>,
 	) -> Result<Psbt, Error> {
 		let anchor_address = if cur_anchor_reserve_sats > DUST_LIMIT_SATS {
 			Some(locked_wallet.peek_address(KeychainKind::Internal, 0))
@@ -2038,19 +2057,6 @@ impl Wallet {
 			);
 		}
 
-		if let Some(input) = shared_input {
-			let psbt_input = psbt::Input {
-				witness_utxo: Some(input.previous_utxo.clone()),
-				..Default::default()
-			};
-			let weight = ldk_to_bdk_satisfaction_weight(input.satisfaction_weight);
-			tx_builder.only_witness_utxo().exclude_unconfirmed();
-			tx_builder.add_foreign_utxo(input.outpoint, psbt_input, weight).map_err(|e| {
-				log_error!(self.logger, "Failed to add shared input for fee estimation: {e}");
-				Error::ChannelSplicingFailed
-			})?;
-		}
-
 		let psbt = tx_builder.finish().map_err(|err| {
 			log_error!(self.logger, "Failed to create temporary drain transaction: {err}");
 			err
@@ -2063,13 +2069,12 @@ impl Wallet {
 	/// the drain output, along with the PSBT for further inspection.
 	///
 	/// The returned PSBT needs no cleanup. Draining to a fixed script means BDK neither reserves a
-	/// change address nor locks inputs for it. Cancelling it via `cancel_tx_inner` would instead
+	/// change address nor locks inputs for it. Cancelling it via `release_outputs` would instead
 	/// clear the usage mark on the anchor reserve placeholder address, which a pending transaction
 	/// may have reserved as its change address.
 	fn get_max_drain_amount(
 		&self, locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>,
 		drain_script: ScriptBuf, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
-		shared_input: Option<&Input>,
 	) -> Result<(u64, Psbt), Error> {
 		let balance = locked_wallet.balance();
 		let spendable_amount_sats =
@@ -2088,7 +2093,6 @@ impl Wallet {
 			drain_script.clone(),
 			cur_anchor_reserve_sats,
 			fee_rate,
-			shared_input,
 		)?;
 
 		let drain_output_value = tmp_psbt
@@ -2102,9 +2106,7 @@ impl Wallet {
 				Error::InsufficientFunds
 			})?;
 
-		let shared_input_value = shared_input.map(|i| i.previous_utxo.value.to_sat()).unwrap_or(0);
-
-		let max_amount = drain_output_value.to_sat().saturating_sub(shared_input_value);
+		let max_amount = drain_output_value.to_sat();
 
 		if max_amount < DUST_LIMIT_SATS {
 			log_error!(
@@ -2134,19 +2136,16 @@ impl Wallet {
 			dummy_p2wsh_script,
 			cur_anchor_reserve_sats,
 			fee_rate,
-			None,
 		)?;
 
 		Ok(max_amount)
 	}
 
-	/// Returns the maximum amount available for splicing into an existing channel, accounting for
-	/// on-chain fees and anchor reserves, along with the wallet UTXOs to use as inputs.
-	pub(crate) fn get_max_splice_in_amount(
-		&self, shared_input: Input, shared_output_script: ScriptBuf, cur_anchor_reserve_sats: u64,
-		fee_rate: FeeRate,
-	) -> Result<u64, Error> {
-		let mut locked_wallet = self.inner.lock().expect("lock");
+	/// Returns the wallet's confirmed UTXOs as inputs for a funding contribution that spends them
+	/// in full, e.g. when splicing all on-chain funds into a channel. Like coin selection, this
+	/// excludes unconfirmed outputs and immature coinbase outputs.
+	pub(crate) fn list_confirmed_funding_inputs(&self) -> Result<Vec<ConfirmedUtxo>, Error> {
+		let locked_wallet = self.inner.lock().expect("lock");
 
 		debug_assert!(matches!(
 			locked_wallet.public_descriptor(KeychainKind::External),
@@ -2157,15 +2156,44 @@ impl Wallet {
 			ExtendedDescriptor::Wpkh(_)
 		));
 
-		let (splice_amount, _) = self.get_max_drain_amount(
-			&mut locked_wallet,
-			shared_output_script,
-			cur_anchor_reserve_sats,
-			fee_rate,
-			Some(&shared_input),
-		)?;
+		let tip_height = locked_wallet.latest_checkpoint().height();
+		let mut inputs = Vec::new();
+		for utxo in locked_wallet.list_unspent() {
+			let Some(confirmation_height) = utxo.chain_position.confirmation_height_upper_bound()
+			else {
+				continue;
+			};
 
-		Ok(splice_amount)
+			let prevtx = locked_wallet
+				.tx_details(utxo.outpoint.txid)
+				.map(|tx_details| tx_details.tx.deref().clone())
+				.ok_or_else(|| {
+					log_error!(
+						self.logger,
+						"Failed to get previous transaction for {}",
+						utxo.outpoint.txid
+					);
+					Error::WalletOperationFailed
+				})?;
+
+			if prevtx.is_coinbase()
+				&& tip_height.saturating_sub(confirmation_height) + 1 < COINBASE_MATURITY
+			{
+				continue;
+			}
+
+			let input = ConfirmedUtxo::new_p2wpkh(prevtx, utxo.outpoint.vout).map_err(|()| {
+				log_error!(
+					self.logger,
+					"Failed to use {} as a funding input: not a P2WPKH output",
+					utxo.outpoint
+				);
+				Error::WalletOperationFailed
+			})?;
+			inputs.push(input);
+		}
+
+		Ok(inputs)
 	}
 
 	pub(crate) fn parse_and_validate_address(&self, address: &Address) -> Result<Address, Error> {
@@ -2206,7 +2234,6 @@ impl Wallet {
 						address.script_pubkey(),
 						cur_anchor_reserve_sats,
 						fee_rate,
-						None,
 					)?;
 
 					let estimated_tx_fee =
@@ -4469,7 +4496,7 @@ impl ChangeDestinationSource for WalletKeysManager {
 	) -> impl Future<Output = Result<ScriptBuf, ()>> + Send + 'a {
 		async move {
 			self.wallet
-				.get_new_internal_address()
+				.next_unused_internal_address()
 				.await
 				.map_err(|e| {
 					log_error!(self.logger, "Failed to retrieve new address from wallet: {}", e);
@@ -12675,5 +12702,77 @@ mod tests {
 		drop(stores);
 
 		assert!(wallet.payment_stores.pending_payment_store().get(&id).await.unwrap().is_none());
+	}
+
+	#[tokio::test]
+	async fn reserved_internal_address_is_skipped_until_released() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+
+		// Handing out an address does not by itself make it used, so it is handed out again.
+		let address = wallet.next_unused_internal_address().await.unwrap();
+		assert_eq!(wallet.next_unused_internal_address().await.unwrap(), address);
+
+		// Reserving it does, so other change-address consumers move on to the next one.
+		let reserved = wallet.reserve_internal_address().await.unwrap();
+		assert_eq!(reserved, address);
+		let next = wallet.next_unused_internal_address().await.unwrap();
+		assert_ne!(next, reserved);
+
+		// Releasing the output paying it frees it again.
+		let output = TxOut { value: Amount::ZERO, script_pubkey: reserved.script_pubkey() };
+		wallet.release_outputs(vec![output]).await.unwrap();
+		assert_eq!(wallet.next_unused_internal_address().await.unwrap(), reserved);
+	}
+
+	#[tokio::test]
+	async fn confirmed_funding_inputs_exclude_unconfirmed_outputs() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let (confirmed_tx, unconfirmed_tx, block_id) = {
+			let mut locked_wallet = wallet.inner.lock().unwrap();
+			let mut pay_to_wallet = |value_sats| Transaction {
+				version: bitcoin::transaction::Version::TWO,
+				lock_time: LockTime::ZERO,
+				input: Vec::new(),
+				output: vec![TxOut {
+					value: Amount::from_sat(value_sats),
+					script_pubkey: locked_wallet
+						.reveal_next_address(KeychainKind::External)
+						.address
+						.script_pubkey(),
+				}],
+			};
+			let confirmed_tx = pay_to_wallet(200_000);
+			let unconfirmed_tx = pay_to_wallet(100_000);
+			let block_id = BlockId {
+				height: locked_wallet.latest_checkpoint().height() + 1,
+				hash: bitcoin::BlockHash::from_byte_array([42; 32]),
+			};
+			(confirmed_tx, unconfirmed_tx, block_id)
+		};
+		let confirmed_txid = confirmed_tx.compute_txid();
+		let mut tx_update = TxUpdate::default();
+		tx_update.txs = vec![Arc::new(confirmed_tx), Arc::new(unconfirmed_tx.clone())];
+		tx_update.anchors =
+			[(ConfirmationBlockTime { block_id, confirmation_time: 1 }, confirmed_txid)].into();
+		tx_update.seen_ats = [(unconfirmed_tx.compute_txid(), 1)].into();
+		let chain = CheckPoint::from_block_ids([
+			wallet.inner.lock().unwrap().latest_checkpoint().block_id(),
+			block_id,
+		])
+		.unwrap();
+		wallet
+			.apply_update(Update { tx_update, chain: Some(chain), ..Default::default() })
+			.await
+			.unwrap();
+
+		// Both outputs count towards the balance, but only the confirmed one is usable as a
+		// funding input.
+		assert_eq!(wallet.inner.lock().unwrap().balance().total(), Amount::from_sat(300_000));
+		let inputs = wallet.list_confirmed_funding_inputs().unwrap();
+		assert_eq!(inputs.len(), 1);
+		assert_eq!(inputs[0].outpoint(), OutPoint { txid: confirmed_txid, vout: 0 });
+		assert_eq!(inputs[0].output().value, Amount::from_sat(200_000));
 	}
 }
