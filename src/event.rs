@@ -494,8 +494,11 @@ pub enum Event {
 		/// The parameters of the [`Node`] API call that initiated the failed splice or fee bump.
 		///
 		/// Will be `None` when the failure does not identify the channel's last locally-initiated
-		/// splice — e.g. when a fee bump superseded the failed attempt — and for events
-		/// serialized by LDK Node v0.7.
+		/// splice, and for events serialized by LDK Node v0.7. The failure does not identify the
+		/// splice when a fee bump superseded the failed attempt, or when the failure follows the
+		/// channel's [`Event::ChannelClosed`], which settles the channel's splices: a force-close
+		/// reports the failure after that event, whereas a cooperative close reports it before,
+		/// with the parameters.
 		///
 		/// [`Node`]: crate::Node
 		parameters: Option<SpliceParameters>,
