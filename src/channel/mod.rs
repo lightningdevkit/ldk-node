@@ -25,7 +25,6 @@ use crate::logger::{log_debug, log_error, LdkLogger, Logger};
 use crate::payment::pending_payment_store::{
 	PendingPaymentDetails, PendingPaymentDetailsUpdate, SpliceIntent, SpliceKind,
 };
-use crate::payment::{PaymentKind, TransactionType};
 use crate::types::{ChannelManager, PendingPaymentStore};
 use crate::wallet::{funding_candidates, random_payment_id, Wallet};
 use crate::Error;
@@ -724,8 +723,9 @@ fn unclaimed_parts<'a>(
 	(inputs, outputs)
 }
 
-/// Whether a pending record concerns the given channel's splices: it carries a splice intent for
-/// the channel, or tracks an interactive funding payment of it.
+/// Whether a pending record concerns the given channel's splices: its splice intent is for the
+/// channel, or it tracks an interactive funding of the channel — one whose round this node
+/// signed, or whose payment wallet sync classified.
 fn concerns_channel(
 	record: &PendingPaymentDetails, counterparty_node_id: PublicKey, channel_id: ChannelId,
 ) -> bool {
@@ -733,15 +733,9 @@ fn concerns_channel(
 		return intent.channel_id == channel_id
 			&& intent.counterparty_node_id == counterparty_node_id;
 	}
-	match record.details().map(|details| &details.kind) {
-		Some(PaymentKind::Onchain {
-			tx_type: Some(TransactionType::InteractiveFunding { channels }),
-			..
-		}) => channels.iter().any(|channel| {
-			channel.channel_id == channel_id && channel.counterparty_node_id == counterparty_node_id
-		}),
-		_ => false,
-	}
+	record.funding_channels().iter().any(|channel| {
+		channel.channel_id == channel_id && channel.counterparty_node_id == counterparty_node_id
+	})
 }
 
 /// Where the intent of a new submission is recorded, decided by [`place_intent`].
@@ -923,7 +917,7 @@ mod tests {
 		FundingTxCandidate,
 	};
 	use crate::payment::store::{ConfirmationStatus, PaymentDetails, PaymentKind};
-	use crate::payment::{PaymentDirection, PaymentStatus};
+	use crate::payment::{PaymentDirection, PaymentStatus, TransactionType};
 	use crate::types::{DynStore, DynStoreWrapper};
 	use lightning::ln::channel_state::SpliceCandidateStatus;
 
@@ -1299,6 +1293,7 @@ mod tests {
 	/// not.
 	#[test]
 	fn records_concerning_a_channel() {
+		use crate::payment::store::Channel;
 		let base = test_intent();
 		let (cp, channel_id) = (base.counterparty_node_id, base.channel_id);
 		let id = PaymentId([1u8; 32]);
@@ -1312,6 +1307,22 @@ mod tests {
 			cp,
 			channel_id
 		));
+
+		// The entry of a round this node signed before wallet sync observed any transaction of the
+		// funding has the funding's channels but no payment record yet.
+		let signed = PendingPaymentDetails::signed_rounds(
+			id,
+			vec![Channel { counterparty_node_id: cp, channel_id }],
+			vec![FundingTxCandidate {
+				txid: txid(0x10),
+				amount_msat: Some(1_000_000),
+				fee_paid_msat: Some(500),
+				awaiting_broadcast: true,
+			}],
+			None,
+		);
+		assert!(concerns_channel(&signed, cp, channel_id));
+		assert!(!concerns_channel(&signed, cp, ChannelId([8u8; 32])));
 
 		let other_channel = SpliceIntent { channel_id: ChannelId([8u8; 32]), ..base };
 		assert!(!concerns_channel(
