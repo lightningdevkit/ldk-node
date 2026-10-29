@@ -182,8 +182,8 @@ use payment::asynchronous::static_invoice_store::StaticInvoiceStore;
 pub use payment::forwarding_store::aggregate_channel_pair_stats;
 use payment::forwarding_store::{run_forwarded_payment_aggregation, ForwardingStore};
 use payment::{
-	Bolt11Payment, Bolt12Payment, ForwardingAnalytics, OnchainPayment, PaymentDetails,
-	PaymentDetailsPage, SpontaneousPayment,
+	Bolt11Payment, Bolt12Payment, ForwardingAnalytics, NodeOffersMessageHandler, OnchainPayment,
+	PaymentDetails, PaymentDetailsPage, SpontaneousPayment,
 };
 #[cfg(feature = "unified-payments")]
 use payment::{HRNResolver, UnifiedPayment};
@@ -266,6 +266,7 @@ pub struct Node {
 	output_sweeper: Arc<Sweeper>,
 	peer_manager: Arc<PeerManager>,
 	onion_messenger: Arc<OnionMessenger>,
+	offers_message_handler: Arc<NodeOffersMessageHandler>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	keys_manager: Arc<KeysManager>,
 	network_graph: Arc<Graph>,
@@ -391,6 +392,7 @@ impl Node {
 			self.stop_sender.subscribe(),
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.offers_message_handler),
 			Arc::clone(&self.chain_monitor),
 			Arc::clone(&self.output_sweeper),
 			zero_fee_commitments_support_required,
@@ -401,6 +403,7 @@ impl Node {
 		let chain_source = Arc::clone(&self.chain_source);
 		let sync_wallet = Arc::clone(&self.wallet);
 		let sync_cman = Arc::clone(&self.channel_manager);
+		let sync_offers = Arc::clone(&self.offers_message_handler);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		self.runtime.spawn_background_task(async move {
@@ -409,6 +412,7 @@ impl Node {
 					stop_sync_receiver,
 					sync_wallet,
 					sync_cman,
+					sync_offers,
 					sync_cmon,
 					sync_sweeper,
 				)
@@ -592,6 +596,28 @@ impl Node {
 									).await;
 							}
 						}
+				}
+			}
+		});
+
+		// Periodically prune LSPS2 state so expired leases and cache targets don't accumulate.
+		let lsps2_client = self.liquidity_source.lsps2_client();
+		let prune_logger = Arc::clone(&self.logger);
+		let mut stop_pruning = self.stop_sender.subscribe();
+		self.runtime.spawn_cancellable_background_task(async move {
+			let mut interval = tokio::time::interval(Duration::from_secs(60 * 60));
+			interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+			loop {
+				tokio::select! {
+					_ = stop_pruning.changed() => return,
+					_ = interval.tick() => {
+						if let Err(error) = lsps2_client.prune_stale_leases().await {
+							log_error!(prune_logger, "Failed pruning stale LSPS2 leases: {}", error);
+						}
+						if let Err(error) = lsps2_client.prune_stale_cache_targets().await {
+							log_error!(prune_logger, "Failed pruning stale LSPS2 cache targets: {}", error);
+						}
+					},
 				}
 			}
 		});
@@ -842,6 +868,17 @@ impl Node {
 								liquidity_logger,
 								"LSP protocols discovery complete.",
 							);
+							if let Err(error) = liquidity_handler
+								.lsps2_client()
+								.refill_cached_leases(&discovery_cm)
+								.await
+							{
+								log_error!(
+									liquidity_logger,
+									"Failed scheduling LSPS2 lease cache refills: {}",
+									error
+								);
+							}
 						}
 					}
 				}
@@ -1110,6 +1147,8 @@ impl Node {
 		Bolt12Payment::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.liquidity_source),
+			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.config),
@@ -1127,6 +1166,8 @@ impl Node {
 		Arc::new(Bolt12Payment::new(
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.liquidity_source),
+			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.keys_manager),
 			Arc::clone(&self.payment_store),
 			Arc::clone(&self.config),
@@ -2289,13 +2330,19 @@ impl Node {
 		let chain_source = Arc::clone(&self.chain_source);
 		let sync_wallet = Arc::clone(&self.wallet);
 		let sync_cman = Arc::clone(&self.channel_manager);
+		let sync_offers = Arc::clone(&self.offers_message_handler);
 		let sync_cmon = Arc::clone(&self.chain_monitor);
 		let sync_sweeper = Arc::clone(&self.output_sweeper);
 		self.runtime.block_on(async move {
 			if chain_source.is_transaction_based() {
 				chain_source.update_fee_rate_estimates().await?;
 				chain_source
-					.sync_lightning_wallet(sync_cman, sync_cmon, Arc::clone(&sync_sweeper))
+					.sync_lightning_wallet(
+						sync_cman,
+						sync_offers,
+						sync_cmon,
+						Arc::clone(&sync_sweeper),
+					)
 					.await?;
 				chain_source.sync_onchain_wallet(sync_wallet).await?;
 			} else {
@@ -2304,6 +2351,7 @@ impl Node {
 					.poll_and_update_listeners(
 						sync_wallet,
 						sync_cman,
+						sync_offers,
 						sync_cmon,
 						Arc::clone(&sync_sweeper),
 					)

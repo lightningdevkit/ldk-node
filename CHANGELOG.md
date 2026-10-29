@@ -21,6 +21,10 @@
   change once after such a migration. Payment contents and completeness are unaffected.
 - Pending JIT-channel payments created before upgrading may fail after upgrade because the
   prior LSPS2 fee-limit state stored in `PaymentKind::Bolt11Jit` is not migrated.
+- Creating a BOLT 12 invoice for a known amount, including for refunds, now fails instead of
+  falling back to a direct path to the node if its channels cannot receive that amount and no
+  LSPS2 just-in-time channel is available. Such invoices could not be paid. This also applies
+  to nodes without a configured LSP.
 - Upgrading from LDK Node v0.1 is no longer supported if the event queue still contains
   a persisted `ChannelClosed` event.
 - Users of the VSS storage backend must upgrade their VSS server to at least version
@@ -51,6 +55,11 @@
   This replaces the previous unpaginated `Node::list_payments`, and
   `Node::list_payments_with_filter` has been removed; filter the returned pages instead.
 - `Node::payment` now returns a `Result`, as retrieving a payment may fail.
+- LSPS2 just-in-time receive fee limits are now configured globally through
+  `Config::lsps2_max_total_lsp_fee_limit_msat`. The corresponding per-call fee-limit arguments
+  have been removed from the BOLT 11 receive APIs.
+- `PaymentKind::Bolt12Offer` now exposes `counterparty_skimmed_fee_msat` for the fee deducted by
+  an LSP when an inbound payment is received through an LSPS2 just-in-time channel.
 - The Bitcoin Core RPC and REST chain-source builder methods now accept an optional
   `wallet_rescan_from_height` argument. Passing a height lets fresh wallets rescan from a known
   birthday block instead of checkpointing at the current tip, which is useful when restoring a
