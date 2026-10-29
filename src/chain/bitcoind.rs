@@ -1270,15 +1270,16 @@ impl BitcoindClient {
 
 		let mempool_entries_cache = mempool_entries_cache.lock().await;
 		let mut mempool_txs_cache = mempool_txs_cache.lock().await;
-		mempool_txs_cache.retain(|txid, _| mempool_entries_cache.contains_key(txid));
+		// Only transactions we may have to emit again are cached, i.e., those that entered the
+		// mempool above our best processed height. Caching every mempool transaction would keep a
+		// full copy of the mempool in memory.
+		mempool_txs_cache.retain(|txid, _| {
+			mempool_entries_cache
+				.get(txid)
+				.is_some_and(|entry| entry.height > best_processed_height)
+		});
 
-		if let Some(difference) =
-			mempool_entries_cache.len().checked_sub(mempool_txs_cache.capacity())
-		{
-			mempool_txs_cache.reserve(difference)
-		}
-
-		let mut txs_to_emit = Vec::with_capacity(mempool_entries_cache.len());
+		let mut txs_to_emit = Vec::new();
 		for (txid, entry) in mempool_entries_cache.iter() {
 			if entry.time > latest_time {
 				latest_time = entry.time;
@@ -1302,7 +1303,9 @@ impl BitcoindClient {
 
 			match self.get_raw_transaction(&entry.txid).await {
 				Ok(Some(tx)) => {
-					mempool_txs_cache.insert(entry.txid, (tx.clone(), entry.time));
+					if !ancestor_within_height {
+						mempool_txs_cache.insert(entry.txid, (tx.clone(), entry.time));
+					}
 					txs_to_emit.push((tx, entry.time));
 				},
 				Ok(None) => {
