@@ -6162,6 +6162,22 @@ async fn bolt12_lsps2_client_service_integration() {
 	tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
 	let fixed_amount_msat = 100_000_000;
+	// A unified URI's offer must register a lease target as well, so that its first payer need not
+	// wait for an on-demand negotiation. The client has no channel yet, so a lease is negotiated
+	// in the background right away.
+	assert!(client_node.list_channels().is_empty());
+	assert!(KVStore::list(&client_store, "lsps2_leases", "").await.unwrap().is_empty());
+	let unified_uri =
+		client_node.unified_payment().receive(fixed_amount_msat / 1_000, "unified", 3_600).unwrap();
+	assert!(unified_uri.to_lowercase().contains("lno="), "unified URI should carry an offer");
+	tokio::time::timeout(std::time::Duration::from_secs(common::INTEROP_TIMEOUT_SECS), async {
+		while KVStore::list(&client_store, "lsps2_leases", "").await.unwrap().is_empty() {
+			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+		}
+	})
+	.await
+	.expect("unified offer should pre-negotiate a lease");
+
 	// The recipient has no channel yet, but the connected payer gives the default message router a
 	// peer through which it can construct an offer path. This keeps the long-lived offer addressed
 	// by a blinded node path; the single-use intercept SCID is introduced only in the invoice.
