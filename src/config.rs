@@ -316,9 +316,9 @@ pub struct Config {
 	/// just-in-time channel.
 	///
 	/// This limit applies to all configured LSPS2 liquidity sources in addition to the fee negotiated
-	/// for a payment. Fixed-amount payments never accept a fee exceeding the payment amount, whether
-	/// or not this limit is set. If unset, variable-amount payments use the negotiated proportional
-	/// fee as their limit.
+	/// for a payment. Once the payment amount is known, fees exceeding it are never accepted, whether
+	/// or not this limit is set. If unset, payments of a yet unknown amount use the negotiated
+	/// proportional fee as their limit.
 	pub lsps2_max_total_lsp_fee_limit_msat: Option<u64>,
 	/// Configuration options pertaining to Anchor channels, i.e., channels for which the
 	/// `option_zero_fee_commitments` or `option_anchors_zero_fee_htlc_tx` channel type is

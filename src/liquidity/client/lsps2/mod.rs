@@ -586,8 +586,7 @@ where
 				let (selection_fee, fee_for_limit) =
 					state::variable_lease_fees(&params, amount_msat)?;
 				let fee_allowed = self
-					.config
-					.lsps2_max_total_lsp_fee_limit_msat
+					.max_variable_amount_fee_msat(amount_msat)
 					.map_or(true, |limit| fee_for_limit <= limit);
 				rejected_for_fee |= !fee_allowed;
 				fee_allowed.then_some((lsp, selection_fee, params))
@@ -925,6 +924,14 @@ where
 		self.config.lsps2_max_total_lsp_fee_limit_msat.unwrap_or(amount_msat).min(amount_msat)
 	}
 
+	/// Variable-amount opening fees are bounded likewise once the payment amount has been resolved.
+	fn max_variable_amount_fee_msat(&self, amount_msat: Option<u64>) -> Option<u64> {
+		match amount_msat {
+			Some(amount_msat) => Some(self.max_fixed_amount_fee_msat(amount_msat)),
+			None => self.config.lsps2_max_total_lsp_fee_limit_msat,
+		}
+	}
+
 	async fn take_cached_fixed_lease(
 		&self, amount_msat: u64,
 	) -> Result<Option<(PaymentLease, u64, LspConfig)>, Error> {
@@ -952,7 +959,7 @@ where
 		let available_lsps = lsps2_nodes.iter().map(|lsp| lsp.node_id).collect::<Vec<_>>();
 		let Some((lease, fee)) = self.lease_state.lock().expect("lock").variable_amount(
 			amount_msat,
-			self.config.lsps2_max_total_lsp_fee_limit_msat,
+			self.max_variable_amount_fee_msat(amount_msat),
 			&available_lsps,
 		) else {
 			return Ok(None);
@@ -1573,6 +1580,38 @@ mod tests {
 
 		assert_eq!(result, Ok(30));
 		assert_eq!(*attempted_lsps.lock().unwrap(), vec![1, 2]);
+	}
+	#[test]
+	fn cached_variable_lease_must_cover_resolved_amount() {
+		let (node, lsp_node_id) = rejection_test_node();
+		let client = node.liquidity_source.lsps2_client();
+		let lease = PaymentLease {
+			id: PaymentLeaseId { lsp_node_id, intercept_scid: 7 },
+			params: LSPS2OpeningFeeParams {
+				min_fee_msat: 1_500,
+				proportional: 0,
+				valid_until: (chrono::Utc::now() + chrono::Duration::days(2))
+					.to_rfc3339()
+					.parse()
+					.unwrap(),
+				min_lifetime: 1,
+				max_client_to_self_delay: 1,
+				min_payment_size_msat: 1,
+				max_payment_size_msat: 10_000,
+				promise: String::new(),
+			},
+			cltv_expiry_delta: 18,
+			payment_size_msat: None,
+			valid_until: now_secs() + 7 * 24 * 60 * 60,
+		};
+		node.runtime.block_on(client.lease_store.insert(lease.clone())).unwrap();
+		client.lease_state.lock().unwrap().insert(lease.clone());
+
+		// No fee limit is configured, so only the resolved amount bounds the acceptable fee.
+		let taken = node.runtime.block_on(client.take_cached_variable_lease(Some(1_000))).unwrap();
+		assert!(taken.is_none(), "a lease fee exceeding the payment amount must not be accepted");
+		let taken = node.runtime.block_on(client.take_cached_variable_lease(Some(2_000))).unwrap();
+		assert_eq!(taken.map(|(lease, fee_msat, _)| (lease.id, fee_msat)), Some((lease.id, 1_500)));
 	}
 }
 
