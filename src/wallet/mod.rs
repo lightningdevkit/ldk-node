@@ -3322,7 +3322,6 @@ impl Wallet {
 						// whatever next concerns the channel's splice. The intent is read from the
 						// entry as it stands, not as listed above: a fee bump submitted since may
 						// have replaced it, and that intent must stay just the same.
-						stores.remove_payment(&payment_id).await?;
 						self.withdraw_unshared_attributions(&entry, payment_id).await?;
 						let kept_intent = stores
 							.mutate_pending_payment(&payment_id, |existing| match existing {
