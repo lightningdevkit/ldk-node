@@ -19,7 +19,9 @@
 //!
 //! Negotiating a lease takes several round trips to the LSP. To avoid that latency when a payer
 //! is waiting, we record [`LeaseCacheTarget`]s for the amounts we expect to receive, so that
-//! matching leases can be negotiated ahead of time.
+//! matching leases can be negotiated ahead of time. When no cached lease matches an invoice
+//! request, one is negotiated on demand and handed to that request alone, without ever entering
+//! the shared pool.
 
 use std::collections::HashMap;
 use std::ops::Deref;
