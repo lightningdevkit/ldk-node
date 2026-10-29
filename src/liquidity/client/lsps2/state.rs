@@ -864,4 +864,84 @@ mod tests {
 		assert!(!Arc::ptr_eq(&fixed, &other_fixed));
 		assert!(!Arc::ptr_eq(&fixed, &variable));
 	}
+
+	#[test]
+	fn startup_drops_leases_of_expired_cache_targets() {
+		use crate::builder::NodeBuilder;
+		use crate::entropy::NodeEntropy;
+		use crate::io::{
+			LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE, LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+		};
+
+		let now = now_secs();
+		let valid_until = now + 7 * 24 * 60 * 60;
+		let expired_target_lease = lease(2, 46, 1, Some(1_000), valid_until);
+		let live_target_lease = lease(3, 47, 1, Some(2_000), valid_until);
+		let untargeted_lease = lease(4, 48, 1, None, valid_until);
+		let targets = vec![
+			LeaseCacheTarget::new(LeaseCacheTargetId::Fixed { amount_msat: 1_000 }, Some(now - 1)),
+			LeaseCacheTarget::new(
+				LeaseCacheTargetId::Fixed { amount_msat: 2_000 },
+				Some(now + 3_600),
+			),
+		];
+
+		let store = InMemoryStore::new();
+		tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+			KVStore::write(
+				&store,
+				LSPS2_CACHE_TARGET_PERSISTENCE_PRIMARY_NAMESPACE,
+				LSPS2_CACHE_TARGET_PERSISTENCE_SECONDARY_NAMESPACE,
+				LSPS2_CACHE_TARGET_PERSISTENCE_KEY,
+				LeaseCacheTargets { targets }.encode(),
+			)
+			.await
+			.unwrap();
+			for lease in [&expired_target_lease, &live_target_lease, &untargeted_lease] {
+				KVStore::write(
+					&store,
+					LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE,
+					LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+					&lease.id.encode_to_hex_str(),
+					lease.encode(),
+				)
+				.await
+				.unwrap();
+			}
+		});
+
+		let mut builder = NodeBuilder::new();
+		builder.set_log_facade_logger();
+		#[cfg(not(feature = "uniffi"))]
+		let entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		let node = builder.build_with_store(entropy, store).unwrap();
+
+		let mut remaining = node
+			.runtime
+			.block_on(KVStore::list(
+				&*node.kv_store,
+				LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE,
+				LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+			))
+			.unwrap();
+		remaining.sort();
+		let mut expected =
+			vec![live_target_lease.id.encode_to_hex_str(), untargeted_lease.id.encode_to_hex_str()];
+		expected.sort();
+		assert_eq!(
+			remaining, expected,
+			"only the leases of cache targets dropped at startup must be removed"
+		);
+		let client = node.liquidity_source.lsps2_client();
+		let lease_state = client.lease_state.lock().unwrap();
+		assert!(lease_state
+			.lease_ids_for_targets(&[LeaseCacheTargetId::Fixed { amount_msat: 1_000 }])
+			.is_empty());
+		assert_eq!(
+			lease_state.lease_ids_for_targets(&[LeaseCacheTargetId::Fixed { amount_msat: 2_000 }]),
+			vec![live_target_lease.id]
+		);
+	}
 }

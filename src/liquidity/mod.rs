@@ -330,7 +330,7 @@ where
 		for lease in leases.iter().filter(|lease| !is_lease_usable(lease)) {
 			lease_store.remove(&lease.id).await.map_err(|_| BuildError::WriteFailed)?;
 		}
-		let lease_state =
+		let mut lease_state =
 			LSPS2LeaseState::from_leases(leases.into_iter().filter(is_lease_usable).collect());
 		let (cache_target_state, removed_target_ids) = LeaseCacheTargetState::from_targets(
 			cache_targets,
@@ -344,6 +344,12 @@ where
 		));
 		if !removed_target_ids.is_empty() {
 			cache_target_store.persist().await.map_err(|_| BuildError::WriteFailed)?;
+			// The runtime prune only sees tracked targets, so leases of targets dropped here would
+			// otherwise linger until they expire.
+			for lease_id in lease_state.lease_ids_for_targets(&removed_target_ids) {
+				lease_store.remove(&lease_id).await.map_err(|_| BuildError::WriteFailed)?;
+				lease_state.remove(&lease_id);
+			}
 		}
 		let liquidity_service_config = self.lsps2_service.as_ref().map(|s| {
 			let lsps2_service_config = Some(s.ldk_service_config.clone());
