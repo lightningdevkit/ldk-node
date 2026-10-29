@@ -173,6 +173,10 @@ impl SpliceTracker {
 					)
 					.await;
 				}
+				// The pass reads the channel's records as they stand, not the list above, and
+				// covers the channel's other intents too. By their turn here they are settled, or
+				// re-anchored to the new funding as splices LDK still tracks with the same inputs,
+				// which the decision below would keep without an input to unlock.
 				continue;
 			}
 
