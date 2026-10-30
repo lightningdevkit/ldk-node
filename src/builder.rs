@@ -92,6 +92,7 @@ use crate::io::{
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
+use crate::liquidity::service::lsps1::LSPS1Service;
 use crate::liquidity::{LSPS2ServiceConfig, LiquiditySourceBuilder, LspConfig};
 use crate::lnurl_auth::LnurlAuth;
 use crate::logger::{log_error, LdkLogger, LogLevel, LogWriter, Logger};
@@ -156,6 +157,8 @@ struct PathfindingScoresSyncConfig {
 struct LiquiditySourceConfig {
 	// Acts for both LSPS1 and LSPS2 clients connecting to the given service.
 	lsp_nodes: Vec<LspConfig>,
+	// Act as an LSPS1 service.
+	lsps1_service: Option<LSPS1Service>,
 	// Act as an LSPS2 service.
 	lsps2_service: Option<LSPS2ServiceConfig>,
 }
@@ -553,18 +556,22 @@ impl NodeBuilder {
 		self
 	}
 
-	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
-	/// channels to clients.
+	/// Configures the [`Node`] instance to provide an [LSPS1] and/or [LSPS2] service to clients.
+	///
+	/// Allowing normal channel purchases and/or just-in-time channels respectively.
 	///
 	/// **Caution**: LSP service support is in **alpha** and is considered an experimental feature.
 	///
+	/// [LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	pub fn enable_liquidity_provider(
-		&mut self, lsps2_service_config: LSPS2ServiceConfig,
+		&mut self, lsps1_service_config: Option<LSPS1Service>,
+		lsps2_service_config: Option<LSPS2ServiceConfig>,
 	) -> &mut Self {
 		let liquidity_source_config =
 			self.liquidity_source_config.get_or_insert(LiquiditySourceConfig::default());
-		liquidity_source_config.lsps2_service = Some(lsps2_service_config);
+		liquidity_source_config.lsps1_service = lsps1_service_config;
+		liquidity_source_config.lsps2_service = lsps2_service_config;
 		self
 	}
 
@@ -1208,14 +1215,22 @@ impl Builder {
 
 #[cfg(feature = "uniffi")]
 impl ArcedNodeBuilder {
-	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
-	/// channels to clients.
+	/// Configures the [`Node`] instance to provide an [LSPS1] and/or [LSPS2] service to clients.
+	///
+	/// Allowing normal channel purchases and/or just-in-time channels respectively.
 	///
 	/// **Caution**: LSP service support is in **alpha** and is considered an experimental feature.
 	///
+	/// [LSPS1]: https://github.com/lightning/blips/blob/master/blip-0051.md
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
-	pub fn enable_liquidity_provider(&self, lsps2_service_config: LSPS2ServiceConfig) {
-		self.inner.write().expect("lock").enable_liquidity_provider(lsps2_service_config);
+	pub fn enable_liquidity_provider(
+		&self, lsps1_service_config: Option<LSPS1Service>,
+		lsps2_service_config: Option<LSPS2ServiceConfig>,
+	) {
+		self.inner
+			.write()
+			.expect("lock")
+			.enable_liquidity_provider(lsps1_service_config, lsps2_service_config);
 	}
 }
 
@@ -2385,6 +2400,12 @@ fn build_with_store_internal(
 			lsc.lsps2_service.as_ref().map(|config| {
 				liquidity_source_builder.lsps2_service(promise_secret, config.clone())
 			});
+
+			lsc.lsps1_service.as_ref().map(|config| {
+				let supported_options = config.clone().ldk_service_config.supported_options;
+				let service_config = config.clone().service_config;
+				liquidity_source_builder.lsps1_service(supported_options, service_config)
+			});
 		}
 
 		let liquidity_source = runtime
@@ -2444,6 +2465,8 @@ fn build_with_store_internal(
 	}
 
 	liquidity_source.lsps2_service().set_peer_manager(Arc::downgrade(&peer_manager));
+
+	liquidity_source.lsps1_service().set_peer_manager(Arc::downgrade(&peer_manager));
 
 	let connection_manager = Arc::new(ConnectionManager::new(
 		Arc::clone(&peer_manager),
