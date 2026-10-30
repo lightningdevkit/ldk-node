@@ -1324,6 +1324,8 @@ impl Node {
 	/// Connect to a node on the peer-to-peer network.
 	///
 	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
+	/// Outbound connection attempts fail with [`Error::ConnectionFailed`] if
+	/// [`Config::disable_lightning_connections`] is set to `true`.
 	pub fn connect(
 		&self, node_id: PublicKey, address: SocketAddress, persist: bool,
 	) -> Result<(), Error> {
