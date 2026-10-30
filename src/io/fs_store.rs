@@ -12,7 +12,7 @@ use lightning::util::persist::migrate_kv_store_data_async;
 use lightning_persister::fs_store::v1::FilesystemStore;
 use lightning_persister::fs_store::v2::{FilesystemStoreV2, FilesystemStoreV2Error};
 
-use crate::io::utils::create_dir_all_private;
+use crate::io::utils::{create_dir_all_private, create_dir_all_private_checked};
 use crate::BuildError;
 
 /// Opens a [`FilesystemStoreV2`], automatically migrating from v1 format if necessary.
@@ -24,7 +24,7 @@ pub(crate) async fn open_or_migrate_fs_store(
 	storage_dir_path: PathBuf,
 ) -> Result<FilesystemStoreV2, BuildError> {
 	let parent_dir = storage_dir_path.parent().ok_or(BuildError::StoragePathAccessFailed)?;
-	create_dir_all_private(parent_dir).map_err(|_| BuildError::StoragePathAccessFailed)?;
+	create_dir_all_private_checked(parent_dir).map_err(|_| BuildError::StoragePathAccessFailed)?;
 	recover_incomplete_fs_store_migration(&storage_dir_path)?;
 	if !storage_dir_path.exists() {
 		create_dir_all_private(&storage_dir_path)
