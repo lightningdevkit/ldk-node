@@ -50,7 +50,9 @@ use crate::io::{
 use crate::liquidity::LiquiditySource;
 use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
 use crate::payment::asynchronous::om_mailbox::OnionMessageMailbox;
-use crate::payment::asynchronous::static_invoice_store::StaticInvoiceStore;
+use crate::payment::asynchronous::static_invoice_store::{
+	StaticInvoiceStore, StaticInvoiceStoreError,
+};
 use crate::payment::forwarding_store::{ForwardRecord, ForwardingStore};
 use crate::payment::store::{
 	Channel, PaymentDetails, PaymentDetailsUpdate, PaymentDirection, PaymentKind, PaymentStatus,
@@ -2524,7 +2526,11 @@ where
 						Ok(_) => {
 							self.channel_manager.static_invoice_persisted(invoice_persisted_path);
 						},
-						Err(e) => {
+						Err(StaticInvoiceStoreError::RateLimited) => {
+							// Drop silently: logging each rejected request, even at trace level,
+							// can cause excessive log output and I/O under sustained load.
+						},
+						Err(StaticInvoiceStoreError::Io(e)) => {
 							log_error!(self.logger, "Failed to persist static invoice: {}", e);
 							return Err(ReplayEvent());
 						},
@@ -2560,7 +2566,11 @@ where
 								invoice_slot
 							);
 						},
-						Err(e) => {
+						Err(StaticInvoiceStoreError::RateLimited) => {
+							// Drop silently: logging each rejected request, even at trace level,
+							// can cause excessive log output and I/O under sustained load.
+						},
+						Err(StaticInvoiceStoreError::Io(e)) => {
 							log_error!(self.logger, "Failed to retrieve static invoice: {}", e);
 							return Err(ReplayEvent());
 						},
