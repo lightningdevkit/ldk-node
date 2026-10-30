@@ -70,8 +70,8 @@ pub(crate) struct SpliceTracker {
 	/// files under an intent's id. Without it, the failure event of a synchronously rejected
 	/// hand-off could settle the just-written intent while `submit` is still deciding whether to
 	/// keep it, and a lock event handled between `submit`'s funding read and its persist could
-	/// leave the new intent anchored at a funding the channel has moved past, which would never be
-	/// settled. Every public entry point takes it; the `_locked` variants assume it is held and
+	/// leave the new intent anchored at a funding a splice lock has since replaced, which would never
+	/// be settled. Every public entry point takes it; the `_locked` variants assume it is held and
 	/// must not take it again (tokio's mutex is not reentrant). It nests outward of the wallet's
 	/// locks and the stores', which are taken while it is held and never hold it. An event
 	/// handler waiting on it waits for a `submit` to finish its bounded sequence, nothing more.
@@ -101,12 +101,12 @@ impl SpliceTracker {
 	///
 	/// The intent is anchored at the channel's funding as it stands under the submit lock, not at
 	/// `pre_splice_funding_txo`, the funding the caller read before building the contribution: a
-	/// splice locking in between moves the funding, and an intent anchored at the old one would
-	/// never be settled by the lock that superseded it. A funding that moved refuses a fee bump —
-	/// the round it was built to replace has locked — and a splice-in, whose inputs the locked
-	/// round may have spent; a splice-out carries no wallet inputs and proceeds, as LDK
+	/// splice locking in between replaces the funding, and an intent anchored at the old one would
+	/// never be settled by the lock that superseded it. A funding a lock replaced refuses a fee
+	/// bump — the round it was built to replace has locked — and a splice-in, whose inputs the
+	/// locked round may have spent; a splice-out carries no wallet inputs and proceeds, as LDK
 	/// re-validates its amount against the live balance ([`check_submission`]). Intents anchored
-	/// at a funding the channel has moved past are settled first, as their lock event would.
+	/// at a funding a lock replaced are settled first, as their lock event would.
 	///
 	/// On any failure the persisted intent is undone and the error returned for the caller to
 	/// surface. A failure before the hand-off also releases what the wallet reserves for the
@@ -444,8 +444,8 @@ impl SpliceTracker {
 		FailureSettlement { tracker: self, _guard: guard, matched }
 	}
 
-	/// Settles the persisted intents made obsolete by the channel's funding having moved on to
-	/// `funding_txo`, the funding a `ChannelReady` event reports as locked
+	/// Settles the persisted intents made obsolete by a splice locking at `funding_txo`, the funding
+	/// a `ChannelReady` event reports as locked
 	/// ([`Self::settle_superseded_intents_locked`]). Takes the submit lock, so the settlement
 	/// cannot interleave with a splice being submitted.
 	pub(crate) async fn on_channel_ready(
@@ -467,15 +467,15 @@ impl SpliceTracker {
 		.await;
 	}
 
-	/// Settles any persisted intent made obsolete by the channel's funding having moved on to
-	/// `funding_txo`: the funding a `ChannelReady` event reports as locked, or the one a new
-	/// splice builds on ([`Self::submit`]). Each of the channel's intents is decided on its own
-	/// ([`effect_of_funding_move`]), against the splice candidates LDK tracks for the channel (`channel`,
-	/// as the caller listed it): one whose pre-splice outpoint is that funding was created after
-	/// the lock and stays; one LDK still tracks as a queued splice candidate is re-anchored to the
-	/// funding it now builds on rather than settled; any other is settled, and what the wallet
-	/// reserves for it is either spent by the locked round or returned by LDK through
-	/// `DiscardFunding`. The caller holds the submit lock.
+	/// Settles any persisted intent made obsolete by a splice locking at `funding_txo`: the
+	/// funding a `ChannelReady` event reports as locked, or the one a new splice builds on
+	/// ([`Self::submit`]). Each of the channel's intents is decided on its own
+	/// ([`effect_of_splice_lock`]), against the splice candidates LDK tracks for the channel
+	/// (`channel`, as the caller listed it): one whose pre-splice outpoint is that funding was
+	/// created after the lock and stays; one LDK still tracks as a queued splice candidate is
+	/// re-anchored to the funding it now builds on rather than settled; any other is settled, and
+	/// what the wallet reserves for it is either spent by the locked round or returned by LDK
+	/// through `DiscardFunding`. The caller holds the submit lock.
 	async fn settle_superseded_intents_locked(
 		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, counterparty_node_id: PublicKey,
 		channel_id: ChannelId, funding_txo: OutPoint, channel: Option<&ChannelDetails>,
@@ -490,14 +490,14 @@ impl SpliceTracker {
 			let Some(intent) = record.splice_intent().cloned() else {
 				continue;
 			};
-			match effect_of_funding_move(&intent, funding_txo, candidates) {
-				FundingMoveEffect::Unaffected => {},
-				FundingMoveEffect::StillQueued => {
+			match effect_of_splice_lock(&intent, funding_txo, candidates) {
+				SpliceLockEffect::Unaffected => {},
+				SpliceLockEffect::StillQueued => {
 					if let Some(new_funding_txo) = channel.and_then(|channel| channel.funding_txo) {
 						self.refresh_intent_funding(payment_id, &intent, new_funding_txo).await;
 					}
 				},
-				FundingMoveEffect::Superseded => {
+				SpliceLockEffect::Superseded => {
 					// What the wallet reserves for the intent is not released here. The inputs the
 					// locked round spent are gone with it, and whatever a superseded round reserved
 					// beyond them, LDK returns through the `DiscardFunding` events it queues at the
@@ -646,20 +646,20 @@ impl fmt::Display for SubmissionRefusal {
 		match self {
 			Self::ChannelGone => write!(f, "the channel is gone or has no funding"),
 			Self::BumpedRoundLocked => {
-				write!(f, "the funding moved since the bump was built; its round has locked")
+				write!(f, "the round the bump was built to replace has locked")
 			},
 			Self::InputsMayBeSpent => write!(
 				f,
-				"the funding moved since the splice was built; the locked round may have spent \
-				its inputs"
+				"a splice locked since this one was built; the locked round may have spent its \
+				inputs"
 			),
 		}
 	}
 }
 
 /// Whether a submission built against `requested_funding` may proceed now that the channel's
-/// funding is `live_funding`, and at which funding to anchor its intent. A funding that has not
-/// moved proceeds. One that has means a splice locked while the contribution was being built,
+/// funding is `live_funding`, and at which funding to anchor its intent. At an unchanged funding
+/// it proceeds. A changed one means a splice locked while the contribution was being built,
 /// and only a splice-out proceeds, anchored at the live funding: it carries no wallet inputs,
 /// and LDK re-validates its amount against the live balance. A fee bump was built to replace
 /// that very round — a bump template is only offered for an unconfirmed, unlocked pending round
@@ -837,10 +837,10 @@ fn record_of_failed_splice(
 	})
 }
 
-/// What a lock of the funding a channel has moved on to — or a new splice building on it —
-/// means for one of the channel's recorded intents, as [`effect_of_funding_move`] classifies it.
+/// What a splice locking at the channel's funding means for one of the channel's recorded
+/// intents, as [`effect_of_splice_lock`] classifies it.
 #[derive(Debug, PartialEq, Eq)]
-enum FundingMoveEffect {
+enum SpliceLockEffect {
 	/// The intent is anchored at that funding: its splice was submitted after the lock.
 	Unaffected,
 	/// LDK still tracks the intent's contribution as a splice candidate — a splice queued behind
@@ -860,21 +860,21 @@ enum FundingMoveEffect {
 	Superseded,
 }
 
-/// What the channel's funding having moved on to `funding_txo` did to `intent`, judged from the
-/// splice candidates LDK tracks for the channel.
-fn effect_of_funding_move(
+/// What a splice locking at `funding_txo` did to `intent`, judged from the splice candidates LDK
+/// tracks for the channel.
+fn effect_of_splice_lock(
 	intent: &SpliceIntent, funding_txo: OutPoint, candidates: &[SpliceCandidateDetails],
-) -> FundingMoveEffect {
+) -> SpliceLockEffect {
 	if intent.pre_splice_funding_txo.into_bitcoin_outpoint() == funding_txo {
-		return FundingMoveEffect::Unaffected;
+		return SpliceLockEffect::Unaffected;
 	}
 	let still_tracked = candidates.iter().any(|candidate| {
 		candidate.contribution.as_ref().is_some_and(|c| is_same_splice(c, &intent.contribution))
 	});
 	if still_tracked {
-		FundingMoveEffect::StillQueued
+		SpliceLockEffect::StillQueued
 	} else {
-		FundingMoveEffect::Superseded
+		SpliceLockEffect::Superseded
 	}
 }
 
@@ -1225,7 +1225,7 @@ mod tests {
 	/// A lock keeps an intent anchored at the locked funding, re-anchors one LDK still tracks as a
 	/// candidate, and settles any other.
 	#[test]
-	fn a_funding_move_leaves_requeues_or_supersedes_an_intent() {
+	fn a_splice_lock_leaves_requeues_or_supersedes_an_intent() {
 		let intent =
 			intent_with(SpliceKind::Out { outputs: Vec::new() }, 3, splice_out_contribution(1_000));
 		let same_funding = intent.pre_splice_funding_txo.into_bitcoin_outpoint();
@@ -1246,31 +1246,28 @@ mod tests {
 		];
 
 		assert_eq!(
-			effect_of_funding_move(&intent, same_funding, &other),
-			FundingMoveEffect::Unaffected
+			effect_of_splice_lock(&intent, same_funding, &other),
+			SpliceLockEffect::Unaffected
 		);
 		assert_eq!(
-			effect_of_funding_move(&intent, new_funding, &tracked_candidates),
-			FundingMoveEffect::StillQueued
+			effect_of_splice_lock(&intent, new_funding, &tracked_candidates),
+			SpliceLockEffect::StillQueued
 		);
 		assert_eq!(
-			effect_of_funding_move(&intent, new_funding, &other),
-			FundingMoveEffect::Superseded
+			effect_of_splice_lock(&intent, new_funding, &other),
+			SpliceLockEffect::Superseded
 		);
-		assert_eq!(
-			effect_of_funding_move(&intent, new_funding, &[]),
-			FundingMoveEffect::Superseded
-		);
+		assert_eq!(effect_of_splice_lock(&intent, new_funding, &[]), SpliceLockEffect::Superseded);
 	}
 
 	/// A submission proceeds at the funding it was built against while that is still the
-	/// channel's. Once the funding moved, only a splice-out proceeds, anchored at the live
+	/// channel's. Once a splice locked, only a splice-out proceeds, anchored at the live
 	/// funding; a bump and a splice-in are refused, as is any submission for a channel LDK no
 	/// longer lists with a funding.
 	#[test]
 	fn a_submission_is_checked_against_the_live_funding() {
 		let requested = LdkOutPoint { txid: txid(0x30), index: 0 };
-		let moved = LdkOutPoint { txid: txid(0x31), index: 0 };
+		let locked = LdkOutPoint { txid: txid(0x31), index: 0 };
 		let kinds = [
 			SpliceKind::In { amount_sats: 5_000 },
 			SpliceKind::Out { outputs: Vec::new() },
@@ -1284,16 +1281,16 @@ mod tests {
 			);
 		}
 		assert_eq!(
-			check_submission(requested, Some(moved), &SpliceKind::Rbf {}),
+			check_submission(requested, Some(locked), &SpliceKind::Rbf {}),
 			Err(SubmissionRefusal::BumpedRoundLocked)
 		);
 		assert_eq!(
-			check_submission(requested, Some(moved), &SpliceKind::In { amount_sats: 5_000 }),
+			check_submission(requested, Some(locked), &SpliceKind::In { amount_sats: 5_000 }),
 			Err(SubmissionRefusal::InputsMayBeSpent)
 		);
 		assert_eq!(
-			check_submission(requested, Some(moved), &SpliceKind::Out { outputs: Vec::new() }),
-			Ok(moved)
+			check_submission(requested, Some(locked), &SpliceKind::Out { outputs: Vec::new() }),
+			Ok(locked)
 		);
 	}
 
