@@ -140,9 +140,9 @@ pub(crate) struct PendingPaymentDetails {
 	/// Empty for non-funding payments.
 	pub candidates: Vec<FundingTxCandidate>,
 	/// The live splice intent, or `None` for a non-splice payment or a splice that has locked.
-	/// Set when a splice is initiated and cleared once it locks or its failure is surfaced. A fee
-	/// bump shares the entry of the round it replaces, so the intent outlives any single round
-	/// negotiated under it.
+	/// Written by the splice entry points when a splice is initiated and cleared by the splice
+	/// tracker once it locks or its failure is surfaced. A fee bump shares the entry of the round
+	/// it replaces, so the intent outlives any single round negotiated under it.
 	pub splice_intent: Option<SpliceIntent>,
 	/// The candidates LDK promoted to the channel's funding, as `ChannelReady` reported them.
 	/// A zero-conf splice locks before its transaction confirms, and every later splice builds
@@ -174,7 +174,6 @@ impl PendingPaymentDetails {
 		}
 	}
 
-	#[cfg(test)]
 	pub(crate) fn pending_splice(id: PaymentId, intent: SpliceIntent) -> Self {
 		Self {
 			id,
@@ -379,8 +378,8 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 				} else {
 					Some(value.conflicting_txids.clone())
 				};
-				// Leave the splice intent unchanged: it is owned by the writers that persist and
-				// settle splices, never by a payment-tracking merge. Emitting the current value
+				// Leave the splice intent unchanged: it is owned by the splice entry points and the
+				// splice tracker, never by a payment-tracking merge. Emitting the current value
 				// here would let an `insert_or_update` of a payment record (e.g. from wallet sync,
 				// built without an intent) clobber a live intent to `None`.
 				Self {
@@ -543,6 +542,15 @@ pub(crate) fn test_funding_contribution_with_feerate(
 	test_funding_contribution_with_outputs(0, feerate, &[])
 }
 
+/// Like [`test_funding_contribution`], but with the given input-selection feerate in sat/kwu and
+/// an input spending output 0 — which must be P2WPKH — of each given previous transaction.
+#[cfg(test)]
+pub(crate) fn test_funding_contribution_with_inputs(
+	feerate: u64, prevtxs: &[bitcoin::Transaction],
+) -> FundingContribution {
+	test_funding_contribution_with_parts(0, feerate, prevtxs, &[], None)
+}
+
 #[cfg(test)]
 mod tests {
 	use bitcoin::hashes::Hash;
@@ -650,6 +658,44 @@ mod tests {
 			Vec::<Txid>::new(),
 			"current txid must not remain in its own conflict list"
 		);
+	}
+
+	fn test_intent() -> SpliceIntent {
+		use std::str::FromStr;
+
+		SpliceIntent {
+			counterparty_node_id: PublicKey::from_str(
+				"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+			)
+			.unwrap(),
+			channel_id: ChannelId([11u8; 32]),
+			pre_splice_funding_txo: LdkOutPoint { txid: test_txid(12), index: 0 },
+			contribution: test_funding_contribution(),
+			kind: SpliceKind::In { amount_sats: 500_000 },
+		}
+	}
+
+	#[test]
+	fn payment_tracking_merge_preserves_a_live_splice_intent() {
+		let payment_id = PaymentId([7u8; 32]);
+		let txid = test_txid(8);
+		let intent = test_intent();
+		let mut record = PendingPaymentDetails::tracked(
+			pending_onchain_payment(payment_id, txid),
+			Vec::new(),
+			Vec::new(),
+			Some(intent.clone()),
+		);
+
+		// Wallet sync merges its view of a transaction through `to_update()` of a fresh record,
+		// which is built without an intent; the merge must leave the live intent in place.
+		let fresh = PendingPaymentDetails::new(
+			pending_onchain_payment(payment_id, txid),
+			vec![test_txid(9)],
+			Vec::new(),
+		);
+		assert!(record.update(fresh.to_update()));
+		assert_eq!(record.splice_intent(), Some(&intent));
 	}
 
 	#[test]
