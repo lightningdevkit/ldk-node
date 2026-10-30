@@ -173,10 +173,11 @@ impl SpliceTracker {
 					)
 					.await;
 				}
-				// The pass reads the channel's records as they stand, not the list above, and
-				// covers the channel's other intents too. By their turn here they are settled, or
-				// re-anchored to the new funding as splices LDK still tracks with the same inputs,
-				// which the decision below would keep without an input to unlock.
+				// `settle_superseded_intents_locked` works through every intent of this channel in
+				// the store, so a copy of another of them still ahead in `records` has the old
+				// funding outpoint, takes this branch too and skips `splice_survived_restart`. Of
+				// them, the ones that call left in place are splices LDK still tracks, for which
+				// `splice_survived_restart` holds.
 				continue;
 			}
 
