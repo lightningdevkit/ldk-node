@@ -112,7 +112,7 @@ impl SpliceTracker {
 	/// report the loss — a contribution it was still queueing or negotiating when it was last
 	/// persisted is failed as it is written, and the failure replayed at startup. That replay
 	/// runs after this reconciliation, so the report carries the splice's parameters only if
-	/// `decide_reconcile` kept the intent: a splice queued behind a pending one of ours, or a fee
+	/// the intent is still in place (`splice_survived_restart`): a splice queued behind a pending one of ours, or a fee
 	/// bump of one, is reported with its parameters; a channel's only splice, whose intent
 	/// settled here, without them.
 	pub(crate) async fn reconcile(&self) {
@@ -185,41 +185,38 @@ impl SpliceTracker {
 				.as_ref()
 				.map(|details| details.candidates.as_slice())
 				.unwrap_or(&[]);
-			match decide_reconcile(candidates) {
-				ReconcileDecision::Keep => {
-					// A kept record may still reserve more than LDK's surviving rounds use —
-					// extras a fee bump lost with the restart had reserved. Release the
-					// difference.
-					let extras = unclaimed_inputs(&intent.contribution, candidates);
-					if let Err(e) = self.wallet.unlock_outpoints(&extras).await {
-						log_error!(
-							self.logger,
-							"Failed to release unused splice inputs on channel {}: {}",
-							intent.channel_id,
-							e,
-						);
-					}
-				},
-				ReconcileDecision::Lost => {
-					log_info!(
+			if splice_survived_restart(candidates) {
+				// A kept record may still reserve more than LDK's surviving rounds use —
+				// extras a fee bump lost with the restart had reserved. Release the
+				// difference.
+				let extras = unclaimed_inputs(&intent.contribution, candidates);
+				if let Err(e) = self.wallet.unlock_outpoints(&extras).await {
+					log_error!(
 						self.logger,
-						"Dropping a splice on channel {} with counterparty {} that did not survive \
-						the restart",
+						"Failed to release unused splice inputs on channel {}: {}",
 						intent.channel_id,
-						intent.counterparty_node_id,
+						e,
 					);
-					self.release_contribution(
-						intent.channel_id,
-						&intent.contribution,
-						candidates,
-						None,
-					)
-					.await;
-					// TODO(#1037): `release_contribution` swallows a failed release. Once inputs
-					// are locked at coin selection, a failure here leaves locks without a record
-					// after the intent is cleared: keep the intent when the release fails.
-					self.clear_persisted_intent(payment_id, |i| *i == intent).await;
-				},
+				}
+			} else {
+				log_info!(
+					self.logger,
+					"Dropping a splice on channel {} with counterparty {} that did not survive \
+					the restart",
+					intent.channel_id,
+					intent.counterparty_node_id,
+				);
+				self.release_contribution(
+					intent.channel_id,
+					&intent.contribution,
+					candidates,
+					None,
+				)
+				.await;
+				// TODO(#1037): `release_contribution` swallows a failed release. Once inputs
+				// are locked at coin selection, a failure here leaves locks without a record
+				// after the intent is cleared: keep the intent when the release fails.
+				self.clear_persisted_intent(payment_id, |i| *i == intent).await;
 			}
 		}
 	}
@@ -1033,40 +1030,25 @@ fn record_with_intent_cleared(existing: &PendingPaymentDetails) -> Option<Pendin
 	(!record.is_empty()).then_some(record)
 }
 
-/// What [`SpliceTracker::reconcile`] should do with a persisted intent whose channel and funding
-/// are unchanged, decided from the splice rounds LDK reports on the channel.
-#[derive(Debug, PartialEq, Eq)]
-enum ReconcileDecision {
-	/// LDK still tracks a splice of ours; leave the intent in place until the splice settles.
-	Keep,
-	/// LDK tracks no splice of ours: the recorded splice died with the restart, so whatever was
-	/// reserved for it is released and the intent dropped.
-	Lost,
-}
-
-/// Decides the startup action for a persisted intent from the channel's [`SpliceDetails`]
-/// candidates.
+/// Whether LDK still tracks the splice a persisted intent recorded, judged from the channel's
+/// [`SpliceDetails`] candidates. A splice LDK no longer tracks died with the restart.
 ///
 /// [`SpliceDetails`]: lightning::ln::channel_state::SpliceDetails
-fn decide_reconcile(candidates: &[SpliceCandidateDetails]) -> ReconcileDecision {
+fn splice_survived_restart(candidates: &[SpliceCandidateDetails]) -> bool {
 	// A round short of `Negotiated` is one LDK still drives on its own: only `AwaitingSignatures`
 	// survives a restart, and LDK resumes the signature exchange itself on reconnect.
 	let in_flight = candidates
 		.iter()
 		.any(|candidate| !matches!(candidate.status, SpliceCandidateStatus::Negotiated { .. }));
 	if in_flight {
-		return ReconcileDecision::Keep;
+		return true;
 	}
 
 	// LDK persists a splice once negotiated, so a negotiated candidate carrying a local
 	// contribution is a splice of ours LDK sees through to lock — even one negotiated at a
 	// different feerate than a recorded fee bump asked for. Without one, whatever rounds
 	// survived are the counterparty's: the recorded splice is gone.
-	if candidates.iter().any(|candidate| candidate.contribution.is_some()) {
-		ReconcileDecision::Keep
-	} else {
-		ReconcileDecision::Lost
-	}
+	candidates.iter().any(|candidate| candidate.contribution.is_some())
 }
 
 /// The inputs `contribution` reserved that no candidate's own contribution still claims — extras
@@ -1609,7 +1591,7 @@ mod tests {
 	/// While any round is short of `Negotiated`, LDK drives the splice itself; the intent stays
 	/// in place until the splice settles.
 	#[test]
-	fn reconcile_keeps_the_intent_while_ldk_drives_a_round() {
+	fn a_splice_survives_while_ldk_drives_a_round() {
 		let in_flight = SpliceCandidateDetails {
 			contribution: Some(test_funding_contribution()),
 			status: SpliceCandidateStatus::AwaitingSignatures {
@@ -1619,16 +1601,16 @@ mod tests {
 				txid: Txid::from_byte_array([9u8; 32]),
 			},
 		};
-		assert_eq!(decide_reconcile(&[in_flight]), ReconcileDecision::Keep);
+		assert!(splice_survived_restart(&[in_flight]));
 	}
 
 	/// A negotiated candidate carrying a local contribution is a splice LDK sees through to lock;
 	/// the splice is not lost. This holds on zero-conf channels too, where the pre-splice funding
 	/// outpoint has not moved on yet.
 	#[test]
-	fn reconcile_trusts_a_negotiated_contribution() {
+	fn a_negotiated_contribution_survives() {
 		let negotiated = [negotiated_candidate(Some(test_funding_contribution()))];
-		assert_eq!(decide_reconcile(&negotiated), ReconcileDecision::Keep);
+		assert!(splice_survived_restart(&negotiated));
 	}
 
 	/// A fee bump that only survives as a candidate negotiated at a lower feerate than requested
@@ -1636,18 +1618,18 @@ mod tests {
 	/// higher-feerate attempt's extra reservations are released through the input difference, not
 	/// by dropping the record.
 	#[test]
-	fn reconcile_keeps_a_bump_negotiated_at_a_lower_feerate() {
+	fn a_bump_negotiated_at_a_lower_feerate_survives() {
 		let lower = [negotiated_candidate(Some(test_funding_contribution_with_feerate(253)))];
-		assert_eq!(decide_reconcile(&lower), ReconcileDecision::Keep);
+		assert!(splice_survived_restart(&lower));
 	}
 
 	/// With no contribution of ours in LDK — no splice at all, or only a counterparty round — the
 	/// recorded splice died with the restart.
 	#[test]
-	fn reconcile_finds_the_splice_lost_when_ldk_tracks_no_contribution() {
-		assert_eq!(decide_reconcile(&[]), ReconcileDecision::Lost);
+	fn a_splice_is_lost_when_ldk_tracks_no_contribution() {
+		assert!(!splice_survived_restart(&[]));
 		let counterparty_only = [negotiated_candidate(None)];
-		assert_eq!(decide_reconcile(&counterparty_only), ReconcileDecision::Lost);
+		assert!(!splice_survived_restart(&counterparty_only));
 	}
 
 	/// The inputs a kept record reserves beyond what LDK's candidates still claim are identified
