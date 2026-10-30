@@ -470,7 +470,7 @@ impl SpliceTracker {
 	/// Settles any persisted intent made obsolete by the channel's funding having moved on to
 	/// `funding_txo`: the funding a `ChannelReady` event reports as locked, or the one a new
 	/// splice builds on ([`Self::submit`]). Each of the channel's intents is decided on its own
-	/// ([`decide_on_lock`]), against the splice candidates LDK tracks for the channel (`channel`,
+	/// ([`effect_of_funding_move`]), against the splice candidates LDK tracks for the channel (`channel`,
 	/// as the caller listed it): one whose pre-splice outpoint is that funding was created after
 	/// the lock and stays; one LDK still tracks as a queued splice candidate is re-anchored to the
 	/// funding it now builds on rather than settled; any other is settled, and what the wallet
@@ -490,14 +490,14 @@ impl SpliceTracker {
 			let Some(intent) = record.splice_intent().cloned() else {
 				continue;
 			};
-			match decide_on_lock(&intent, funding_txo, candidates) {
-				LockDecision::Keep => {},
-				LockDecision::Refresh => {
+			match effect_of_funding_move(&intent, funding_txo, candidates) {
+				FundingMoveEffect::Unaffected => {},
+				FundingMoveEffect::StillQueued => {
 					if let Some(new_funding_txo) = channel.and_then(|channel| channel.funding_txo) {
 						self.refresh_intent_funding(payment_id, &intent, new_funding_txo).await;
 					}
 				},
-				LockDecision::Settle => {
+				FundingMoveEffect::Superseded => {
 					// What the wallet reserves for the intent is not released here. The inputs the
 					// locked round spent are gone with it, and whatever a superseded round reserved
 					// beyond them, LDK returns through the `DiscardFunding` events it queues at the
@@ -838,15 +838,15 @@ fn record_of_failed_splice(
 }
 
 /// What a lock of the funding a channel has moved on to — or a new splice building on it —
-/// means for one of the channel's recorded intents, decided by [`decide_on_lock`].
+/// means for one of the channel's recorded intents, as [`effect_of_funding_move`] classifies it.
 #[derive(Debug, PartialEq, Eq)]
-enum LockDecision {
+enum FundingMoveEffect {
 	/// The intent is anchored at that funding: its splice was submitted after the lock.
-	Keep,
+	Unaffected,
 	/// LDK still tracks the intent's contribution as a splice candidate — a splice queued behind
 	/// the one that locked, carried across the lock — so the intent is re-anchored to the new
 	/// funding.
-	Refresh,
+	StillQueued,
 	/// The lock superseded the intent's splice: the splice locked, a replacement or a
 	/// counterparty splice locked instead, or the queued splice was failed at the lock. The
 	/// intent is settled.
@@ -857,24 +857,24 @@ enum LockDecision {
 	/// parameters. The overlap check at queue time — against this node's own contributions to the
 	/// pending rounds — lets only a contribution containing an input or output the counterparty
 	/// contributed to the promoted round get this far, which this node's wallet does not produce.
-	Settle,
+	Superseded,
 }
 
-/// Decides what the channel's funding having moved on to `funding_txo` means for `intent`, given
-/// the splice candidates LDK tracks for the channel.
-fn decide_on_lock(
+/// What the channel's funding having moved on to `funding_txo` did to `intent`, judged from the
+/// splice candidates LDK tracks for the channel.
+fn effect_of_funding_move(
 	intent: &SpliceIntent, funding_txo: OutPoint, candidates: &[SpliceCandidateDetails],
-) -> LockDecision {
+) -> FundingMoveEffect {
 	if intent.pre_splice_funding_txo.into_bitcoin_outpoint() == funding_txo {
-		return LockDecision::Keep;
+		return FundingMoveEffect::Unaffected;
 	}
 	let still_tracked = candidates.iter().any(|candidate| {
 		candidate.contribution.as_ref().is_some_and(|c| is_same_splice(c, &intent.contribution))
 	});
 	if still_tracked {
-		LockDecision::Refresh
+		FundingMoveEffect::StillQueued
 	} else {
-		LockDecision::Settle
+		FundingMoveEffect::Superseded
 	}
 }
 
@@ -1225,7 +1225,7 @@ mod tests {
 	/// A lock keeps an intent anchored at the locked funding, re-anchors one LDK still tracks as a
 	/// candidate, and settles any other.
 	#[test]
-	fn a_lock_keeps_refreshes_or_settles_an_intent() {
+	fn a_funding_move_leaves_requeues_or_supersedes_an_intent() {
 		let intent =
 			intent_with(SpliceKind::Out { outputs: Vec::new() }, 3, splice_out_contribution(1_000));
 		let same_funding = intent.pre_splice_funding_txo.into_bitcoin_outpoint();
@@ -1245,13 +1245,22 @@ mod tests {
 			},
 		];
 
-		assert_eq!(decide_on_lock(&intent, same_funding, &other), LockDecision::Keep);
 		assert_eq!(
-			decide_on_lock(&intent, new_funding, &tracked_candidates),
-			LockDecision::Refresh
+			effect_of_funding_move(&intent, same_funding, &other),
+			FundingMoveEffect::Unaffected
 		);
-		assert_eq!(decide_on_lock(&intent, new_funding, &other), LockDecision::Settle);
-		assert_eq!(decide_on_lock(&intent, new_funding, &[]), LockDecision::Settle);
+		assert_eq!(
+			effect_of_funding_move(&intent, new_funding, &tracked_candidates),
+			FundingMoveEffect::StillQueued
+		);
+		assert_eq!(
+			effect_of_funding_move(&intent, new_funding, &other),
+			FundingMoveEffect::Superseded
+		);
+		assert_eq!(
+			effect_of_funding_move(&intent, new_funding, &[]),
+			FundingMoveEffect::Superseded
+		);
 	}
 
 	/// A submission proceeds at the funding it was built against while that is still the
