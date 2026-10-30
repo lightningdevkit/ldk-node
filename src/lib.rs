@@ -1356,6 +1356,9 @@ impl Node {
 	///
 	/// Will also remove the peer from the peer store, i.e., after this has been called we won't
 	/// try to reconnect on restart.
+	///
+	/// If removing the peer from the peer store fails, we still disconnect the current session,
+	/// but return the error, as we'd otherwise keep reconnecting to the peer.
 	pub fn disconnect(&self, counterparty_node_id: PublicKey) -> Result<(), Error> {
 		if !*self.is_running.read().expect("lock") {
 			return Err(Error::NotRunning);
@@ -1363,15 +1366,16 @@ impl Node {
 
 		log_info!(self.logger, "Disconnecting peer {}..", counterparty_node_id);
 
-		match self.runtime.block_on(self.peer_store.remove_peer(&counterparty_node_id)) {
-			Ok(()) => {},
-			Err(e) => {
+		let res = self
+			.runtime
+			.block_on(self.peer_store.remove_peer(&counterparty_node_id))
+			.map_err(|e| {
 				log_error!(self.logger, "Failed to remove peer {}: {}", counterparty_node_id, e);
-			},
-		}
+				e
+			});
 
 		self.peer_manager.disconnect_by_node_id(counterparty_node_id);
-		Ok(())
+		res
 	}
 
 	fn open_channel_inner(

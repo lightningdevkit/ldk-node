@@ -341,12 +341,14 @@ impl PaginatedKVStore for WalletPersistGatedStore {
 	}
 }
 
-/// A store whose writes to one primary namespace fail while the test says so, for exercising how
-/// the node answers a failed write of one kind of record.
+/// A store whose writes to one primary namespace, or only to one key in it, fail while the test
+/// says so, for exercising how the node answers a failed write of one kind of record.
 #[derive(Clone)]
 struct NamespaceWriteFailingStore {
 	inner: Arc<InMemoryStore>,
 	primary_namespace: &'static str,
+	/// When set, only writes to this key in `primary_namespace` fail.
+	key: Option<&'static str>,
 	failing: Arc<AtomicBool>,
 }
 
@@ -355,11 +357,17 @@ impl NamespaceWriteFailingStore {
 		Self {
 			inner: Arc::new(InMemoryStore::new()),
 			primary_namespace,
+			key: None,
 			failing: Arc::new(AtomicBool::new(false)),
 		}
 	}
 
-	/// Makes every write to the namespace fail from now on, or lets them through again.
+	/// Like [`Self::new`], but only writes to `key` in the namespace fail.
+	fn new_for_key(primary_namespace: &'static str, key: &'static str) -> Self {
+		Self { key: Some(key), ..Self::new(primary_namespace) }
+	}
+
+	/// Makes every write the store targets fail from now on, or lets them through again.
 	fn fail_writes(&self, fail: bool) {
 		self.failing.store(fail, Ordering::Release);
 	}
@@ -377,8 +385,9 @@ impl KVStore for NamespaceWriteFailingStore {
 	) -> impl Future<Output = Result<(), lightning::io::Error>> + 'static + Send {
 		// The inner store writes as soon as it is asked, not when its future is polled, so a
 		// failing write is never asked for.
-		let fail =
-			primary_namespace == self.primary_namespace && self.failing.load(Ordering::Acquire);
+		let fail = primary_namespace == self.primary_namespace
+			&& self.key.map_or(true, |k| k == key)
+			&& self.failing.load(Ordering::Acquire);
 		let write = (!fail).then(|| {
 			KVStore::write(&*self.inner, primary_namespace, secondary_namespace, key, buf)
 		});
@@ -2912,6 +2921,33 @@ async fn do_connection_restart_behavior(persist: bool) {
 		assert!(node_a.list_peers().is_empty());
 		assert!(node_b.list_peers().is_empty());
 	}
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn disconnect_reports_failure_to_remove_peer() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	// The peer list lives at `("", "", "peers")`, see `PEER_INFO_PERSISTENCE_*`.
+	let store_a = NamespaceWriteFailingStore::new_for_key("", "peers");
+	let node_a = setup_node_with_store(&chain_source, random_config(), store_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+
+	let node_id_b = node_b.node_id();
+	let node_addr_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	node_a.connect(node_id_b, node_addr_b, true).unwrap();
+
+	// Node A would keep reconnecting to a peer it failed to remove, so the caller has to learn
+	// about the failure. The current connection is closed regardless.
+	store_a.fail_writes(true);
+	assert_eq!(Err(NodeError::PersistenceFailed), node_a.disconnect(node_id_b));
+	let peer_b = node_a.list_peers().into_iter().find(|p| p.node_id == node_id_b).unwrap();
+	assert!(peer_b.is_persisted);
+	assert!(!peer_b.is_connected);
+
+	// Once the store recovers, a retry removes the peer.
+	store_a.fail_writes(false);
+	node_a.disconnect(node_id_b).unwrap();
+	assert!(node_a.list_peers().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
