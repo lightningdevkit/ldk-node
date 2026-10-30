@@ -160,9 +160,9 @@ impl SpliceTracker {
 			};
 
 			if channel.funding_txo != Some(intent.pre_splice_funding_txo) {
-				// The funding moved on while the node was down: the recorded splice, a
-				// replacement, or a counterparty splice locked — the same situation a live lock
-				// event resolves, so resolve it the same way.
+				// A splice locked while the node was down — the recorded one, a replacement, or a
+				// counterparty's — the same situation a live lock event resolves, so resolve it the
+				// same way.
 				if let Some(funding_txo) = channel.funding_txo {
 					self.settle_superseded_intents_locked(
 						&guard,
@@ -596,17 +596,17 @@ impl SpliceTracker {
 		.await;
 	}
 
-	/// Settles any persisted intent made obsolete by the channel's funding having moved on to
-	/// `funding_txo`: the funding a `ChannelReady` event reports as locked, the one a new splice
-	/// builds on ([`Self::submit`]), or the one [`Self::reconcile`] finds the channel at after a
-	/// funding moved while the node was down — the same situation, minus the event. Each of the
-	/// channel's intents is decided on its own
-	/// ([`effect_of_splice_lock`]), against the splice candidates LDK tracks for the channel (`channel`,
-	/// as the caller listed it): one whose pre-splice outpoint is that funding was created after
-	/// the lock and stays; one LDK still tracks as a queued splice candidate is re-anchored to the
-	/// funding it now builds on rather than settled; any other is settled, and what the wallet
-	/// reserves for it is either spent by the locked round or returned by LDK through
-	/// `DiscardFunding`. The caller holds the submit lock.
+	/// Settles any persisted intent made obsolete by a splice locking at `funding_txo`: the
+	/// funding a `ChannelReady` event reports as locked, the one a new splice builds on
+	/// ([`Self::submit`]), or the one [`Self::reconcile`] finds the channel at after a splice
+	/// locked while the node was down — the same situation, minus the event. Each of the
+	/// channel's intents is decided on its own ([`effect_of_splice_lock`]), against the splice
+	/// candidates LDK tracks for the channel (`channel`, as the caller listed it): one whose
+	/// pre-splice outpoint is that funding was created after the lock and stays; one LDK still
+	/// tracks as a queued splice candidate is re-anchored to the funding it now builds on rather
+	/// than settled; any other is settled, and what the wallet reserves for it is either spent by
+	/// the locked round or returned by LDK through `DiscardFunding`. The caller holds the submit
+	/// lock.
 	async fn settle_superseded_intents_locked(
 		&self, _guard: &tokio::sync::MutexGuard<'_, ()>, counterparty_node_id: PublicKey,
 		channel_id: ChannelId, funding_txo: OutPoint, channel: Option<&ChannelDetails>,
@@ -1606,8 +1606,8 @@ mod tests {
 	}
 
 	/// A negotiated candidate carrying a local contribution is a splice LDK sees through to lock;
-	/// the splice is not lost. This holds on zero-conf channels too, where the pre-splice funding
-	/// outpoint has not moved on yet.
+	/// the splice is not lost. This holds on zero-conf channels too, where the channel's funding is
+	/// still the pre-splice one.
 	#[test]
 	fn a_negotiated_contribution_survives() {
 		let negotiated = [negotiated_candidate(Some(test_funding_contribution()))];
