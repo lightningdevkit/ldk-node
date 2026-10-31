@@ -562,6 +562,34 @@ async fn address_pool_is_reloaded_on_restart() {
 	expect_channel_ready_event!(node_b, node_a.node_id());
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn application_data_persists_in_node_kv_store() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let mut config = random_config();
+	config.store_type = TestStoreType::Sqlite;
+
+	let (primary_namespace, secondary_namespace) = ("app", "data");
+	let node = setup_node(&chain_source, config.clone());
+	let kv_store = node.kv_store();
+	KVStore::write(&kv_store, primary_namespace, secondary_namespace, "key", vec![42; 32])
+		.await
+		.unwrap();
+	node.stop().unwrap();
+	drop(node);
+	drop(kv_store);
+
+	// Data written through the handle is persisted alongside the node's state and survives a
+	// restart.
+	let node = setup_node(&chain_source, config);
+	let kv_store = node.kv_store();
+	let data = KVStore::read(&kv_store, primary_namespace, secondary_namespace, "key").await;
+	assert_eq!(data.unwrap(), vec![42; 32]);
+	let keys = KVStore::list(&kv_store, primary_namespace, secondary_namespace).await.unwrap();
+	assert_eq!(keys, vec!["key".to_string()]);
+	node.stop().unwrap();
+}
+
 #[cfg(feature = "chain-bitcoind")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn channel_full_cycle() {
