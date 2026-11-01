@@ -31,7 +31,7 @@ use crate::fee_estimator::{
 	ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::update_and_persist_node_metrics;
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_error, log_info, log_trace, log_warn, LdkLogger, Logger};
 use crate::runtime::Runtime;
 use crate::types::DynStore;
 use crate::util::{cbf_percentile_for_target, coinbase_fee_rate, percentile_of_sorted};
@@ -47,8 +47,68 @@ const BLOCK_FEE_CACHE_CAPACITY: usize = REORG_SAFETY_BLOCKS as usize * 2;
 /// Peer response timeout passed to kyoto's `Builder::response_timeout`.
 const DEFAULT_RESPONSE_TIMEOUT_SECS: u64 = 5;
 
-/// Number of peers that must agree on filter headers before they're accepted.
-const DEFAULT_REQUIRED_PEERS: u8 = 1;
+/// Default number of peer connections the node maintains (kyoto's own default is 1).
+const DEFAULT_REQUIRED_PEERS: u8 = 2;
+
+/// Peer connection settings for the CBF chain source.
+///
+/// Nothing here has to be set: with the default value the node discovers peers on its own (DNS
+/// seeds, then address gossip) and keeps two connections open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "uniffi", derive(uniffi::Record))]
+pub struct CbfNetworkConfig {
+	/// Peers (`ip:port`) to connect to.
+	///
+	/// Unless [`Self::whitelist_only`] is set, these are only preferred and the node may connect
+	/// to other peers as well. Entries that are not a valid `ip:port` are ignored.
+	pub peers: Vec<String>,
+	/// Connect to the given [`Self::peers`] only.
+	///
+	/// This turns off DNS seeding and address gossip, so the node never talks to a peer you did
+	/// not name. It requires at least one valid entry in [`Self::peers`], otherwise the node
+	/// cannot be built. List at least [`Self::required_peers`] valid peers, as syncing cannot make
+	/// progress with fewer.
+	pub whitelist_only: bool,
+	/// The number of peers the node keeps connected, and that must agree on the compact filter
+	/// headers before they are accepted.
+	///
+	/// More peers make it harder for a single peer to withhold or fake chain data, at the cost of
+	/// bandwidth and memory. While fewer peers than this are reachable, the filter header sync
+	/// cannot make progress. Values are clamped to the range 1 to 15.
+	pub required_peers: u8,
+}
+
+impl Default for CbfNetworkConfig {
+	fn default() -> Self {
+		Self { peers: Vec::new(), whitelist_only: false, required_peers: DEFAULT_REQUIRED_PEERS }
+	}
+}
+
+impl CbfNetworkConfig {
+	/// Whether at least one entry of [`Self::peers`] is a valid `ip:port`.
+	fn has_valid_peer(&self) -> bool {
+		self.peers.iter().any(|peer| peer.parse::<SocketAddr>().is_ok())
+	}
+
+	/// Applies the settings to a kyoto builder. Kyoto clamps `required_peers` to 1..=15 itself.
+	fn apply_network_config(&self, mut builder: KyotoBuilder, logger: &Logger) -> KyotoBuilder {
+		let mut trusted_peers = Vec::with_capacity(self.peers.len());
+		for peer in &self.peers {
+			match peer.parse::<SocketAddr>() {
+				Ok(addr) => trusted_peers.push(TrustedPeer::from_socket_addr(addr)),
+				Err(_) => log_warn!(logger, "CBF: ignoring invalid peer address `{}`", peer),
+			}
+		}
+
+		if !trusted_peers.is_empty() {
+			builder = builder.add_peers(trusted_peers);
+		}
+		if self.whitelist_only {
+			builder = builder.whitelist_only();
+		}
+		builder.required_peers(self.required_peers)
+	}
+}
 
 /// How long a first-ever start waits for the headers-only sync that discovers the chain tip.
 const STABLE_TIP_FETCH_TIMEOUT_SECS: u64 = 600;
@@ -113,8 +173,8 @@ fn mark_syncing(sync_state_tx: &watch::Sender<CbfSyncState>) {
 
 /// Struct for holding cbf chain source
 pub struct CbfChainSource {
-	/// Trusted peer addresses for kyoto's `Builder::add_peers`.
-	trusted_peers: Vec<TrustedPeer>,
+	/// Peer settings applied to every kyoto builder.
+	network_config: CbfNetworkConfig,
 	/// Scripts tracked by LDK, onchain wallet's scripts are pulled from the onchain wallet
 	registered_scripts: Arc<Mutex<HashSet<ScriptBuf>>>,
 	fee_source: FeeSource,
@@ -307,16 +367,15 @@ enum FeeSource {
 
 impl CbfChainSource {
 	pub(crate) fn new(
-		peers: Vec<String>, fee_source_config: Option<CbfFeeSourceConfig>, runtime: Arc<Runtime>,
-		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
-		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
+		network_config: CbfNetworkConfig, fee_source_config: Option<CbfFeeSourceConfig>,
+		runtime: Arc<Runtime>, fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>,
+		config: Arc<Config>, logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
 	) -> Result<Self, Error> {
-		let trusted_peers: Vec<TrustedPeer> = peers
-			.iter()
-			.filter_map(|peer_str| {
-				peer_str.parse::<SocketAddr>().ok().map(TrustedPeer::from_socket_addr)
-			})
-			.collect();
+		if network_config.whitelist_only && !network_config.has_valid_peer() {
+			// Without DNS seeding and gossip the node would never find a peer.
+			log_error!(logger, "CBF: `whitelist_only` requires at least one valid peer address.");
+			return Err(Error::ConnectionFailed);
+		}
 
 		let fee_source = match fee_source_config {
 			#[cfg(feature = "chain-esplora")]
@@ -338,7 +397,7 @@ impl CbfChainSource {
 		let (sync_state_tx, _) =
 			watch::channel(CbfSyncState::Active { applied_tip: None, synced_to_tip: false });
 		Ok(Self {
-			trusted_peers,
+			network_config,
 			fee_source,
 			registered_scripts,
 			cbf_runtime_status,
@@ -353,16 +412,12 @@ impl CbfChainSource {
 	}
 
 	fn build_kyoto(
-		trusted_peers: &[TrustedPeer], config: &Config, logger: &Logger,
+		network_config: &CbfNetworkConfig, config: &Config, logger: &Logger,
 		chain_listener: &ChainListener,
 	) -> (KyotoNode, Client) {
-		let mut kyoto_builder = KyotoBuilder::new(config.network);
+		let mut kyoto_builder =
+			network_config.apply_network_config(KyotoBuilder::new(config.network), logger);
 
-		if !trusted_peers.is_empty() {
-			kyoto_builder = kyoto_builder.add_peers(trusted_peers.to_vec());
-		}
-
-		kyoto_builder = kyoto_builder.required_peers(DEFAULT_REQUIRED_PEERS);
 		kyoto_builder = kyoto_builder.fetch_witness_data();
 		kyoto_builder =
 			kyoto_builder.response_timeout(Duration::from_secs(DEFAULT_RESPONSE_TIMEOUT_SECS));
@@ -385,13 +440,11 @@ impl CbfChainSource {
 	pub(crate) async fn fetch_stable_tip(&self) -> Result<BlockLocator, Error> {
 		log_info!(self.logger, "CBF: finding a stable tip for the first start.");
 
-		let mut kyoto_builder = KyotoBuilder::new(self.config.network).headers_only_sync();
+		let mut kyoto_builder = self.network_config.apply_network_config(
+			KyotoBuilder::new(self.config.network).headers_only_sync(),
+			&self.logger,
+		);
 
-		if !self.trusted_peers.is_empty() {
-			kyoto_builder = kyoto_builder.add_peers(self.trusted_peers.to_vec());
-		}
-
-		kyoto_builder = kyoto_builder.required_peers(DEFAULT_REQUIRED_PEERS);
 		kyoto_builder =
 			kyoto_builder.response_timeout(Duration::from_secs(DEFAULT_RESPONSE_TIMEOUT_SECS));
 
@@ -482,7 +535,7 @@ impl CbfChainSource {
 
 	pub(crate) fn start(&self, chain_listener: ChainListener) {
 		let (node, client) =
-			Self::build_kyoto(&self.trusted_peers, &self.config, &self.logger, &chain_listener);
+			Self::build_kyoto(&self.network_config, &self.config, &self.logger, &chain_listener);
 		let Client { requester, info_rx, warn_rx, event_rx } = client;
 
 		{
@@ -521,7 +574,7 @@ impl CbfChainSource {
 
 		let restart_status = Arc::clone(&self.cbf_runtime_status);
 		let restart_logger = Arc::clone(&self.logger);
-		let restart_peers = self.trusted_peers.clone();
+		let restart_network_config = self.network_config.clone();
 		let restart_config = Arc::clone(&self.config);
 		let restart_listener = chain_listener;
 		let restart_registered_scripts = Arc::clone(&self.registered_scripts);
@@ -604,7 +657,7 @@ impl CbfChainSource {
 						tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
 						backoff_ms = backoff_ms.saturating_mul(2);
 						let (new_node, new_client) = Self::build_kyoto(
-							&restart_peers,
+							&restart_network_config,
 							&restart_config,
 							&restart_logger,
 							&restart_listener,
