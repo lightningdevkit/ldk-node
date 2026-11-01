@@ -39,6 +39,8 @@ use electrsd::corepc_node::{Client as BitcoindClient, Node as BitcoinD};
 use electrsd::electrum_client::ElectrumApi;
 use electrsd::{corepc_node, ElectrsD};
 use ldk_node::bip39::{Mnemonic, WordCount};
+#[cfg(feature = "chain-cbf")]
+use ldk_node::CbfNetworkConfig;
 #[cfg(feature = "chain-electrum")]
 use ldk_node::config::ElectrumSyncConfig;
 #[cfg(feature = "chain-esplora")]
@@ -814,7 +816,12 @@ pub(crate) fn configure_chain_source(
 		TestChainSource::Cbf(bitcoind) => {
 			let p2p_socket = bitcoind.params.p2p_socket.expect("P2P must be enabled for CBF");
 			let peer_addr = format!("{}", p2p_socket);
-			builder.set_chain_source_cbf(vec![peer_addr], None);
+			let network_config = CbfNetworkConfig {
+				peers: vec![peer_addr],
+				whitelist_only: true,
+				required_peers: 1,
+			};
+			builder.set_chain_source_cbf(Some(network_config), None);
 		},
 	}
 }

@@ -28,6 +28,8 @@ use lightning::chain::{BlockLocator, Filter};
 #[cfg(feature = "chain-bitcoind")]
 use crate::chain::bitcoind::{BitcoindChainSource, UtxoSourceClient};
 #[cfg(feature = "chain-cbf")]
+pub use crate::chain::cbf::CbfNetworkConfig;
+#[cfg(feature = "chain-cbf")]
 use crate::chain::cbf::CbfChainSource;
 #[cfg(feature = "chain-electrum")]
 use crate::chain::electrum::ElectrumChainSource;
@@ -404,13 +406,13 @@ impl ChainSource {
 
 	#[cfg(feature = "chain-cbf")]
 	pub(crate) fn new_cbf(
-		peers: Vec<String>, fee_source_config: Option<CbfFeeSourceConfig>, runtime: Arc<Runtime>,
-		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
-		node_metrics: Arc<PersistedNodeMetrics>,
+		network_config: Option<CbfNetworkConfig>, fee_source_config: Option<CbfFeeSourceConfig>,
+		runtime: Arc<Runtime>, fee_estimator: Arc<OnchainFeeEstimator>,
+		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
+		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
 	) -> Result<(Self, Option<BlockLocator>), Error> {
 		let cbf_chain_source = CbfChainSource::new(
-			peers,
+			network_config.unwrap_or_default(),
 			fee_source_config,
 			runtime,
 			Arc::clone(&fee_estimator),

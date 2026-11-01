@@ -56,7 +56,7 @@ use vss_client::headers::VssHeaderProvider;
 
 use crate::chain::ChainSource;
 #[cfg(feature = "chain-cbf")]
-use crate::chain::CbfFeeSourceConfig;
+use crate::chain::{CbfFeeSourceConfig, CbfNetworkConfig};
 #[cfg(feature = "chain-bitcoind")]
 use crate::config::BitcoindRestClientConfig;
 use crate::config::{
@@ -143,7 +143,7 @@ enum ChainDataSourceConfig {
 	},
 	#[cfg(feature = "chain-cbf")]
 	Cbf {
-		peers: Vec<String>,
+		network_config: Option<CbfNetworkConfig>,
 		fee_source_config: Option<CbfFeeSourceConfig>,
 	},
 }
@@ -448,16 +448,20 @@ impl NodeBuilder {
 	}
 
 	/// Configures the [`Node`] instance to source chain data via compact block filters
-	/// (BIP157/BIP158), connecting to the given peers (`ip:port`).
+	/// (BIP157/BIP158).
+	///
+	/// If no `network_config` is given, peers are discovered automatically. See
+	/// [`CbfNetworkConfig`] for more information on the peer settings.
 	///
 	/// `fee_source_config` optionally delegates fee estimation to an Esplora or Electrum server;
 	/// if `None`, fee rates are derived from recent blocks.
 	#[cfg(feature = "chain-cbf")]
 	pub fn set_chain_source_cbf(
-		&mut self, peers: Vec<String>, fee_source_config: Option<CbfFeeSourceConfig>,
+		&mut self, network_config: Option<CbfNetworkConfig>,
+		fee_source_config: Option<CbfFeeSourceConfig>,
 	) -> &mut Self {
 		self.chain_data_source_config =
-			Some(ChainDataSourceConfig::Cbf { peers, fee_source_config });
+			Some(ChainDataSourceConfig::Cbf { network_config, fee_source_config });
 		self
 	}
 
@@ -1126,14 +1130,21 @@ impl Builder {
 #[uniffi::export]
 impl Builder {
 	/// Configures the [`Node`] instance to source chain data via compact block filters
-	/// (BIP157/BIP158), connecting to the given peers (`ip:port`).
+	/// (BIP157/BIP158).
+	///
+	/// If no `network_config` is given, peers are discovered automatically. See
+	/// [`CbfNetworkConfig`] for more information on the peer settings.
 	///
 	/// `fee_source_config` optionally delegates fee estimation to an Esplora or Electrum server;
 	/// if `None`, fee rates are derived from recent blocks.
 	pub fn set_chain_source_cbf(
-		&self, peers: Vec<String>, fee_source_config: Option<CbfFeeSourceConfig>,
+		&self, network_config: Option<CbfNetworkConfig>,
+		fee_source_config: Option<CbfFeeSourceConfig>,
 	) {
-		self.inner.write().expect("lock").set_chain_source_cbf(peers, fee_source_config);
+		self.inner
+			.write()
+			.expect("lock")
+			.set_chain_source_cbf(network_config, fee_source_config);
 	}
 }
 
@@ -1712,8 +1723,8 @@ fn build_with_store_internal(
 			)
 		},
 		#[cfg(feature = "chain-cbf")]
-		Some(ChainDataSourceConfig::Cbf { peers, fee_source_config }) => ChainSource::new_cbf(
-			peers.clone(),
+		Some(ChainDataSourceConfig::Cbf { network_config, fee_source_config }) => ChainSource::new_cbf(
+			network_config.clone(),
 			fee_source_config.clone(),
 			Arc::clone(&runtime),
 			Arc::clone(&fee_estimator),
