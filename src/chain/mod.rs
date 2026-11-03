@@ -11,6 +11,8 @@ pub(crate) mod bitcoind;
 mod electrum;
 #[cfg(feature = "chain-esplora")]
 mod esplora;
+#[cfg(feature = "chain-esplora")]
+pub use self::esplora::EsploraHeaderProvider;
 
 #[cfg(feature = "chain-esplora")]
 use std::collections::HashMap;
@@ -225,14 +227,16 @@ impl Listen for ChainListener {
 impl ChainSource {
 	#[cfg(feature = "chain-esplora")]
 	pub(crate) fn new_esplora(
-		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
-		fee_estimator: Arc<OnchainFeeEstimator>, tx_broadcaster: Arc<Broadcaster>,
-		kv_store: Arc<DynStore>, config: Arc<Config>, logger: Arc<Logger>,
-		node_metrics: Arc<PersistedNodeMetrics>,
+		server_url: String, headers: HashMap<String, String>,
+		header_provider: Option<Arc<dyn crate::chain::esplora::EsploraHeaderProvider>>,
+		sync_config: EsploraSyncConfig, fee_estimator: Arc<OnchainFeeEstimator>,
+		tx_broadcaster: Arc<Broadcaster>, kv_store: Arc<DynStore>, config: Arc<Config>,
+		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
 	) -> Result<(Self, Option<BlockLocator>), ()> {
 		let esplora_chain_source = EsploraChainSource::new(
 			server_url,
 			headers,
+			header_provider,
 			sync_config,
 			fee_estimator,
 			kv_store,
