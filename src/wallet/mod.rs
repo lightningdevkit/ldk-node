@@ -4879,6 +4879,7 @@ mod tests {
 		let (chain_source, _) = ChainSource::new_esplora(
 			"http://localhost:1".to_string(),
 			HashMap::new(),
+			None,
 			EsploraSyncConfig::default(),
 			Arc::clone(&fee_estimator),
 			Arc::clone(&broadcaster),
