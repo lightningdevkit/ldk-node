@@ -43,6 +43,8 @@ use crate::fee_estimator::OnchainFeeEstimator;
 use crate::ffi::maybe_wrap;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
+use crate::payment::payjoin::payjoin_session::PayjoinSession;
+use crate::payment::payjoin::seen_inputs::SeenInput;
 use crate::payment::{
 	ChannelPairForwardingStats, ForwardedPaymentDetails, PaymentDetails, PendingPaymentDetails,
 };
@@ -344,6 +346,9 @@ pub(crate) type ChannelForwardingStatsStore =
 pub(crate) type ChannelPairForwardingStatsStore =
 	DataStore<ChannelPairForwardingStats, Arc<Logger>, KeepNoEntries>;
 pub(crate) type ChannelTxFactsStore = DataStore<ChannelTxFacts, Arc<Logger>, KeepLeastRecentlyUsed>;
+
+pub(crate) type PayjoinSessionStore = DataStore<PayjoinSession, Arc<Logger>>;
+pub(crate) type PayjoinSeenInputsStore = DataStore<SeenInput, Arc<Logger>, KeepNoEntries>;
 
 /// A local, potentially user-provided, identifier of a channel.
 ///
