@@ -1270,15 +1270,18 @@ impl BitcoindClient {
 
 		let mempool_entries_cache = mempool_entries_cache.lock().await;
 		let mut mempool_txs_cache = mempool_txs_cache.lock().await;
-		mempool_txs_cache.retain(|txid, _| mempool_entries_cache.contains_key(txid));
+		// Only keep transactions we may still have to emit, i.e., those that entered the mempool
+		// above our best processed height and those a failed poll fetched but didn't emit. Once a
+		// poll succeeds, `latest_mempool_timestamp` advances and the latter are dropped here, so we
+		// don't keep a full copy of the mempool in memory.
+		mempool_txs_cache.retain(|txid, _| {
+			mempool_entries_cache.get(txid).is_some_and(|entry| {
+				entry.height > best_processed_height || entry.time > prev_mempool_time
+			})
+		});
+		mempool_txs_cache.shrink_to_fit();
 
-		if let Some(difference) =
-			mempool_entries_cache.len().checked_sub(mempool_txs_cache.capacity())
-		{
-			mempool_txs_cache.reserve(difference)
-		}
-
-		let mut txs_to_emit = Vec::with_capacity(mempool_entries_cache.len());
+		let mut txs_to_emit = Vec::new();
 		for (txid, entry) in mempool_entries_cache.iter() {
 			if entry.time > latest_time {
 				latest_time = entry.time;
