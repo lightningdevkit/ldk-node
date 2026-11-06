@@ -2857,6 +2857,15 @@ mod tests {
 		let description =
 			Bolt11InvoiceDescription::Direct(Description::new("not running".to_string()).unwrap())
 				.into();
+		assert_eq!(
+			node.bolt11_payment().quote_circular_route(
+				1_000,
+				UserChannelId(1),
+				UserChannelId(2),
+				None
+			),
+			Err(Error::NotRunning),
+		);
 		let invoice = node.bolt11_payment().receive(1_000, &description, 3_600).unwrap();
 		assert_eq!(node.bolt11_payment().send(&invoice, None), Err(Error::NotRunning));
 		assert_eq!(

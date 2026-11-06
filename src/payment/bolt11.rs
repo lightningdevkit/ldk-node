@@ -24,6 +24,7 @@ use lightning_invoice::{
 };
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
+use super::circular::{quote_circular_route, CircularRouteQuote};
 use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
@@ -37,7 +38,8 @@ use crate::payment::store::{
 };
 use crate::peer_store::{PeerInfo, PeerStore};
 use crate::runtime::Runtime;
-use crate::types::{ChannelManager, PaymentStore};
+use crate::types::{ChannelManager, PaymentStore, Router};
+use crate::UserChannelId;
 
 #[cfg(not(feature = "uniffi"))]
 type Bolt11Invoice = LdkBolt11Invoice;
@@ -69,6 +71,7 @@ impl_writeable_tlv_based!(PaymentMetadata, {
 pub struct Bolt11Payment {
 	runtime: Arc<Runtime>,
 	channel_manager: Arc<ChannelManager>,
+	router: Arc<Router>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
 	payment_store: Arc<PaymentStore>,
@@ -84,11 +87,12 @@ impl Bolt11Payment {
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, payment_store: Arc<PaymentStore>,
 		peer_store: Arc<PeerStore<Arc<Logger>>>, config: Arc<Config>,
-		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>,
+		is_running: Arc<RwLock<bool>>, logger: Arc<Logger>, router: Arc<Router>,
 	) -> Self {
 		Self {
 			runtime,
 			channel_manager,
+			router,
 			connection_manager,
 			liquidity_source,
 			payment_store,
@@ -303,6 +307,37 @@ impl Bolt11Payment {
 
 #[cfg_attr(feature = "uniffi", uniffi::export)]
 impl Bolt11Payment {
+	/// Estimate a circular route through two exact, distinct local channels without sending.
+	///
+	/// Every returned path leaves through `first_hop_user_channel_id` and returns through
+	/// `last_hop_user_channel_id`, including when there are several channels to the same peer.
+	/// This does not create an invoice, send a probe or HTLC, or modify payment records.
+	/// A quote does not reserve liquidity or guarantee that a subsequent payment will succeed.
+	///
+	/// `route_parameters` overrides the node-wide configuration when provided; otherwise the
+	/// node-wide configuration or LDK defaults are used. An unset fee cap retains LDK's default.
+	/// This method does not submit the quoted route. Circular payment execution is not supported.
+	pub fn quote_circular_route(
+		&self, amount_msat: u64, first_hop_user_channel_id: UserChannelId,
+		last_hop_user_channel_id: UserChannelId, route_parameters: Option<RouteParametersConfig>,
+	) -> Result<CircularRouteQuote, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+		// Match LDK's ordinary BOLT11 feature conversion without creating an invoice.
+		quote_circular_route(
+			&*self.router,
+			self.channel_manager.get_our_node_id(),
+			self.channel_manager.init_features().to_context(),
+			&self.channel_manager.list_channels(),
+			self.channel_manager.compute_inflight_htlcs(),
+			amount_msat,
+			first_hop_user_channel_id,
+			last_hop_user_channel_id,
+			route_parameters.or(self.config.route_parameters).unwrap_or_default(),
+		)
+	}
+
 	/// Send a payment given an invoice.
 	///
 	/// If `route_parameters` are provided they will override the default as well as the
