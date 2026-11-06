@@ -451,7 +451,12 @@ where
 		self.mutate_with(id, |current| async move { Ok(f(current.as_ref())) }).await
 	}
 
-	async fn mutate_with<F, Fut>(&self, id: &SO::Id, f: F) -> Result<Option<SO>, Error>
+	/// Like [`Self::mutate`], but allows the transformation to await fallible reads.
+	///
+	/// The mutation lock remains held while `f` runs. This is useful when the new state must be
+	/// decided from an async read of another store without letting a concurrent writer invalidate
+	/// that decision. Callers must keep cross-store lock ordering consistent to avoid deadlocks.
+	pub(crate) async fn mutate_with<F, Fut>(&self, id: &SO::Id, f: F) -> Result<Option<SO>, Error>
 	where
 		F: FnOnce(Option<SO>) -> Fut,
 		Fut: Future<Output = Result<Option<SO>, Error>>,
@@ -468,19 +473,6 @@ where
 		self.persist(&new_object).await?;
 		self.cache.lock().expect("lock").insert(new_object.id(), new_object.clone());
 		Ok(Some(new_object))
-	}
-
-	/// Like [`Self::mutate`], but allows the transformation to await fallible reads.
-	///
-	/// The mutation lock remains held while `f` runs. This is useful when the new state must be
-	/// decided from an async read of another store without letting a concurrent writer invalidate
-	/// that decision. Callers must keep cross-store lock ordering consistent to avoid deadlocks.
-	pub(crate) async fn mutate_async<F, Fut>(&self, id: &SO::Id, f: F) -> Result<Option<SO>, Error>
-	where
-		F: FnOnce(Option<SO>) -> Fut,
-		Fut: Future<Output = Result<Option<SO>, Error>>,
-	{
-		self.mutate_with(id, f).await
 	}
 
 	/// Returns whether an object is stored under `id`.
@@ -1260,7 +1252,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn mutate_async_awaits_fallible_reads() {
+	async fn mutate_with_awaits_fallible_reads() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		let logger = Arc::new(TestLogger::new());
 		let id = TestObjectId { id: [42u8; 4] };
@@ -1285,7 +1277,7 @@ mod tests {
 		);
 
 		let result = data_store
-			.mutate_async(&id, |existing| async move {
+			.mutate_with(&id, |existing| async move {
 				let mut updated = existing.unwrap();
 				updated.data = other_store.get(&other_id).await?.unwrap().data;
 				Ok(Some(updated))
