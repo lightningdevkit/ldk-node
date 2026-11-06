@@ -24,7 +24,7 @@ use lightning_invoice::{
 };
 use lightning_types::payment::{PaymentHash, PaymentPreimage};
 
-use crate::config::{Config, LDK_PAYMENT_RETRY_TIMEOUT};
+use crate::config::{apply_route_parameters_config, Config, LDK_PAYMENT_RETRY_TIMEOUT};
 use crate::connection::ConnectionManager;
 use crate::data_store::DataStoreUpdateResult;
 use crate::error::Error;
@@ -837,18 +837,8 @@ impl Bolt11Payment {
 		let mut route_params =
 			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
 
-		if let Some(RouteParametersConfig {
-			max_total_routing_fee_msat,
-			max_total_cltv_expiry_delta,
-			max_path_count,
-			max_channel_saturation_power_of_half,
-		}) = route_parameters.as_ref().or(self.config.route_parameters.as_ref())
-		{
-			route_params.max_total_routing_fee_msat = *max_total_routing_fee_msat;
-			route_params.payment_params.max_total_cltv_expiry_delta = *max_total_cltv_expiry_delta;
-			route_params.payment_params.max_path_count = *max_path_count;
-			route_params.payment_params.max_channel_saturation_power_of_half =
-				*max_channel_saturation_power_of_half;
+		if let Some(config) = route_parameters.as_ref().or(self.config.route_parameters.as_ref()) {
+			apply_route_parameters_config(&mut route_params, config);
 		}
 
 		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);
@@ -899,18 +889,8 @@ impl Bolt11Payment {
 		let mut route_params =
 			RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
 
-		if let Some(RouteParametersConfig {
-			max_total_routing_fee_msat,
-			max_total_cltv_expiry_delta,
-			max_path_count,
-			max_channel_saturation_power_of_half,
-		}) = route_parameters.as_ref().or(self.config.route_parameters.as_ref())
-		{
-			route_params.max_total_routing_fee_msat = *max_total_routing_fee_msat;
-			route_params.payment_params.max_total_cltv_expiry_delta = *max_total_cltv_expiry_delta;
-			route_params.payment_params.max_path_count = *max_path_count;
-			route_params.payment_params.max_channel_saturation_power_of_half =
-				*max_channel_saturation_power_of_half;
+		if let Some(config) = route_parameters.as_ref().or(self.config.route_parameters.as_ref()) {
+			apply_route_parameters_config(&mut route_params, config);
 		}
 
 		let liquidity_limit_multiplier = Some(self.config.probing_liquidity_limit_multiplier);

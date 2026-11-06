@@ -16,7 +16,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-use lightning::routing::router::RouteParametersConfig;
+use lightning::routing::router::{RouteParameters, RouteParametersConfig};
 use lightning::util::config::{
 	ChannelConfig as LdkChannelConfig, MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
 };
@@ -763,6 +763,18 @@ pub(crate) fn clamp_full_scan_stop_gap(full_scan_stop_gap: u32) -> u32 {
 	full_scan_stop_gap.clamp(MIN_FULL_SCAN_STOP_GAP, MAX_FULL_SCAN_STOP_GAP)
 }
 
+pub(crate) fn apply_route_parameters_config(
+	route_params: &mut RouteParameters, config: &RouteParametersConfig,
+) {
+	if let Some(max_total_routing_fee_msat) = config.max_total_routing_fee_msat {
+		route_params.max_total_routing_fee_msat = Some(max_total_routing_fee_msat);
+	}
+	route_params.payment_params.max_total_cltv_expiry_delta = config.max_total_cltv_expiry_delta;
+	route_params.payment_params.max_path_count = config.max_path_count;
+	route_params.payment_params.max_channel_saturation_power_of_half =
+		config.max_channel_saturation_power_of_half;
+}
+
 /// Configuration for syncing with Bitcoin Core backend via REST.
 #[derive(Debug, Clone)]
 pub struct BitcoindRestClientConfig {
@@ -918,11 +930,60 @@ pub enum AsyncPaymentsRole {
 mod tests {
 	use std::str::FromStr;
 
+	use lightning::routing::router::PaymentParameters;
+
 	use super::{
-		clamp_full_scan_stop_gap, default_user_config, may_announce_channel, AnnounceError, Config,
-		ElectrumSyncConfig, EsploraSyncConfig, NodeAlias, SocketAddress,
+		apply_route_parameters_config, clamp_full_scan_stop_gap, default_user_config,
+		may_announce_channel, AnnounceError, Config, ElectrumSyncConfig, EsploraSyncConfig,
+		NodeAlias, RouteParameters, RouteParametersConfig, SocketAddress,
 		DEFAULT_FULL_SCAN_STOP_GAP, MAX_FULL_SCAN_STOP_GAP, MIN_FULL_SCAN_STOP_GAP,
 	};
+
+	fn route_params(amount_msat: u64) -> RouteParameters {
+		let node_id = bitcoin::secp256k1::PublicKey::from_str(
+			"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+		)
+		.unwrap();
+		RouteParameters::from_payment_params_and_value(
+			PaymentParameters::from_node_id(node_id, 42),
+			amount_msat,
+		)
+	}
+
+	#[test]
+	fn unset_routing_fee_limit_keeps_the_default() {
+		let mut route_params = route_params(1_000_000);
+		let default_fee_limit = route_params.max_total_routing_fee_msat;
+		assert_eq!(default_fee_limit, Some(1_000_000 / 100 + 50_000));
+
+		let config = RouteParametersConfig {
+			max_total_routing_fee_msat: None,
+			max_total_cltv_expiry_delta: 144,
+			max_path_count: 3,
+			max_channel_saturation_power_of_half: 1,
+		};
+		apply_route_parameters_config(&mut route_params, &config);
+
+		assert_eq!(route_params.max_total_routing_fee_msat, default_fee_limit);
+		assert_eq!(route_params.payment_params.max_total_cltv_expiry_delta, 144);
+		assert_eq!(route_params.payment_params.max_path_count, 3);
+		assert_eq!(route_params.payment_params.max_channel_saturation_power_of_half, 1);
+	}
+
+	#[test]
+	fn explicit_routing_fee_limit_overrides_the_default() {
+		for limit in [0, 1_234, u64::MAX] {
+			let mut route_params = route_params(1_000_000);
+			let config = RouteParametersConfig {
+				max_total_routing_fee_msat: Some(limit),
+				max_total_cltv_expiry_delta: 1008,
+				max_path_count: 10,
+				max_channel_saturation_power_of_half: 2,
+			};
+			apply_route_parameters_config(&mut route_params, &config);
+			assert_eq!(route_params.max_total_routing_fee_msat, Some(limit));
+		}
+	}
 
 	#[test]
 	fn node_announce_channel() {
