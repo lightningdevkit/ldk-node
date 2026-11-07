@@ -52,7 +52,7 @@ pub(super) fn migrate_schema(
 		})?;
 
 		// Update user_version
-		tx.pragma(Some(rusqlite::DatabaseName::Main), "user_version", to_version, |_| Ok(()))
+		tx.pragma(Some("main"), "user_version", to_version, |_| Ok(()))
 			.map_err(|e| {
 				let msg = format!(
 					"Failed to upgrade user_version from {} to {}: {}",
@@ -106,7 +106,7 @@ mod tests {
 
 			connection
 				.pragma(
-					Some(rusqlite::DatabaseName::Main),
+					Some("main"),
 					"user_version",
 					old_schema_version,
 					|_| Ok(()),
