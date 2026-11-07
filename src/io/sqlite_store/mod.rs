@@ -262,7 +262,7 @@ impl SqliteStoreInner {
 			// New database, set our SCHEMA_USER_VERSION and continue
 			connection
 				.pragma(
-					Some(rusqlite::DatabaseName::Main),
+					Some("main"),
 					"user_version",
 					SCHEMA_USER_VERSION,
 					|_| Ok(()),
