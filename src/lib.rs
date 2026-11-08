@@ -1930,10 +1930,6 @@ impl Node {
 			});
 			let max_feerate = max_funding_feerate(min_feerate);
 
-			if let FundingAmount::Exact { amount_sats } = splice_amount_sats {
-				self.check_sufficient_onchain_funds(amount_sats, &counterparty_node_id, None)?;
-			}
-
 			let funding_template = self
 				.channel_manager
 				.splice_channel(&channel_details.channel_id, &counterparty_node_id)
@@ -1961,18 +1957,67 @@ impl Node {
 			};
 
 			let contribution = match splice_amount_sats {
-				FundingAmount::Exact { amount_sats } => self
-					.runtime
-					.block_on(funding_template.splice_in(
-						Amount::from_sat(amount_sats),
-						feerate,
-						max_feerate,
-						Arc::clone(&self.wallet),
-					))
-					.map_err(|e| {
-						log_error!(self.logger, "Failed to splice channel: {}", e);
-						Error::ChannelSplicingFailed
-					})?,
+				FundingAmount::Exact { amount_sats } => {
+					// Coin selection locks the inputs it picks, which takes them off the spendable
+					// balance, so keep the balance from before it to check the contribution against.
+					let spendable_amount_sats = self.check_sufficient_onchain_funds(
+						amount_sats,
+						&counterparty_node_id,
+						None,
+					)?;
+
+					let contribution = self
+						.runtime
+						.block_on(funding_template.splice_in(
+							Amount::from_sat(amount_sats),
+							feerate,
+							max_feerate,
+							Arc::clone(&self.wallet),
+						))
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to splice channel: {}", e);
+							Error::ChannelSplicingFailed
+						})?;
+
+					// The fee for our contribution is paid from the same on-chain funds as the
+					// amount, and coin selection doesn't keep the anchor reserve aside. Now that the
+					// fee is known, check that what the contribution takes from our wallet, its
+					// inputs minus its change, still leaves the reserve in place.
+					let inputs_sats: u64 = contribution
+						.inputs()
+						.iter()
+						.map(|input| input.output().value.to_sat())
+						.sum();
+					let change_sats =
+						contribution.change_output().map_or(0, |output| output.value.to_sat());
+					let required_funds_sats = inputs_sats.saturating_sub(change_sats);
+					if required_funds_sats > spendable_amount_sats {
+						log_error!(
+							self.logger,
+							"Unable to splice-in due to insufficient funds. Available: {}sats, Required: {}sats (including fee)",
+							spendable_amount_sats,
+							required_funds_sats,
+						);
+
+						// Return what coin selection set aside for the contribution we drop.
+						let inputs =
+							contribution.inputs().iter().map(|input| input.outpoint()).collect();
+						let outputs = contribution.change_output().cloned().into_iter().collect();
+						if let Err(e) = self
+							.runtime
+							.block_on(self.wallet.release_inputs_and_outputs(inputs, outputs))
+						{
+							log_error!(
+								self.logger,
+								"Failed to release the inputs of a dropped splice contribution: {}",
+								e
+							);
+						}
+						return Err(Error::InsufficientFunds);
+					}
+
+					contribution
+				},
 				FundingAmount::Max => self.splice_in_with_all_contribution(
 					funding_template,
 					Vec::new(),
@@ -2151,6 +2196,10 @@ impl Node {
 	/// As with the estimate, we may pay up to 1.5 times this feerate: when the channel already has a
 	/// pending splice that requires a higher feerate to be replaced, or when the counterparty
 	/// initiates a splice concurrently and our contribution is added to theirs.
+	///
+	/// The fee for our contribution is paid from the same on-chain funds as `splice_amount_sats`,
+	/// so both together must fit within [`BalanceDetails::spendable_onchain_balance_sats`], which
+	/// excludes the anchor reserve. Otherwise, this fails with [`NodeError::InsufficientFunds`].
 	///
 	/// # Experimental API
 	///
