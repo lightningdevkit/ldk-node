@@ -95,6 +95,9 @@
   built after the channel had already been negotiated.
 - When acting as an LSPS2 service, we likewise account for the funding transaction's fee when
   checking that a JIT channel can be opened while retaining the anchor reserve.
+- Splicing in an exact amount now accounts for the fee of our contribution to the splice
+  transaction when checking the anchor reserve, and fails with `NodeError::InsufficientFunds` if
+  paying it would spend part of the reserve. Previously, the fee could be paid from the reserve.
 
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.

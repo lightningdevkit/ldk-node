@@ -1886,18 +1886,39 @@ impl Node {
 			};
 
 			let contribution = match splice_amount_sats {
-				FundingAmount::Exact { amount_sats } => self
-					.runtime
-					.block_on(funding_template.splice_in(
-						Amount::from_sat(amount_sats),
-						feerate,
-						max_feerate,
-						Arc::clone(&self.wallet),
-					))
-					.map_err(|e| {
-						log_error!(self.logger, "Failed to splice channel: {}", e);
-						Error::ChannelSplicingFailed
-					})?,
+				FundingAmount::Exact { amount_sats } => {
+					let contribution = self
+						.runtime
+						.block_on(funding_template.splice_in(
+							Amount::from_sat(amount_sats),
+							feerate,
+							max_feerate,
+							Arc::clone(&self.wallet),
+						))
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to splice channel: {}", e);
+							Error::ChannelSplicingFailed
+						})?;
+
+					// The fee for our contribution is paid from the same on-chain funds as the
+					// amount, and coin selection doesn't keep the anchor reserve aside. Now that the
+					// fee is known, check that what the contribution takes from our wallet, its
+					// inputs minus its change, still leaves the reserve in place.
+					let inputs_sats: u64 = contribution
+						.inputs()
+						.iter()
+						.map(|input| input.output().value.to_sat())
+						.sum();
+					let change_sats =
+						contribution.change_output().map_or(0, |output| output.value.to_sat());
+					self.check_sufficient_onchain_funds(
+						inputs_sats.saturating_sub(change_sats),
+						&counterparty_node_id,
+						None,
+					)?;
+
+					contribution
+				},
 				FundingAmount::Max => self.splice_in_with_all_contribution(
 					funding_template,
 					Vec::new(),
@@ -2069,6 +2090,10 @@ impl Node {
 	/// As with the estimate, we may pay up to 1.5 times this feerate: when the channel already has a
 	/// pending splice that requires a higher feerate to be replaced, or when the counterparty
 	/// initiates a splice concurrently and our contribution is added to theirs.
+	///
+	/// The fee for our contribution is paid from the same on-chain funds as `splice_amount_sats`,
+	/// so both together must fit within [`BalanceDetails::spendable_onchain_balance_sats`], which
+	/// excludes the anchor reserve. Otherwise, this fails with [`NodeError::InsufficientFunds`].
 	///
 	/// # Experimental API
 	///
