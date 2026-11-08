@@ -78,7 +78,10 @@ regex = "1.5.6"
 criterion = { version = "0.7.0", features = ["async_tokio"] }
 
 [target.'cfg(not(no_download))'.dev-dependencies]
-electrsd = { version = "0.36.1", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
+# Electrs/bitcoind download features stripped: those build.rs scripts fetch release
+# artifacts and hash-assert, panicking when upstream rebuilds an artifact (CI drift).
+# Inert set = legacy only, matching the no_download entry below.
+electrsd = { version = "0.36.1", default-features = false, features = ["legacy"] }
 
 [target.'cfg(no_download)'.dev-dependencies]
 electrsd = { version = "0.36.1", default-features = false, features = ["legacy"] }
