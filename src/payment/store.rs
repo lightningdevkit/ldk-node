@@ -16,7 +16,7 @@ use lightning::offers::offer::OfferId;
 use lightning::util::ser::{Readable, Writeable};
 use lightning::{
 	_init_and_read_len_prefixed_tlv_fields, impl_writeable_tlv_based,
-	impl_writeable_tlv_based_enum, write_tlv_fields,
+	impl_writeable_tlv_based_enum, impl_writeable_tlv_based_enum_upgradable, write_tlv_fields,
 };
 use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 use lightning_types::string::UntrustedString;
@@ -490,7 +490,7 @@ pub enum TransactionType {
 	},
 }
 
-impl_writeable_tlv_based_enum!(TransactionType,
+impl_writeable_tlv_based_enum_upgradable!(TransactionType,
 	(0, Funding) => {
 		(0, channels, optional_vec),
 	},
@@ -639,7 +639,7 @@ impl PaymentKind {
 impl_writeable_tlv_based_enum!(PaymentKind,
 	(0, Onchain) => {
 		(0, txid, required),
-		(1, tx_type, option),
+		(1, tx_type, upgradable_option),
 		(2, status, required),
 	},
 	(2, Bolt11) => {
