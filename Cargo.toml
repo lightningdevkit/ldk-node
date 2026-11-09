@@ -48,7 +48,8 @@ bdk_wallet = { version = "2.2.0", default-features = false, features = ["std", "
 
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rustls = { version = "0.23", default-features = false }
-rusqlite = { version = "0.31.0", features = ["bundled"] }
+# rusqlite 0.40.0 and 0.40.1 do not compile on our MSRV.
+rusqlite = { version = ">=0.31.0, <0.40.0", features = ["bundled"] }
 bitcoin = "0.32.7"
 bip39 = { version = "2.0.0", features = ["rand"] }
 bip21 = { version = "0.5", features = ["std"], default-features = false }
@@ -77,10 +78,8 @@ proptest = "1.0.0"
 regex = "1.5.6"
 criterion = { version = "0.7.0", features = ["async_tokio"] }
 
-[target.'cfg(not(no_download))'.dev-dependencies]
-electrsd = { version = "0.36.1", default-features = false, features = ["legacy", "esplora_a33e97e1", "corepc-node_27_2"] }
-
-[target.'cfg(no_download)'.dev-dependencies]
+# Test binaries are provided via scripts/download_bitcoind_electrs.sh.
+# Keep automatic downloads disabled to avoid the yanked zip dependency.
 electrsd = { version = "0.36.1", default-features = false, features = ["legacy"] }
 corepc-node = { version = "0.10.0", default-features = false, features = ["27_2"] }
 
