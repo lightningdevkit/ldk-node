@@ -55,7 +55,7 @@
 //!
 //! 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 //! 	let node_addr = SocketAddress::from_str("IP_ADDR:PORT").unwrap();
-//! 	node.open_channel(node_id, node_addr, 10000, None, None).unwrap();
+//! 	node.open_channel(node_id, node_addr, 10000, None, None, None).unwrap();
 //!
 //! 	let event = node.wait_next_event();
 //! 	println!("EVENT: {:?}", event);
@@ -153,16 +153,22 @@ use io::utils::update_and_persist_node_metrics;
 pub use lightning;
 use lightning::chain::BlockLocator;
 use lightning::impl_writeable_tlv_based;
-use lightning::ln::chan_utils::FUNDING_TRANSACTION_WITNESS_WEIGHT;
 use lightning::ln::channel_state::ChannelDetails as LdkChannelDetails;
-pub use lightning::ln::channel_state::ChannelShutdownState;
+pub use lightning::ln::channel_state::{
+	ChannelShutdownState, InboundHTLCDetails, InboundHTLCStateDetails, OutboundHTLCDetails,
+	OutboundHTLCStateDetails,
+};
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::funding::{
+	FundingBuilder, FundingContribution, FundingContributionError, FundingTemplate,
+};
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
+
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStore;
-use lightning::util::wallet_utils::{Input, Wallet as LdkWallet};
+use lightning::util::wallet_utils::{ConfirmedUtxo, Wallet as LdkWallet};
 use lightning_background_processor::process_events_async;
 pub use lightning_invoice;
 pub use lightning_liquidity;
@@ -186,6 +192,7 @@ use payment::{HRNResolver, UnifiedPayment};
 use peer_store::{PeerInfo, PeerStore};
 #[cfg(feature = "uniffi")]
 pub use probing::ArcedProbingConfigBuilder as ProbingConfigBuilder;
+pub use probing::ProbingConfigError;
 use probing::{run_prober, Prober};
 use runtime::Runtime;
 pub use tokio;
@@ -200,10 +207,10 @@ pub use types::{
 pub use vss_client;
 
 use crate::config::{LIQUIDITY_DISCOVERY_RETRY_INITIAL_DELAY, LIQUIDITY_DISCOVERY_RETRY_MAX_DELAY};
-use crate::ffi::{maybe_deref, maybe_wrap};
+use crate::ffi::{maybe_deref, maybe_map_fee_rate_opt, maybe_wrap, FfiFeeRate};
 use crate::liquidity::Liquidity;
 use crate::scoring::setup_background_pathfinding_scores_sync;
-use crate::wallet::FundingAmount;
+use crate::wallet::{FundingAmount, DUST_LIMIT_SATS};
 
 #[cfg(not(feature = "uniffi"))]
 type NodeFeatures = LdkNodeFeatures;
@@ -280,6 +287,7 @@ pub struct Node {
 	node_metrics: Arc<PersistedNodeMetrics>,
 	om_mailbox: Option<Arc<OnionMessageMailbox>>,
 	async_payments_role: Option<AsyncPaymentsRole>,
+	pending_funding_fee_rates: Arc<Mutex<std::collections::HashMap<u128, bitcoin::FeeRate>>>,
 	#[cfg(feature = "unified-payments")]
 	hrn_resolver: HRNResolver,
 	prober: Option<Arc<Prober>>,
@@ -354,20 +362,41 @@ impl Node {
 			|| monitor_owns_any_0fc_channels
 			|| self.config.anchor_channels_config.enable_zero_fee_commitments;
 
-		// Block to ensure we update our fee rate cache once on startup.
-		// Also take this opportunity to make sure our chain source supports 0FC channels
-		// if they are enabled.
-		//
-		// TODO: drop 0FC chain source validation when support is ubiquitous
-		let chain_source = Arc::clone(&self.chain_source);
-		self.runtime.block_on(async move {
-			tokio::try_join!(
-				chain_source.update_fee_rate_estimates(),
-				chain_source.validate_zero_fee_commitments_support_if_required(
-					zero_fee_commitments_support_required
-				)
-			)
-		})?;
+		// Record the node's channel outputs for channels not reported by a producer: ones opened
+		// before this node recorded channel facts, and ones whose report failed in an earlier session.
+		// Before anything syncs, so that a close or a sweep the first sync finds is classified
+		// against them.
+		self.runtime.block_on(self.wallet.record_channel_outputs());
+
+		// A splice round recorded when this node signed it is taken back once LDK reports the
+		// negotiation failed or the channel closed. LDK reports the loss of a negotiation its last
+		// channel manager write carried mid-way, but a round committed, negotiated and signed
+		// since that write gets no report if the node stopped before the next one, so drop what
+		// LDK's persisted state does not track before anything runs on the records: nothing has
+		// synced and no background task has started yet, so a failure here fails the start
+		// cleanly. A channel LDK no longer lists is left to its `ChannelClosed` event.
+		let channels = self.channel_manager.list_channels();
+		self.runtime.block_on(self.wallet.drop_splice_rounds_lost_across_restart(
+			|channel_id| {
+				channels.iter().find(|channel| channel.channel_id == channel_id).map(|channel| {
+					wallet::tracked_splice_rounds(
+						channel.splice_details.as_ref(),
+						channel.funding_txo,
+					)
+				})
+			},
+		))?;
+
+		// Synchronize Lightning chain state before peers or event processing can act on stale
+		// confirmations. Each restored ChannelMonitor may have been persisted at a different tip.
+		self.runtime.block_on(self.chain_source.initialize_wallets(
+			self.stop_sender.subscribe(),
+			Arc::clone(&self.wallet),
+			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.chain_monitor),
+			Arc::clone(&self.output_sweeper),
+			zero_fee_commitments_support_required,
+		))?;
 
 		// Spawn background task continuously syncing onchain, lightning, and fee rate cache.
 		let stop_sync_receiver = self.stop_sender.subscribe();
@@ -688,6 +717,7 @@ impl Node {
 			Arc::clone(&self.wallet),
 			bump_tx_event_handler,
 			Arc::clone(&self.channel_manager),
+			Arc::clone(&self.chain_monitor),
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.output_sweeper),
 			Arc::clone(&self.network_graph),
@@ -703,6 +733,7 @@ impl Node {
 			Arc::clone(&self.runtime),
 			Arc::clone(&self.logger),
 			Arc::clone(&self.config),
+			Arc::clone(&self.pending_funding_fee_rates),
 		));
 
 		if let Some(prober) = self.prober.clone() {
@@ -1177,6 +1208,7 @@ impl Node {
 			self.bolt11_payment().into(),
 			self.bolt12_payment().into(),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 			self.hrn_resolver.clone(),
 		)
@@ -1201,6 +1233,7 @@ impl Node {
 			self.bolt11_payment(),
 			self.bolt12_payment(),
 			Arc::clone(&self.config),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 			self.hrn_resolver.clone(),
 		))
@@ -1256,6 +1289,7 @@ impl Node {
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.liquidity_source),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
 	}
@@ -1268,6 +1302,7 @@ impl Node {
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
 			Arc::clone(&self.liquidity_source),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		))
 	}
@@ -1341,13 +1376,10 @@ impl Node {
 
 	fn open_channel_inner(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: FundingAmount,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
-		announce_for_forwarding: bool, disable_counterparty_reserve: bool,
+		push_to_counterparty_msat: Option<u64>, fee_rate: Option<bitcoin::FeeRate>,
+		channel_config: Option<ChannelConfig>, announce_for_forwarding: bool,
+		disable_counterparty_reserve: bool,
 	) -> Result<UserChannelId, Error> {
-		if !*self.is_running.read().expect("lock") {
-			return Err(Error::NotRunning);
-		}
-
 		let peer_info = PeerInfo { node_id, address };
 
 		let con_node_id = peer_info.node_id;
@@ -1373,10 +1405,12 @@ impl Node {
 					total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 				let new_channel_reserve =
 					self.new_channel_anchor_reserve_sats(&peer_info.node_id)?;
-				let total_anchor_reserve_sats = cur_anchor_reserve_sats + new_channel_reserve;
+				let total_anchor_reserve_sats =
+					cur_anchor_reserve_sats.saturating_add(new_channel_reserve);
 
-				let fee_rate =
-					self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+				let fee_rate = fee_rate.unwrap_or_else(|| {
+					self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+				});
 
 				let amount =
 					self.wallet.get_max_funding_amount(total_anchor_reserve_sats, fee_rate)?;
@@ -1421,6 +1455,12 @@ impl Node {
 		let peer_was_stored = self.peer_store.get_peer(&peer_info.node_id).is_some();
 		self.runtime.block_on(self.peer_store.add_peer(peer_info.clone()))?;
 
+		// Register the fee-rate override before creating the channel, as the
+		// `FundingGenerationReady` event may be handled before `create_channel` returns.
+		if let Some(fee_rate) = fee_rate {
+			self.pending_funding_fee_rates.lock().expect("lock").insert(user_channel_id, fee_rate);
+		}
+
 		let result = if disable_counterparty_reserve {
 			self.channel_manager.create_channel_to_trusted_peer_0reserve(
 				peer_info.node_id,
@@ -1460,6 +1500,7 @@ impl Node {
 					zero_reserve_string,
 					e
 				);
+				self.pending_funding_fee_rates.lock().expect("lock").remove(&user_channel_id);
 				// Don't keep reconnecting to a peer we only stored for this attempt.
 				if !peer_was_stored {
 					if let Err(e) =
@@ -1510,7 +1551,7 @@ impl Node {
 
 		if for_new_channel {
 			let required_funds_sats =
-				amount_sats + self.new_channel_anchor_reserve_sats(peer_node_id)?;
+				amount_sats.saturating_add(self.new_channel_anchor_reserve_sats(peer_node_id)?);
 
 			if spendable_amount_sats < required_funds_sats {
 				log_error!(self.logger,
@@ -1538,18 +1579,28 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
+		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
 			FundingAmount::Exact { amount_sats: channel_amount_sats },
 			push_to_counterparty_msat,
+			fee_rate_opt,
 			channel_config,
 			false,
 			false,
@@ -1574,23 +1625,33 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
+		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {}", err);
 			return Err(Error::ChannelCreationFailed);
 		}
 
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
 			FundingAmount::Exact { amount_sats: channel_amount_sats },
 			push_to_counterparty_msat,
+			fee_rate_opt,
 			channel_config,
 			true,
 			false,
@@ -1608,18 +1669,27 @@ impl Node {
 	/// channel counterparty on channel open. This can be useful to start out with the balance not
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
-		channel_config: Option<ChannelConfig>,
+		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
 			FundingAmount::Max,
 			push_to_counterparty_msat,
+			fee_rate_opt,
 			channel_config,
 			false,
 			false,
@@ -1641,23 +1711,32 @@ impl Node {
 	/// channel counterparty on channel open. This can be useful to start out with the balance not
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_announced_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
-		channel_config: Option<ChannelConfig>,
+		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		if let Err(err) = may_announce_channel(&self.config) {
 			log_error!(self.logger, "Failed to open announced channel as the node hasn't been sufficiently configured to act as a forwarding node: {err}");
 			return Err(Error::ChannelCreationFailed);
 		}
 
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
 			FundingAmount::Max,
 			push_to_counterparty_msat,
+			fee_rate_opt,
 			channel_config,
 			true,
 			false,
@@ -1680,18 +1759,28 @@ impl Node {
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`] is available and will be retained before
 	/// opening the channel.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
 	/// [`AnchorChannelsConfig::per_channel_reserve_sats`]: crate::config::AnchorChannelsConfig::per_channel_reserve_sats
 	pub fn open_0reserve_channel(
 		&self, node_id: PublicKey, address: SocketAddress, channel_amount_sats: u64,
-		push_to_counterparty_msat: Option<u64>, channel_config: Option<ChannelConfig>,
+		push_to_counterparty_msat: Option<u64>, fee_rate: Option<FfiFeeRate>,
+		channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
 			FundingAmount::Exact { amount_sats: channel_amount_sats },
 			push_to_counterparty_msat,
+			fee_rate_opt,
 			channel_config,
 			false,
 			true,
@@ -1711,16 +1800,25 @@ impl Node {
 	/// channel counterparty on channel open. This can be useful to start out with the balance not
 	/// entirely shifted to one side, therefore allowing to receive payments from the getgo.
 	///
+	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
+	/// retrieve a reasonable estimate from the configured chain source.
+	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	pub fn open_0reserve_channel_with_all(
 		&self, node_id: PublicKey, address: SocketAddress, push_to_counterparty_msat: Option<u64>,
-		channel_config: Option<ChannelConfig>,
+		fee_rate: Option<FfiFeeRate>, channel_config: Option<ChannelConfig>,
 	) -> Result<UserChannelId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let fee_rate_opt = maybe_map_fee_rate_opt(fee_rate);
 		self.open_channel_inner(
 			node_id,
 			address,
 			FundingAmount::Max,
 			push_to_counterparty_msat,
+			fee_rate_opt,
 			channel_config,
 			false,
 			true,
@@ -1729,72 +1827,21 @@ impl Node {
 
 	fn splice_in_inner(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
-		splice_amount_sats: FundingAmount,
+		splice_amount_sats: FundingAmount, min_fee_rate: Option<bitcoin::FeeRate>,
 	) -> Result<(), Error> {
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			let min_feerate =
-				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let min_feerate = min_fee_rate.unwrap_or_else(|| {
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+			});
 			let max_feerate = max_funding_feerate(min_feerate);
 
-			let splice_amount_sats = match splice_amount_sats {
-				FundingAmount::Exact { amount_sats } => amount_sats,
-				FundingAmount::Max => {
-					let cur_anchor_reserve_sats =
-						total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-
-					const EMPTY_SCRIPT_SIG_WEIGHT: u64 =
-						1 /* empty script_sig */ * bitcoin::constants::WITNESS_SCALE_FACTOR as u64;
-
-					let funding_txo = channel_details.funding_txo.ok_or_else(|| {
-						log_error!(self.logger, "Failed to splice channel: channel not yet ready",);
-						Error::ChannelSplicingFailed
-					})?;
-
-					let funding_output = channel_details.get_funding_output().ok_or_else(|| {
-						log_error!(self.logger, "Failed to splice channel: channel not yet ready");
-						Error::ChannelSplicingFailed
-					})?;
-
-					let shared_input = Input {
-						outpoint: funding_txo.into_bitcoin_outpoint(),
-						previous_utxo: funding_output.clone(),
-						satisfaction_weight: EMPTY_SCRIPT_SIG_WEIGHT
-							+ FUNDING_TRANSACTION_WITNESS_WEIGHT,
-					};
-
-					let amount = self
-						.wallet
-						.get_max_splice_in_amount(
-							shared_input,
-							funding_output.script_pubkey.clone(),
-							cur_anchor_reserve_sats,
-							min_feerate,
-						)
-						.map_err(|e| {
-							log_error!(
-								self.logger,
-								"Failed to determine max splice-in amount: {e:?}"
-							);
-							e
-						})?;
-
-					log_info!(
-						self.logger,
-						"Splicing in with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
-						amount,
-						min_feerate.to_sat_per_kwu(),
-						cur_anchor_reserve_sats,
-					);
-
-					amount
-				},
-			};
-
-			self.check_sufficient_onchain_funds(splice_amount_sats, &counterparty_node_id, false)?;
+			if let FundingAmount::Exact { amount_sats } = splice_amount_sats {
+				self.check_sufficient_onchain_funds(amount_sats, &counterparty_node_id, false)?;
+			}
 
 			let funding_template = self
 				.channel_manager
@@ -1822,18 +1869,26 @@ impl Node {
 				_ => min_feerate,
 			};
 
-			let contribution = self
-				.runtime
-				.block_on(funding_template.splice_in(
-					Amount::from_sat(splice_amount_sats),
+			let contribution = match splice_amount_sats {
+				FundingAmount::Exact { amount_sats } => self
+					.runtime
+					.block_on(funding_template.splice_in(
+						Amount::from_sat(amount_sats),
+						feerate,
+						max_feerate,
+						Arc::clone(&self.wallet),
+					))
+					.map_err(|e| {
+						log_error!(self.logger, "Failed to splice channel: {}", e);
+						Error::ChannelSplicingFailed
+					})?,
+				FundingAmount::Max => self.splice_in_with_all_contribution(
+					funding_template,
+					Vec::new(),
 					feerate,
 					max_feerate,
-					Arc::clone(&self.wallet),
-				))
-				.map_err(|e| {
-					log_error!(self.logger, "Failed to splice channel: {}", e);
-					Error::ChannelSplicingFailed
-				})?;
+				)?,
+			};
 
 			self.channel_manager
 				.funding_contributed(
@@ -1857,11 +1912,147 @@ impl Node {
 		}
 	}
 
+	/// Builds a contribution splicing in all confirmed on-chain funds, consumed in full, with any
+	/// anchor reserve retained as an output to one of our own addresses. `pending_inputs` are the
+	/// inputs of a pending splice round to spend as well, which the wallet may already count as
+	/// spent by that round's transaction. The contribution replaces any prior one of the template.
+	fn splice_in_with_all_contribution(
+		&self, funding_template: FundingTemplate, pending_inputs: Vec<ConfirmedUtxo>,
+		feerate: bitcoin::FeeRate, max_feerate: bitcoin::FeeRate,
+	) -> Result<FundingContribution, Error> {
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		// A reserve below the dust limit cannot be kept as an output of its own, so keep the dust
+		// limit instead.
+		let reserve_output_sats = if cur_anchor_reserve_sats == 0 {
+			0
+		} else {
+			cur_anchor_reserve_sats.max(DUST_LIMIT_SATS)
+		};
+
+		// Splicing in all funds spends every confirmed UTXO in full, so the inputs are chosen here
+		// rather than by coin selection against an amount. The fee is only known once the
+		// contribution is built, so first check that the inputs can at least retain the anchor
+		// reserve and still add a non-dust amount, rather than asking LDK to build a contribution
+		// from nothing.
+		let mut inputs = pending_inputs;
+		for input in self.wallet.list_confirmed_funding_inputs().map_err(|e| {
+			log_error!(self.logger, "Failed to list confirmed UTXOs: {e:?}");
+			Error::ChannelSplicingFailed
+		})? {
+			if !inputs.iter().any(|pending| pending.outpoint() == input.outpoint()) {
+				inputs.push(input);
+			}
+		}
+		let input_total_sats: u64 = inputs.iter().map(|input| input.output().value.to_sat()).sum();
+		if input_total_sats.saturating_sub(reserve_output_sats) < DUST_LIMIT_SATS {
+			log_error!(
+				self.logger,
+				"Unable to splice-in due to insufficient funds. Confirmed: {}sats, anchor reserve: {}sats",
+				input_total_sats,
+				reserve_output_sats,
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		// Manually selected inputs are consumed in full with no change output: the amount added to
+		// the channel is what remains after fees, and a later fee bump lowers that amount instead of
+		// needing further inputs. The anchor reserve is retained as an explicit output to one of our
+		// own addresses, which stays fixed across fee bumps. The address is reserved so that other
+		// change-address consumers skip it until the splice transaction reaches the wallet.
+		let reserve_output = if reserve_output_sats > 0 {
+			let script_pubkey =
+				self.runtime.block_on(self.wallet.reserve_internal_address())?.script_pubkey();
+			Some(bitcoin::TxOut { value: Amount::from_sat(reserve_output_sats), script_pubkey })
+		} else {
+			None
+		};
+
+		let builder = funding_template.without_prior_contribution(feerate, max_feerate);
+		let built = self.build_splice_in_with_all_contribution(
+			builder,
+			inputs,
+			reserve_output.clone(),
+			feerate,
+		);
+		match built {
+			Ok(contribution) => Ok(contribution),
+			Err(e) => {
+				// LDK never took the contribution, so no `DiscardFunding` event will free the
+				// reserved address; release it here instead.
+				if let Some(reserve_output) = reserve_output {
+					if let Err(e) =
+						self.runtime.block_on(self.wallet.release_outputs(vec![reserve_output]))
+					{
+						log_error!(
+							self.logger,
+							"Failed to release the anchor reserve address: {e:?}"
+						);
+					}
+				}
+				Err(e)
+			},
+		}
+	}
+
+	/// Builds the contribution for splicing in all on-chain funds: `inputs` are consumed in full
+	/// and `reserve_output`, if any, keeps the anchor reserve on-chain. Fails with
+	/// [`Error::InsufficientFunds`] when the inputs cannot cover the reserve and the fee, or when
+	/// fees would leave less than dust to add to the channel. `feerate` is the builder's, for
+	/// logging.
+	fn build_splice_in_with_all_contribution(
+		&self, builder: FundingBuilder, inputs: Vec<ConfirmedUtxo>,
+		reserve_output: Option<bitcoin::TxOut>, feerate: bitcoin::FeeRate,
+	) -> Result<FundingContribution, Error> {
+		let cur_anchor_reserve_sats =
+			reserve_output.as_ref().map_or(0, |output| output.value.to_sat());
+
+		let contribution = builder
+			.add_inputs(inputs)
+			.and_then(|builder| builder.add_outputs(reserve_output.into_iter().collect()).build())
+			.map_err(|e| {
+				log_error!(self.logger, "Failed to splice channel: {}", e);
+				match e {
+					FundingContributionError::ManuallySelectedInputsInsufficient => {
+						Error::InsufficientFunds
+					},
+					_ => Error::ChannelSplicingFailed,
+				}
+			})?;
+
+		let value_added_sats = contribution.value_added().to_sat();
+		if value_added_sats < DUST_LIMIT_SATS {
+			log_error!(
+				self.logger,
+				"Unable to splice-in: available funds would be consumed entirely by fees. Remaining: {}sats, fee: {}sats",
+				value_added_sats,
+				contribution.estimated_fee().to_sat(),
+			);
+			return Err(Error::InsufficientFunds);
+		}
+
+		log_info!(
+			self.logger,
+			"Splicing in with all balance: {}sats (fee rate: {} sat/kw, anchor reserve: {}sats)",
+			value_added_sats,
+			feerate.to_sat_per_kwu(),
+			cur_anchor_reserve_sats,
+		);
+
+		Ok(contribution)
+	}
+
 	/// Add funds to an existing channel from a transaction output you control.
 	///
 	/// This provides for increasing a channel's outbound liquidity without re-balancing or closing
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
+	///
+	/// If `min_fee_rate` is set, it will be used as the minimum feerate for our contribution to the
+	/// splice transaction instead of a feerate estimate retrieved from the configured chain source.
+	/// As with the estimate, we may pay up to 1.5 times this feerate: when the channel already has a
+	/// pending splice that requires a higher feerate to be replaced, or when the counterparty
+	/// initiates a splice concurrently and our contribution is added to theirs.
 	///
 	/// # Experimental API
 	///
@@ -1869,12 +2060,17 @@ impl Node {
 	/// this classification may change in the future.
 	pub fn splice_in(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
-		splice_amount_sats: u64,
+		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		self.splice_in_inner(
 			user_channel_id,
 			counterparty_node_id,
 			FundingAmount::Exact { amount_sats: splice_amount_sats },
+			maybe_map_fee_rate_opt(min_fee_rate),
 		)
 	}
 
@@ -1887,21 +2083,52 @@ impl Node {
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
 	///
+	/// If `min_fee_rate` is set, it will be used as the minimum feerate for our contribution to the
+	/// splice transaction instead of a feerate estimate retrieved from the configured chain source.
+	/// As with the estimate, we may pay up to 1.5 times this feerate: when the channel already has a
+	/// pending splice that requires a higher feerate to be replaced, or when the counterparty
+	/// initiates a splice concurrently and our contribution is added to theirs.
+	///
+	/// The amount spliced in is what the confirmed on-chain funds leave after the anchor reserve
+	/// and the transaction fee at the feerate used: `min_fee_rate`, or the estimate if unset, or a
+	/// pending splice's RBF minimum if that is higher. A later [`Node::bump_channel_funding_fee`]
+	/// pays its higher fee from the same funds and so reduces the amount spliced in.
+	///
 	/// # Experimental API
 	///
 	/// This API is experimental. Currently, a splice-in will be marked as an outbound payment, but
 	/// this classification may change in the future.
 	pub fn splice_in_with_all(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
-		self.splice_in_inner(user_channel_id, counterparty_node_id, FundingAmount::Max)
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+		self.splice_in_inner(
+			user_channel_id,
+			counterparty_node_id,
+			FundingAmount::Max,
+			maybe_map_fee_rate_opt(min_fee_rate),
+		)
 	}
 
 	/// Remove funds from an existing channel, sending them to an on-chain address.
 	///
+	/// `splice_amount_sats` is the value to be sent to the destination address.
+	/// This value plus transaction fees must fit within [`ChannelDetails::next_splice_out_maximum_sat`].
+	/// Use [`Node::splice_out_max`] to send on-chain the maximum available balance from the
+	/// channel.
+	///
 	/// This provides for decreasing a channel's outbound liquidity without re-balancing or closing
 	/// it. Once negotiation with the counterparty is complete, the channel remains operational
 	/// while waiting for a new funding transaction to confirm.
+	///
+	/// If `min_fee_rate` is set, it will be used as the minimum feerate for our contribution to the
+	/// splice transaction instead of a feerate estimate retrieved from the configured chain source.
+	/// As with the estimate, we may pay up to 1.5 times this feerate: when the channel already has a
+	/// pending splice that requires a higher feerate to be replaced, or when the counterparty
+	/// initiates a splice concurrently and our contribution is added to theirs.
 	///
 	/// # Experimental API
 	///
@@ -1910,23 +2137,88 @@ impl Node {
 	/// in the future.
 	pub fn splice_out(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
-		splice_amount_sats: u64,
+		splice_amount_sats: u64, min_fee_rate: Option<FfiFeeRate>,
+	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		self.splice_out_inner(
+			user_channel_id,
+			counterparty_node_id,
+			address,
+			FundingAmount::Exact { amount_sats: splice_amount_sats },
+			maybe_map_fee_rate_opt(min_fee_rate),
+		)
+	}
+
+	/// Remove the maximum available funds from a channel, sending them to an on-chain address.
+	///
+	/// This is similar to [`Node::splice_out`], but calculates the destination output value by
+	/// subtracting splice transaction fees from [`ChannelDetails::next_splice_out_maximum_sat`].
+	/// The channel stays open and retains its required reserve and commitment fee budget.
+	/// Returns [`NodeError::ChannelSplicingFailed`] if the available amount cannot cover fees and
+	/// a non-dust output.
+	///
+	/// `min_fee_rate` has the same meaning as in [`Node::splice_out`]. The output is calculated
+	/// using that rate, or the chain source estimate if unset, raised to the minimum RBF feerate
+	/// when required and within our fee-rate ceiling.
+	///
+	/// The maximum is read when this call constructs the contribution. Changes to channel state
+	/// or fees can cause negotiation to fail. A concurrent peer-initiated splice can change our
+	/// fee share, leaving some of the available balance unwithdrawn. Using the full budget also
+	/// leaves no channel balance available for a higher transaction fee.
+	///
+	/// [`Node::bump_channel_funding_fee`] preserves the destination output value, including for
+	/// maximum withdrawals. If the channel cannot cover the higher fee, it may fund the entire
+	/// output and fees from the on-chain wallet instead, leaving the channel balance unwithdrawn.
+	/// It does not reduce the destination output to pay the additional fee.
+	///
+	/// Success means the contribution was submitted, not that the splice has completed. Monitor
+	/// [`Event::SpliceNegotiated`] or [`Event::SpliceNegotiationFailed`] for the negotiation result,
+	/// and [`Event::ChannelReady`] for the channel's transition to the new funding output.
+	///
+	/// # Experimental API
+	///
+	/// This API is experimental. Currently, a splice-out will be marked as an inbound payment if
+	/// paid to an address associated with the on-chain wallet, but this classification may change
+	/// in the future.
+	pub fn splice_out_max(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
+		min_fee_rate: Option<FfiFeeRate>,
+	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+		self.splice_out_inner(
+			user_channel_id,
+			counterparty_node_id,
+			address,
+			FundingAmount::Max,
+			maybe_map_fee_rate_opt(min_fee_rate),
+		)
+	}
+
+	fn splice_out_inner(
+		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey, address: &Address,
+		splice_amount: FundingAmount, min_fee_rate: Option<bitcoin::FeeRate>,
 	) -> Result<(), Error> {
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			let splice_amount_msat =
-				splice_amount_sats.checked_mul(1_000).ok_or(Error::ChannelSplicingFailed)?;
-			if splice_amount_msat > channel_details.outbound_capacity_msat {
-				return Err(Error::ChannelSplicingFailed);
+			if let FundingAmount::Exact { amount_sats } = &splice_amount {
+				if *amount_sats > channel_details.next_splice_out_maximum_sat {
+					return Err(Error::ChannelSplicingFailed);
+				}
 			}
 
 			self.wallet.parse_and_validate_address(address)?;
 
-			let min_feerate =
-				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let min_feerate = min_fee_rate.unwrap_or_else(|| {
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+			});
 			let max_feerate = max_funding_feerate(min_feerate);
 
 			let funding_template = self
@@ -1955,12 +2247,24 @@ impl Node {
 				_ => min_feerate,
 			};
 
-			let outputs = vec![bitcoin::TxOut {
-				value: Amount::from_sat(splice_amount_sats),
-				script_pubkey: address.script_pubkey(),
-			}];
+			let script_pubkey = address.script_pubkey();
+			let output = match splice_amount {
+				FundingAmount::Exact { amount_sats } => {
+					bitcoin::TxOut { value: Amount::from_sat(amount_sats), script_pubkey }
+				},
+				FundingAmount::Max => max_splice_out_output(
+					&funding_template,
+					script_pubkey,
+					Amount::from_sat(channel_details.next_splice_out_maximum_sat),
+					feerate,
+				)
+				.map_err(|e| {
+					log_error!(self.logger, "Failed to calculate maximum splice output: {}", e);
+					Error::ChannelSplicingFailed
+				})?,
+			};
 			let contribution =
-				funding_template.splice_out(outputs, feerate, max_feerate).map_err(|e| {
+				funding_template.splice_out(vec![output], feerate, max_feerate).map_err(|e| {
 					log_error!(self.logger, "Failed to splice channel: {}", e);
 					Error::ChannelSplicingFailed
 				})?;
@@ -1990,16 +2294,39 @@ impl Node {
 	/// Fee-bumps the pending splice on a channel by replacing its in-flight funding transaction
 	/// (RBF). The splice's amount and destination are preserved; only the fee rate is raised.
 	/// Errors if the channel has no pending splice to bump.
+	///
+	/// For a splice-out, additional fees are taken from the channel balance when possible. If
+	/// that balance is insufficient, wallet inputs may fund the entire withdrawal output and
+	/// fees, leaving the channel balance unwithdrawn. This also applies to withdrawals created
+	/// with [`Node::splice_out_max`]; the output is not reduced to cover the higher fee.
+	///
+	/// A splice of all on-chain funds (see [`Node::splice_in_with_all`]) has no amount to preserve:
+	/// the bump is paid by adding less to the channel, or, if the pending splice's maximum feerate
+	/// does not allow that or less than dust would be left to add, the splice is rebuilt from all
+	/// confirmed funds, including any confirmed since.
+	///
+	/// If `min_fee_rate` is set, it will be used as the minimum feerate for the replacement instead
+	/// of a feerate estimate retrieved from the configured chain source. As with the estimate, we
+	/// pay the feerate required to replace the pending splice if it is higher, but no more than 1.5
+	/// times this feerate: if replacing it requires more, the bump fails.
 	pub fn bump_channel_funding_fee(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
+		min_fee_rate: Option<FfiFeeRate>,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
+		let min_fee_rate = maybe_map_fee_rate_opt(min_fee_rate);
+
 		let open_channels =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
-			let min_feerate =
-				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding);
+			let min_feerate = min_fee_rate.unwrap_or_else(|| {
+				self.fee_estimator.estimate_fee_rate(ConfirmationTarget::ChannelFunding)
+			});
 
 			let funding_template = self
 				.channel_manager
@@ -2024,17 +2351,50 @@ impl Node {
 				return Err(Error::ChannelSplicingFailed);
 			};
 
-			let contribution = self
-				.runtime
-				.block_on(funding_template.rbf_prior_contribution(
-					Some(target_feerate),
-					max_feerate,
-					Arc::clone(&self.wallet),
-				))
-				.map_err(|e| {
+			let rbf_template = funding_template.clone();
+			let prior_value_added_sats = funding_template
+				.prior_contribution()
+				.map_or(0, |contribution| contribution.value_added().to_sat());
+			let adjusted = match self.runtime.block_on(rbf_template.rbf_prior_contribution(
+				Some(target_feerate),
+				max_feerate,
+				Arc::clone(&self.wallet),
+			)) {
+				// LDK pays the bump of a contribution of manually selected inputs by adding less
+				// to the channel, with no floor on the amount. Rebuild one that would add less
+				// than dust below, where the amount is checked.
+				Ok(contribution)
+					if contribution.value_added().to_sat() < prior_value_added_sats
+						&& contribution.value_added().to_sat() < DUST_LIMIT_SATS =>
+				{
+					None
+				},
+				Ok(contribution) => Some(contribution),
+				// LDK adjusts a contribution of manually selected inputs only up to its maximum
+				// feerate and never supplements it by coin selection.
+				Err(FundingContributionError::ManuallySelectedInputsInsufficient) => None,
+				Err(e) => {
 					log_error!(self.logger, "Failed to RBF channel: {}", e);
-					Error::ChannelSplicingFailed
-				})?;
+					return Err(Error::ChannelSplicingFailed);
+				},
+			};
+			let contribution = match adjusted {
+				Some(contribution) => contribution,
+				// The pending splice spends manually selected inputs, as a splice-in of all funds
+				// does, so replace it with one built the same way from all confirmed funds: its
+				// inputs and any coins confirmed since.
+				None => {
+					let pending_inputs = funding_template
+						.prior_contribution()
+						.map_or(Vec::new(), |contribution| contribution.inputs().to_vec());
+					self.splice_in_with_all_contribution(
+						funding_template,
+						pending_inputs,
+						target_feerate,
+						max_feerate,
+					)?
+				},
+			};
 
 			self.channel_manager
 				.funding_contributed(
@@ -2108,6 +2468,9 @@ impl Node {
 	pub fn close_channel(
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		self.close_channel_internal(user_channel_id, counterparty_node_id, false, None)
 	}
 
@@ -2128,6 +2491,9 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		reason: Option<String>,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		self.close_channel_internal(user_channel_id, counterparty_node_id, true, reason)
 	}
 
@@ -2188,6 +2554,10 @@ impl Node {
 		&self, user_channel_id: &UserChannelId, counterparty_node_id: PublicKey,
 		channel_config: ChannelConfig,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let open_channels: Vec<LdkChannelDetails> =
 			self.channel_manager.list_channels_with_counterparty(&counterparty_node_id);
 		if let Some(channel_details) =
@@ -2440,6 +2810,26 @@ impl Node {
 	}
 }
 
+// TODO: Replace this helper with upstream LDK drain-output construction so the contribution
+// retains maximum-withdrawal semantics through RBF.
+// See https://git.rust-bitcoin.org/lightningdevkit/rust-lightning/issues/5305
+fn max_splice_out_output(
+	funding_template: &FundingTemplate, script_pubkey: bitcoin::ScriptBuf, maximum: Amount,
+	feerate: bitcoin::FeeRate,
+) -> Result<bitcoin::TxOut, FundingContributionError> {
+	let minimum_output = script_pubkey.minimal_non_dust();
+	let mut output = bitcoin::TxOut { value: minimum_output, script_pubkey };
+	let fee = funding_template
+		.clone()
+		.splice_out(vec![output.clone()], feerate, feerate)?
+		.estimated_fee();
+	output.value = maximum
+		.checked_sub(fee)
+		.filter(|value| *value >= minimum_output)
+		.ok_or(FundingContributionError::InvalidSpliceValue)?;
+	Ok(output)
+}
+
 impl Drop for Node {
 	fn drop(&mut self) {
 		let _ = self.stop();
@@ -2576,7 +2966,7 @@ impl_writeable_tlv_based!(NodeMetrics, {
 pub(crate) fn total_anchor_channels_reserve_sats(
 	channel_manager: &ChannelManager, config: &Config,
 ) -> u64 {
-	channel_manager
+	let num_reserved_channels = channel_manager
 		.list_channels()
 		.into_iter()
 		.filter(|c| {
@@ -2586,10 +2976,10 @@ pub(crate) fn total_anchor_channels_reserve_sats(
 				.contains(&c.counterparty.node_id)
 				&& c.channel_shutdown_state
 					.map_or(true, |s| s != ChannelShutdownState::ShutdownComplete)
-				&& c.channel_type.as_ref().map_or(false, requires_anchor_channel_type)
+				&& c.channel_type.as_ref().map_or(true, requires_anchor_channel_type)
 		})
-		.count() as u64
-		* config.anchor_channels_config.per_channel_reserve_sats
+		.count() as u64;
+	num_reserved_channels.saturating_mul(config.anchor_channels_config.per_channel_reserve_sats)
 }
 
 pub(crate) fn new_channel_anchor_reserve_sats(
