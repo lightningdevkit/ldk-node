@@ -34,7 +34,7 @@ use lightning::sign::{EntropySource, SpendableOutputDescriptor};
 use lightning::util::config::{ChannelConfigOverrides, ChannelConfigUpdate};
 use lightning::util::errors::APIError;
 use lightning::util::persist::KVStore;
-use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use lightning::util::ser::{CollectionLength, Readable, ReadableArgs, Writeable, Writer};
 use lightning::{
 	impl_writeable_tlv_based, impl_writeable_tlv_based_enum,
 	impl_writeable_tlv_based_enum_upgradable,
@@ -702,9 +702,9 @@ impl Readable for EventQueueDeserWrapper {
 	fn read<R: lightning::io::Read>(
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
-		let len: u16 = Readable::read(reader)?;
-		let mut queue = VecDeque::with_capacity(len as usize);
-		for _ in 0..len {
+		let len: CollectionLength = Readable::read(reader)?;
+		let mut queue = VecDeque::with_capacity(len.0 as usize);
+		for _ in 0..len.0 {
 			queue.push_back(Readable::read(reader)?);
 		}
 		Ok(Self(queue))
@@ -715,7 +715,7 @@ struct EventQueueSerWrapper<'a>(&'a VecDeque<Event>);
 
 impl Writeable for EventQueueSerWrapper<'_> {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-		(self.0.len() as u16).write(writer)?;
+		CollectionLength(self.0.len() as u64).write(writer)?;
 		for e in self.0.iter() {
 			e.write(writer)?;
 		}
@@ -3580,5 +3580,43 @@ mod tests {
 
 		assert_eq!(sweepable_outpoints(&outputs), vec![(outpoint(2).txid, 2)]);
 		assert_eq!(direct_outpoints(&outputs), vec![(outpoint(1).txid, 1)]);
+	}
+
+	fn test_event_queue(len: usize) -> VecDeque<Event> {
+		(0..len)
+			.map(|i| Event::ChannelReady {
+				channel_id: ChannelId([23u8; 32]),
+				user_channel_id: UserChannelId(i as u128),
+				counterparty_node_id: None,
+				funding_txo: None,
+			})
+			.collect()
+	}
+
+	#[test]
+	fn event_queue_round_trips_around_u16_max() {
+		for len in [65_534, 65_535, 65_536, 65_540] {
+			let queue = test_event_queue(len);
+			let bytes = EventQueueSerWrapper(&queue).encode();
+			let read_queue: EventQueueDeserWrapper = Readable::read(&mut &bytes[..]).unwrap();
+			assert_eq!(read_queue.0.len(), len);
+			assert_eq!(read_queue.0, queue);
+		}
+	}
+
+	#[test]
+	fn event_queue_keeps_legacy_encoding_below_u16_max() {
+		let queue = test_event_queue(3);
+
+		// Before `CollectionLength`, the count was written as a plain `u16`.
+		let mut legacy_bytes = Vec::new();
+		(queue.len() as u16).write(&mut legacy_bytes).unwrap();
+		for event in queue.iter() {
+			event.write(&mut legacy_bytes).unwrap();
+		}
+
+		assert_eq!(EventQueueSerWrapper(&queue).encode(), legacy_bytes);
+		let read_queue: EventQueueDeserWrapper = Readable::read(&mut &legacy_bytes[..]).unwrap();
+		assert_eq!(read_queue.0, queue);
 	}
 }
