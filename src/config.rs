@@ -16,7 +16,7 @@ use bitcoin::secp256k1::PublicKey;
 use bitcoin::Network;
 use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
-use lightning::routing::router::RouteParametersConfig;
+use lightning::routing::router::{RouteParameters, RouteParametersConfig};
 use lightning::util::config::{
 	ChannelConfig as LdkChannelConfig, MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
 };
@@ -761,6 +761,18 @@ impl Default for ElectrumSyncConfig {
 
 pub(crate) fn clamp_full_scan_stop_gap(full_scan_stop_gap: u32) -> u32 {
 	full_scan_stop_gap.clamp(MIN_FULL_SCAN_STOP_GAP, MAX_FULL_SCAN_STOP_GAP)
+}
+
+pub(crate) fn apply_route_parameters_config(
+	route_params: &mut RouteParameters, config: &RouteParametersConfig,
+) {
+	if let Some(max_total_routing_fee_msat) = config.max_total_routing_fee_msat {
+		route_params.max_total_routing_fee_msat = Some(max_total_routing_fee_msat);
+	}
+	route_params.payment_params.max_total_cltv_expiry_delta = config.max_total_cltv_expiry_delta;
+	route_params.payment_params.max_path_count = config.max_path_count;
+	route_params.payment_params.max_channel_saturation_power_of_half =
+		config.max_channel_saturation_power_of_half;
 }
 
 /// Configuration for syncing with Bitcoin Core backend via REST.
