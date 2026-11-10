@@ -42,6 +42,8 @@ interface ProbingConfigBuilder {
 	void set_max_locked_msat(u64 max_msat);
 	void set_diversity_penalty_msat(u64 penalty_msat);
 	void set_cooldown(u64 secs);
+	[Throws=ProbingConfigError]
+	void set_amount_range_msat(u64 min_msat, u64 max_msat);
 	ProbingConfig build();
 };
 
@@ -78,25 +80,27 @@ interface Node {
 	[Throws=NodeError]
 	void disconnect(PublicKey node_id);
 	[Throws=NodeError]
-	UserChannelId open_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config);
+	UserChannelId open_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, FeeRate? fee_rate, ChannelConfig? channel_config);
 	[Throws=NodeError]
-	UserChannelId open_announced_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config);
+	UserChannelId open_announced_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, FeeRate? fee_rate, ChannelConfig? channel_config);
 	[Throws=NodeError]
-	UserChannelId open_channel_with_all(PublicKey node_id, SocketAddress address, u64? push_to_counterparty_msat, ChannelConfig? channel_config);
+	UserChannelId open_channel_with_all(PublicKey node_id, SocketAddress address, u64? push_to_counterparty_msat, FeeRate? fee_rate, ChannelConfig? channel_config);
 	[Throws=NodeError]
-	UserChannelId open_announced_channel_with_all(PublicKey node_id, SocketAddress address, u64? push_to_counterparty_msat, ChannelConfig? channel_config);
+	UserChannelId open_announced_channel_with_all(PublicKey node_id, SocketAddress address, u64? push_to_counterparty_msat, FeeRate? fee_rate, ChannelConfig? channel_config);
 	[Throws=NodeError]
-	UserChannelId open_0reserve_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, ChannelConfig? channel_config);
+	UserChannelId open_0reserve_channel(PublicKey node_id, SocketAddress address, u64 channel_amount_sats, u64? push_to_counterparty_msat, FeeRate? fee_rate, ChannelConfig? channel_config);
 	[Throws=NodeError]
-	UserChannelId open_0reserve_channel_with_all(PublicKey node_id, SocketAddress address, u64? push_to_counterparty_msat, ChannelConfig? channel_config);
+	UserChannelId open_0reserve_channel_with_all(PublicKey node_id, SocketAddress address, u64? push_to_counterparty_msat, FeeRate? fee_rate, ChannelConfig? channel_config);
 	[Throws=NodeError]
-	void splice_in([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, u64 splice_amount_sats);
+	void splice_in([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, u64 splice_amount_sats, FeeRate? min_fee_rate);
 	[Throws=NodeError]
-	void splice_in_with_all([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
+	void splice_in_with_all([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, FeeRate? min_fee_rate);
 	[Throws=NodeError]
-	void splice_out([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, [ByRef]Address address, u64 splice_amount_sats);
+	void splice_out([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, [ByRef]Address address, u64 splice_amount_sats, FeeRate? min_fee_rate);
 	[Throws=NodeError]
-	void bump_channel_funding_fee([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
+	void splice_out_max([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, [ByRef]Address address, FeeRate? min_fee_rate);
+	[Throws=NodeError]
+	void bump_channel_funding_fee([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id, FeeRate? min_fee_rate);
 	[Throws=NodeError]
 	void close_channel([ByRef]UserChannelId user_channel_id, PublicKey counterparty_node_id);
 	[Throws=NodeError]
@@ -218,6 +222,8 @@ enum NodeError {
 typedef dictionary NodeStatus;
 
 typedef enum BuildError;
+
+typedef enum ProbingConfigError;
 
 [Trait, WithForeign]
 interface VssHeaderProvider {

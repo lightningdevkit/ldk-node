@@ -17,6 +17,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Once, RwLock};
 use std::time::SystemTime;
 
+use bdk_wallet::descriptor::IntoWalletDescriptor;
+use bdk_wallet::signer::SignersContainer;
 use bdk_wallet::template::Bip84;
 use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
 use bitcoin::bip32::{ChildNumber, Xpriv};
@@ -58,8 +60,8 @@ use crate::config::BitcoindRestClientConfig;
 use crate::config::{
 	default_user_config, may_announce_channel, AnnounceError, AsyncPaymentsRole, Config,
 	ElectrumSyncConfig, EsploraSyncConfig, HRNResolverConfig, TorConfig,
-	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL,
-	DEFAULT_MAX_PROBE_AMOUNT_MSAT, DEFAULT_MIN_PROBE_AMOUNT_MSAT, PAYMENT_CACHE_CAPACITY,
+	CHANNEL_TX_FACTS_CACHE_CAPACITY, CHANNEL_TX_FACTS_CACHE_WARMUP_COUNT,
+	DEFAULT_ESPLORA_SERVER_URL, DEFAULT_LOG_FILENAME, DEFAULT_LOG_LEVEL, PAYMENT_CACHE_CAPACITY,
 	PAYMENT_CACHE_WARMUP_COUNT,
 };
 use crate::connection::ConnectionManager;
@@ -83,6 +85,8 @@ use crate::io::utils::{
 use crate::io::vss_store::VssStoreBuilder;
 use crate::io::{
 	self, CHANNEL_FORWARDING_STATS_PERSISTENCE_SECONDARY_NAMESPACE,
+	CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE,
+	CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE,
 	FORWARDED_PAYMENT_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 	PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -104,11 +108,12 @@ use crate::probing::{
 use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
-	AsyncPersister, ChainMonitor, ChannelManager, DynStore, DynStoreRef, DynStoreWrapper,
-	GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore, PeerManager,
-	PendingPaymentStore,
+	AsyncPersister, ChainMonitor, ChannelManager, ChannelTxFactsStore, DynStore, DynStoreRef,
+	DynStoreWrapper, GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
+	PeerManager, PendingPaymentStore,
 };
 use crate::wallet::persist::{read_address_pool, KVStoreWalletPersister};
+use crate::wallet::provenance::NodeChannelLiveness;
 use crate::wallet::Wallet;
 use crate::{Node, NodeMetrics, PersistedNodeMetrics};
 
@@ -1564,6 +1569,7 @@ fn build_with_store_internal(
 		channel_forwarding_stats_res,
 		node_metris_res,
 		pending_payment_store_res,
+		channel_tx_facts_store_res,
 		address_pool_res,
 	) = runtime.block_on(async move {
 		tokio::join!(
@@ -1585,6 +1591,13 @@ fn build_with_store_internal(
 				&*kv_store_ref,
 				PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
 				PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				Arc::clone(&logger_ref),
+			),
+			read_n_objects(
+				&*kv_store_ref,
+				CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE,
+				CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE,
+				CHANNEL_TX_FACTS_CACHE_WARMUP_COUNT,
 				Arc::clone(&logger_ref),
 			),
 			read_address_pool(&*kv_store_ref, &*logger_ref),
@@ -1747,17 +1760,30 @@ fn build_with_store_internal(
 		BuildError::WalletSetupFailed
 	})?;
 
-	let descriptor = Bip84(xprv, KeychainKind::External);
-	let change_descriptor = Bip84(xprv, KeychainKind::Internal);
+	let secp_ctx = Secp256k1::new();
+	let (descriptor, keymap) = Bip84(xprv, KeychainKind::External)
+		.into_wallet_descriptor(&secp_ctx, config.network.into())
+		.map_err(|e| {
+			log_error!(logger, "Failed to derive external wallet descriptor: {}", e);
+			BuildError::WalletSetupFailed
+		})?;
+	let (change_descriptor, change_keymap) = Bip84(xprv, KeychainKind::Internal)
+		.into_wallet_descriptor(&secp_ctx, config.network.into())
+		.map_err(|e| {
+			log_error!(logger, "Failed to derive internal wallet descriptor: {}", e);
+			BuildError::WalletSetupFailed
+		})?;
+	let signers = [
+		SignersContainer::build(keymap, &descriptor, &secp_ctx),
+		SignersContainer::build(change_keymap, &change_descriptor, &secp_ctx),
+	];
 	let mut wallet_persister =
 		KVStoreWalletPersister::new(Arc::clone(&kv_store), Arc::clone(&logger));
-	#[allow(deprecated)]
 	let wallet_opt = runtime
 		.block_on(async {
 			BdkWallet::load()
 				.descriptor(KeychainKind::External, Some(descriptor.clone()))
 				.descriptor(KeychainKind::Internal, Some(change_descriptor.clone()))
-				.extract_keys()
 				.check_network(config.network)
 				.load_wallet_async(&mut wallet_persister)
 				.await
@@ -1918,6 +1944,24 @@ fn build_with_store_internal(
 		},
 	};
 
+	let channel_tx_facts_store = match channel_tx_facts_store_res {
+		Ok(channel_tx_facts) => Arc::new(ChannelTxFactsStore::new(
+			// The read hands us the newest records first, while the cache treats the objects it
+			// is seeded with as increasingly recently used. Reverse them, so that the newest
+			// record is the last one to be evicted rather than the first.
+			channel_tx_facts.into_iter().rev().collect(),
+			KeepLeastRecentlyUsed::new(CHANNEL_TX_FACTS_CACHE_CAPACITY),
+			CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			Arc::clone(&kv_store),
+			Arc::clone(&logger),
+		)),
+		Err(e) => {
+			log_error!(logger, "Failed to read channel transaction facts from store: {}", e);
+			return Err(BuildError::ReadFailed);
+		},
+	};
+
 	let persisted_pool_indices = match address_pool_res {
 		Ok(indices) => indices,
 		Err(e) => {
@@ -1928,6 +1972,7 @@ fn build_with_store_internal(
 
 	let wallet = Arc::new(Wallet::new(
 		bdk_wallet,
+		signers,
 		wallet_persister,
 		persisted_pool_indices,
 		Arc::clone(&tx_broadcaster),
@@ -1938,6 +1983,7 @@ fn build_with_store_internal(
 		Arc::clone(&config),
 		Arc::clone(&logger),
 		Arc::clone(&pending_payment_store),
+		Arc::clone(&channel_tx_facts_store),
 	));
 
 	// Fill the address pool up front so LDK's sync `SignerProvider` callbacks can hand out
@@ -1946,8 +1992,6 @@ fn build_with_store_internal(
 		log_error!(logger, "Failed to fill the wallet's address pool: {}", e);
 		BuildError::WalletSetupFailed
 	})?;
-
-	tx_broadcaster.set_wallet(Arc::downgrade(&wallet));
 
 	// Initialize the KeysManager
 	let cur_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_err(|e| {
@@ -2429,6 +2473,15 @@ fn build_with_store_internal(
 		},
 	};
 
+	// The wallet drops the facts it recorded for a channel once that channel is not live
+	// anymore, and records on start what a live channel's producers never reported. Both need the
+	// node's channel state, which exists from this point on.
+	wallet.set_channel_liveness(Arc::new(NodeChannelLiveness::new(
+		&channel_manager,
+		&chain_monitor,
+		&output_sweeper,
+	)));
+
 	let event_queue = match event_queue_res {
 		Ok(event_queue) => Arc::new(event_queue),
 		Err(e) => {
@@ -2488,8 +2541,8 @@ fn build_with_store_internal(
 					Arc::clone(&channel_manager),
 					probing_router,
 					*top_node_count,
-					DEFAULT_MIN_PROBE_AMOUNT_MSAT,
-					DEFAULT_MAX_PROBE_AMOUNT_MSAT,
+					probing_cfg.min_amount_msat,
+					probing_cfg.max_amount_msat,
 					probing_cfg.cooldown,
 					config.probing_liquidity_limit_multiplier,
 				))
@@ -2498,8 +2551,8 @@ fn build_with_store_internal(
 				Arc::clone(&network_graph),
 				Arc::clone(&channel_manager),
 				*max_hops,
-				DEFAULT_MIN_PROBE_AMOUNT_MSAT,
-				DEFAULT_MAX_PROBE_AMOUNT_MSAT,
+				probing_cfg.min_amount_msat,
+				probing_cfg.max_amount_msat,
 			)),
 			ProbingStrategyKind::Custom(s) => Arc::clone(s),
 		};
@@ -2568,6 +2621,7 @@ fn build_with_store_internal(
 		node_metrics,
 		om_mailbox,
 		async_payments_role,
+		pending_funding_fee_rates: Arc::new(Mutex::new(std::collections::HashMap::new())),
 		#[cfg(feature = "unified-payments")]
 		hrn_resolver,
 		prober,
@@ -2740,6 +2794,157 @@ mod tests {
 		);
 
 		assert!(matches!(result, Err(BuildError::ReadFailed)));
+	}
+
+	#[test]
+	fn unstarted_node_rejects_live_node_apis() {
+		use std::str::FromStr;
+
+		use bitcoin::secp256k1::PublicKey;
+		use lightning::ln::channelmanager::PaymentId;
+		use lightning::ln::msgs::SocketAddress;
+		use lightning::offers::offer::OfferBuilder;
+		use lightning_invoice::{Bolt11InvoiceDescription, Description};
+		use lightning_types::payment::PaymentPreimage;
+
+		use crate::ffi::maybe_wrap;
+		use crate::{CustomTlvRecord, Error, UserChannelId};
+
+		let builder = NodeBuilder::new();
+		let logger = Arc::new(Logger::new_log_facade());
+		#[cfg(not(feature = "uniffi"))]
+		let node_entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let node_entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		let node = builder
+			.build_with_store_and_logger(node_entropy, InMemoryStore::new(), logger)
+			.unwrap();
+
+		let node_id = PublicKey::from_str(
+			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+		)
+		.unwrap();
+		let payment_id = PaymentId([0; 32]);
+		let user_channel_id = UserChannelId(0);
+
+		let custom_tlvs = vec![CustomTlvRecord { type_num: 65_537, value: vec![1, 2, 3] }];
+		let preimage = PaymentPreimage([42; 32]);
+		assert_eq!(node.spontaneous_payment().send(1_000, node_id, None), Err(Error::NotRunning));
+		assert_eq!(
+			node.spontaneous_payment().send_with_custom_tlvs(
+				1_000,
+				node_id,
+				None,
+				custom_tlvs.clone()
+			),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.spontaneous_payment().send_with_preimage(1_000, node_id, preimage, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.spontaneous_payment().send_with_preimage_and_custom_tlvs(
+				1_000,
+				node_id,
+				custom_tlvs,
+				preimage,
+				None,
+			),
+			Err(Error::NotRunning)
+		);
+
+		let description =
+			Bolt11InvoiceDescription::Direct(Description::new("not running".to_string()).unwrap())
+				.into();
+		let invoice = node.bolt11_payment().receive(1_000, &description, 3_600).unwrap();
+		assert_eq!(node.bolt11_payment().send(&invoice, None), Err(Error::NotRunning));
+		assert_eq!(
+			node.bolt11_payment().send_using_amount(&invoice, 1_000, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.bolt11_payment().send_using_amount_underpaying(&invoice, 500, None),
+			Err(Error::NotRunning)
+		);
+
+		let offer = maybe_wrap(
+			OfferBuilder::new(node_id)
+				.description("not running".to_string())
+				.amount_msats(1_000)
+				.build()
+				.unwrap(),
+		);
+		assert_eq!(node.bolt12_payment().send(&offer, None, None, None), Err(Error::NotRunning));
+		assert_eq!(
+			node.bolt12_payment().send_using_amount(&offer, 1_000, None, None, None),
+			Err(Error::NotRunning)
+		);
+
+		assert_eq!(node.onchain_payment().bump_fee_rbf(payment_id, None), Err(Error::NotRunning));
+		assert_eq!(node.close_channel(&user_channel_id, node_id), Err(Error::NotRunning));
+		assert_eq!(
+			node.force_close_channel(&user_channel_id, node_id, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.update_channel_config(&user_channel_id, node_id, Default::default()),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(node.splice_in(&user_channel_id, node_id, 1_000, None), Err(Error::NotRunning));
+		assert_eq!(
+			node.bump_channel_funding_fee(&user_channel_id, node_id, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(node.bolt11_payment().fail_for_id(payment_id), Err(Error::NotRunning));
+		assert_eq!(
+			node.bolt11_payment().claim_for_id(payment_id, PaymentPreimage([0; 32])),
+			Err(Error::NotRunning)
+		);
+
+		let address = SocketAddress::from_str("127.0.0.1:9735").unwrap();
+		assert_eq!(
+			node.open_channel(node_id, address.clone(), 1_000, None, None, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.open_channel_with_all(node_id, address.clone(), None, None, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.open_announced_channel(node_id, address.clone(), 1_000, None, None, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.open_announced_channel_with_all(node_id, address.clone(), None, None, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.open_0reserve_channel(node_id, address.clone(), 1_000, None, None, None),
+			Err(Error::NotRunning)
+		);
+		assert_eq!(
+			node.open_0reserve_channel_with_all(node_id, address, None, None, None),
+			Err(Error::NotRunning)
+		);
+
+		// Async receive state is persisted via the background processor.
+		assert_eq!(node.bolt12_payment().receive_async().err(), Some(Error::NotRunning));
+		#[cfg(not(feature = "uniffi"))]
+		let paths = Vec::new();
+		#[cfg(feature = "uniffi")]
+		let paths = Vec::<u8>::new();
+		assert_eq!(
+			node.bolt12_payment().set_paths_to_static_invoice_server(paths),
+			Err(Error::NotRunning)
+		);
+
+		// The running state is checked before any URI or HRN resolution happens.
+		#[cfg(feature = "unified-payments")]
+		{
+			let res = node.runtime.block_on(node.unified_payment().send("not a uri", None, None));
+			assert_eq!(res.err(), Some(Error::NotRunning));
+		}
 	}
 
 	#[test]

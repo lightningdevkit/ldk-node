@@ -93,14 +93,14 @@ where
 				Error::LiquidityRequestFailed
 			})?;
 
-		if let Some(max_total_lsp_fee_limit_msat) = max_total_lsp_fee_limit_msat {
-			if min_total_fee_msat > max_total_lsp_fee_limit_msat {
-				log_error!(self.logger,
-					"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our fee limit of {}msat",
-					min_total_fee_msat, max_total_lsp_fee_limit_msat
-				);
-				return Err(Error::LiquidityFeeTooHigh);
-			}
+		let max_total_lsp_fee_limit_msat =
+			max_total_lsp_fee_limit_msat.unwrap_or(amount_msat).min(amount_msat);
+		if min_total_fee_msat > max_total_lsp_fee_limit_msat {
+			log_error!(self.logger,
+				"Failed to request inbound JIT channel as LSP's requested total opening fee of {}msat exceeds our fee limit of {}msat",
+				min_total_fee_msat, max_total_lsp_fee_limit_msat
+			);
+			return Err(Error::LiquidityFeeTooHigh);
 		}
 
 		log_debug!(
@@ -110,6 +110,11 @@ where
 			min_total_fee_msat
 		);
 
+		let lsps2_parameters = LSPS2Parameters {
+			max_total_opening_fee_msat: Some(min_total_fee_msat),
+			max_proportional_opening_fee_ppm_msat: None,
+			min_opening_fee_msat: min_opening_params.min_fee_msat,
+		};
 		let buy_response = self
 			.lsps2_send_buy_request(
 				Some(amount_msat),
@@ -117,11 +122,6 @@ where
 				Some(&cheapest_lsp.node_id),
 			)
 			.await?;
-		let lsps2_parameters = LSPS2Parameters {
-			max_total_opening_fee_msat: Some(min_total_fee_msat),
-			max_proportional_opening_fee_ppm_msat: None,
-		};
-
 		let invoice = self.lsps2_create_jit_invoice(
 			buy_response,
 			Some(amount_msat),
@@ -178,13 +178,14 @@ where
 			min_prop_fee_ppm_msat
 		);
 
-		let buy_response = self
-			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
-			.await?;
 		let lsps2_parameters = LSPS2Parameters {
 			max_total_opening_fee_msat: None,
 			max_proportional_opening_fee_ppm_msat: Some(min_prop_fee_ppm_msat),
+			min_opening_fee_msat: min_opening_params.min_fee_msat,
 		};
+		let buy_response = self
+			.lsps2_send_buy_request(None, min_opening_params, Some(&cheapest_lsp.node_id))
+			.await?;
 		let invoice = self.lsps2_create_jit_invoice(
 			buy_response,
 			None,
@@ -359,7 +360,7 @@ where
 					.channel_manager
 					.create_inbound_payment_for_hash(
 						payment_hash,
-						None,
+						amount_msat,
 						expiry_secs,
 						Some(min_final_cltv_expiry_delta),
 						Some(encoded_payment_metadata),
@@ -373,7 +374,7 @@ where
 			None => self
 				.channel_manager
 				.create_inbound_payment(
-					None,
+					amount_msat,
 					expiry_secs,
 					Some(min_final_cltv_expiry_delta),
 					Some(encoded_payment_metadata),

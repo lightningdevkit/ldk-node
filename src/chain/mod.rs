@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bitcoin::{Script, Txid};
+#[cfg(feature = "chain-bitcoind")]
+use lightning::chain::Listen;
 use lightning::chain::{BlockLocator, Filter};
 
 #[cfg(feature = "chain-bitcoind")]
@@ -35,8 +37,9 @@ use crate::config::ElectrumSyncConfig;
 use crate::config::EsploraSyncConfig;
 use crate::config::{BackgroundSyncConfig, Config, WALLET_SYNC_INTERVAL_MINIMUM_SECS};
 use crate::fee_estimator::OnchainFeeEstimator;
-use crate::logger::{log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{log_debug, log_info, log_trace, LdkLogger, Logger};
 use crate::runtime::Runtime;
+use crate::tx_broadcaster::BroadcastPackage;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
 use crate::{Error, PersistedNodeMetrics};
 
@@ -157,6 +160,66 @@ enum ChainSourceKind {
 	Electrum(ElectrumChainSource),
 	#[cfg(feature = "chain-bitcoind")]
 	Bitcoind(BitcoindChainSource),
+}
+
+#[cfg(feature = "chain-bitcoind")]
+pub(crate) struct ChainListener {
+	pub(crate) onchain_wallet: std::sync::Weak<Wallet>,
+	pub(crate) channel_manager: std::sync::Weak<ChannelManager>,
+	pub(crate) chain_monitor: std::sync::Weak<ChainMonitor>,
+	pub(crate) output_sweeper: std::sync::Weak<Sweeper>,
+}
+
+#[cfg(feature = "chain-bitcoind")]
+impl ChainListener {
+	fn upgrade(
+		&self,
+	) -> Option<(Arc<Wallet>, Arc<ChannelManager>, Arc<ChainMonitor>, Arc<Sweeper>)> {
+		Some((
+			self.onchain_wallet.upgrade()?,
+			self.channel_manager.upgrade()?,
+			self.chain_monitor.upgrade()?,
+			self.output_sweeper.upgrade()?,
+		))
+	}
+}
+
+#[cfg(feature = "chain-bitcoind")]
+impl Listen for ChainListener {
+	fn filtered_block_connected(
+		&self, header: &bitcoin::block::Header,
+		txdata: &lightning::chain::transaction::TransactionData, height: u32,
+	) {
+		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
+			self.upgrade()
+		{
+			onchain_wallet.filtered_block_connected(header, txdata, height);
+			channel_manager.filtered_block_connected(header, txdata, height);
+			chain_monitor.filtered_block_connected(header, txdata, height);
+			output_sweeper.filtered_block_connected(header, txdata, height);
+		}
+	}
+	fn block_connected(&self, block: &bitcoin::Block, height: u32) {
+		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
+			self.upgrade()
+		{
+			onchain_wallet.block_connected(block, height);
+			channel_manager.block_connected(block, height);
+			chain_monitor.block_connected(block, height);
+			output_sweeper.block_connected(block, height);
+		}
+	}
+
+	fn blocks_disconnected(&self, fork_point_block: lightning::chain::BlockLocator) {
+		if let Some((onchain_wallet, channel_manager, chain_monitor, output_sweeper)) =
+			self.upgrade()
+		{
+			onchain_wallet.blocks_disconnected(fork_point_block);
+			channel_manager.blocks_disconnected(fork_point_block);
+			chain_monitor.blocks_disconnected(fork_point_block);
+			output_sweeper.blocks_disconnected(fork_point_block);
+		}
+	}
 }
 
 impl ChainSource {
@@ -306,6 +369,47 @@ impl ChainSource {
 			ChainSourceKind::Electrum { .. } => true,
 			#[cfg(feature = "chain-bitcoind")]
 			ChainSourceKind::Bitcoind { .. } => false,
+		}
+	}
+
+	pub(crate) async fn initialize_wallets(
+		&self, stop_sync_receiver: tokio::sync::watch::Receiver<()>, onchain_wallet: Arc<Wallet>,
+		channel_manager: Arc<ChannelManager>, chain_monitor: Arc<ChainMonitor>,
+		output_sweeper: Arc<Sweeper>, zero_fee_commitments_support_required: bool,
+	) -> Result<(), Error> {
+		// Replay can broadcast claims, so refresh fees and validate the backend before syncing.
+		// TODO: drop 0FC chain source validation when support is ubiquitous.
+		tokio::try_join!(
+			self.update_fee_rate_estimates(),
+			self.validate_zero_fee_commitments_support_if_required(
+				zero_fee_commitments_support_required
+			)
+		)?;
+
+		#[cfg(not(feature = "chain-bitcoind"))]
+		let _ = (stop_sync_receiver, onchain_wallet);
+		match &self.kind {
+			#[cfg(feature = "chain-bitcoind")]
+			ChainSourceKind::Bitcoind(source) => {
+				source
+					.initialize_wallets(
+						stop_sync_receiver,
+						onchain_wallet,
+						channel_manager,
+						chain_monitor,
+						output_sweeper,
+						&self.tx_broadcaster,
+					)
+					.await
+			},
+			#[cfg(feature = "chain-esplora")]
+			ChainSourceKind::Esplora(source) => {
+				source.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper).await
+			},
+			#[cfg(feature = "chain-electrum")]
+			ChainSourceKind::Electrum(source) => {
+				source.sync_lightning_wallet(channel_manager, chain_monitor, output_sweeper).await
+			},
 		}
 	}
 
@@ -562,52 +666,44 @@ impl ChainSource {
 		}
 	}
 
+	/// Hands the package to the configured chain source, parents before their child so a CPFP
+	/// package a chain source submits one transaction at a time is still accepted.
+	async fn broadcast(&self, package: BroadcastPackage) {
+		let package = package.into_sorted_transactions();
+		match &self.kind {
+			#[cfg(feature = "chain-esplora")]
+			ChainSourceKind::Esplora(esplora_chain_source) => {
+				esplora_chain_source.process_transaction_broadcast(package).await
+			},
+			#[cfg(feature = "chain-electrum")]
+			ChainSourceKind::Electrum(electrum_chain_source) => {
+				electrum_chain_source.process_transaction_broadcast(package).await
+			},
+			#[cfg(feature = "chain-bitcoind")]
+			ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
+				bitcoind_chain_source.process_transaction_broadcast(package).await
+			},
+		}
+	}
+
 	pub(crate) async fn continuously_process_broadcast_queue(
 		&self, mut stop_tx_bcast_receiver: tokio::sync::watch::Receiver<()>,
 	) {
-		let mut receiver = self.tx_broadcaster.get_broadcast_queue().await;
 		loop {
-			let tx_bcast_logger = Arc::clone(&self.logger);
-			tokio::select! {
+			let package = tokio::select! {
+				// A stop request is polled first, so a queue that always has a package ready
+				// cannot starve it.
+				biased;
 				_ = stop_tx_bcast_receiver.changed() => {
 					log_debug!(
-						tx_bcast_logger,
+						self.logger,
 						"Stopping broadcasting transactions.",
 					);
 					return;
 				}
-				Some(next_package) = receiver.recv() => {
-					// Classify funding broadcasts into payment records before sending. If
-					// classification fails we skip the broadcast, since broadcasting a tx we
-					// failed to record would leave it on-chain without a payment.
-					let package = match self.tx_broadcaster.classify_package(next_package).await {
-						Ok(package) => package,
-						Err(e) => {
-							log_error!(
-								tx_bcast_logger,
-								"Skipping broadcast: failed to persist payment records: {:?}",
-								e,
-							);
-							continue;
-						},
-					};
-					let package = package.into_sorted_transactions();
-					match &self.kind {
-						#[cfg(feature = "chain-esplora")]
-						ChainSourceKind::Esplora(esplora_chain_source) => {
-							esplora_chain_source.process_transaction_broadcast(package).await
-						},
-						#[cfg(feature = "chain-electrum")]
-						ChainSourceKind::Electrum(electrum_chain_source) => {
-							electrum_chain_source.process_transaction_broadcast(package).await
-						},
-						#[cfg(feature = "chain-bitcoind")]
-						ChainSourceKind::Bitcoind(bitcoind_chain_source) => {
-							bitcoind_chain_source.process_transaction_broadcast(package).await
-						},
-					}
-				}
-			}
+				package = self.tx_broadcaster.next_package() => package,
+			};
+			self.broadcast(package).await;
 		}
 	}
 }

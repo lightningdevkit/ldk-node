@@ -134,6 +134,7 @@ pub struct Liquidity {
 	wallet: Arc<Wallet>,
 	connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
 	liquidity_source: Arc<LiquiditySource<Arc<Logger>>>,
+	is_running: Arc<RwLock<bool>>,
 	logger: Arc<Logger>,
 }
 
@@ -141,9 +142,10 @@ impl Liquidity {
 	pub(crate) fn new(
 		runtime: Arc<Runtime>, wallet: Arc<Wallet>,
 		connection_manager: Arc<ConnectionManager<Arc<Logger>>>,
-		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, logger: Arc<Logger>,
+		liquidity_source: Arc<LiquiditySource<Arc<Logger>>>, is_running: Arc<RwLock<bool>>,
+		logger: Arc<Logger>,
 	) -> Self {
-		Self { runtime, wallet, connection_manager, liquidity_source, logger }
+		Self { runtime, wallet, connection_manager, liquidity_source, is_running, logger }
 	}
 }
 
@@ -159,6 +161,10 @@ impl Liquidity {
 		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 		trust_peer_0conf: bool,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		{
 			let mut lsp_nodes = self.liquidity_source.lsp_nodes.write().expect("lock");
 			if lsp_nodes.iter().any(|n| n.node_id == node_id) {
@@ -212,6 +218,7 @@ impl Liquidity {
 			Arc::clone(&self.wallet),
 			Arc::clone(&self.connection_manager),
 			self.liquidity_source.lsps1_client(),
+			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
 		)
 	}

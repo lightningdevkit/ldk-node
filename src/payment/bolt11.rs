@@ -102,12 +102,14 @@ impl Bolt11Payment {
 	pub(crate) fn receive_inner(
 		&self, amount_msat: Option<u64>, invoice_description: &LdkBolt11InvoiceDescription,
 		expiry_secs: u32, manual_claim_payment_hash: Option<PaymentHash>,
+		min_final_cltv_expiry_delta: Option<u16>,
 	) -> Result<LdkBolt11Invoice, Error> {
 		let invoice_params = Bolt11InvoiceParameters {
 			amount_msats: amount_msat,
 			description: invoice_description.clone(),
 			invoice_expiry_delta_secs: Some(expiry_secs),
 			payment_hash: manual_claim_payment_hash,
+			min_final_cltv_expiry_delta,
 			..Default::default()
 		};
 
@@ -186,6 +188,7 @@ mod tests {
 		let lsps2_parameters = LSPS2Parameters {
 			max_total_opening_fee_msat: Some(42_000),
 			max_proportional_opening_fee_ppm_msat: Some(17_000),
+			min_opening_fee_msat: 1_000,
 		};
 		let metadata = PaymentMetadata { lsps2_parameters: Some(lsps2_parameters) };
 
@@ -202,10 +205,6 @@ impl Bolt11Payment {
 		route_parameters: Option<RouteParametersConfig>,
 		declared_total_mpp_value_msat_override: Option<u64>, invalid_amount_log: &'static str,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().expect("lock") {
-			return Err(Error::NotRunning);
-		}
-
 		let payment_hash = invoice.payment_hash();
 		let payment_id = PaymentId(invoice.payment_hash().0);
 		if let Some(payment) = self.runtime.block_on(self.payment_store.get(&payment_id))? {
@@ -412,17 +411,24 @@ impl Bolt11Payment {
 	/// This should be called in response to a [`PaymentClaimable`] event as soon as the preimage is
 	/// available.
 	///
-	/// Will check that the payment is known, and that the given preimage and claimable amount
-	/// match our expectations before attempting to claim the payment, and will return an error
-	/// otherwise.
+	/// For every payment, the caller must verify that the event's `claimable_amount_msat` meets
+	/// their expectations before calling, including payments for invoices created before upgrading.
+	/// Calling this method approves claiming the payment reported by the event.
+	///
+	/// Will check that the payment is known and that the given preimage matches its payment hash
+	/// before attempting to claim the payment, and will return an error otherwise.
 	///
 	/// When claiming the payment has succeeded, a [`PaymentReceived`] event will be emitted.
 	///
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	/// [`PaymentReceived`]: crate::Event::PaymentReceived
 	pub fn claim_for_id(
-		&self, payment_id: PaymentId, claimable_amount_msat: u64, preimage: PaymentPreimage,
+		&self, payment_id: PaymentId, preimage: PaymentPreimage,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let details =
 			self.runtime.block_on(self.payment_store.get(&payment_id))?.ok_or_else(|| {
 				log_error!(
@@ -455,25 +461,6 @@ impl Bolt11Payment {
 			return Err(Error::InvalidPaymentPreimage);
 		}
 
-		// For payments requested via `receive*_via_jit_channel_for_hash()`
-		// `skimmed_fee_msat` held by LSP must be taken into account.
-		let skimmed_fee_msat = match details.kind {
-			PaymentKind::Bolt11 {
-				counterparty_skimmed_fee_msat: Some(skimmed_fee_msat), ..
-			} => skimmed_fee_msat,
-			_ => 0,
-		};
-		if let Some(invoice_amount_msat) = details.amount_msat {
-			if claimable_amount_msat < invoice_amount_msat.saturating_sub(skimmed_fee_msat) {
-				log_error!(
-					self.logger,
-					"Failed to manually claim payment {} as the claimable amount is less than expected",
-					payment_id
-				);
-				return Err(Error::InvalidAmount);
-			}
-		}
-
 		self.channel_manager.claim_funds(preimage);
 		Ok(())
 	}
@@ -489,6 +476,10 @@ impl Bolt11Payment {
 	///
 	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
 	pub fn fail_for_id(&self, payment_id: PaymentId) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let details =
 			self.runtime.block_on(self.payment_store.get(&payment_id))?.ok_or_else(|| {
 				log_error!(
@@ -549,7 +540,8 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(Some(amount_msat), &description, expiry_secs, None)?;
+		let invoice =
+			self.receive_inner(Some(amount_msat), &description, expiry_secs, None, None)?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -578,8 +570,39 @@ impl Bolt11Payment {
 		payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice =
-			self.receive_inner(Some(amount_msat), &description, expiry_secs, Some(payment_hash))?;
+		let invoice = self.receive_inner(
+			Some(amount_msat),
+			&description,
+			expiry_secs,
+			Some(payment_hash),
+			None,
+		)?;
+		Ok(maybe_wrap(invoice))
+	}
+
+	/// Same as [`receive_for_hash`], but requires the payment's final HTLC to leave at least
+	/// `min_final_cltv_expiry_delta` blocks until it expires, giving the user that much more time
+	/// to obtain the preimage.
+	///
+	/// The invoice requests three blocks more than the given value, to allow for blocks being
+	/// connected while the payment is in flight, and an HTLC arriving with fewer than
+	/// `min_final_cltv_expiry_delta` blocks left is failed back without a [`PaymentClaimable`]
+	/// event.
+	///
+	/// [`receive_for_hash`]: Self::receive_for_hash
+	/// [`PaymentClaimable`]: crate::Event::PaymentClaimable
+	pub fn receive_for_hash_with_min_final_cltv_expiry_delta(
+		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
+		payment_hash: PaymentHash, min_final_cltv_expiry_delta: u16,
+	) -> Result<Bolt11Invoice, Error> {
+		let description = maybe_try_convert_enum(description)?;
+		let invoice = self.receive_inner(
+			Some(amount_msat),
+			&description,
+			expiry_secs,
+			Some(payment_hash),
+			Some(min_final_cltv_expiry_delta),
+		)?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -591,7 +614,7 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(None, &description, expiry_secs, None)?;
+		let invoice = self.receive_inner(None, &description, expiry_secs, None, None)?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -619,7 +642,8 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
 		let description = maybe_try_convert_enum(description)?;
-		let invoice = self.receive_inner(None, &description, expiry_secs, Some(payment_hash))?;
+		let invoice =
+			self.receive_inner(None, &description, expiry_secs, Some(payment_hash), None)?;
 		Ok(maybe_wrap(invoice))
 	}
 
@@ -629,14 +653,17 @@ impl Bolt11Payment {
 	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
 	/// to us, supplying just-in-time inbound liquidity.
 	///
-	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
-	/// channel to us. We'll use its cheapest offer otherwise.
+	/// We choose the cheapest offer and return [`Error::LiquidityFeeTooHigh`] if its opening fee
+	/// exceeds `amount_msat` or the optional `max_total_lsp_fee_limit_msat`.
 	///
 	/// [LSPS2]: https://github.com/BitcoinAndLightningLayerSpecs/lsp/blob/main/LSPS2/README.md
 	pub fn receive_via_jit_channel(
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			Some(amount_msat),
@@ -655,8 +682,8 @@ impl Bolt11Payment {
 	/// When the returned invoice is paid, the configured [LSPS2]-compliant LSP will open a channel
 	/// to us, supplying just-in-time inbound liquidity.
 	///
-	/// If set, `max_total_lsp_fee_limit_msat` will limit how much fee we allow the LSP to take for opening the
-	/// channel to us. We'll use its cheapest offer otherwise.
+	/// We choose the cheapest offer and return [`Error::LiquidityFeeTooHigh`] if its opening fee
+	/// exceeds `amount_msat` or the optional `max_total_lsp_fee_limit_msat`.
 	///
 	/// The inbound payment will only be accepted if
 	/// [`Config::manually_handle_unknown_bolt11_payments`] is enabled. We will then emit a
@@ -682,6 +709,9 @@ impl Bolt11Payment {
 		&self, amount_msat: u64, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_total_lsp_fee_limit_msat: Option<u64>, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			Some(amount_msat),
@@ -709,6 +739,9 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>,
 	) -> Result<Bolt11Invoice, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			None,
@@ -755,6 +788,9 @@ impl Bolt11Payment {
 		&self, description: &Bolt11InvoiceDescription, expiry_secs: u32,
 		max_proportional_lsp_fee_limit_ppm_msat: Option<u64>, payment_hash: PaymentHash,
 	) -> Result<Bolt11Invoice, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
 		let description = maybe_try_convert_enum(description)?;
 		let invoice = self.receive_via_jit_channel_inner(
 			None,

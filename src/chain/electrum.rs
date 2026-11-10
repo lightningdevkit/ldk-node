@@ -44,6 +44,16 @@ use crate::PersistedNodeMetrics;
 
 const BDK_ELECTRUM_CLIENT_BATCH_SIZE: usize = 5;
 const ELECTRUM_CLIENT_NUM_RETRIES: u8 = 3;
+/// The Electrum protocol version that introduced `blockchain.transaction.broadcast_package`.
+const BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION: (u32, u32) = (1, 6);
+
+/// Parses an Electrum protocol version string of the form `major.minor[.patch]`.
+fn parse_protocol_version(version: &str) -> Option<(u32, u32)> {
+	let mut parts = version.trim().split('.');
+	let major = parts.next()?.parse::<u32>().ok()?;
+	let minor = parts.next().map_or(Some(0), |s| s.parse::<u32>().ok())?;
+	Some((major, minor))
+}
 
 pub(super) struct ElectrumChainSource {
 	server_url: String,
@@ -333,28 +343,33 @@ impl ElectrumChainSource {
 			return Err(Error::ConnectionFailed);
 		};
 
-		// TODO: Use `protocol_version` API once shipped in
-		// https://github.com/bitcoindevkit/rust-electrum-client/pull/213.
+		// The `blockchain.transaction.broadcast_package` method was introduced in Electrum protocol
+		// v1.6, so we check the protocol version negotiated during connection setup.
 		//
 		// This could still accept an Electrum server running against Bitcoin Core v26
 		// through v28, which does not relay ephemeral dust.
 		let spawn_fut = electrum_client.runtime.spawn_blocking({
 			let electrum_client = Arc::clone(&electrum_client.electrum_client);
-			move || electrum_client.transaction_broadcast_package(&super::dummy_package())
+			move || electrum_client.protocol_version()
 		});
 		let timeout_fut = tokio::time::timeout(
-			Duration::from_secs(self.sync_config.timeouts_config.tx_broadcast_timeout_secs),
+			Duration::from_secs(self.sync_config.timeouts_config.per_request_timeout_secs as u64),
 			spawn_fut,
 		);
 
 		match timeout_fut.await {
-			Ok(Ok(Ok(_))) => Ok(()),
-			Ok(Ok(Err(
-				e @ (electrum_client::Error::Protocol(_)
-				| electrum_client::Error::AllAttemptsErrored(_)),
-			))) => {
-				log_error!(self.logger, "Electrum server does not support submitpackage: {:?}", e);
-				Err(Error::ChainSourceNotSupported)
+			Ok(Ok(Ok(version))) => match parse_protocol_version(&version) {
+				Some(v) if v >= BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION => Ok(()),
+				_ => {
+					log_error!(
+						self.logger,
+						"Electrum server does not support submitpackage: negotiated protocol version {} is below v{}.{}",
+						version,
+						BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION.0,
+						BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION.1,
+					);
+					Err(Error::ChainSourceNotSupported)
+				},
 			},
 			e => {
 				log_error!(
@@ -919,13 +934,99 @@ impl Filter for ElectrumRuntimeClient {
 
 #[cfg(test)]
 mod tests {
+	use std::io::{BufRead, BufReader, Write};
+	use std::net::{Shutdown, TcpListener};
 	use std::sync::atomic::{AtomicUsize, Ordering};
-	use std::sync::mpsc;
+	use std::sync::{mpsc, Barrier};
 	use std::thread;
 
 	use bitcoin::blockdata::constants::genesis_block;
 
 	use super::*;
+
+	#[test]
+	fn clean_eof_wakes_concurrent_electrum_requests() {
+		const REQUEST_COUNT: usize = 8;
+		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+		let server_address = listener.local_addr().unwrap();
+		let (client_sender, client_receiver) = mpsc::channel::<Arc<ElectrumClient>>();
+		let server = thread::spawn(move || {
+			let (stream, _) = listener.accept().unwrap();
+			let mut reader = BufReader::new(stream);
+			let mut version_request = String::new();
+			assert!(reader.read_line(&mut version_request).unwrap() > 0);
+			let version_request: serde_json::Value =
+				serde_json::from_str(&version_request).unwrap();
+			let version_response = serde_json::json!({
+				"jsonrpc": "2.0",
+				"id": version_request["id"],
+				"result": ["test-server", "1.4"],
+			});
+			writeln!(reader.get_mut(), "{version_response}").unwrap();
+			reader.get_mut().flush().unwrap();
+			let client = client_receiver.recv().unwrap();
+
+			// The client's reader thread holds the shared stream while it blocks on a read, so
+			// other requests can't be written meanwhile. Send notifications to repeatedly
+			// unblock it until every request was fully written and flushed (excluding the
+			// version handshake).
+			let nudge = serde_json::json!({"jsonrpc": "2.0", "method": "test.nudge", "params": []});
+			let deadline = std::time::Instant::now() + Duration::from_secs(30);
+			while client.calls_made().unwrap() - 1 < REQUEST_COUNT {
+				assert!(std::time::Instant::now() < deadline, "requests weren't all sent");
+				writeln!(reader.get_mut(), "{nudge}").unwrap();
+				thread::sleep(Duration::from_millis(10));
+			}
+			drop(client);
+			// Give the requests time to start waiting for their responses.
+			thread::sleep(Duration::from_millis(50));
+
+			// Only shut down our sending side so the client observes a clean EOF. Closing the
+			// entire socket with unread requests could send a TCP reset instead, which older
+			// clients already handled.
+			reader.get_ref().shutdown(Shutdown::Write).unwrap();
+
+			// Keep reading until the client hangs up so unread requests don't trigger a reset.
+			reader.get_mut().set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+			let mut remaining = String::new();
+			while matches!(reader.read_line(&mut remaining), Ok(n) if n > 0) {
+				remaining.clear();
+			}
+		});
+
+		let config = ElectrumConfigBuilder::new().retry(0).build();
+		let client = Arc::new(
+			ElectrumClient::from_config(&format!("tcp://{server_address}"), config).unwrap(),
+		);
+		client_sender.send(Arc::clone(&client)).unwrap();
+		let start = Arc::new(Barrier::new(REQUEST_COUNT + 1));
+		let (finished_sender, finished_receiver) = mpsc::channel();
+		let mut requests = Vec::new();
+		for _ in 0..REQUEST_COUNT {
+			let client = Arc::clone(&client);
+			let start = Arc::clone(&start);
+			let finished_sender = finished_sender.clone();
+			requests.push(thread::spawn(move || {
+				start.wait();
+				let result = client.raw_call("server.ping", Vec::<electrum_client::Param>::new());
+				finished_sender.send(result.is_err()).unwrap();
+			}));
+		}
+		start.wait();
+
+		for _ in 0..REQUEST_COUNT {
+			let failed_as_expected = finished_receiver
+				.recv_timeout(Duration::from_secs(60))
+				.expect("clean EOF must wake every concurrent Electrum request");
+			assert!(failed_as_expected);
+		}
+		for request in requests {
+			request.join().unwrap();
+		}
+		// Hang up so the server stops reading.
+		drop(client);
+		server.join().unwrap();
+	}
 
 	struct RecordingConfirm {
 		calls: AtomicUsize,
@@ -1052,5 +1153,18 @@ mod tests {
 		confirm.best_block_updated(&block.header, 0);
 		assert_eq!(blocking.calls.load(Ordering::Acquire), 1);
 		assert_eq!(trailing.calls.load(Ordering::Acquire), 1);
+	}
+
+	#[test]
+	fn protocol_version_parsing() {
+		assert_eq!(parse_protocol_version("1.6"), Some((1, 6)));
+		assert_eq!(parse_protocol_version("1.4.2"), Some((1, 4)));
+		assert_eq!(parse_protocol_version("2"), Some((2, 0)));
+		assert_eq!(parse_protocol_version("garbage"), None);
+		assert_eq!(parse_protocol_version("1.x"), None);
+
+		assert!(Some((1, 6)) >= Some(BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION));
+		assert!(Some((2, 0)) >= Some(BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION));
+		assert!(Some((1, 5)) < Some(BROADCAST_PACKAGE_MIN_PROTOCOL_VERSION));
 	}
 }

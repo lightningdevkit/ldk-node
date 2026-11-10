@@ -70,4 +70,4 @@ jobs:
         env:
           TEST_POSTGRES_URL: "host=localhost user=postgres password=postgres"
         run: |
-          RUSTFLAGS="--cfg no_download --cfg cycle_tests" cargo test --features storage-postgres --test integration_tests_postgres
+          RUSTFLAGS="--cfg cycle_tests" cargo test --features storage-postgres --test integration_tests_postgres
