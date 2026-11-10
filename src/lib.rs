@@ -1590,7 +1590,9 @@ impl Node {
 	/// opening the channel.
 	///
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
-	/// retrieve a reasonable estimate from the configured chain source.
+	/// retrieve a reasonable estimate from the configured chain source. As the funding
+	/// transaction's fee is paid from the same on-chain funds, `channel_amount_sats` can be at most
+	/// what [`Node::open_channel_with_all`] would fund at that fee rate.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
@@ -1636,7 +1638,9 @@ impl Node {
 	/// opening the channel.
 	///
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
-	/// retrieve a reasonable estimate from the configured chain source.
+	/// retrieve a reasonable estimate from the configured chain source. As the funding
+	/// transaction's fee is paid from the same on-chain funds, `channel_amount_sats` can be at most
+	/// what [`Node::open_announced_channel_with_all`] would fund at that fee rate.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///
@@ -1770,7 +1774,9 @@ impl Node {
 	/// opening the channel.
 	///
 	/// If `fee_rate` is set it will be used for the funding transaction. Otherwise we'll
-	/// retrieve a reasonable estimate from the configured chain source.
+	/// retrieve a reasonable estimate from the configured chain source. As the funding
+	/// transaction's fee is paid from the same on-chain funds, `channel_amount_sats` can be at most
+	/// what [`Node::open_0reserve_channel_with_all`] would fund at that fee rate.
 	///
 	/// Returns a [`UserChannelId`] allowing to locally keep track of the channel.
 	///

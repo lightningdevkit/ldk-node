@@ -7978,3 +7978,64 @@ async fn open_channel_with_fee_rate_override() {
 	node_c.stop().unwrap();
 	node_d.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn open_channel_fee_does_not_spend_anchor_reserve() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	// Node B needs funds of its own to retain an anchor reserve, otherwise it rejects the anchor
+	// channel and we fall back to a channel type without one.
+	let premine_amount_sat = 1_000_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![
+			node_a.onchain_payment().new_address().unwrap(),
+			node_b.onchain_payment().new_address().unwrap(),
+		],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+
+	// The channel amount and the anchor reserve fit in our funds, but at 100 sat/vB the funding
+	// transaction's fee of about 15,000 sats would have to come out of the reserve.
+	let anchor_reserve_sat = 25_000;
+	let channel_amount_sat = premine_amount_sat - anchor_reserve_sat - 5_000;
+	let fee_rate = bitcoin::FeeRate::from_sat_per_vb(100).unwrap();
+	let address_b = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	assert_eq!(
+		Err(NodeError::InsufficientFunds),
+		node_a.open_channel(
+			node_b.node_id(),
+			address_b.clone(),
+			channel_amount_sat,
+			None,
+			Some(fee_rate.into()),
+			None,
+		)
+	);
+	assert!(node_a.list_channels().is_empty());
+
+	// At the ~1 sat/vB the estimator yields on regtest, the fee fits next to the reserve.
+	node_a.open_channel(node_b.node_id(), address_b, channel_amount_sat, None, None, None).unwrap();
+	let funding_txo = expect_channel_pending_event!(node_a, node_b.node_id());
+	expect_channel_pending_event!(node_b, node_a.node_id());
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+
+	node_a.sync_wallets().unwrap();
+	let balances = node_a.list_balances();
+	assert!(
+		balances.total_onchain_balance_sats >= anchor_reserve_sat,
+		"the funding transaction left {}sats on-chain, less than the {}sats anchor reserve",
+		balances.total_onchain_balance_sats,
+		anchor_reserve_sat,
+	);
+	assert_eq!(balances.total_anchor_channels_reserve_sats, anchor_reserve_sat);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
