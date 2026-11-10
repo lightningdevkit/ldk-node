@@ -156,7 +156,9 @@ impl Liquidity {
 	/// The given `token` will be used by the LSP to authenticate the user.
 	/// `trust_peer_0conf` controls whether the node will accept 0-confirmation channels opened by this
 	/// LSP. Note this supersedes [`Config::trusted_peers_0conf`] for this peer.
-	/// Duplicate `node_id`s are ignored.
+	/// Re-adding an existing `node_id` updates its address/token/0conf settings in place. A live
+	/// peer is left connected; the new address is used on the next start (same restart-only
+	/// rediscovery as #956). New `node_id`s still connect and discover immediately.
 	pub fn add_liquidity_source(
 		&self, node_id: PublicKey, address: SocketAddress, token: Option<String>,
 		trust_peer_0conf: bool,
@@ -167,11 +169,24 @@ impl Liquidity {
 
 		{
 			let mut lsp_nodes = self.liquidity_source.lsp_nodes.write().expect("lock");
-			if lsp_nodes.iter().any(|n| n.node_id == node_id) {
-				log_info!(self.logger, "LSP node {} already added, skipping.", node_id);
+			if let Some(existing) = lsp_nodes.iter_mut().find(|n| n.node_id == node_id) {
+				let changed = existing.address != address
+					|| existing.token != token
+					|| existing.trust_peer_0conf != trust_peer_0conf;
+				if !changed {
+					log_info!(self.logger, "LSP node {} already added, skipping.", node_id);
+					return Ok(());
+				}
+				log_info!(
+					self.logger,
+					"Updating existing LSP node {} config in place; reconnect on next start.",
+					node_id
+				);
+				existing.address = address;
+				existing.token = token;
+				existing.trust_peer_0conf = trust_peer_0conf;
 				return Ok(());
 			}
-
 			lsp_nodes.push(LspNode {
 				node_id,
 				address: address.clone(),
