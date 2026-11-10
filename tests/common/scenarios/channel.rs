@@ -25,7 +25,7 @@ pub(crate) async fn open_channel_to_external<E: ElectrumApi>(
 	let ext_node_id = peer.get_node_id().await.unwrap();
 	let ext_addr = peer.get_listening_address().await.unwrap();
 
-	node.open_channel(ext_node_id, ext_addr, funding_amount_sat, push_msat, None).unwrap();
+	node.open_channel(ext_node_id, ext_addr, funding_amount_sat, push_msat, None, None).unwrap();
 
 	let funding_txo = expect_channel_pending_event!(node, ext_node_id);
 	super::super::wait_for_tx(electrs, funding_txo.txid).await;

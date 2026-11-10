@@ -445,10 +445,11 @@ where
 				};
 
 				// Fail if we have insufficient onchain funds available.
-				let over_provisioning_msat = (amt_to_forward_msat
-					* service_config.channel_over_provisioning_ppm as u64)
+				let over_provisioning_msat = amt_to_forward_msat
+					.saturating_mul(service_config.channel_over_provisioning_ppm as u64)
 					/ 1_000_000;
-				let channel_amount_sats = (amt_to_forward_msat + over_provisioning_msat) / 1000;
+				let channel_amount_sats =
+					amt_to_forward_msat.saturating_add(over_provisioning_msat) / 1000;
 				let cur_anchor_reserve_sats =
 					total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
 				let spendable_amount_sats =
@@ -460,7 +461,8 @@ where
 					&their_network_key,
 					anchor_channel,
 				);
-				let required_funds_sats = channel_amount_sats + additional_reserve_required;
+				let required_funds_sats =
+					channel_amount_sats.saturating_add(additional_reserve_required);
 				if spendable_amount_sats < required_funds_sats {
 					log_error!(self.logger,
 						"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",

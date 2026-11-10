@@ -45,7 +45,7 @@ fn main() {
 
 	let node_id = PublicKey::from_str("NODE_ID").unwrap();
 	let node_addr = SocketAddress::from_str("IP_ADDR:PORT").unwrap();
-	node.open_channel(node_id, node_addr, 10000, None, None).unwrap();
+	node.open_channel(node_id, node_addr, 10000, None, None, None).unwrap();
 
 	let event = node.wait_next_event();
 	println!("EVENT: {:?}", event);
@@ -132,6 +132,20 @@ LDK Node itself is written in [Rust][rust] and may therefore be natively added a
 
 ## MSRV
 The Minimum Supported Rust Version (MSRV) is currently 1.85.0.
+
+## Running Tests
+
+Rust integration tests and benchmarks require Bitcoin Core and Esplora-enabled `electrs` binaries.
+On Linux and macOS, run the following from the repository root in Bash:
+
+```bash
+source ./scripts/download_bitcoind_electrs.sh
+RUSTFLAGS="--cfg tokio_unstable" cargo test
+```
+
+The script requires `curl`, `unzip`, `tar`, and `shasum`. It verifies the downloads and exports
+`BITCOIND_EXE` and `ELECTRS_EXE` for the current shell. Alternatively, set these variables to
+compatible binaries you already have. Cargo's automatic binary downloads are disabled.
 
 [api_docs]: https://docs.rs/ldk-node/*/ldk_node/
 [api_docs_node]: https://docs.rs/ldk-node/*/ldk_node/struct.Node.html

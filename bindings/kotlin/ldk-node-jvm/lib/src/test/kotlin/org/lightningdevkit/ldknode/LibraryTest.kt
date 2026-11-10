@@ -253,7 +253,7 @@ class LibraryTest {
         assertEquals(100000uL, totalBalance1)
         assertEquals(100000uL, totalBalance2)
 
-        node1.openChannel(nodeId2, listenAddress2, 50000u, null, null)
+        node1.openChannel(nodeId2, listenAddress2, 50000u, null, null, null)
 
         val channelPendingEvent1 = node1.waitNextEvent()
         println("Got event: $channelPendingEvent1")

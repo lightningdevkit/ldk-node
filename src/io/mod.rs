@@ -37,6 +37,10 @@ pub(crate) const PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "pending_payments";
 pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
+/// The channel transaction provenance facts will be persisted under this prefix.
+pub(crate) const CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE: &str = "channel_tx_facts";
+pub(crate) const CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
+
 /// Forwarded payment information is persisted under this primary namespace.
 pub(crate) const FORWARDED_PAYMENT_PERSISTENCE_PRIMARY_NAMESPACE: &str = "forwarded_payments";
 pub(crate) const FORWARDED_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "details";

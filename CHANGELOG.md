@@ -1,6 +1,13 @@
 # Pending
 
 ## Compatibility Notes
+- Inbound BOLT11 payments now report amounts net of any withheld LSP fee as soon as they
+  become claimable, consistently with completed payments and BOLT12. Pending invoices from
+  v0.7 and earlier retain invoice-based amounts, minus any recorded fee, until another payment
+  event supplies the actual amount. Their historical serialization format is preserved.
+- `Bolt11Payment::claim_for_id` no longer takes a `claimable_amount_msat` argument. Applications
+  must check the amount reported in `PaymentClaimable` against their expectations before every
+  manual claim, including payments for invoices created before upgrading.
 - The language bindings now expose `Mnemonic` as an object instead of a string alias. Existing
   mnemonic phrases must be passed through its fallible constructor, which returns
   `NodeError::InvalidMnemonic` for invalid input; generated mnemonics can be converted back to a
@@ -30,6 +37,11 @@
   `Event::PaymentClaimable`.
 
 ## Feature and API updates
+- `Node::splice_out_max` withdraws the maximum available channel balance to an on-chain address.
+- All `Node::open_channel` variants now take an optional `FeeRate` (after
+  `push_to_counterparty_msat`) that, when set, is used for the channel's funding transaction instead of the internal fee estimation. For the
+  `_with_all` variants it also determines the rate at which the maximum funding amount is
+  computed. When unset, behavior is unchanged.
 - Language-binding `Mnemonic` objects can be generated or constructed from entropy and expose
   their words, word indices, word count, entropy, checksum, and passphrase-derived seed.
 - `Node::list_payments` is now paginated: it takes an optional `PageToken` and returns a
@@ -57,8 +69,21 @@
   disclosed. The method is stateless: the payment id, preimage, and invoice are taken from
   `Event::PaymentSuccessful` and nothing is persisted. Payments settled via a static invoice,
   i.e., async payments, don't support payer proofs. (#1045)
+- `Node::splice_in`, `Node::splice_in_with_all`, and `Node::splice_out` now take an optional
+  `min_fee_rate`. If set, it is used as the minimum feerate for our contribution to the splice
+  transaction instead of a feerate estimate retrieved from the configured chain source. For
+  `splice_in_with_all`, the amount spliced in is determined at `min_fee_rate`, or at the estimate
+  if unset.
+  `Node::bump_channel_funding_fee` takes the same optional `min_fee_rate` for the replacement
+  transaction.
 
 ## Bug Fixes and Improvements
+- `Node::bump_channel_funding_fee` can now fee-bump a splice made with
+  `Node::splice_in_with_all` without spending the anchor reserve or failing for lack of a change
+  output. The splice now spends the wallet's confirmed UTXOs in full, so a bump is paid by adding
+  less to the channel, and any required anchor reserve is kept as a fixed output back to the
+  wallet. A bump past the splice's maximum feerate rebuilds it from all confirmed funds,
+  including coins confirmed since. (#1168)
 - Building a fresh node against a Bitcoin Core RPC or REST chain source that fails to return the
   current chain tip now aborts with a new `BuildError::ChainTipFetchFailed` variant instead of
   silently pinning the wallet birthday to genesis, which would have forced a full-history rescan

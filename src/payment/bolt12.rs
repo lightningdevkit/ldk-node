@@ -127,10 +127,6 @@ impl Bolt12Payment {
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>, hrn: Option<HumanReadableName>,
 	) -> Result<PaymentId, Error> {
-		if !*self.is_running.read().expect("lock") {
-			return Err(Error::NotRunning);
-		}
-
 		let offer = maybe_deref(offer);
 
 		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
@@ -209,6 +205,9 @@ impl Bolt12Payment {
 				log_error!(self.logger, "Failed to send payment: {:?}", e);
 				match e {
 					Bolt12SemanticError::DuplicatePaymentId => Err(Error::DuplicatePayment),
+					Bolt12SemanticError::InvalidQuantity
+					| Bolt12SemanticError::MissingQuantity
+					| Bolt12SemanticError::UnexpectedQuantity => Err(Error::InvalidQuantity),
 					_ => {
 						let kind = PaymentKind::Bolt12Offer {
 							hash: None,
@@ -325,6 +324,19 @@ impl Bolt12Payment {
 			},
 		};
 
+		let payment_amount_msat = match quantity {
+			Some(quantity) => offer_amount_msat.checked_mul(quantity).ok_or_else(|| {
+				log_error!(
+					self.logger,
+					"Failed to send payment as the total for {} items of {}msat overflows.",
+					quantity,
+					offer_amount_msat
+				);
+				Error::InvalidAmount
+			})?,
+			None => offer_amount_msat,
+		};
+
 		let params = OptionalOfferPaymentParams {
 			payer_note: payer_note.clone(),
 			retry_strategy,
@@ -343,7 +355,7 @@ impl Bolt12Payment {
 				log_info!(
 					self.logger,
 					"Initiated sending {}msat to {:?}",
-					offer_amount_msat,
+					payment_amount_msat,
 					payee_pubkey
 				);
 
@@ -358,7 +370,7 @@ impl Bolt12Payment {
 				let payment = PaymentDetails::new(
 					payment_id,
 					kind,
-					Some(offer_amount_msat),
+					Some(payment_amount_msat),
 					None,
 					PaymentDirection::Outbound,
 					PaymentStatus::Pending,
@@ -371,6 +383,9 @@ impl Bolt12Payment {
 				log_error!(self.logger, "Failed to send invoice request: {:?}", e);
 				match e {
 					Bolt12SemanticError::DuplicatePaymentId => Err(Error::DuplicatePayment),
+					Bolt12SemanticError::InvalidQuantity
+					| Bolt12SemanticError::MissingQuantity
+					| Bolt12SemanticError::UnexpectedQuantity => Err(Error::InvalidQuantity),
 					_ => {
 						let kind = PaymentKind::Bolt12Offer {
 							hash: None,
@@ -383,7 +398,7 @@ impl Bolt12Payment {
 						let payment = PaymentDetails::new(
 							payment_id,
 							kind,
-							Some(offer_amount_msat),
+							Some(payment_amount_msat),
 							None,
 							PaymentDirection::Outbound,
 							PaymentStatus::Failed,
@@ -412,6 +427,10 @@ impl Bolt12Payment {
 		&self, offer: &Offer, amount_msat: u64, quantity: Option<u64>, payer_note: Option<String>,
 		route_parameters: Option<RouteParametersConfig>,
 	) -> Result<PaymentId, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let payment_id = self.send_using_amount_inner(
 			offer,
 			amount_msat,
@@ -569,6 +588,10 @@ impl Bolt12Payment {
 		&self, amount_msat: u64, expiry_secs: u32, quantity: Option<u64>,
 		payer_note: Option<String>, route_parameters: Option<RouteParametersConfig>,
 	) -> Result<Refund, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let payment_id = PaymentId(self.keys_manager.get_secure_random_bytes());
 
 		let absolute_expiry = (SystemTime::now() + Duration::from_secs(expiry_secs as u64))
@@ -640,6 +663,10 @@ impl Bolt12Payment {
 	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
 	/// [`Offer`]: lightning::offers::offer::Offer
 	pub fn receive_async(&self) -> Result<Offer, Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		self.channel_manager
 			.get_async_receive_offer()
 			.map(maybe_wrap)
@@ -659,6 +686,10 @@ impl Bolt12Payment {
 	pub fn set_paths_to_static_invoice_server(
 		&self, paths: Vec<BlindedMessagePath>,
 	) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		self.channel_manager
 			.set_paths_to_static_invoice_server(paths)
 			.or(Err(Error::InvalidBlindedPaths))
@@ -689,6 +720,10 @@ impl Bolt12Payment {
 	/// [`Offer`]: lightning::offers::offer::Offer
 	/// [`StaticInvoice`]: lightning::offers::static_invoice::StaticInvoice
 	pub fn set_paths_to_static_invoice_server(&self, paths: Vec<u8>) -> Result<(), Error> {
+		if !*self.is_running.read().expect("lock") {
+			return Err(Error::NotRunning);
+		}
+
 		let decoded_paths = <Vec<BlindedMessagePath> as Readable>::read(&mut &paths[..])
 			.or(Err(Error::InvalidBlindedPaths))?;
 

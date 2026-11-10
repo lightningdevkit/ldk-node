@@ -345,19 +345,27 @@ macro_rules! expect_payment_successful_event {
 pub(crate) use expect_payment_successful_event;
 
 pub(crate) fn setup_bitcoind_and_electrsd() -> (BitcoinD, ElectrsD) {
-	let bitcoind_exe =
-		env::var("BITCOIND_EXE").ok().or_else(|| corepc_node::downloaded_exe_path().ok()).expect(
-			"you need to provide an env var BITCOIND_EXE or specify a bitcoind version feature",
-		);
+	setup_bitcoind_and_electrsd_with_args(&[])
+}
+
+/// Like [`setup_bitcoind_and_electrsd`], but with a lower `incrementalrelayfee` so that LDK's
+/// minimum RBF feerate bump of 25 sat/kwu (0.1 sat/vB) satisfies BIP125's absolute fee increase
+/// requirement when replacing a splice transaction.
+pub(crate) fn setup_bitcoind_and_electrsd_for_splice_rbf() -> (BitcoinD, ElectrsD) {
+	setup_bitcoind_and_electrsd_with_args(&["-incrementalrelayfee=0.00000100"])
+}
+
+fn setup_bitcoind_and_electrsd_with_args(bitcoind_args: &[&'static str]) -> (BitcoinD, ElectrsD) {
+	let bitcoind_exe = env::var("BITCOIND_EXE")
+		.expect("set BITCOIND_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
 	let mut bitcoind_conf = corepc_node::Conf::default();
 	bitcoind_conf.network = "regtest";
 	bitcoind_conf.args.push("-rest");
+	bitcoind_conf.args.extend_from_slice(bitcoind_args);
 	let bitcoind = BitcoinD::with_conf(bitcoind_exe, &bitcoind_conf).unwrap();
 
 	let electrs_exe = env::var("ELECTRS_EXE")
-		.ok()
-		.or_else(electrsd::downloaded_exe_path)
-		.expect("you need to provide env var ELECTRS_EXE or specify an electrsd version feature");
+		.expect("set ELECTRS_EXE or source ./scripts/download_bitcoind_electrs.sh before testing");
 	let mut electrsd_conf = electrsd::Conf::default();
 	electrsd_conf.http_enabled = true;
 	electrsd_conf.network = "regtest";
@@ -836,26 +844,7 @@ pub(crate) fn setup_two_nodes_with_store(
 }
 
 pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> TestNode {
-	setup_builder!(builder, config.node_config);
-	configure_chain_source(chain_source, &mut builder, &config);
-
-	match &config.log_writer {
-		TestLogWriter::FileWriter => {
-			builder.set_filesystem_logger(None, None);
-		},
-		TestLogWriter::LogFacade => {
-			builder.set_log_facade_logger();
-		},
-		TestLogWriter::Custom(custom_log_writer) => {
-			builder.set_custom_logger(Arc::clone(custom_log_writer));
-		},
-	}
-
-	builder.set_async_payments_role(config.async_payments_role).unwrap();
-
-	if let Some(probing) = config.probing {
-		builder.set_probing_config(probing.into());
-	}
+	let builder = configured_builder(chain_source, &config);
 
 	let node = match config.store_type {
 		TestStoreType::TestSyncStore => {
@@ -870,6 +859,45 @@ pub(crate) fn setup_node(chain_source: &TestChainSource, config: TestConfig) -> 
 		},
 	};
 
+	start_node(node)
+}
+
+/// Like [`setup_node`], but around `kv_store`, which the test keeps hold of: to read or change
+/// what the node persisted, or to build the node again around it.
+pub(crate) fn setup_node_with_store<S: PaginatedKVStore + Send + Sync + 'static>(
+	chain_source: &TestChainSource, config: TestConfig, kv_store: S,
+) -> TestNode {
+	let builder = configured_builder(chain_source, &config);
+	let node = builder.build_with_store(config.node_entropy.into(), kv_store).unwrap();
+	start_node(node)
+}
+
+fn configured_builder(chain_source: &TestChainSource, config: &TestConfig) -> Builder {
+	setup_builder!(builder, config.node_config);
+	configure_chain_source(chain_source, &mut builder, config);
+
+	match &config.log_writer {
+		TestLogWriter::FileWriter => {
+			builder.set_filesystem_logger(None, None);
+		},
+		TestLogWriter::LogFacade => {
+			builder.set_log_facade_logger();
+		},
+		TestLogWriter::Custom(custom_log_writer) => {
+			builder.set_custom_logger(Arc::clone(custom_log_writer));
+		},
+	}
+
+	builder.set_async_payments_role(config.async_payments_role.clone()).unwrap();
+
+	if let Some(probing) = config.probing.clone() {
+		builder.set_probing_config(probing.into());
+	}
+
+	builder
+}
+
+fn start_node(node: TestNode) -> TestNode {
 	node.start().unwrap();
 	assert!(node.status().is_running);
 	assert!(node.status().latest_fee_rate_cache_update_timestamp.is_some());
@@ -1134,6 +1162,7 @@ pub async fn open_channel_no_wait(
 				funding_amount_sat,
 				push_amount_msat,
 				None,
+				None,
 			)
 			.unwrap();
 	} else {
@@ -1143,6 +1172,7 @@ pub async fn open_channel_no_wait(
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
 				push_amount_msat,
+				None,
 				None,
 			)
 			.unwrap();
@@ -1187,6 +1217,7 @@ pub async fn open_channel_with_all(
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				None,
 				None,
+				None,
 			)
 			.unwrap();
 	} else {
@@ -1194,6 +1225,7 @@ pub async fn open_channel_with_all(
 			.open_channel_with_all(
 				node_b.node_id(),
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
+				None,
 				None,
 				None,
 			)
@@ -1212,7 +1244,7 @@ pub async fn open_channel_with_all(
 pub async fn splice_in_with_all(
 	node_a: &TestNode, node_b: &TestNode, user_channel_id: &UserChannelId, electrsd: &ElectrsD,
 ) {
-	node_a.splice_in_with_all(user_channel_id, node_b.node_id()).unwrap();
+	node_a.splice_in_with_all(user_channel_id, node_b.node_id(), None).unwrap();
 
 	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	wait_for_tx(&electrsd.client, splice_txo.txid).await;
@@ -1284,6 +1316,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 				funding_amount_sat,
 				Some(push_msat),
 				None,
+				None,
 			)
 			.unwrap();
 	} else {
@@ -1293,6 +1326,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 				node_b.listening_addresses().unwrap().first().unwrap().clone(),
 				funding_amount_sat,
 				Some(push_msat),
+				None,
 				None,
 			)
 			.unwrap();
@@ -1543,10 +1577,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let (manual_payment_id, claimable_amount_msat) =
 		expect_payment_claimable_event!(node_b, manual_payment_hash, invoice_amount_3_msat);
 	assert_ne!(manual_payment_id.0, manual_payment_hash.0);
-	node_b
-		.bolt11_payment()
-		.claim_for_id(manual_payment_id, claimable_amount_msat, manual_preimage)
-		.unwrap();
+	node_b.bolt11_payment().claim_for_id(manual_payment_id, manual_preimage).unwrap();
 	let received_payment_id = expect_payment_received_event!(node_b, claimable_amount_msat);
 	assert_eq!(received_payment_id, manual_payment_id);
 	expect_payment_successful_event!(node_a, outbound_manual_payment_id, None);
@@ -1560,6 +1591,36 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert_eq!(manual_payment.direction, PaymentDirection::Inbound);
 	assert_eq!(manual_payment.amount_msat, Some(invoice_amount_3_msat));
 	assert!(matches!(&manual_payment.kind, PaymentKind::Bolt11 { .. }));
+
+	// Test claiming manually registered payments that require a longer final CLTV expiry.
+	let manual_cltv_amount_msat = 5_532_000;
+	let min_final_cltv_expiry_delta = 81;
+	let manual_cltv_preimage = PaymentPreimage([44u8; 32]);
+	let manual_cltv_payment_hash =
+		PaymentHash(Sha256::hash(&manual_cltv_preimage.0).to_byte_array());
+	let manual_cltv_invoice = node_b
+		.bolt11_payment()
+		.receive_for_hash_with_min_final_cltv_expiry_delta(
+			manual_cltv_amount_msat,
+			&invoice_description.clone().into(),
+			9217,
+			manual_cltv_payment_hash,
+			min_final_cltv_expiry_delta,
+		)
+		.unwrap();
+	assert_eq!(
+		manual_cltv_invoice.min_final_cltv_expiry_delta(),
+		u64::from(min_final_cltv_expiry_delta) + 3
+	);
+	let outbound_manual_cltv_payment_id =
+		node_a.bolt11_payment().send(&manual_cltv_invoice, None).unwrap();
+
+	let (manual_cltv_payment_id, claimable_amount_msat) =
+		expect_payment_claimable_event!(node_b, manual_cltv_payment_hash, manual_cltv_amount_msat);
+	node_b.bolt11_payment().claim_for_id(manual_cltv_payment_id, manual_cltv_preimage).unwrap();
+	let received_payment_id = expect_payment_received_event!(node_b, claimable_amount_msat);
+	assert_eq!(received_payment_id, manual_cltv_payment_id);
+	expect_payment_successful_event!(node_a, outbound_manual_cltv_payment_id, None);
 
 	// Test failing manually registered payments.
 	let invoice_amount_4_msat = 5_532_000;
@@ -1632,11 +1693,11 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	assert!(matches!(&received_keysend_payment.kind, PaymentKind::Spontaneous { .. }));
 	assert_eq!(
 		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
-		5
+		6
 	);
 	assert_eq!(
 		node_b.list_payments_matching(|p| matches!(p.kind, PaymentKind::Bolt11 { .. })).len(),
-		5
+		6
 	);
 	assert_eq!(
 		node_a.list_payments_matching(|p| matches!(p.kind, PaymentKind::Spontaneous { .. })).len(),
@@ -1655,7 +1716,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 	let available_splice_out_sat = node_b.list_channels()[0].outbound_capacity_msat / 1000;
 	let splice_out_sat = available_splice_out_sat / 2;
 	assert!(splice_out_sat > 500_000);
-	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat).unwrap();
+	node_b.splice_out(&user_channel_id_b, node_a.node_id(), &addr_a, splice_out_sat, None).unwrap();
 
 	let splice_out_txo = expect_splice_negotiated_event!(node_b, node_a.node_id());
 	wait_for_tx(electrsd, splice_out_txo.txid).await;
@@ -1677,7 +1738,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 
 	println!("\nA splices in the splice-out payment from B");
 	let splice_in_sat = splice_out_sat;
-	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), splice_in_sat, None).unwrap();
 
 	let splice_in_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
 	wait_for_tx(electrsd, splice_in_txo.txid).await;
@@ -1849,6 +1910,7 @@ pub(crate) async fn do_channel_full_cycle<E: ElectrumApi>(
 		+ invoice_amount_1_msat
 		+ overpaid_amount_msat
 		+ invoice_amount_3_msat
+		+ manual_cltv_amount_msat
 		+ determined_amount_msat
 		+ keysend_amount_msat)
 		/ 1000 - splice_out_sat;
