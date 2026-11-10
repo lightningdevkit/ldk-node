@@ -119,6 +119,16 @@ impl PaymentStoresGuard<'_> {
 		self.stores.payment_store.remove(id).await
 	}
 
+	/// Removes the payment record stored under `id` only while `predicate` holds for it, in one
+	/// critical section of the store; see
+	/// [`DataStore::remove_if`](crate::data_store::DataStore::remove_if). Returns whether the
+	/// record was removed.
+	pub(super) async fn remove_payment_if<F: FnOnce(&PaymentDetails) -> bool>(
+		&self, id: &PaymentId, predicate: F,
+	) -> Result<bool, Error> {
+		self.stores.payment_store.remove_if(id, predicate).await
+	}
+
 	/// Transforms the payment record stored under `id` through `f` and persists the result, all
 	/// in one critical section of the store; see
 	/// [`DataStore::mutate`](crate::data_store::DataStore::mutate).
@@ -131,9 +141,26 @@ impl PaymentStoresGuard<'_> {
 		self.stores.payment_store.mutate(id, f).await
 	}
 
+	/// Stores `entry`, overwriting the entry already stored under its id, if any.
+	pub(super) async fn insert_pending_payment(
+		&self, entry: PendingPaymentDetails,
+	) -> Result<(), Error> {
+		self.stores.pending_payment_store.insert(entry).await
+	}
+
 	/// Removes the pending-store entry stored under `id`, if any.
 	pub(super) async fn remove_pending_payment(&self, id: &PaymentId) -> Result<(), Error> {
 		self.stores.pending_payment_store.remove(id).await
+	}
+
+	/// Removes the pending-store entry stored under `id` only while `predicate` holds for it, in
+	/// one critical section of the store; see
+	/// [`DataStore::remove_if`](crate::data_store::DataStore::remove_if). Returns whether the
+	/// entry was removed.
+	pub(super) async fn remove_pending_payment_if<F: FnOnce(&PendingPaymentDetails) -> bool>(
+		&self, id: &PaymentId, predicate: F,
+	) -> Result<bool, Error> {
+		self.stores.pending_payment_store.remove_if(id, predicate).await
 	}
 
 	/// Transforms the pending-store entry stored under `id` through `f` and persists the result,
@@ -149,7 +176,7 @@ impl PaymentStoresGuard<'_> {
 	}
 
 	/// [`Self::mutate_pending_payment`] with a transformation that awaits fallible reads; see
-	/// [`DataStore::mutate_async`](crate::data_store::DataStore::mutate_async).
+	/// [`DataStore::mutate_with`](crate::data_store::DataStore::mutate_with).
 	pub(super) async fn mutate_pending_payment_async<F, Fut>(
 		&self, id: &PaymentId, f: F,
 	) -> Result<Option<PendingPaymentDetails>, Error>
@@ -157,6 +184,6 @@ impl PaymentStoresGuard<'_> {
 		F: FnOnce(Option<PendingPaymentDetails>) -> Fut,
 		Fut: Future<Output = Result<Option<PendingPaymentDetails>, Error>>,
 	{
-		self.stores.pending_payment_store.mutate_async(id, f).await
+		self.stores.pending_payment_store.mutate_with(id, f).await
 	}
 }

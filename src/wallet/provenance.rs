@@ -99,8 +99,9 @@ impl ChannelOutputFact {
 	}
 }
 
-/// This node's share of an interactively negotiated funding transaction, and the funding payment
-/// the transaction belongs to.
+/// This node's share of a funding transaction it took part in building — the funding
+/// transaction of a channel it opened, or a round of an interactively negotiated funding — and
+/// the funding payment the transaction belongs to.
 ///
 /// The amount and the fee are `None` for a candidate this node contributed nothing to, e.g. a
 /// counterparty-initiated round before one of ours replaced it.
@@ -243,7 +244,7 @@ impl ChannelTxFacts {
 		self
 	}
 
-	/// Records this node's share of an interactively negotiated funding candidate, and the funding
+	/// Records this node's share of a funding candidate it took part in building, and the funding
 	/// payment the candidate belongs to.
 	pub(crate) fn with_local_figures(mut self, local_figures: LocalFundingFigures) -> Self {
 		self.local_figures = Some(local_figures);
@@ -335,7 +336,8 @@ impl ChannelTxFacts {
 	/// A record is written whole, so its size is the one resource a producer drives without
 	/// creating a record of its own: every channel-controlled output of a transaction lands on
 	/// that transaction's record, and a counterparty decides how many HTLCs a commitment
-	/// transaction carries. What a refused report would have described stays unclassifiable.
+	/// transaction carries. What a refused report would have described stays undescribed, and
+	/// what that costs is for the producer that reported it to weigh.
 	pub(crate) fn size_checked(self) -> Result<Self, ChannelTxFactsRejection> {
 		let bytes = self.serialized_length();
 		if bytes > CHANNEL_TX_FACTS_MAX_RECORD_BYTES {
@@ -354,9 +356,34 @@ pub(crate) enum FactsRecordOutcome {
 	/// Everything reported is on record.
 	Recorded,
 	/// Part of what was reported is not on record, because recording it would have taken the
-	/// facts past the resources they are allowed. Transactions that would have been classified
-	/// from the missing part are reported without a classification instead.
+	/// facts past the resources they are allowed. Nothing was lost, so what the refusal costs
+	/// is the reporting producer's to weigh: a transaction reported without a classification
+	/// for a producer that has nothing left to withhold, a round left unsigned for one that
+	/// will not release a transaction it cannot measure.
 	Incomplete,
+}
+
+/// Whether a report about a transaction this node has no record of at all is subject to the
+/// number of records the store may contain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FactsAdmission {
+	/// Refused once the store contains as many records as it is allowed to.
+	///
+	/// This is what bounds the store: a counterparty opening and closing channels, or replacing
+	/// a negotiated funding again and again, drives records about transactions this node only
+	/// reports on, and each of them costs nothing to refuse beyond a transaction going
+	/// unclassified.
+	Capped,
+	/// Admitted beside however many records the store contains, and counted like any other, so
+	/// that capped reports are refused the sooner.
+	///
+	/// This is for the reports whose refusal costs more than the record: the funding transaction
+	/// this node builds for a channel it opens, without which the funding and every transaction
+	/// spending it go unclassified, and a round this node is about to sign, which it will not
+	/// release without its own share of it on record. How many such records there can be is a
+	/// question of how many channels this node funds and rounds it signs, which is its own
+	/// decision.
+	Exempt,
 }
 
 /// One of this node's channel outputs, which only LDK will spend: the funding output of a channel
@@ -721,8 +748,8 @@ impl TxProvenance {
 		classify(tx, self.self_facts.as_ref(), &self.parent_facts)
 	}
 
-	/// This node's share of the transaction, for a candidate of an interactively negotiated
-	/// funding a producer reported the figures of.
+	/// This node's share of the transaction, for a funding candidate it took part in building
+	/// that a producer reported the figures of.
 	pub(crate) fn local_figures(&self) -> Option<&LocalFundingFigures> {
 		self.self_facts.as_ref()?.local_figures.as_ref()
 	}
