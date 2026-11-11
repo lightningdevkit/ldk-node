@@ -6713,6 +6713,15 @@ async fn unified_send_receive_bip21_uri() {
 
 	let uni_payment = node_b.unified_payment().receive(expected_amount_sats, "asdf", expiry_sec);
 	let uri_str = uni_payment.clone().unwrap();
+
+	// The offer must expire together with the rest of the URI.
+	let offer_str = uri_str.split("&lno=").nth(1).unwrap().split('&').next().unwrap();
+	let offer = offer_str.to_lowercase().parse::<lightning::offers::offer::Offer>().unwrap();
+	let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
+	let offer_expiry = offer.absolute_expiry().expect("unified offer must honor the URI expiry");
+	assert!(offer_expiry > now);
+	assert!(offer_expiry <= now + Duration::from_secs(expiry_sec as u64));
+
 	let offer_payment_id: PaymentId =
 		match node_a.unified_payment().send(&uri_str, None, None).await {
 			Ok(UnifiedPaymentResult::Bolt12 { payment_id }) => {
