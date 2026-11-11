@@ -135,6 +135,10 @@ prost = { version = "0.11.6", default-features = false, optional = true}
 #bitcoin-payment-instructions = { version = "0.6" }
 bitcoin-payment-instructions = { git = "https://github.com/benthecarman/bitcoin-payment-instructions", rev = "3dbe11bdf8916639df42476501fb40f87b253e84", optional = true }
 
+[patch.crates-io]
+esplora-client-012 = { package = "esplora-client", path = "vendor/esplora-client-0.12.3" }
+esplora-client-013 = { package = "esplora-client", path = "vendor/esplora-client-0.13.0" }
+
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["winbase"] }
 

@@ -120,12 +120,13 @@ use crate::{Node, NodeMetrics, PersistedNodeMetrics};
 const LSPS_HARDENED_CHILD_INDEX: u32 = 577;
 const PERSISTER_MAX_PENDING_UPDATES: u64 = 100;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum ChainDataSourceConfig {
 	#[cfg(feature = "chain-esplora")]
 	Esplora {
 		server_url: String,
 		headers: HashMap<String, String>,
+		header_provider: Option<Arc<dyn crate::EsploraHeaderProvider>>,
 		sync_config: Option<EsploraSyncConfig>,
 	},
 	#[cfg(feature = "chain-electrum")]
@@ -139,6 +140,44 @@ enum ChainDataSourceConfig {
 		rest_client_config: Option<BitcoindRestClientConfig>,
 		wallet_rescan_from_height: Option<u32>,
 	},
+}
+
+impl std::fmt::Debug for ChainDataSourceConfig {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			#[cfg(feature = "chain-esplora")]
+			Self::Esplora { server_url, headers, header_provider, sync_config } => f
+				.debug_struct("Esplora")
+				.field("server_url", server_url)
+				.field("headers", headers)
+				.field("has_header_provider", &header_provider.is_some())
+				.field("sync_config", sync_config)
+				.finish(),
+			#[cfg(feature = "chain-electrum")]
+			Self::Electrum { server_url, sync_config } => f
+				.debug_struct("Electrum")
+				.field("server_url", server_url)
+				.field("sync_config", sync_config)
+				.finish(),
+			#[cfg(feature = "chain-bitcoind")]
+			Self::Bitcoind {
+				rpc_host,
+				rpc_port,
+				rpc_user,
+				rpc_password: _,
+				rest_client_config,
+				wallet_rescan_from_height,
+			} => f
+				.debug_struct("Bitcoind")
+				.field("rpc_host", rpc_host)
+				.field("rpc_port", rpc_port)
+				.field("rpc_user", rpc_user)
+				.field("rpc_password", &"[REDACTED]")
+				.field("rest_client_config", rest_client_config)
+				.field("wallet_rescan_from_height", wallet_rescan_from_height)
+				.finish(),
+		}
+	}
 }
 
 #[derive(Debug, Clone)]
@@ -405,6 +444,7 @@ impl NodeBuilder {
 		self.chain_data_source_config = Some(ChainDataSourceConfig::Esplora {
 			server_url,
 			headers: Default::default(),
+			header_provider: None,
 			sync_config,
 		});
 		self
@@ -422,8 +462,34 @@ impl NodeBuilder {
 		&mut self, server_url: String, headers: HashMap<String, String>,
 		sync_config: Option<EsploraSyncConfig>,
 	) -> &mut Self {
-		self.chain_data_source_config =
-			Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config });
+		self.chain_data_source_config = Some(ChainDataSourceConfig::Esplora {
+			server_url,
+			headers,
+			header_provider: None,
+			sync_config,
+		});
+		self
+	}
+
+	/// Configures Esplora requests to obtain headers from `header_provider` at request time.
+	///
+	/// The provider is shared by wallet synchronization and LDK transaction synchronization. It is
+	/// called for every HTTP request, allowing applications to refresh short-lived credentials
+	/// while the node is running. Provider errors fail the corresponding Esplora request.
+	///
+	/// If no `sync_config` is given, default values are used. See [`EsploraSyncConfig`] for more
+	/// information.
+	#[cfg(feature = "chain-esplora")]
+	pub fn set_chain_source_esplora_with_header_provider(
+		&mut self, server_url: String, header_provider: Arc<dyn crate::EsploraHeaderProvider>,
+		sync_config: Option<EsploraSyncConfig>,
+	) -> &mut Self {
+		self.chain_data_source_config = Some(ChainDataSourceConfig::Esplora {
+			server_url,
+			headers: Default::default(),
+			header_provider: Some(header_provider),
+			sync_config,
+		});
 		self
 	}
 
@@ -1064,6 +1130,22 @@ impl Builder {
 	) {
 		self.inner.write().expect("lock").set_chain_source_esplora(server_url, sync_config);
 	}
+
+	/// Configures Esplora requests to obtain headers from `header_provider` at request time.
+	///
+	/// The provider is shared by wallet synchronization and LDK transaction synchronization and is
+	/// called for every HTTP request. Provider errors fail the corresponding request.
+	pub fn set_chain_source_esplora_with_header_provider(
+		&self, server_url: String, header_provider: Arc<dyn crate::ffi::EsploraHeaderProvider>,
+		sync_config: Option<EsploraSyncConfig>,
+	) {
+		let adapter = Arc::new(crate::ffi::EsploraHeaderProviderAdapter::new(header_provider));
+		self.inner.write().expect("lock").set_chain_source_esplora_with_header_provider(
+			server_url,
+			adapter,
+			sync_config,
+		);
+	}
 }
 
 #[cfg(all(feature = "uniffi", feature = "chain-esplora"))]
@@ -1645,11 +1727,17 @@ fn build_with_store_internal(
 
 	let (chain_source, chain_tip_opt) = match chain_data_source_config {
 		#[cfg(feature = "chain-esplora")]
-		Some(ChainDataSourceConfig::Esplora { server_url, headers, sync_config }) => {
+		Some(ChainDataSourceConfig::Esplora {
+			server_url,
+			headers,
+			header_provider,
+			sync_config,
+		}) => {
 			let sync_config = sync_config.unwrap_or(EsploraSyncConfig::default());
 			ChainSource::new_esplora(
 				server_url.clone(),
 				headers.clone(),
+				header_provider.clone(),
 				sync_config,
 				Arc::clone(&fee_estimator),
 				Arc::clone(&tx_broadcaster),
@@ -1724,6 +1812,7 @@ fn build_with_store_internal(
 			ChainSource::new_esplora(
 				server_url.clone(),
 				HashMap::new(),
+				None,
 				sync_config,
 				Arc::clone(&fee_estimator),
 				Arc::clone(&tx_broadcaster),

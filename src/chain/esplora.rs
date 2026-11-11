@@ -10,6 +10,25 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+/// Supplies current HTTP headers for each Esplora request.
+///
+/// Implementations can refresh short-lived credentials while the node is running. The provider is
+/// called separately by both Esplora clients and its errors fail the corresponding request.
+#[async_trait::async_trait]
+pub trait EsploraHeaderProvider: Send + Sync {
+	/// Return the headers to attach to the next Esplora request.
+	async fn get_headers(&self) -> Result<HashMap<String, String>, String>;
+}
+
+fn to_client_header_provider(
+	provider: Arc<dyn EsploraHeaderProvider>,
+) -> esplora_client::HeaderProvider {
+	Arc::new(move || {
+		let provider = Arc::clone(&provider);
+		Box::pin(async move { provider.get_headers().await })
+	})
+}
+
 use bdk_esplora::EsploraAsyncExt;
 use bitcoin::transaction::Version;
 use bitcoin::{FeeRate, Network, Script, Txid};
@@ -49,7 +68,8 @@ pub(super) struct EsploraChainSource {
 
 impl EsploraChainSource {
 	pub(crate) fn new(
-		server_url: String, headers: HashMap<String, String>, sync_config: EsploraSyncConfig,
+		server_url: String, headers: HashMap<String, String>,
+		header_provider: Option<Arc<dyn EsploraHeaderProvider>>, sync_config: EsploraSyncConfig,
 		fee_estimator: Arc<OnchainFeeEstimator>, kv_store: Arc<DynStore>, config: Arc<Config>,
 		logger: Arc<Logger>, node_metrics: Arc<PersistedNodeMetrics>,
 	) -> Result<Self, ()> {
@@ -66,10 +86,21 @@ impl EsploraChainSource {
 			ldk_client_builder = ldk_client_builder.header(header_name, header_value);
 		}
 
-		let esplora_client = client_builder.build_async().map_err(|e| {
+		let esplora_client = if let Some(provider) = header_provider.as_ref() {
+			client_builder
+				.build_async_with_header_provider(to_client_header_provider(Arc::clone(provider)))
+		} else {
+			client_builder.build_async()
+		}
+		.map_err(|e| {
 			log_error!(logger, "Failed to build Esplora client: {}", e);
 		})?;
-		let ldk_esplora_client = ldk_client_builder.build_async().map_err(|e| {
+		let ldk_esplora_client = if let Some(provider) = header_provider {
+			ldk_client_builder.build_async_with_header_provider(to_client_header_provider(provider))
+		} else {
+			ldk_client_builder.build_async()
+		}
+		.map_err(|e| {
 			log_error!(logger, "Failed to build LDK Esplora client: {}", e);
 		})?;
 		let tx_sync =
@@ -527,6 +558,85 @@ impl EsploraChainSource {
 				}
 			},
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::io::{Read, Write};
+	use std::net::TcpListener;
+	use std::sync::atomic::{AtomicUsize, Ordering};
+	use std::thread;
+
+	use super::{to_client_header_provider, EsploraHeaderProvider};
+	use std::collections::HashMap;
+	use std::sync::Arc;
+
+	struct RotatingHeaderProvider {
+		next_token: AtomicUsize,
+	}
+
+	#[async_trait::async_trait]
+	impl EsploraHeaderProvider for RotatingHeaderProvider {
+		async fn get_headers(&self) -> Result<HashMap<String, String>, String> {
+			let token = self.next_token.fetch_add(1, Ordering::SeqCst) + 1;
+			Ok(HashMap::from([("Authorization".to_string(), format!("Bearer {token}"))]))
+		}
+	}
+
+	fn start_esplora_server(request_count: usize) -> (String, thread::JoinHandle<Vec<String>>) {
+		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+		let address = listener.local_addr().unwrap();
+		let server = thread::spawn(move || {
+			let mut requests = Vec::with_capacity(request_count);
+			for _ in 0..request_count {
+				let (mut stream, _) = listener.accept().unwrap();
+				let mut request = Vec::new();
+				let mut buffer = [0; 1024];
+				loop {
+					let bytes_read = stream.read(&mut buffer).unwrap();
+					request.extend_from_slice(&buffer[..bytes_read]);
+					if bytes_read == 0 || request.windows(4).any(|window| window == b"\r\n\r\n") {
+						break;
+					}
+				}
+				requests.push(String::from_utf8(request).unwrap());
+				stream
+					.write_all(
+						b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n1",
+					)
+					.unwrap();
+			}
+			requests
+		});
+		(format!("http://{address}"), server)
+	}
+
+	#[tokio::test]
+	async fn dynamic_headers_refresh_for_both_esplora_clients() {
+		let (server_url, server) = start_esplora_server(2);
+		let provider: Arc<dyn EsploraHeaderProvider> =
+			Arc::new(RotatingHeaderProvider { next_token: AtomicUsize::new(0) });
+
+		let bdk_client = esplora_client::Builder::new(&server_url)
+			.build_async_with_header_provider(to_client_header_provider(Arc::clone(&provider)))
+			.unwrap();
+		assert_eq!(bdk_client.get_height().await.unwrap(), 1);
+
+		let ldk_client = ldk_esplora_client::Builder::new(&server_url)
+			.build_async_with_header_provider(to_client_header_provider(provider))
+			.unwrap();
+		assert_eq!(ldk_client.get_height().await.unwrap(), 1);
+
+		let requests = server.join().unwrap();
+		assert!(
+			requests[0].contains("authorization: Bearer 1\r\n")
+				|| requests[0].contains("Authorization: Bearer 1\r\n")
+		);
+		assert!(
+			requests[1].contains("authorization: Bearer 2\r\n")
+				|| requests[1].contains("Authorization: Bearer 2\r\n")
+		);
 	}
 }
 

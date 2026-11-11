@@ -134,6 +134,55 @@ pub trait VssHeaderProvider: Send + Sync {
 	) -> Result<HashMap<String, String>, VssHeaderProviderError>;
 }
 
+/// Error returned when an Esplora header provider cannot supply headers.
+#[derive(Debug, uniffi::Error)]
+pub enum EsploraHeaderProviderError {
+	/// Providing headers failed.
+	ProviderError {
+		/// Description of the failure.
+		error: String,
+	},
+}
+
+impl std::fmt::Display for EsploraHeaderProviderError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::ProviderError { error } => write!(f, "Esplora header provider failed: {error}"),
+		}
+	}
+}
+
+impl std::error::Error for EsploraHeaderProviderError {}
+
+/// Supplies current HTTP headers for each Esplora request from a foreign language.
+///
+/// This callback is synchronous because UniFFI 0.29 does not support async foreign traits. It
+/// should return cached/current headers promptly; token acquisition and refresh can run separately.
+#[uniffi::export(with_foreign)]
+pub trait EsploraHeaderProvider: Send + Sync {
+	/// Returns the headers to use for the next Esplora request.
+	fn get_headers(&self) -> Result<HashMap<String, String>, EsploraHeaderProviderError>;
+}
+
+pub(crate) struct EsploraHeaderProviderAdapter {
+	inner: Arc<dyn EsploraHeaderProvider>,
+}
+
+impl EsploraHeaderProviderAdapter {
+	pub(crate) fn new(inner: Arc<dyn EsploraHeaderProvider>) -> Self {
+		Self { inner }
+	}
+}
+
+#[async_trait::async_trait]
+impl crate::EsploraHeaderProvider for EsploraHeaderProviderAdapter {
+	async fn get_headers(&self) -> Result<HashMap<String, String>, String> {
+		self.inner.get_headers().map_err(|e| match e {
+			EsploraHeaderProviderError::ProviderError { error } => error,
+		})
+	}
+}
+
 /// An adapter that wraps the local [`VssHeaderProvider`] and implements the upstream
 /// [`VssClientHeaderProvider`] trait.
 #[cfg(feature = "storage-vss")]
