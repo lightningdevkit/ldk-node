@@ -604,7 +604,7 @@ where
 			return Err(if rejected_for_fee {
 				log_error!(
 					self.logger,
-					"Failed to request inbound JIT channel as all LSP offers exceed our configured fee limit"
+					"Failed to request inbound JIT channel as all LSP offers exceed our fee limit"
 				);
 				Error::LiquidityFeeTooHigh.into()
 			} else {
@@ -1246,9 +1246,16 @@ mod tests {
 	use crate::io::test_utils::InMemoryStore;
 
 	fn rejection_test_node() -> (crate::Node, PublicKey) {
+		test_node_with_fee_limit(None)
+	}
+
+	fn test_node_with_fee_limit(fee_limit_msat: Option<u64>) -> (crate::Node, PublicKey) {
 		let node_id =
 			"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993".parse().unwrap();
-		let mut builder = NodeBuilder::new();
+		let mut builder = NodeBuilder::from_config(Config {
+			lsps2_max_total_lsp_fee_limit_msat: fee_limit_msat,
+			..Default::default()
+		});
 		builder.set_log_facade_logger();
 		// An unsupported address makes connection attempts fail without network I/O.
 		builder.add_liquidity_source(
@@ -1623,37 +1630,137 @@ mod tests {
 		assert_eq!(result, Ok(30));
 		assert_eq!(*attempted_lsps.lock().unwrap(), vec![1, 2]);
 	}
+	fn fee_cap_test_params() -> LSPS2OpeningFeeParams {
+		LSPS2OpeningFeeParams {
+			min_fee_msat: 1_500,
+			proportional: 0,
+			valid_until: (chrono::Utc::now() + chrono::Duration::days(2))
+				.to_rfc3339()
+				.parse()
+				.unwrap(),
+			min_lifetime: 1,
+			max_client_to_self_delay: 1,
+			min_payment_size_msat: 1,
+			max_payment_size_msat: 10_000,
+			promise: String::new(),
+		}
+	}
+
 	#[test]
 	fn cached_variable_lease_must_cover_resolved_amount() {
-		let (node, lsp_node_id) = rejection_test_node();
-		let client = node.liquidity_source.lsps2_client();
-		let lease = PaymentLease {
-			id: PaymentLeaseId { lsp_node_id, intercept_scid: 7 },
-			params: LSPS2OpeningFeeParams {
-				min_fee_msat: 1_500,
-				proportional: 0,
-				valid_until: (chrono::Utc::now() + chrono::Duration::days(2))
-					.to_rfc3339()
-					.parse()
-					.unwrap(),
-				min_lifetime: 1,
-				max_client_to_self_delay: 1,
-				min_payment_size_msat: 1,
-				max_payment_size_msat: 10_000,
-				promise: String::new(),
-			},
-			cltv_expiry_delta: 18,
-			payment_size_msat: None,
-			valid_until: now_secs() + 7 * 24 * 60 * 60,
-		};
-		node.runtime.block_on(client.lease_store.insert(lease.clone())).unwrap();
-		client.lease_state.lock().unwrap().insert(lease.clone());
+		// The resolved amount bounds the acceptable fee, both without a configured fee limit and
+		// with a configured limit exceeding the amount.
+		for fee_limit_msat in [None, Some(2_000)] {
+			let (node, lsp_node_id) = test_node_with_fee_limit(fee_limit_msat);
+			let client = node.liquidity_source.lsps2_client();
+			let lease = PaymentLease {
+				id: PaymentLeaseId { lsp_node_id, intercept_scid: 7 },
+				params: fee_cap_test_params(),
+				cltv_expiry_delta: 18,
+				payment_size_msat: None,
+				valid_until: now_secs() + 7 * 24 * 60 * 60,
+			};
+			node.runtime.block_on(client.lease_store.insert(lease.clone())).unwrap();
+			client.lease_state.lock().unwrap().insert(lease.clone());
 
-		// No fee limit is configured, so only the resolved amount bounds the acceptable fee.
-		let taken = node.runtime.block_on(client.take_cached_variable_lease(Some(1_000))).unwrap();
-		assert!(taken.is_none(), "a lease fee exceeding the payment amount must not be accepted");
-		let taken = node.runtime.block_on(client.take_cached_variable_lease(Some(2_000))).unwrap();
-		assert_eq!(taken.map(|(lease, fee_msat, _)| (lease.id, fee_msat)), Some((lease.id, 1_500)));
+			let taken =
+				node.runtime.block_on(client.take_cached_variable_lease(Some(1_499))).unwrap();
+			assert!(
+				taken.is_none(),
+				"a lease fee exceeding the payment amount must not be accepted"
+			);
+			let taken =
+				node.runtime.block_on(client.take_cached_variable_lease(Some(1_500))).unwrap();
+			assert_eq!(
+				taken.map(|(lease, fee_msat, _)| (lease.id, fee_msat)),
+				Some((lease.id, 1_500)),
+				"a lease fee equal to the payment amount must be accepted"
+			);
+		}
+	}
+
+	#[test]
+	fn negotiated_lease_fees_must_not_exceed_payment_amount() {
+		// As for cached leases, the amount bounds the fee of freshly negotiated leases, both
+		// without a configured fee limit and with a configured limit exceeding the amount.
+		for fee_limit_msat in [None, Some(2_000)] {
+			let (node, node_id) = test_node_with_fee_limit(fee_limit_msat);
+			let client = node.liquidity_source.lsps2_client();
+			node.runtime.block_on(async {
+				for (fixed_amount, amount_msat) in
+					[(true, 1_499), (true, 1_500), (false, 1_499), (false, 1_500)]
+				{
+					let negotiation = async {
+						if fixed_amount {
+							client
+								.negotiate_fixed_lease(amount_msat, &node.connection_manager)
+								.await
+						} else {
+							client
+								.negotiate_variable_lease(
+									Some(amount_msat),
+									&node.connection_manager,
+								)
+								.await
+						}
+					};
+					let responses = async {
+						loop {
+							let fee_request_id = client
+								.pending_lsps2_fee_requests
+								.lock()
+								.unwrap()
+								.keys()
+								.next()
+								.cloned();
+							if let Some(request_id) = fee_request_id {
+								client
+									.handle_event(LSPS2ClientEvent::OpeningParametersReady {
+										request_id,
+										counterparty_node_id: node_id,
+										opening_fee_params_menu: vec![fee_cap_test_params()],
+									})
+									.await;
+							}
+							let buy_request_id =
+								client.pending_buy_requests.lock().unwrap().keys().next().cloned();
+							if let Some(request_id) = buy_request_id {
+								client
+									.handle_event(LSPS2ClientEvent::InvoiceParametersReady {
+										request_id,
+										counterparty_node_id: node_id,
+										intercept_scid: 42,
+										cltv_expiry_delta: 144,
+										payment_size_msat: fixed_amount.then_some(amount_msat),
+									})
+									.await;
+							}
+							tokio::task::yield_now().await;
+						}
+					};
+					let result = tokio::time::timeout(Duration::from_secs(1), async {
+						tokio::select! {
+							result = negotiation => result,
+							_ = responses => unreachable!(),
+						}
+					})
+					.await
+					.expect("lease negotiation must finish without waiting for request timeouts");
+					if amount_msat < 1_500 {
+						assert!(
+							matches!(result, Err(Error::LiquidityFeeTooHigh)),
+							"a negotiated fee exceeding the payment amount must not be accepted"
+						);
+					} else {
+						assert_eq!(
+							result.map(|(_, fee_msat, _)| fee_msat),
+							Ok(1_500),
+							"a negotiated fee equal to the payment amount must be accepted"
+						);
+					}
+				}
+			});
+		}
 	}
 }
 
