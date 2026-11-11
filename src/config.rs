@@ -18,7 +18,8 @@ use lightning::ln::msgs::SocketAddress;
 use lightning::routing::gossip::NodeAlias;
 use lightning::routing::router::{RouteParameters, RouteParametersConfig};
 use lightning::util::config::{
-	ChannelConfig as LdkChannelConfig, MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
+	ChannelConfig as LdkChannelConfig, ChannelConfigUpdate,
+	MaxDustHTLCExposure as LdkMaxDustHTLCExposure, UserConfig,
 };
 
 use crate::logger::LogLevel;
@@ -862,16 +863,31 @@ impl From<LdkChannelConfig> for ChannelConfig {
 	}
 }
 
-impl From<ChannelConfig> for LdkChannelConfig {
+/// Only sets the fields we expose, leaving any other settings of a channel's [`LdkChannelConfig`],
+/// such as its splice minimum depths, untouched when applied.
+impl From<ChannelConfig> for ChannelConfigUpdate {
 	fn from(value: ChannelConfig) -> Self {
 		Self {
-			forwarding_fee_proportional_millionths: value.forwarding_fee_proportional_millionths,
-			forwarding_fee_base_msat: value.forwarding_fee_base_msat,
-			cltv_expiry_delta: value.cltv_expiry_delta,
-			max_dust_htlc_exposure: value.max_dust_htlc_exposure.into(),
-			force_close_avoidance_max_fee_satoshis: value.force_close_avoidance_max_fee_satoshis,
-			accept_underpaying_htlcs: value.accept_underpaying_htlcs,
+			forwarding_fee_proportional_millionths: Some(
+				value.forwarding_fee_proportional_millionths,
+			),
+			forwarding_fee_base_msat: Some(value.forwarding_fee_base_msat),
+			cltv_expiry_delta: Some(value.cltv_expiry_delta),
+			max_dust_htlc_exposure_msat: Some(value.max_dust_htlc_exposure.into()),
+			force_close_avoidance_max_fee_satoshis: Some(
+				value.force_close_avoidance_max_fee_satoshis,
+			),
+			accept_underpaying_htlcs: Some(value.accept_underpaying_htlcs),
+			..Default::default()
 		}
+	}
+}
+
+impl From<ChannelConfig> for LdkChannelConfig {
+	fn from(value: ChannelConfig) -> Self {
+		let mut config = LdkChannelConfig::default();
+		config.apply(&value.into());
+		config
 	}
 }
 
