@@ -944,4 +944,121 @@ mod tests {
 			vec![live_target_lease.id]
 		);
 	}
+
+	/// Fails removing persisted leases while passing everything else through.
+	struct LeaseRemovalFailingStore(Arc<InMemoryStore>);
+
+	impl KVStore for LeaseRemovalFailingStore {
+		fn read(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+			KVStore::read(&*self.0, primary_namespace, secondary_namespace, key)
+		}
+
+		fn write(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, buf: Vec<u8>,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			KVStore::write(&*self.0, primary_namespace, secondary_namespace, key, buf)
+		}
+
+		fn remove(
+			&self, primary_namespace: &str, secondary_namespace: &str, key: &str, lazy: bool,
+		) -> impl std::future::Future<Output = Result<(), io::Error>> + 'static + Send {
+			let removal =
+				(primary_namespace != crate::io::LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE).then(
+					|| KVStore::remove(&*self.0, primary_namespace, secondary_namespace, key, lazy),
+				);
+			async move {
+				match removal {
+					Some(removal) => removal.await,
+					None => Err(io::Error::new(io::ErrorKind::Other, "remove failed")),
+				}
+			}
+		}
+
+		fn list(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+			KVStore::list(&*self.0, primary_namespace, secondary_namespace)
+		}
+	}
+
+	impl PaginatedKVStore for LeaseRemovalFailingStore {
+		fn list_paginated(
+			&self, primary_namespace: &str, secondary_namespace: &str,
+			page_token: Option<PageToken>,
+		) -> impl std::future::Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
+			PaginatedKVStore::list_paginated(
+				&*self.0,
+				primary_namespace,
+				secondary_namespace,
+				page_token,
+			)
+		}
+	}
+
+	#[test]
+	fn startup_keeps_dropped_cache_targets_until_their_leases_are_removed() {
+		use crate::builder::{BuildError, NodeBuilder};
+		use crate::entropy::NodeEntropy;
+		use crate::io::{
+			LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE, LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+		};
+
+		let now = now_secs();
+		let expired_target_lease = lease(2, 46, 1, Some(1_000), now + 7 * 24 * 60 * 60);
+		let targets = vec![LeaseCacheTarget::new(
+			LeaseCacheTargetId::Fixed { amount_msat: 1_000 },
+			Some(now - 1),
+		)];
+
+		let store = Arc::new(InMemoryStore::new());
+		let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+		runtime.block_on(async {
+			KVStore::write(
+				&*store,
+				LSPS2_CACHE_TARGET_PERSISTENCE_PRIMARY_NAMESPACE,
+				LSPS2_CACHE_TARGET_PERSISTENCE_SECONDARY_NAMESPACE,
+				LSPS2_CACHE_TARGET_PERSISTENCE_KEY,
+				LeaseCacheTargets { targets: targets.clone() }.encode(),
+			)
+			.await
+			.unwrap();
+			KVStore::write(
+				&*store,
+				LSPS2_LEASE_PERSISTENCE_PRIMARY_NAMESPACE,
+				LSPS2_LEASE_PERSISTENCE_SECONDARY_NAMESPACE,
+				&expired_target_lease.id.encode_to_hex_str(),
+				expired_target_lease.encode(),
+			)
+			.await
+			.unwrap();
+		});
+
+		let mut builder = NodeBuilder::new();
+		builder.set_log_facade_logger();
+		#[cfg(not(feature = "uniffi"))]
+		let entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		let res = builder.build_with_store(entropy, LeaseRemovalFailingStore(Arc::clone(&store)));
+		assert!(matches!(res, Err(BuildError::WriteFailed)));
+
+		// The removed target identifiers are derived from the persisted targets. They must hence
+		// stay persisted until their leases are gone, as a retry could otherwise not find the leases.
+		let data = runtime
+			.block_on(KVStore::read(
+				&*store,
+				LSPS2_CACHE_TARGET_PERSISTENCE_PRIMARY_NAMESPACE,
+				LSPS2_CACHE_TARGET_PERSISTENCE_SECONDARY_NAMESPACE,
+				LSPS2_CACHE_TARGET_PERSISTENCE_KEY,
+			))
+			.unwrap();
+		assert_eq!(
+			LeaseCacheTargets::read(&mut &data[..]).unwrap().targets,
+			targets,
+			"a dropped cache target was persisted as removed before its leases were removed"
+		);
+	}
 }

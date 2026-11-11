@@ -343,13 +343,15 @@ where
 			self.logger.clone(),
 		));
 		if !removed_target_ids.is_empty() {
-			cache_target_store.persist().await.map_err(|_| BuildError::WriteFailed)?;
 			// The runtime prune only sees tracked targets, so leases of targets dropped here would
 			// otherwise linger until they expire.
 			for lease_id in lease_state.lease_ids_for_targets(&removed_target_ids) {
 				lease_store.remove(&lease_id).await.map_err(|_| BuildError::WriteFailed)?;
 				lease_state.remove(&lease_id);
 			}
+			// Persist the shrunk target set last: the removed identifiers are derived from the
+			// persisted targets, so a retry after a failure above can still find the leases to drop.
+			cache_target_store.persist().await.map_err(|_| BuildError::WriteFailed)?;
 		}
 		let liquidity_service_config = self.lsps2_service.as_ref().map(|s| {
 			let lsps2_service_config = Some(s.ldk_service_config.clone());
