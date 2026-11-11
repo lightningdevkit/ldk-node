@@ -130,6 +130,17 @@ fn record_negotiation_failure(
 	}
 }
 
+/// The time a lease backing an invoice must remain valid beyond the invoice's expiry.
+///
+/// Payers may attempt a payment until the invoice expires, while the LSP drops an unpaid intercept
+/// SCID as soon as its lease does. The margin leaves time for such a late payment to arrive.
+const LEASE_EXPIRY_MARGIN_SECS: u64 = 10 * 60;
+
+/// Returns how long a lease must remain valid to back an invoice expiring in `invoice_expiry_secs`.
+fn min_lease_validity_secs(invoice_expiry_secs: u64) -> u64 {
+	invoice_expiry_secs.saturating_add(LEASE_EXPIRY_MARGIN_SECS)
+}
+
 fn opening_fee_params_valid_for(params: &LSPS2OpeningFeeParams, min_remaining_secs: u64) -> bool {
 	let Ok(valid_until) = u64::try_from(params.valid_until.0.timestamp()) else {
 		return false;
@@ -370,7 +381,8 @@ where
 
 		// The offers flow currently uses its two-hour default invoice expiry. Never publish a JIT
 		// path whose intercept SCID may expire before the invoice does.
-		if !is_lease_valid_for(&lease, DEFAULT_BOLT12_INVOICE_EXPIRY_SECS as u64) {
+		let min_remaining_secs = min_lease_validity_secs(DEFAULT_BOLT12_INVOICE_EXPIRY_SECS as u64);
+		if !is_lease_valid_for(&lease, min_remaining_secs) {
 			return Err(Error::LiquidityRequestFailed);
 		}
 		let lease_parameters = LSPS2LeaseParameters {
@@ -442,9 +454,10 @@ where
 	}
 
 	async fn acquire_fixed_lease(
-		self: &Arc<Self>, amount_msat: u64, min_remaining_secs: u64,
+		self: &Arc<Self>, amount_msat: u64, invoice_expiry_secs: u64,
 		connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig, bool), Error> {
+		let min_remaining_secs = min_lease_validity_secs(invoice_expiry_secs);
 		if let Some((lease, total_fee_msat, lsp)) =
 			self.take_cached_fixed_lease(amount_msat, min_remaining_secs).await?
 		{
@@ -584,9 +597,10 @@ where
 	}
 
 	async fn acquire_variable_lease(
-		self: &Arc<Self>, amount_msat: Option<u64>, min_remaining_secs: u64,
+		self: &Arc<Self>, amount_msat: Option<u64>, invoice_expiry_secs: u64,
 		connection_manager: &Arc<ConnectionManager<L>>,
 	) -> Result<(PaymentLease, u64, LspConfig, bool), Error> {
+		let min_remaining_secs = min_lease_validity_secs(invoice_expiry_secs);
 		if let Some((lease, fee, lsp)) =
 			self.take_cached_variable_lease(amount_msat, min_remaining_secs).await?
 		{
@@ -1424,6 +1438,109 @@ mod tests {
 			assert!(!should_retry_lease_negotiation(&error, 3));
 			assert!(client.pending_buy_requests.lock().unwrap().is_empty());
 			assert!(client.pending_lsps2_fee_requests.lock().unwrap().is_empty());
+		});
+	}
+
+	#[test]
+	fn invoice_leases_must_outlive_the_invoice_by_a_margin() {
+		let (node, node_id) = rejection_test_node();
+		let client = node.liquidity_source.lsps2_client();
+		let invoice_expiry_secs = DEFAULT_BOLT12_INVOICE_EXPIRY_SECS as u64;
+		let lease = |intercept_scid, payment_size_msat, valid_until: u64| PaymentLease {
+			id: PaymentLeaseId { lsp_node_id: node_id, intercept_scid },
+			params: LSPS2OpeningFeeParams {
+				min_fee_msat: 1,
+				proportional: 1,
+				valid_until: chrono::DateTime::from_timestamp(valid_until as i64, 0)
+					.unwrap()
+					.to_rfc3339()
+					.parse()
+					.unwrap(),
+				min_lifetime: 1,
+				max_client_to_self_delay: 1,
+				min_payment_size_msat: 1,
+				max_payment_size_msat: 2_000,
+				promise: String::new(),
+			},
+			cltv_expiry_delta: 144,
+			payment_size_msat,
+			valid_until,
+		};
+		node.runtime.block_on(async {
+			for (fixed_amount, intercept_scid) in [(true, 1), (false, 3)] {
+				let payment_size_msat = fixed_amount.then_some(1_000);
+				let acquire = || async {
+					let acquisition = async {
+						if fixed_amount {
+							client
+								.acquire_fixed_lease(
+									1_000,
+									invoice_expiry_secs,
+									&node.connection_manager,
+								)
+								.await
+						} else {
+							client
+								.acquire_variable_lease(
+									Some(1_000),
+									invoice_expiry_secs,
+									&node.connection_manager,
+								)
+								.await
+						}
+					};
+					// Reject any fee query so that a lease can only be acquired from the cache.
+					let rejections = async {
+						loop {
+							let request_id = client
+								.pending_lsps2_fee_requests
+								.lock()
+								.unwrap()
+								.keys()
+								.next()
+								.cloned();
+							if let Some(request_id) = request_id {
+								client
+									.handle_event(LSPS2ClientEvent::GetInfoFailed {
+										request_id,
+										counterparty_node_id: node_id,
+										error: LSPSResponseError {
+											code: 200,
+											message: "unrecognized token".into(),
+											data: None,
+										},
+									})
+									.await;
+							} else {
+								tokio::task::yield_now().await;
+							}
+						}
+					};
+					tokio::time::timeout(Duration::from_secs(1), async {
+						tokio::select! {
+							result = acquisition => result,
+							_ = rejections => unreachable!(),
+						}
+					})
+					.await
+					.expect("lease acquisition must finish without waiting for request timeouts")
+				};
+
+				let valid_until = now_secs() + invoice_expiry_secs + LEASE_EXPIRY_MARGIN_SECS;
+				let short_lease = lease(intercept_scid, payment_size_msat, valid_until - 60);
+				client.store_cached_lease(short_lease).await.unwrap();
+				assert!(
+					matches!(acquire().await, Err(Error::LiquidityRequestFailed)),
+					"a cached lease expiring just after the invoice must not back it"
+				);
+
+				let sufficient_lease =
+					lease(intercept_scid + 1, payment_size_msat, valid_until + 60);
+				client.store_cached_lease(sufficient_lease.clone()).await.unwrap();
+				let (acquired, _, _, is_fresh) = acquire().await.unwrap();
+				assert_eq!(acquired.id, sufficient_lease.id);
+				assert!(!is_fresh);
+			}
 		});
 	}
 
