@@ -387,6 +387,27 @@ impl Node {
 			},
 		))?;
 
+		// See `Wallet::unlock_unreferenced_outpoints`. The locks still needed are those the wallet
+		// recorded for the funding transaction of a channel that is still around. Without that
+		// record for a channel awaiting its funding's confirmation, its locks cannot be told apart
+		// from leftovers, and every lock is kept. An output this releases although a broadcast
+		// transaction spends it is spent again in the wallet's view by the next sync.
+		let mut funding_inputs = std::collections::HashSet::new();
+		let mut has_untracked_funding = false;
+		for channel in channels.iter().filter(|channel| channel.is_outbound) {
+			let Some(funding_txo) = channel.funding_txo else {
+				continue;
+			};
+			let inputs =
+				self.runtime.block_on(self.wallet.locked_funding_inputs(&funding_txo.txid));
+			has_untracked_funding |= inputs.is_empty()
+				&& channel.confirmations.map_or(true, |confirmations| confirmations == 0);
+			funding_inputs.extend(inputs);
+		}
+		self.runtime.block_on(self.wallet.unlock_unreferenced_outpoints(|outpoint| {
+			has_untracked_funding || funding_inputs.contains(outpoint)
+		}))?;
+
 		// Synchronize Lightning chain state before peers or event processing can act on stale
 		// confirmations. Each restored ChannelMonitor may have been persisted at a different tip.
 		self.runtime.block_on(self.chain_source.initialize_wallets(

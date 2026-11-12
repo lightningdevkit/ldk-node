@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::PublicKey;
-use bitcoin::{Sequence, Transaction, Txid};
+use bitcoin::{OutPoint, Sequence, Transaction, Txid};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::types::ChannelId;
 use lightning::util::persist::PageToken;
@@ -136,6 +136,10 @@ pub(crate) struct ChannelTxFacts {
 	/// This node's share of an interactive-funding candidate, and the funding record it belongs
 	/// to.
 	pub local_figures: Option<LocalFundingFigures>,
+	/// The wallet outputs locked for this transaction when the wallet built it to fund a channel.
+	/// They tell which locks the transaction accounts for, and are what to unlock should it never
+	/// be made.
+	pub locked_inputs: Vec<OutPoint>,
 	/// The chain tip this node was at when it last learned something new about the transaction.
 	/// It dates the record for retention; it is not a fact about the transaction, and so is the
 	/// one part of a record a later report may move.
@@ -148,6 +152,7 @@ impl_writeable_tlv_based!(ChannelTxFacts, {
 	(4, self_role, option),
 	(6, local_figures, option),
 	(8, recorded_at_height, required),
+	(10, locked_inputs, optional_vec),
 });
 
 impl ChannelTxFacts {
@@ -158,8 +163,15 @@ impl ChannelTxFacts {
 			outputs: Vec::new(),
 			self_role: None,
 			local_figures: None,
+			locked_inputs: Vec::new(),
 			recorded_at_height: 0,
 		}
+	}
+
+	/// Records `inputs` as the wallet outputs locked for this transaction.
+	pub(crate) fn with_locked_inputs(mut self, inputs: impl IntoIterator<Item = OutPoint>) -> Self {
+		self.locked_inputs.extend(inputs);
+		self
 	}
 
 	/// Dates these facts at the chain tip the node is at while reporting them.
@@ -320,6 +332,12 @@ impl ChannelTxFacts {
 				changed = true;
 			},
 			_ => {},
+		}
+
+		// One report covers all of them: the wallet builds a funding transaction once.
+		if self.locked_inputs.is_empty() && !incoming.locked_inputs.is_empty() {
+			self.locked_inputs = incoming.locked_inputs.clone();
+			changed = true;
 		}
 
 		if !changed {
@@ -940,6 +958,7 @@ mod tests {
 			.with_outputs(&channel, Some(UserChannelId(42)), ChannelOutputRole::Funding, [0])
 			.with_outputs(&channel, None, ChannelOutputRole::Anchor, [1])
 			.with_outputs(&channel, None, ChannelOutputRole::Htlc, [2, 3])
+			.with_locked_inputs([OutPoint::new(test_txid(8), 1), OutPoint::new(test_txid(9), 0)])
 			.with_outputs(&channel, None, ChannelOutputRole::Spendable, [4])
 			.with_self_role(TransactionType::InteractiveFunding {
 				channels: vec![channel.clone()],
@@ -1114,6 +1133,28 @@ mod tests {
 			merged.outputs.iter().find(|output| output.vout == 1).map(|output| output.channel_id),
 			Some(other.channel_id)
 		);
+	}
+
+	/// The channel's own report of its funding output arrives after the wallet's, and carries no
+	/// inputs: it must not take the recorded ones away.
+	#[test]
+	fn locked_inputs_survive_a_later_report_without_them() {
+		let channel = test_channel(1);
+		let locked = vec![OutPoint::new(test_txid(8), 1)];
+		let built = ChannelTxFacts::new(test_txid(7)).with_locked_inputs(locked.clone());
+		let pending = ChannelTxFacts::new(test_txid(7)).with_outputs(
+			&channel,
+			Some(UserChannelId(42)),
+			ChannelOutputRole::Funding,
+			[0],
+		);
+
+		let merged = built.clone().merged_with(&pending).unwrap().unwrap();
+		assert_eq!(merged.locked_inputs, locked);
+		assert_eq!(merged.outputs.len(), 1);
+
+		let merged = pending.merged_with(&built).unwrap().unwrap();
+		assert_eq!(merged.locked_inputs, locked);
 	}
 
 	#[test]

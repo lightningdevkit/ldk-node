@@ -1368,10 +1368,8 @@ async fn multi_hop_sending() {
 
 	open_channel(&nodes[0], &nodes[1], 100_000, true, &electrsd).await;
 	open_channel(&nodes[1], &nodes[2], 1_000_000, true, &electrsd).await;
-	// We need to sync wallets in-between back-to-back channel opens from the same node so BDK
-	// wallet picks up on the broadcast funding tx and doesn't double-spend itself.
-	//
-	// TODO: Remove once fixed in BDK.
+	// The wallet learns of a funding transaction's change only from a sync, and the second
+	// channel is funded from the change of the first.
 	nodes[1].sync_wallets().unwrap();
 	open_channel(&nodes[1], &nodes[3], 1_000_000, true, &electrsd).await;
 	open_channel(&nodes[2], &nodes[4], 1_000_000, true, &electrsd).await;
@@ -1662,6 +1660,46 @@ async fn back_to_back_onchain_sends_before_sync() {
 	assert!(
 		mempool.0.contains(&first_txid) && mempool.0.contains(&second_txid),
 		"both back-to-back transactions must coexist in the mempool"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn back_to_back_channel_opens_before_sync() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	// Without background sync, so that the wallet does not learn of the first funding in between.
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let node_a = setup_node(&chain_source, random_config());
+	let node_b = setup_node(&chain_source, random_config());
+
+	let funding_address = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![funding_address],
+		Amount::from_sat(500_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	let first_funding_txo = open_channel_no_wait(&node_a, &node_b, 100_000, None, false).await;
+
+	// The wallet's only coin is spent by the first channel's funding transaction, and its change
+	// is unknown to the wallet until the next sync.
+	let node_b_address = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	assert_eq!(
+		node_a.open_channel(node_b.node_id(), node_b_address, 100_000, None, None, None),
+		Err(NodeError::InsufficientFunds)
+	);
+
+	wait_for_tx(&electrsd.client, first_funding_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	let second_funding_txo = open_channel_no_wait(&node_a, &node_b, 100_000, None, false).await;
+	wait_for_tx(&electrsd.client, second_funding_txo.txid).await;
+
+	let mempool = bitcoind.client.get_raw_mempool().unwrap().into_model().unwrap();
+	assert!(
+		mempool.0.contains(&first_funding_txo.txid) && mempool.0.contains(&second_funding_txo.txid),
+		"both funding transactions must coexist in the mempool"
 	);
 }
 
@@ -4738,7 +4776,7 @@ const CLOSED_CHANNEL_PAYMENT_RESOLVED: &str = "of closed channel";
 /// tracks once it promoted a splice round to the channel's funding, however it does.
 const PROMOTED_ROUND_PAYMENT_RESOLVED: &str = "once splice round";
 /// Logged by a node as it returns the addresses of a contribution LDK discarded to the wallet.
-const RECLAIMED_ADDRESSES: &str = "Reclaiming unused addresses from channel";
+const RECLAIMED_ADDRESSES: &str = "Reclaiming unused wallet state from channel";
 /// Logged by a node once it has decided the funding payments of a closed channel by the rounds the
 /// channel's monitor watches, at `ChannelClosed` and for a round LDK discards after the close.
 /// Unlike [`CLOSED_CHANNEL_PAYMENT_RESOLVED`], logged whatever was found, so also when no payment
@@ -6949,16 +6987,22 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
 	payer_node.start().unwrap();
 
-	let service_addr = service_node.onchain_payment().new_address().unwrap();
+	// The service opens four JIT channels below without syncing in between. Each needs a coin of
+	// its own: the wallet learns of a funding transaction's change only from a sync, and the
+	// inputs of a funding transaction withheld for an unclaimed payment stay locked.
+	let mut funded_addrs: Vec<_> =
+		(0..4).map(|_| service_node.onchain_payment().new_address().unwrap()).collect();
 	let client_addr = client_node.onchain_payment().new_address().unwrap();
 	let payer_addr = payer_node.onchain_payment().new_address().unwrap();
+
+	funded_addrs.extend([client_addr, payer_addr]);
 
 	let premine_amount_sat = 10_000_000;
 
 	premine_and_distribute_funds(
 		&bitcoind.client,
 		&electrsd.client,
-		vec![service_addr, client_addr, payer_addr],
+		funded_addrs,
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;

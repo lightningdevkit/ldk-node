@@ -18,7 +18,7 @@ use bdk_wallet::descriptor::ExtendedDescriptor;
 use bdk_wallet::error::{BuildFeeBumpError, CreateTxError};
 use bdk_wallet::signer::SignersContainer;
 use bdk_wallet::{
-	Balance, FinalizeInputOutcome, KeychainKind, LocalOutput, PersistedWallet, SignOptions, Update,
+	FinalizeInputOutcome, KeychainKind, LocalOutput, PersistedWallet, SignOptions, Update,
 	WalletEvent,
 };
 use bitcoin::address::NetworkUnchecked;
@@ -553,7 +553,11 @@ impl Wallet {
 			Error::PersistenceFailed
 		})?;
 
-		let change_set = self.inner.lock().expect("lock").take_staged().unwrap_or_default();
+		let change_set = {
+			let mut locked_wallet = self.inner.lock().expect("lock");
+			Self::unlock_confirmed_spends(&mut locked_wallet);
+			locked_wallet.take_staged().unwrap_or_default()
+		};
 		locked_persister.persist_changeset(change_set).await.map_err(|e| {
 			log_error!(self.logger, "Failed to persist wallet: {}", e);
 			Error::PersistenceFailed
@@ -620,6 +624,69 @@ impl Wallet {
 			let seen_at = Self::next_seen_at(wallet, &tx);
 			wallet.apply_unconfirmed_txs([(tx, seen_at)]);
 		}
+	}
+
+	/// Unlocks the outpoints a confirmed transaction spends.
+	///
+	/// A lock outlives a spend that is only unconfirmed: a chain source that stops reporting the
+	/// spending transaction evicts it from the wallet, and the lock is then all that keeps its
+	/// inputs from being selected again.
+	fn unlock_confirmed_spends(wallet: &mut PersistedWallet<KVStoreWalletPersister>) {
+		if wallet.list_locked_outpoints().next().is_none() {
+			return;
+		}
+		let confirmed: HashSet<Txid> = wallet
+			.transactions()
+			.filter(|tx| tx.chain_position.is_confirmed())
+			.map(|tx| tx.tx_node.txid)
+			.collect();
+		let spent: Vec<OutPoint> = wallet
+			.list_locked_outpoints()
+			.filter(|outpoint| {
+				wallet.tx_graph().outspends(*outpoint).iter().any(|txid| confirmed.contains(txid))
+			})
+			.collect();
+		for outpoint in spent {
+			wallet.unlock_outpoint(outpoint);
+		}
+	}
+
+	/// The wallet outputs locked for the channel funding transaction `txid`, as recorded when the
+	/// wallet built it. Empty if nothing is on record.
+	pub(crate) async fn locked_funding_inputs(&self, txid: &Txid) -> Vec<OutPoint> {
+		self.channel_tx_facts(txid).await.map(|facts| facts.locked_inputs).unwrap_or_default()
+	}
+
+	/// Unlocks every outpoint `is_referenced` does not vouch for.
+	///
+	/// The wallet locks the inputs of a channel funding transaction or splice contribution when
+	/// it selects them, as it learns of the transaction spending them only from a later sync. A
+	/// lock is returned when LDK discards the transaction or never takes it
+	/// ([`Self::release_inputs_and_outputs`]), and dropped once the transaction confirms.
+	///
+	/// LDK does not report every transaction it lets go, though: not one it lost to a restart,
+	/// and not a withheld funding transaction whose channel closed. This returns what such a lock
+	/// holds.
+	pub(crate) async fn unlock_unreferenced_outpoints(
+		&self, is_referenced: impl Fn(&OutPoint) -> bool,
+	) -> Result<(), Error> {
+		let mut locked_persister = self.persister.lock().await;
+		let change_set = {
+			let mut locked_wallet = self.inner.lock().expect("lock");
+			let unreferenced: Vec<OutPoint> = locked_wallet
+				.list_locked_outpoints()
+				.filter(|outpoint| !is_referenced(outpoint))
+				.collect();
+			for outpoint in unreferenced {
+				log_info!(self.logger, "Unlocking wallet output {} no channel refers to", outpoint);
+				locked_wallet.unlock_outpoint(outpoint);
+			}
+			locked_wallet.take_staged().unwrap_or_default()
+		};
+		locked_persister.persist_changeset(change_set).await.map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			Error::PersistenceFailed
+		})
 	}
 
 	#[cfg(feature = "chain-bitcoind")]
@@ -1843,7 +1910,7 @@ impl Wallet {
 		let fee_rate =
 			fee_rate.unwrap_or_else(|| self.fee_estimator.estimate_fee_rate(confirmation_target));
 		let mut locked_persister = self.persister.lock().await;
-		let (psbt, change_set) = {
+		let (tx, change_set) = {
 			let mut locked_wallet = self.inner.lock().expect("lock");
 			let mut tx_builder = locked_wallet.build_tx();
 			tx_builder.add_recipient(output_script, amount).fee_rate(fee_rate).nlocktime(locktime);
@@ -1875,17 +1942,24 @@ impl Wallet {
 				},
 			}
 
-			(psbt, locked_wallet.take_staged().unwrap_or_default())
-		};
-		locked_persister.persist_changeset(change_set).await.map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
+			let tx = psbt.extract_tx().map_err(|e| {
+				log_error!(self.logger, "Failed to extract transaction: {}", e);
+				e
+			})?;
 
-		let tx = psbt.extract_tx().map_err(|e| {
-			log_error!(self.logger, "Failed to extract transaction: {}", e);
-			e
-		})?;
+			// See `unlock_unreferenced_outpoints` for what a lock is for and what returns it.
+			//
+			// A funding transaction an LSPS2 service withholds until its payment is claimed is
+			// locked as well, and nothing reports it if the payment never is: its inputs then stay
+			// locked for as long as the channel exists.
+			for txin in &tx.input {
+				locked_wallet.lock_outpoint(txin.previous_output);
+			}
+
+			(tx, locked_wallet.take_staged().unwrap_or_default())
+		};
+		let locked = tx.input.iter().map(|txin| txin.previous_output);
+		self.persist_new_locks(&mut locked_persister, change_set, locked).await?;
 
 		Ok(tx)
 	}
@@ -2110,9 +2184,36 @@ impl Wallet {
 	/// Frees the wallet addresses paid by `outputs` for reuse, for a transaction that will not be
 	/// made after all.
 	pub(crate) async fn release_outputs(&self, outputs: Vec<TxOut>) -> Result<(), Error> {
+		self.release_inputs_and_outputs(Vec::new(), outputs).await
+	}
+
+	/// Persists a change set that locks `newly_locked`. If that fails the caller does not hand
+	/// out what the locks were taken for, and nothing would ever return them, so they are dropped.
+	async fn persist_new_locks(
+		&self, persister: &mut KVStoreWalletPersister, change_set: bdk_wallet::ChangeSet,
+		newly_locked: impl Iterator<Item = OutPoint>,
+	) -> Result<(), Error> {
+		persister.persist_changeset(change_set).await.map_err(|e| {
+			log_error!(self.logger, "Failed to persist wallet: {}", e);
+			let mut locked_wallet = self.inner.lock().expect("lock");
+			for outpoint in newly_locked {
+				locked_wallet.unlock_outpoint(outpoint);
+			}
+			Error::PersistenceFailed
+		})
+	}
+
+	/// Returns what the wallet held for a transaction that will not be made after all: unlocks
+	/// `inputs` and frees the wallet addresses paid by `outputs` for reuse.
+	pub(crate) async fn release_inputs_and_outputs(
+		&self, inputs: Vec<OutPoint>, outputs: Vec<TxOut>,
+	) -> Result<(), Error> {
 		let mut locked_persister = self.persister.lock().await;
 		let change_set = {
 			let mut locked_wallet = self.inner.lock().expect("lock");
+			for outpoint in inputs {
+				locked_wallet.unlock_outpoint(outpoint);
+			}
 			for txout in outputs {
 				if let Some((keychain, index)) =
 					locked_wallet.derivation_of_spk(txout.script_pubkey)
@@ -2134,27 +2235,48 @@ impl Wallet {
 	pub(crate) fn get_balances(
 		&self, total_anchor_channels_reserve_sats: u64,
 	) -> Result<(u64, u64), Error> {
-		let balance = self.inner.lock().expect("lock").balance();
+		let locked_wallet = self.inner.lock().expect("lock");
+		let balances = self.get_balances_inner(&locked_wallet, total_anchor_channels_reserve_sats);
+		#[cfg(debug_assertions)]
+		let has_confirmed_funds = locked_wallet.balance().confirmed != Amount::ZERO;
+		drop(locked_wallet);
 
 		// Make sure `list_confirmed_utxos` returns at least one `Utxo` we could use to spend/bump
 		// Anchors if we have any confirmed amounts.
 		#[cfg(debug_assertions)]
-		if balance.confirmed != Amount::ZERO {
+		if has_confirmed_funds {
 			debug_assert!(
 				self.list_confirmed_utxos_inner().map_or(false, |v| !v.is_empty()),
 				"Confirmed amounts should always be available for Anchor spending"
 			);
 		}
 
-		self.get_balances_inner(balance, total_anchor_channels_reserve_sats)
+		balances
 	}
 
 	fn get_balances_inner(
-		&self, balance: Balance, total_anchor_channels_reserve_sats: u64,
+		&self, wallet: &PersistedWallet<KVStoreWalletPersister>,
+		total_anchor_channels_reserve_sats: u64,
 	) -> Result<(u64, u64), Error> {
+		let balance = wallet.balance();
+		// Locked outputs still belong to the wallet, but are promised to a pending funding. Only
+		// those the trusted spendable balance counts are taken off it: confirmed outputs, and
+		// unconfirmed change.
+		let locked_amount_sats: u64 = wallet
+			.list_locked_unspent()
+			.filter_map(|outpoint| wallet.get_utxo(outpoint))
+			.filter(|utxo| {
+				utxo.chain_position.is_confirmed() || utxo.keychain == KeychainKind::Internal
+			})
+			.map(|utxo| utxo.txout.value.to_sat())
+			.sum();
 		let (total, spendable) = (
 			balance.total().to_sat(),
-			balance.trusted_spendable().to_sat().saturating_sub(total_anchor_channels_reserve_sats),
+			balance
+				.trusted_spendable()
+				.to_sat()
+				.saturating_sub(total_anchor_channels_reserve_sats)
+				.saturating_sub(locked_amount_sats),
 		);
 
 		Ok((total, spendable))
@@ -2205,9 +2327,10 @@ impl Wallet {
 		&self, locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>,
 		drain_script: ScriptBuf, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
 	) -> Result<(u64, Psbt), Error> {
-		let balance = locked_wallet.balance();
-		let spendable_amount_sats =
-			self.get_balances_inner(balance, cur_anchor_reserve_sats).map(|(_, s)| s).unwrap_or(0);
+		let spendable_amount_sats = self
+			.get_balances_inner(&locked_wallet, cur_anchor_reserve_sats)
+			.map(|(_, s)| s)
+			.unwrap_or(0);
 
 		if spendable_amount_sats == 0 {
 			log_error!(
@@ -2288,6 +2411,9 @@ impl Wallet {
 		let tip_height = locked_wallet.latest_checkpoint().height();
 		let mut inputs = Vec::new();
 		for utxo in locked_wallet.list_unspent() {
+			if locked_wallet.is_outpoint_locked(utxo.outpoint) {
+				continue;
+			}
 			let Some(confirmation_height) = utxo.chain_position.confirmation_height_upper_bound()
 			else {
 				continue;
@@ -2406,9 +2532,8 @@ impl Wallet {
 					amount_sats,
 					cur_anchor_reserve_sats,
 				} => {
-					let balance = locked_wallet.balance();
 					let spendable_amount_sats = self
-						.get_balances_inner(balance, cur_anchor_reserve_sats)
+						.get_balances_inner(&locked_wallet, cur_anchor_reserve_sats)
 						.map(|(_, s)| s)
 						.unwrap_or(0);
 					let tx_fee_sats = locked_wallet
@@ -2433,9 +2558,8 @@ impl Wallet {
 					}
 				},
 				OnchainSendAmount::AllRetainingReserve { cur_anchor_reserve_sats } => {
-					let balance = locked_wallet.balance();
 					let spendable_amount_sats = self
-						.get_balances_inner(balance, cur_anchor_reserve_sats)
+						.get_balances_inner(&locked_wallet, cur_anchor_reserve_sats)
 						.map(|(_, s)| s)
 						.unwrap_or(0);
 					let (sent, received) = locked_wallet.sent_and_received(&psbt.unsigned_tx);
@@ -2631,6 +2755,8 @@ impl Wallet {
 			.filter(|t| t.chain_position.is_confirmed())
 			.map(|t| t.tx_node.txid)
 			.collect();
+		// Locked outputs are listed as well: bumping the anchor of a closing channel may not wait
+		// for a funding that is still being negotiated, and takes its inputs if it has to.
 		let unspent_confirmed_utxos =
 			locked_wallet.list_unspent().filter(|u| confirmed_txs.contains(&u.outpoint.txid));
 
@@ -4116,9 +4242,10 @@ impl Wallet {
 			})?
 			.to_sat();
 		let additional_fee_sats = replacement_fee_sats.saturating_sub(old_fee_sats);
-		let balance = locked_wallet.balance();
-		let spendable_amount_sats =
-			self.get_balances_inner(balance, cur_anchor_reserve_sats).map(|(_, s)| s).unwrap_or(0);
+		let spendable_amount_sats = self
+			.get_balances_inner(&locked_wallet, cur_anchor_reserve_sats)
+			.map(|(_, s)| s)
+			.unwrap_or(0);
 		if spendable_amount_sats < additional_fee_sats {
 			log_error!(
 				self.logger,
@@ -4479,7 +4606,11 @@ impl Listen for Wallet {
 				return;
 			}
 
-			let change_set = self.inner.lock().expect("lock").take_staged().unwrap_or_default();
+			let change_set = {
+				let mut locked_wallet = self.inner.lock().expect("lock");
+				Self::unlock_confirmed_spends(&mut locked_wallet);
+				locked_wallet.take_staged().unwrap_or_default()
+			};
 			if let Err(e) = locked_persister.persist_changeset(change_set).await {
 				log_error!(self.logger, "Failed to persist on-chain wallet: {}", e);
 				return;
@@ -13571,5 +13702,175 @@ mod tests {
 		let entry = wallet.payment_stores.pending_payment(&payment_id).await.unwrap().unwrap();
 		assert_eq!(entry.conflicting_txids, vec![txid_a, txid_b]);
 		assert_eq!(wallet.find_payment_by_txid(txid_b).await.unwrap(), Some(payment_id));
+	}
+
+	/// Builds a channel funding transaction of `amount_sat` from the wallet's coins.
+	async fn test_funding_tx(wallet: &Wallet, amount_sat: u64) -> Result<Transaction, Error> {
+		let funding_script = ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([7; 32]));
+		wallet
+			.create_funding_transaction(
+				funding_script,
+				Amount::from_sat(amount_sat),
+				ConfirmationTarget::ChannelFunding,
+				LockTime::ZERO,
+				None,
+			)
+			.await
+	}
+
+	fn locked_outpoint_count(wallet: &Wallet) -> usize {
+		wallet.inner.lock().unwrap().list_locked_outpoints().count()
+	}
+
+	fn spent_outpoints(tx: &Transaction) -> Vec<OutPoint> {
+		tx.input.iter().map(|txin| txin.previous_output).collect()
+	}
+
+	fn all_locked(wallet: &Wallet, outpoints: &[OutPoint]) -> bool {
+		let locked_wallet = wallet.inner.lock().unwrap();
+		outpoints.iter().all(|outpoint| locked_wallet.is_outpoint_locked(*outpoint))
+	}
+
+	fn none_locked(wallet: &Wallet, outpoints: &[OutPoint]) -> bool {
+		let locked_wallet = wallet.inner.lock().unwrap();
+		outpoints.iter().all(|outpoint| !locked_wallet.is_outpoint_locked(*outpoint))
+	}
+
+	/// The wallet has not seen a funding transaction it built, so only the locks on its inputs
+	/// keep a second funding transaction from spending them too.
+	#[tokio::test]
+	async fn funding_transactions_built_back_to_back_spend_distinct_inputs() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 2), 2);
+
+		let first = spent_outpoints(&test_funding_tx(&wallet, 50_000).await.unwrap());
+		let second = spent_outpoints(&test_funding_tx(&wallet, 50_000).await.unwrap());
+		assert!(first.iter().all(|outpoint| !second.contains(outpoint)));
+		assert!(all_locked(&wallet, &first) && all_locked(&wallet, &second));
+
+		// Both coins are spoken for.
+		assert!(test_funding_tx(&wallet, 50_000).await.is_err());
+		assert_eq!(wallet.get_balances(0).unwrap(), (180_000, 0));
+		assert_eq!(wallet.list_confirmed_utxos_inner().unwrap().len(), 2);
+		assert!(wallet.list_confirmed_funding_inputs().unwrap().is_empty());
+
+		drop(wallet);
+		let wallet = new_test_wallet(store, true).await;
+		assert!(all_locked(&wallet, &first) && all_locked(&wallet, &second));
+	}
+
+	#[tokio::test]
+	async fn an_unused_funding_transaction_returns_its_inputs() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+
+		let unused = test_funding_tx(&wallet, 50_000).await.unwrap();
+		let inputs = spent_outpoints(&unused);
+		wallet.release_inputs_and_outputs(inputs.clone(), unused.output).await.unwrap();
+
+		drop(wallet);
+		let wallet = new_test_wallet(store, true).await;
+		assert!(none_locked(&wallet, &inputs));
+		assert_eq!(spent_outpoints(&test_funding_tx(&wallet, 50_000).await.unwrap()), inputs);
+	}
+
+	/// A funding transaction seen unconfirmed can still be evicted, which would free its inputs
+	/// were they not locked. Its confirmation is what makes the locks redundant.
+	#[tokio::test]
+	async fn funding_input_locks_last_until_the_funding_confirms() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+
+		let funding_tx = test_funding_tx(&wallet, 50_000).await.unwrap();
+		let funding_txid = funding_tx.compute_txid();
+		let inputs = spent_outpoints(&funding_tx);
+
+		let mut tx_update = bdk_chain::TxUpdate::default();
+		tx_update.txs = vec![Arc::new(funding_tx)];
+		tx_update.seen_ats = [(funding_txid, 100)].into();
+		wallet.apply_update(Update { tx_update, ..Default::default() }).await.unwrap();
+		assert!(all_locked(&wallet, &inputs));
+
+		sync_evicting(&wallet, funding_txid, 101).await;
+		assert!(all_locked(&wallet, &inputs));
+		assert!(test_funding_tx(&wallet, 50_000).await.is_err());
+
+		let block = block_id_at(2);
+		let chain = wallet.inner.lock().unwrap().latest_checkpoint().insert(block);
+		let mut tx_update = bdk_chain::TxUpdate::default();
+		tx_update.anchors =
+			[(ConfirmationBlockTime { block_id: block, confirmation_time: 100 }, funding_txid)]
+				.into();
+		wallet
+			.apply_update(Update { tx_update, chain: Some(chain), ..Default::default() })
+			.await
+			.unwrap();
+		assert!(none_locked(&wallet, &inputs));
+	}
+
+	#[tokio::test]
+	async fn only_unreferenced_locks_are_unlocked() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 2), 2);
+		let kept = spent_outpoints(&test_funding_tx(&wallet, 50_000).await.unwrap());
+		let dropped = spent_outpoints(&test_funding_tx(&wallet, 50_000).await.unwrap());
+
+		wallet.unlock_unreferenced_outpoints(|outpoint| kept.contains(outpoint)).await.unwrap();
+
+		drop(wallet);
+		let wallet = new_test_wallet(store, true).await;
+		assert!(all_locked(&wallet, &kept));
+		assert!(none_locked(&wallet, &dropped));
+	}
+
+	/// A funding transaction that could not be persisted is not handed out, so nobody would ever
+	/// return the locks on its inputs.
+	#[tokio::test]
+	async fn a_funding_transaction_that_fails_to_persist_holds_no_locks() {
+		let fail_store =
+			FailSwitchStore::failing_only(crate::io::BDK_WALLET_LOCKED_OUTPOINTS_PRIMARY_NAMESPACE);
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+
+		fail_store.fail_writes.store(true, Ordering::Release);
+		assert!(matches!(test_funding_tx(&wallet, 50_000).await, Err(Error::PersistenceFailed)));
+		assert_eq!(locked_outpoint_count(&wallet), 0);
+
+		// The persister retries what it failed to write along with the next change, which must
+		// not make the locks durable after all.
+		fail_store.fail_writes.store(false, Ordering::Release);
+		wallet.release_outputs(Vec::new()).await.unwrap();
+		drop(wallet);
+		let wallet = new_test_wallet(store, true).await;
+		assert_eq!(locked_outpoint_count(&wallet), 0);
+		assert!(test_funding_tx(&wallet, 50_000).await.is_ok());
+	}
+
+	/// A funding transaction LDK lets go without saying what it spent is looked up in what the
+	/// wallet recorded when it built the transaction.
+	#[tokio::test]
+	async fn locked_funding_inputs_are_read_back_from_the_recorded_facts() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+		let funding_tx = test_funding_tx(&wallet, 50_000).await.unwrap();
+		let txid = funding_tx.compute_txid();
+		let inputs = spent_outpoints(&funding_tx);
+		assert!(wallet.locked_funding_inputs(&txid).await.is_empty());
+
+		let facts = ChannelTxFacts::new(txid).with_locked_inputs(inputs.clone());
+		assert_eq!(
+			wallet.record_own_funding_tx_facts(facts).await.unwrap(),
+			FactsRecordOutcome::Recorded
+		);
+
+		assert_eq!(wallet.locked_funding_inputs(&txid).await, inputs);
 	}
 }
