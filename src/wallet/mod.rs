@@ -3565,7 +3565,7 @@ impl Wallet {
 					},
 					// Promote an entry that has no record yet: wallet sync saw the splice
 					// transaction before this node recorded a payment for it. The entry keeps
-					// the rounds signed under it and gains the record.
+					// its signed rounds and gains the record.
 					Some(mut entry) if entry.details().is_none() => {
 						entry.details = Some(payment);
 						entry.conflicting_txids = conflicting_txids;
