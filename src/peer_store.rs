@@ -27,7 +27,9 @@ where
 	L::Target: LdkLogger,
 {
 	peers: RwLock<HashMap<PublicKey, PeerInfo>>,
-	mutation_lock: tokio::sync::Mutex<()>,
+	// Serializes mutations. The guarded flag is set while the persisted peer set may differ from
+	// the in-memory one, i.e., once a write was started that we don't know to have succeeded.
+	mutation_lock: tokio::sync::Mutex<bool>,
 	kv_store: Arc<DynStore>,
 	logger: L,
 }
@@ -38,7 +40,7 @@ where
 {
 	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let peers = RwLock::new(HashMap::new());
-		let mutation_lock = tokio::sync::Mutex::new(());
+		let mutation_lock = tokio::sync::Mutex::new(false);
 		Self { peers, mutation_lock, kv_store, logger }
 	}
 
@@ -60,17 +62,22 @@ where
 	/// Applies `update` to a copy of the peer set, persists the result, and only then publishes
 	/// it to readers, so that the in-memory peer set never gets ahead of the persisted one.
 	///
-	/// `update` returns whether it changed anything; if it didn't, nothing is written.
+	/// `update` returns whether it changed anything. If it didn't, nothing is written, unless an
+	/// earlier write may have left the persisted peer set out of sync.
 	async fn update_peers<F: FnOnce(&mut HashMap<PublicKey, PeerInfo>) -> bool>(
 		&self, update: F,
 	) -> Result<(), Error> {
-		let _guard = self.mutation_lock.lock().await;
+		let mut persisted_out_of_sync = self.mutation_lock.lock().await;
 		let mut updated_peers = self.peers.read().expect("lock").clone();
-		if !update(&mut updated_peers) {
+		let changed = update(&mut updated_peers);
+		if !changed && !*persisted_out_of_sync {
 			return Ok(());
 		}
 		let data = PeerStoreSerWrapper(&updated_peers).encode();
+		// A write that fails or is cancelled may still have reached the store.
+		*persisted_out_of_sync = true;
 		self.persist_peers(data).await?;
+		*persisted_out_of_sync = false;
 		*self.peers.write().expect("lock") = updated_peers;
 		Ok(())
 	}
@@ -120,7 +127,7 @@ where
 		let (kv_store, logger) = args;
 		let read_peers: PeerStoreDeserWrapper = Readable::read(reader)?;
 		let peers: RwLock<HashMap<PublicKey, PeerInfo>> = RwLock::new(read_peers.0);
-		let mutation_lock = tokio::sync::Mutex::new(());
+		let mutation_lock = tokio::sync::Mutex::new(false);
 		Ok(Self { peers, mutation_lock, kv_store, logger })
 	}
 }
@@ -333,5 +340,19 @@ mod tests {
 		// A count of 2^60 + 0xffff peers, followed by no peers at all.
 		let bytes = [0xff, 0xff, 0x10, 0, 0, 0, 0, 0, 0, 0];
 		assert!(<PeerStoreDeserWrapper as Readable>::read(&mut &bytes[..]).is_err());
+	}
+
+	#[tokio::test]
+	async fn unconfirmed_write_is_followed_by_a_rewrite() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let peer_store = PeerStore::new(store, Arc::new(TestLogger::new()));
+		let peer_info = test_peer_info();
+
+		// A write reported as failed may still have reached the store.
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(peer_info.clone()).await);
+
+		// Removing the peer doesn't change the in-memory set, but as we can't tell what the
+		// store holds, it has to be written regardless.
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.remove_peer(&peer_info.node_id).await);
 	}
 }
