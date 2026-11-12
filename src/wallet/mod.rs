@@ -2559,8 +2559,17 @@ impl Wallet {
 		})?;
 
 		let txid = tx.compute_txid();
+		// The wallet holds the transaction in memory by now, so a failure to persist it must not
+		// keep it from being broadcast: that would leave its inputs locked with nothing sent.
 		#[cfg(feature = "chain-cbf")]
-		self.apply_own_unconfirmed_tx(&tx, Vec::new()).await?;
+		if let Err(e) = self.apply_own_unconfirmed_tx(&tx, Vec::new()).await {
+			log_error!(
+				self.logger,
+				"Failed to apply the transaction {} we are broadcasting to the wallet: {}",
+				txid,
+				e,
+			);
+		}
 		self.broadcaster.broadcast(tx);
 
 		match send_amount {
@@ -4253,7 +4262,16 @@ impl Wallet {
 		{
 			drop(stores);
 			drop(locked_persister);
-			self.apply_own_unconfirmed_tx(&fee_bumped_tx, vec![txid]).await?;
+			// See `send_to_address`: a failure to persist must not keep the transaction from
+			// being broadcast.
+			if let Err(e) = self.apply_own_unconfirmed_tx(&fee_bumped_tx, vec![txid]).await {
+				log_error!(
+					self.logger,
+					"Failed to apply the fee-bumped transaction {} we are broadcasting to the wallet: {}",
+					new_txid,
+					e,
+				);
+			}
 		}
 		self.broadcaster.broadcast(fee_bumped_tx);
 
