@@ -88,6 +88,10 @@
   current chain tip now aborts with a new `BuildError::ChainTipFetchFailed` variant instead of
   silently pinning the wallet birthday to genesis, which would have forced a full-history rescan
   once the chain source became reachable again. (#884)
+- On-chain sends and fee bumps are now known to the wallet and the payment store as soon as they
+  are made rather than only after the next wallet sync. Previously, a second send made before
+  that sync could spend the same inputs, and a second `OnchainPayment::bump_fee_rbf` of the same
+  payment failed. (#1037)
 
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
