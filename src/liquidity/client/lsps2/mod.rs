@@ -1444,24 +1444,26 @@ mod tests {
 	#[test]
 	fn invoice_leases_must_outlive_the_invoice_by_a_margin() {
 		let (node, node_id) = rejection_test_node();
-		let client = node.liquidity_source.lsps2_client();
+		let client = &node.liquidity_source.lsps2_client();
+		let connection_manager = &node.connection_manager;
 		let invoice_expiry_secs = DEFAULT_BOLT12_INVOICE_EXPIRY_SECS as u64;
+		let params = |valid_until: u64| LSPS2OpeningFeeParams {
+			min_fee_msat: 1,
+			proportional: 1,
+			valid_until: chrono::DateTime::from_timestamp(valid_until as i64, 0)
+				.unwrap()
+				.to_rfc3339()
+				.parse()
+				.unwrap(),
+			min_lifetime: 1,
+			max_client_to_self_delay: 1,
+			min_payment_size_msat: 1,
+			max_payment_size_msat: 2_000,
+			promise: String::new(),
+		};
 		let lease = |intercept_scid, payment_size_msat, valid_until: u64| PaymentLease {
 			id: PaymentLeaseId { lsp_node_id: node_id, intercept_scid },
-			params: LSPS2OpeningFeeParams {
-				min_fee_msat: 1,
-				proportional: 1,
-				valid_until: chrono::DateTime::from_timestamp(valid_until as i64, 0)
-					.unwrap()
-					.to_rfc3339()
-					.parse()
-					.unwrap(),
-				min_lifetime: 1,
-				max_client_to_self_delay: 1,
-				min_payment_size_msat: 1,
-				max_payment_size_msat: 2_000,
-				promise: String::new(),
-			},
+			params: params(valid_until),
 			cltv_expiry_delta: 144,
 			payment_size_msat,
 			valid_until,
@@ -1469,39 +1471,42 @@ mod tests {
 		node.runtime.block_on(async {
 			for (fixed_amount, intercept_scid) in [(true, 1), (false, 3)] {
 				let payment_size_msat = fixed_amount.then_some(1_000);
-				let acquire = || async {
+				// Acquires a lease while the LSP offers opening parameters valid until the given time
+				// and accepts any buy request for them. Without an offer, the LSP rejects fee queries so
+				// that a lease can only be acquired from the cache.
+				let acquire = |offered_valid_until: Option<u64>| async move {
 					let acquisition = async {
 						if fixed_amount {
 							client
-								.acquire_fixed_lease(
-									1_000,
-									invoice_expiry_secs,
-									&node.connection_manager,
-								)
+								.acquire_fixed_lease(1_000, invoice_expiry_secs, connection_manager)
 								.await
 						} else {
 							client
 								.acquire_variable_lease(
 									Some(1_000),
 									invoice_expiry_secs,
-									&node.connection_manager,
+									connection_manager,
 								)
 								.await
 						}
 					};
-					// Reject any fee query so that a lease can only be acquired from the cache.
-					let rejections = async {
+					let responses = async {
 						loop {
-							let request_id = client
+							let fee_request_id = client
 								.pending_lsps2_fee_requests
 								.lock()
 								.unwrap()
 								.keys()
 								.next()
 								.cloned();
-							if let Some(request_id) = request_id {
-								client
-									.handle_event(LSPS2ClientEvent::GetInfoFailed {
+							if let Some(request_id) = fee_request_id {
+								let event = match offered_valid_until {
+									Some(valid_until) => LSPS2ClientEvent::OpeningParametersReady {
+										request_id,
+										counterparty_node_id: node_id,
+										opening_fee_params_menu: vec![params(valid_until)],
+									},
+									None => LSPS2ClientEvent::GetInfoFailed {
 										request_id,
 										counterparty_node_id: node_id,
 										error: LSPSResponseError {
@@ -1509,35 +1514,62 @@ mod tests {
 											message: "unrecognized token".into(),
 											data: None,
 										},
+									},
+								};
+								client.handle_event(event).await;
+							}
+							let buy_request_id =
+								client.pending_buy_requests.lock().unwrap().keys().next().cloned();
+							if let Some(request_id) = buy_request_id {
+								client
+									.handle_event(LSPS2ClientEvent::InvoiceParametersReady {
+										request_id,
+										counterparty_node_id: node_id,
+										intercept_scid: 100 + intercept_scid,
+										cltv_expiry_delta: 144,
+										payment_size_msat,
 									})
 									.await;
-							} else {
-								tokio::task::yield_now().await;
 							}
+							tokio::task::yield_now().await;
 						}
 					};
 					tokio::time::timeout(Duration::from_secs(1), async {
 						tokio::select! {
 							result = acquisition => result,
-							_ = rejections => unreachable!(),
+							_ = responses => unreachable!(),
 						}
 					})
 					.await
 					.expect("lease acquisition must finish without waiting for request timeouts")
 				};
 
-				let valid_until = now_secs() + invoice_expiry_secs + LEASE_EXPIRY_MARGIN_SECS;
-				let short_lease = lease(intercept_scid, payment_size_msat, valid_until - 60);
+				let invoice_expires_at = now_secs() + invoice_expiry_secs;
+				let (within_margin, beyond_margin) =
+					(invoice_expires_at + 5 * 60, invoice_expires_at + 15 * 60);
+
+				let short_lease = lease(intercept_scid, payment_size_msat, within_margin);
 				client.store_cached_lease(short_lease).await.unwrap();
 				assert!(
-					matches!(acquire().await, Err(Error::LiquidityRequestFailed)),
+					matches!(acquire(None).await, Err(Error::LiquidityRequestFailed)),
 					"a cached lease expiring just after the invoice must not back it"
 				);
+				assert!(
+					matches!(
+						acquire(Some(within_margin)).await,
+						Err(Error::LiquidityRequestFailed)
+					),
+					"a lease expiring just after the invoice must not be negotiated to back it"
+				);
 
-				let sufficient_lease =
-					lease(intercept_scid + 1, payment_size_msat, valid_until + 60);
+				let (negotiated, _, _, is_fresh) = acquire(Some(beyond_margin)).await.unwrap();
+				assert_eq!(negotiated.id.intercept_scid, 100 + intercept_scid);
+				assert_eq!(negotiated.valid_until, beyond_margin);
+				assert!(is_fresh);
+
+				let sufficient_lease = lease(intercept_scid + 1, payment_size_msat, beyond_margin);
 				client.store_cached_lease(sufficient_lease.clone()).await.unwrap();
-				let (acquired, _, _, is_fresh) = acquire().await.unwrap();
+				let (acquired, _, _, is_fresh) = acquire(None).await.unwrap();
 				assert_eq!(acquired.id, sufficient_lease.id);
 				assert!(!is_fresh);
 			}
@@ -1545,7 +1577,7 @@ mod tests {
 	}
 
 	#[test]
-	fn cached_leases_only_need_to_outlive_the_invoice() {
+	fn cached_leases_only_need_to_outlive_the_invoice_by_the_margin() {
 		let (node, node_id) = rejection_test_node();
 		let client = node.liquidity_source.lsps2_client();
 		// Shorter than the margin we require when refilling the cache, but long enough to back an
@@ -1576,7 +1608,7 @@ mod tests {
 			client.store_cached_lease(lease(2, None)).await.unwrap();
 			client.prune_stale_leases().await.unwrap();
 
-			let invoice_expiry_secs = 2 * 3_600;
+			let min_remaining_secs = min_lease_validity_secs(2 * 3_600);
 			assert!(
 				client
 					.take_cached_fixed_lease(1_000, MIN_CACHED_LEASE_REMAINING_SECS)
@@ -1586,16 +1618,16 @@ mod tests {
 				"a lease expiring before the invoice must not be used"
 			);
 			assert!(
-				client.take_cached_fixed_lease(1_000, invoice_expiry_secs).await.unwrap().is_some(),
-				"a cached fixed-amount lease outliving the invoice must be usable"
+				client.take_cached_fixed_lease(1_000, min_remaining_secs).await.unwrap().is_some(),
+				"a cached fixed-amount lease outliving the invoice by the margin must be usable"
 			);
 			assert!(
 				client
-					.take_cached_variable_lease(Some(1_000), invoice_expiry_secs)
+					.take_cached_variable_lease(Some(1_000), min_remaining_secs)
 					.await
 					.unwrap()
 					.is_some(),
-				"a cached variable-amount lease outliving the invoice must be usable"
+				"a cached variable-amount lease outliving the invoice by the margin must be usable"
 			);
 		});
 	}
