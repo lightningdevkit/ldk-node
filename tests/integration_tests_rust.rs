@@ -7673,6 +7673,132 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 	);
 }
 
+/// Sets up an LSPS2 service around `service_store`, a client of it, and a payer with a channel to
+/// the service. The service's and the client's on-chain wallets are funded with the given amounts.
+async fn setup_lsps2_nodes<S: PaginatedKVStore + Send + Sync + 'static>(
+	bitcoind: &BitcoinD, electrsd: &ElectrsD, service_store: S, service_funds_sat: u64,
+	client_funds_sat: u64,
+) -> (TestNode, TestNode, TestNode) {
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+
+	let lsps2_service_config = LSPS2ServiceConfig {
+		require_token: None,
+		advertise_service: false,
+		channel_opening_fee_ppm: 10_000,
+		channel_over_provisioning_ppm: 100_000,
+		max_payment_size_msat: 1_000_000_000,
+		min_payment_size_msat: 0,
+		min_channel_lifetime: 100,
+		min_channel_opening_fee_msat: 0,
+		max_client_to_self_delay: 1024,
+		client_trusts_lsp: false,
+		disable_client_reserve: false,
+	};
+
+	let service_config = random_config();
+	setup_builder!(service_builder, service_config.node_config);
+	service_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	service_builder.enable_liquidity_provider(lsps2_service_config);
+	let service_node = service_builder
+		.build_with_store(service_config.node_entropy.into(), service_store)
+		.unwrap();
+	service_node.start().unwrap();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let client_config = random_config();
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	client_builder.add_liquidity_source(service_node.node_id(), service_addr, None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	let payer_config = random_config();
+	setup_builder!(payer_builder, payer_config.node_config);
+	payer_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
+	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
+	payer_node.start().unwrap();
+
+	premine_blocks(&bitcoind.client, &electrsd.client).await;
+	for (node, funds_sat) in [
+		(&service_node, service_funds_sat),
+		(&client_node, client_funds_sat),
+		(&payer_node, 10_000_000),
+	] {
+		if funds_sat > 0 {
+			let addr = node.onchain_payment().new_address().unwrap();
+			distribute_funds_unconfirmed(
+				&bitcoind.client,
+				&electrsd.client,
+				vec![addr],
+				Amount::from_sat(funds_sat),
+			)
+			.await;
+		}
+	}
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+	service_node.sync_wallets().unwrap();
+	client_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+
+	open_channel(&payer_node, &service_node, 5_000_000, false, electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	service_node.sync_wallets().unwrap();
+	payer_node.sync_wallets().unwrap();
+	expect_channel_ready_event!(payer_node, service_node.node_id());
+	expect_channel_ready_event!(service_node, payer_node.node_id());
+
+	(service_node, client_node, payer_node)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_service_prunes_closed_channel_state() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let service_store = TestSyncStore::new(random_config().node_config.storage_dir_path.into());
+	let (service_node, client_node, payer_node) =
+		setup_lsps2_nodes(&bitcoind, &electrsd, service_store.clone(), 10_000_000, 10_000_000)
+			.await;
+
+	let list_lsps2_peer_states = || async {
+		KVStore::list(&service_store, "lightning_liquidity_state", "lsps2_service").await.unwrap()
+	};
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let jit_amount_msat = 100_000_000;
+	let jit_invoice = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel(jit_amount_msat, &invoice_description.into(), 1024, None)
+		.unwrap();
+
+	let payer_payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_event!(service_node, PaymentForwarded);
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	let client_user_channel_id = expect_channel_ready_event!(client_node, service_node.node_id());
+	expect_payment_successful_event!(payer_node, payer_payment_id, None);
+	expect_payment_received_event!(client_node, jit_amount_msat * 99 / 100);
+
+	assert_eq!(list_lsps2_peer_states().await, vec![client_node.node_id().to_string()]);
+
+	client_node.close_channel(&client_user_channel_id, service_node.node_id()).unwrap();
+	expect_event!(client_node, ChannelClosed);
+	expect_event!(service_node, ChannelClosed);
+
+	// The service drops the client's state once it holds no channel anymore, which happens in the
+	// background.
+	tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), async {
+		while !list_lsps2_peer_states().await.is_empty() {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+	})
+	.await
+	.expect("the service should prune the state of the closed JIT channel");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn payment_persistence_after_restart() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();

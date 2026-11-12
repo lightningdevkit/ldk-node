@@ -260,6 +260,18 @@ where
 		}
 	}
 
+	pub(crate) async fn handle_channel_closed(&self, channel_id: ChannelId) {
+		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
+			if let Err(e) = lsps2_service_handler.channel_closed(channel_id).await {
+				log_error!(
+					self.logger,
+					"LSPS2 service failed to handle ChannelClosed event: {:?}",
+					e
+				);
+			}
+		}
+	}
+
 	pub(crate) async fn handle_event(&self, event: LSPS2ServiceEvent) {
 		match event {
 			LSPS2ServiceEvent::GetInfo { request_id, counterparty_node_id, token } => {
