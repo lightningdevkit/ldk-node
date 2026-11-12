@@ -44,7 +44,7 @@ use lightning::chain::{BlockLocator, ClaimId, Listen};
 use lightning::ln::channel_state::{SpliceCandidateDetails, SpliceCandidateStatus, SpliceDetails};
 use lightning::ln::channelmanager::PaymentId;
 use lightning::ln::inbound_payment::ExpandedKey;
-use lightning::ln::msgs::UnsignedGossipMessage;
+use lightning::ln::msgs::{TxAddInput, UnsignedGossipMessage};
 use lightning::ln::script::ShutdownScript;
 use lightning::ln::types::ChannelId;
 use lightning::sign::{
@@ -2187,6 +2187,26 @@ impl Wallet {
 		self.release_inputs_and_outputs(Vec::new(), outputs).await
 	}
 
+	/// Locks `outpoints` against selection for another transaction, for inputs chosen without
+	/// [`Self::select_confirmed_utxos`].
+	pub(crate) async fn lock_outpoints(&self, outpoints: Vec<OutPoint>) -> Result<(), Error> {
+		let mut locked_persister = self.persister.lock().await;
+		let (newly_locked, change_set) = {
+			let mut locked_wallet = self.inner.lock().expect("lock");
+			// A fee bump of a splice carries the inputs of the round it replaces, which hold
+			// that round's locks already.
+			let newly_locked: Vec<OutPoint> = outpoints
+				.into_iter()
+				.filter(|outpoint| !locked_wallet.is_outpoint_locked(*outpoint))
+				.collect();
+			for outpoint in &newly_locked {
+				locked_wallet.lock_outpoint(*outpoint);
+			}
+			(newly_locked, locked_wallet.take_staged().unwrap_or_default())
+		};
+		self.persist_new_locks(&mut locked_persister, change_set, newly_locked.into_iter()).await
+	}
+
 	/// Persists a change set that locks `newly_locked`. If that fails the caller does not hand
 	/// out what the locks were taken for, and nothing would ever return them, so they are dropped.
 	async fn persist_new_locks(
@@ -2676,8 +2696,22 @@ impl Wallet {
 				ExtendedDescriptor::Wpkh(_)
 			));
 
+			// LDK refuses a contribution with an input it could not announce to the counterparty,
+			// and does so only once the selection is made and its inputs are locked.
+			let unannounceable: Vec<OutPoint> = locked_wallet
+				.list_unspent()
+				.filter(|utxo| {
+					locked_wallet
+						.tx_graph()
+						.get_tx(utxo.outpoint.txid)
+						.is_some_and(|prevtx| !fits_tx_add_input(&prevtx))
+				})
+				.map(|utxo| utxo.outpoint)
+				.collect();
+
 			let mut tx_builder = locked_wallet.build_tx();
 			tx_builder.only_witness_utxo();
+			tx_builder.unspendable(unannounceable);
 
 			for input in &must_spend {
 				let psbt_input = psbt::Input {
@@ -2725,24 +2759,26 @@ impl Wallet {
 				return Err(());
 			}
 
+			// See `unlock_unreferenced_outpoints` for what a lock is for and what returns it. LDK
+			// reports nothing if the caller fails to build a contribution from the selection,
+			// which leaves these locks to that sweep.
+			for utxo in &confirmed_utxos {
+				locked_wallet.lock_outpoint(utxo.outpoint());
+			}
+
 			let change_output = unsigned_tx
 				.output
 				.into_iter()
 				.find(|txout| must_pay_to.iter().all(|output| output != txout));
-			let change_set = if change_output.is_some() {
-				Some(locked_wallet.take_staged().unwrap_or_default())
-			} else {
-				None
-			};
 
-			(CoinSelection { confirmed_utxos, change_output }, change_set)
+			(
+				CoinSelection { confirmed_utxos, change_output },
+				locked_wallet.take_staged().unwrap_or_default(),
+			)
 		};
 
-		if let Some(change_set) = change_set {
-			locked_persister.persist_changeset(change_set).await.map_err(|e| {
-				log_error!(self.logger, "Failed to persist wallet: {}", e);
-			})?;
-		}
+		let locked = coin_selection.confirmed_utxos.iter().map(|utxo| utxo.outpoint());
+		self.persist_new_locks(&mut locked_persister, change_set, locked).await.map_err(|_| ())?;
 
 		Ok(coin_selection)
 	}
@@ -3367,12 +3403,8 @@ impl Wallet {
 			let payment_id = entry.id();
 			let (abandoned, remaining): (Vec<FundingTxCandidate>, Vec<FundingTxCandidate>) = {
 				let locked_wallet = self.inner.lock().expect("lock");
-				// TODO(#1037): the graph learns a round LDK broadcast from wallet sync alone
-				// today, so this check only adds what a sync has already seen to `tracked_rounds`.
-				// It catches every broadcast round by itself, whichever caller — the startup
-				// sweep or a live event — runs the drop, only once the `InteractiveFunding`
-				// broadcast arm applies the round to the graph, which #1037 does not do: it
-				// prepares only `Funding`-typed packages.
+				// The graph learns a round LDK broadcast from wallet sync alone, so this check only
+				// adds what a sync has already seen to `tracked_rounds`.
 				entry.candidates().iter().cloned().partition(|candidate| {
 					candidate.awaiting_broadcast
 						&& !tracked_rounds.contains(&candidate.txid)
@@ -4358,6 +4390,26 @@ impl Wallet {
 
 		Ok(new_txid)
 	}
+}
+
+/// Whether a `tx_add_input` message carrying `prevtx` fits a Lightning message.
+///
+/// The message announces an input of an interactively built transaction along with the whole
+/// transaction the input spends from. Mirrors the check LDK applies to a funding contribution.
+fn fits_tx_add_input(prevtx: &Transaction) -> bool {
+	use lightning::util::ser::Writeable;
+	const MESSAGE_TYPE_LEN: usize = 2;
+	const MAX_MESSAGE_LEN: usize = u16::MAX as usize;
+	let message_without_prevtx = TxAddInput {
+		channel_id: ChannelId([0; 32]),
+		serial_id: 0,
+		prevtx: None,
+		prevtx_out: 0,
+		sequence: 0,
+		shared_input_txid: None,
+	};
+	MESSAGE_TYPE_LEN + message_without_prevtx.serialized_length() + prevtx.serialized_length()
+		<= MAX_MESSAGE_LEN
 }
 
 struct LocalStakeAggregate {
@@ -13829,6 +13881,82 @@ mod tests {
 		assert!(none_locked(&wallet, &dropped));
 	}
 
+	/// LDK holds a splice coin selection through a negotiation the wallet sees nothing of, so only
+	/// the locks keep a second selection from choosing the same inputs.
+	#[tokio::test]
+	async fn splice_coin_selection_locks_inputs_until_discarded() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 2), 2);
+
+		let payment = TxOut {
+			value: Amount::from_sat(50_000),
+			script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([1; 20])),
+		};
+		let fee_rate = FeeRate::from_sat_per_kwu(250);
+		let selected_outpoints = |selection: &CoinSelection| -> Vec<OutPoint> {
+			selection.confirmed_utxos.iter().map(|utxo| utxo.outpoint()).collect()
+		};
+
+		let first =
+			Wallet::select_confirmed_utxos(&wallet, Vec::new(), &[payment.clone()], fee_rate)
+				.await
+				.unwrap();
+		let first_outpoints = selected_outpoints(&first);
+		assert!(!first_outpoints.is_empty());
+
+		drop(wallet);
+		let wallet = new_test_wallet(Arc::clone(&store), true).await;
+		assert!(all_locked(&wallet, &first_outpoints));
+		let second =
+			Wallet::select_confirmed_utxos(&wallet, Vec::new(), &[payment.clone()], fee_rate)
+				.await
+				.unwrap();
+		assert!(selected_outpoints(&second)
+			.iter()
+			.all(|outpoint| !first_outpoints.contains(outpoint)));
+
+		// What a `DiscardFunding` event returns of the first selection.
+		wallet
+			.release_inputs_and_outputs(
+				first_outpoints.clone(),
+				first.change_output.into_iter().collect(),
+			)
+			.await
+			.unwrap();
+
+		drop(wallet);
+		let wallet = new_test_wallet(store, true).await;
+		assert!(none_locked(&wallet, &first_outpoints));
+		let third = Wallet::select_confirmed_utxos(&wallet, Vec::new(), &[payment], fee_rate)
+			.await
+			.unwrap();
+		assert_eq!(selected_outpoints(&third), first_outpoints);
+	}
+
+	#[tokio::test]
+	async fn outpoints_locked_by_hand_are_kept_out_of_coin_selection() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+		let inputs: Vec<OutPoint> = wallet
+			.list_confirmed_funding_inputs()
+			.unwrap()
+			.iter()
+			.map(|input| input.outpoint())
+			.collect();
+		assert_eq!(inputs.len(), 1);
+
+		wallet.lock_outpoints(inputs.clone()).await.unwrap();
+
+		drop(wallet);
+		let wallet = new_test_wallet(store, true).await;
+		assert!(all_locked(&wallet, &inputs));
+		assert!(wallet.list_confirmed_funding_inputs().unwrap().is_empty());
+		assert!(test_funding_tx(&wallet, 50_000).await.is_err());
+	}
+
 	/// A funding transaction that could not be persisted is not handed out, so nobody would ever
 	/// return the locks on its inputs.
 	#[tokio::test]
@@ -13872,5 +14000,73 @@ mod tests {
 		);
 
 		assert_eq!(wallet.locked_funding_inputs(&txid).await, inputs);
+	}
+
+	/// LDK checks a contribution's inputs only after coin selection locked them, and nothing
+	/// would return the locks of a selection it then refuses.
+	#[tokio::test]
+	async fn splice_coin_selection_skips_inputs_too_large_to_announce() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let mut oversized = wallet_paying_tx(&wallet, 1);
+		oversized.output.push(TxOut {
+			value: Amount::ZERO,
+			script_pubkey: ScriptBuf::from_bytes(vec![0x6a; 70_000]),
+		});
+		assert!(!fits_tx_add_input(&oversized));
+		let oversized_outpoint = OutPoint::new(oversized.compute_txid(), 0);
+		insert_confirmed_tx(&wallet, oversized, 1);
+
+		let payment = TxOut {
+			value: Amount::from_sat(50_000),
+			script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([1; 20])),
+		};
+		let fee_rate = FeeRate::from_sat_per_kwu(250);
+		assert!(Wallet::select_confirmed_utxos(&wallet, Vec::new(), &[payment.clone()], fee_rate)
+			.await
+			.is_err());
+		assert_eq!(locked_outpoint_count(&wallet), 0);
+
+		let coin = wallet_paying_tx(&wallet, 2);
+		assert!(fits_tx_add_input(&coin));
+		let coin_outpoint = OutPoint::new(coin.compute_txid(), 0);
+		insert_confirmed_tx(&wallet, coin, 2);
+		let selection = Wallet::select_confirmed_utxos(&wallet, Vec::new(), &[payment], fee_rate)
+			.await
+			.unwrap();
+		let selected: Vec<OutPoint> =
+			selection.confirmed_utxos.iter().map(|utxo| utxo.outpoint()).collect();
+		assert_eq!(selected, vec![coin_outpoint]);
+		assert!(none_locked(&wallet, &[oversized_outpoint]));
+	}
+
+	/// See `a_funding_transaction_that_fails_to_persist_holds_no_locks`.
+	#[tokio::test]
+	async fn a_splice_coin_selection_that_fails_to_persist_holds_no_locks() {
+		let fail_store =
+			FailSwitchStore::failing_only(crate::io::BDK_WALLET_LOCKED_OUTPOINTS_PRIMARY_NAMESPACE);
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+		let payment = TxOut {
+			value: Amount::from_sat(50_000),
+			script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([1; 20])),
+		};
+		let fee_rate = FeeRate::from_sat_per_kwu(250);
+
+		fail_store.fail_writes.store(true, Ordering::Release);
+		assert!(Wallet::select_confirmed_utxos(&wallet, Vec::new(), &[payment.clone()], fee_rate)
+			.await
+			.is_err());
+		assert_eq!(locked_outpoint_count(&wallet), 0);
+
+		fail_store.fail_writes.store(false, Ordering::Release);
+		wallet.release_outputs(Vec::new()).await.unwrap();
+		drop(wallet);
+		let wallet = new_test_wallet(store, true).await;
+		assert_eq!(locked_outpoint_count(&wallet), 0);
+		assert!(Wallet::select_confirmed_utxos(&wallet, Vec::new(), &[payment], fee_rate)
+			.await
+			.is_ok());
 	}
 }

@@ -2560,15 +2560,13 @@ where
 					return Err(ReplayEvent());
 				}
 
-				// TODO(#1037): once inputs are locked at coin selection, the `inputs` of a
-				// contribution are locks this event returns: unlock them here.
 				let (inputs, outputs) = match funding_info {
 					FundingInfo::Tx { transaction } => (
 						transaction.input.into_iter().map(|txin| txin.previous_output).collect(),
 						transaction.output,
 					),
-					FundingInfo::Contribution { inputs: _, outputs } => (
-						Vec::new(),
+					FundingInfo::Contribution { inputs, outputs } => (
+						inputs,
 						outputs
 							.into_iter()
 							.map(|script_pubkey| bitcoin::TxOut {
