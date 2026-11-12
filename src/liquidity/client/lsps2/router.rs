@@ -110,11 +110,7 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 					.network_graph
 					.read_only()
 					.node(&NodeId::from_pubkey(&channel.counterparty.node_id))
-					.is_some() && channel
-				.counterparty
-				.forwarding_info
-				.clone()
-				.is_some_and(|info| PaymentRelay::try_from(info).is_ok())
+					.is_some() && channel.counterparty.forwarding_info.is_some()
 		};
 		let direct_path_has_sufficient_liquidity = amount_msats.map_or(true, |amount_msats| {
 			if allow_mpp {
@@ -149,9 +145,9 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 		);
 		// The default router may fall back to a direct path for an announced recipient even when no
 		// channel-backed paths have enough inbound liquidity. Only accept that fallback when the
-		// public, blinded-path-eligible channels can receive the resolved amount: across channels when
-		// MPP is allowed, or on one channel, including its HTLC bounds, when MPP is disabled. A direct
-		// recipient path provides no hint for payers to discover private channels.
+		// public channels advertised by their counterparty can receive the resolved amount: across
+		// channels when MPP is allowed, or on one channel, including its HTLC bounds, when MPP is
+		// disabled. A direct recipient path provides no hint for payers to discover private channels.
 		// Otherwise it would hide the need for a JIT path and leave an invoice that cannot be paid.
 		//
 		// Always prefer usable ordinary paths. Besides avoiding an unnecessary channel open, this
@@ -659,6 +655,40 @@ mod tests {
 			paths[0].introduction_node(),
 			&IntroductionNode::NodeId(lsp_node_id),
 			"capacity without forwarding parameters hid the JIT path"
+		);
+	}
+
+	#[test]
+	fn counts_capacity_with_large_cltv_delta_for_direct_fallback() {
+		let recipient = pubkey(10);
+		let parameters = LSPS2LeaseParameters {
+			lsp_node_id: pubkey(11),
+			intercept_scid: 42,
+			cltv_expiry_delta: 48,
+			payment_size_msat: Some(3_000),
+			valid_until: u64::MAX,
+		};
+		// Too large for a blinded hop, but payers route to a direct path over the public graph.
+		let mut large_cltv_delta = first_hop(3_000, None, None);
+		large_cltv_delta.counterparty.forwarding_info.as_mut().unwrap().cltv_expiry_delta = 288;
+		let inner_router =
+			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
+		let router = LSPS2Router::new(inner_router, announced_graph(recipient, true), TestEntropy);
+		let paths = router
+			.create_blinded_payment_paths(
+				recipient,
+				ReceiveAuthKey([3; 32]),
+				vec![large_cltv_delta],
+				payment_tlvs(payment_metadata(parameters)),
+				Some(3_000),
+				&Secp256k1::new(),
+			)
+			.unwrap();
+
+		assert_eq!(
+			paths[0].introduction_node(),
+			&IntroductionNode::NodeId(recipient),
+			"a large CLTV expiry delta must not exclude publicly routable capacity"
 		);
 	}
 
