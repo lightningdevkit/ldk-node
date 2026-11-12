@@ -387,12 +387,19 @@ impl Node {
 			},
 		))?;
 
-		// See `Wallet::unlock_unreferenced_outpoints`. The locks still needed are those the wallet
-		// recorded for the funding transaction of a channel that is still around. Without that
-		// record for a channel awaiting its funding's confirmation, its locks cannot be told apart
-		// from leftovers, and every lock is kept. An output this releases although a broadcast
-		// transaction spends it is spent again in the wallet's view by the next sync.
-		let mut funding_inputs = std::collections::HashSet::new();
+		// See `Wallet::unlock_unreferenced_outpoints`. The locks still needed are those of a splice
+		// round LDK still tracks, which lists the inputs this node contributed to it, and those
+		// the wallet recorded for the funding transaction of a channel that is still around.
+		// Without that record for a channel awaiting its funding's confirmation, its locks cannot
+		// be told apart from leftovers, and every lock is kept. An output this releases although a
+		// broadcast transaction spends it is spent again in the wallet's view by the next sync.
+		let mut referenced: std::collections::HashSet<bitcoin::OutPoint> = channels
+			.iter()
+			.filter_map(|channel| channel.splice_details.as_ref())
+			.flat_map(|splice| splice.candidates.iter())
+			.filter_map(|candidate| candidate.contribution.as_ref())
+			.flat_map(|contribution| contribution.inputs().iter().map(|input| input.outpoint()))
+			.collect();
 		let mut has_untracked_funding = false;
 		for channel in channels.iter().filter(|channel| channel.is_outbound) {
 			let Some(funding_txo) = channel.funding_txo else {
@@ -402,10 +409,10 @@ impl Node {
 				self.runtime.block_on(self.wallet.locked_funding_inputs(&funding_txo.txid));
 			has_untracked_funding |= inputs.is_empty()
 				&& channel.confirmations.map_or(true, |confirmations| confirmations == 0);
-			funding_inputs.extend(inputs);
+			referenced.extend(inputs);
 		}
 		self.runtime.block_on(self.wallet.unlock_unreferenced_outpoints(|outpoint| {
-			has_untracked_funding || funding_inputs.contains(outpoint)
+			has_untracked_funding || referenced.contains(outpoint)
 		}))?;
 
 		// Synchronize Lightning chain state before peers or event processing can act on stale
@@ -1978,6 +1985,13 @@ impl Node {
 			reserve_output.clone(),
 			feerate,
 		);
+		let built = built.and_then(|contribution| {
+			// These inputs were not chosen by the wallet's coin selection, which would have locked
+			// them. LDK reports them once it lets the contribution go.
+			let outpoints = contribution.inputs().iter().map(|input| input.outpoint()).collect();
+			self.runtime.block_on(self.wallet.lock_outpoints(outpoints))?;
+			Ok(contribution)
+		});
 		match built {
 			Ok(contribution) => Ok(contribution),
 			Err(e) => {
