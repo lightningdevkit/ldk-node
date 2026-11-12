@@ -54,11 +54,7 @@ where
 	}
 
 	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
-		self.update_peers(|peers| {
-			peers.remove(node_id);
-			true
-		})
-		.await
+		self.update_peers(|peers| peers.remove(node_id).is_some()).await
 	}
 
 	/// Applies `update` to a copy of the peer set, persists the result, and only then publishes
@@ -302,5 +298,14 @@ mod tests {
 
 		// A retry has to attempt the write again.
 		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(peer_info).await);
+	}
+
+	#[tokio::test]
+	async fn removing_unknown_peer_does_not_write() {
+		// Every write to this store fails, so removing only succeeds if nothing is written.
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let peer_store = PeerStore::new(store, Arc::new(TestLogger::new()));
+
+		assert_eq!(Ok(()), peer_store.remove_peer(&test_peer_info().node_id).await);
 	}
 }
