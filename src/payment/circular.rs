@@ -15,6 +15,7 @@ use lightning::routing::router::{
 use lightning_types::features::Bolt11InvoiceFeatures;
 use lightning_types::routing::RoutingFees;
 
+use crate::config::apply_route_parameters_config;
 use crate::{Error, UserChannelId};
 
 /// A hop in a circular route quote. The final hop returns to the local node.
@@ -75,14 +76,6 @@ fn fresh_synthetic_payee() -> Result<PublicKey, Error> {
 		if let Ok(secret_key) = SecretKey::from_slice(&secret_bytes) {
 			return Ok(PublicKey::from_secret_key(&secp_ctx, &secret_key));
 		}
-	}
-}
-
-fn apply_configured_routing_fee_cap(
-	route_params: &mut RouteParameters, route_parameters: &RouteParametersConfig,
-) {
-	if let Some(max_total_routing_fee_msat) = route_parameters.max_total_routing_fee_msat {
-		route_params.max_total_routing_fee_msat = Some(max_total_routing_fee_msat);
 	}
 }
 
@@ -161,19 +154,15 @@ pub(super) fn quote_circular_route<R: Router>(
 		htlc_minimum_msat: last_hop.inbound_htlc_minimum_msat,
 		htlc_maximum_msat: last_hop.inbound_htlc_maximum_msat,
 	}]);
-	let mut payment_params =
+	let payment_params =
 		PaymentParameters::from_node_id(synthetic_payee, u32::from(MIN_FINAL_CLTV_EXPIRY_DELTA))
 			.with_bolt11_features(invoice_features)
 			.map_err(|_| Error::PaymentSendingFailed)?
 			.with_route_hints(vec![route_hint])
 			.map_err(|_| Error::PaymentSendingFailed)?;
-	payment_params.max_total_cltv_expiry_delta = route_parameters.max_total_cltv_expiry_delta;
-	payment_params.max_path_count = route_parameters.max_path_count;
-	payment_params.max_channel_saturation_power_of_half =
-		route_parameters.max_channel_saturation_power_of_half;
 	let mut route_params =
 		RouteParameters::from_payment_params_and_value(payment_params, amount_msat);
-	apply_configured_routing_fee_cap(&mut route_params, &route_parameters);
+	apply_route_parameters_config(&mut route_params, &route_parameters);
 	let first_hops = [first_hop];
 	let route = router
 		.find_route(&local_node_id, &route_params, Some(&first_hops), inflight_htlcs)
@@ -336,10 +325,10 @@ mod tests {
 			1_000_000,
 		);
 		let default_cap = params.max_total_routing_fee_msat;
-		apply_configured_routing_fee_cap(&mut params, &RouteParametersConfig::default());
+		apply_route_parameters_config(&mut params, &RouteParametersConfig::default());
 		assert_eq!(params.max_total_routing_fee_msat, default_cap);
 		for cap in [0, 777] {
-			apply_configured_routing_fee_cap(
+			apply_route_parameters_config(
 				&mut params,
 				&RouteParametersConfig {
 					max_total_routing_fee_msat: Some(cap),
