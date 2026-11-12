@@ -10,6 +10,7 @@
 pub(crate) mod asynchronous;
 mod bolt11;
 mod bolt12;
+mod circular;
 mod forwarding;
 pub(crate) mod forwarding_store;
 #[cfg(feature = "unified-payments")]
@@ -24,6 +25,7 @@ mod unified;
 pub use bolt11::Bolt11Payment;
 pub(crate) use bolt11::PaymentMetadata;
 pub use bolt12::{Bolt12Payment, PayerProofOptions};
+pub use circular::{CircularRouteHop, CircularRoutePath, CircularRouteQuote};
 pub use forwarding::{
 	ChannelForwardingStats, ChannelForwardingStatsPage, ChannelPairForwardingStats,
 	ChannelPairForwardingStatsId, ChannelPairForwardingStatsPage, ForwardedPaymentDetails,

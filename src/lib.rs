@@ -165,7 +165,6 @@ use lightning::ln::funding::{
 use lightning::ln::msgs::{BaseMessageHandler, SocketAddress};
 use lightning::ln::peer_handler::CustomMessageHandler;
 use lightning::routing::gossip::NodeAlias;
-
 use lightning::sign::EntropySource;
 use lightning::util::persist::KVStore;
 use lightning::util::wallet_utils::{ConfirmedUtxo, Wallet as LdkWallet};
@@ -1083,6 +1082,7 @@ impl Node {
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
+			Arc::clone(&self._router),
 		)
 	}
 
@@ -1101,6 +1101,7 @@ impl Node {
 			Arc::clone(&self.config),
 			Arc::clone(&self.is_running),
 			Arc::clone(&self.logger),
+			Arc::clone(&self._router),
 		))
 	}
 
