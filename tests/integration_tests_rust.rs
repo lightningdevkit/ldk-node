@@ -1634,6 +1634,38 @@ async fn detailed_forwarded_payment_tracking() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn back_to_back_onchain_sends_before_sync() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	// Without background sync, so that the wallet does not learn of the first send in between.
+	let node = setup_node(&TestChainSource::Esplora(&electrsd), random_config());
+
+	let funding_address = node.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![funding_address],
+		Amount::from_sat(500_000),
+	)
+	.await;
+	node.sync_wallets().unwrap();
+
+	let first_address = bitcoind.client.new_address().unwrap();
+	let second_address = bitcoind.client.new_address().unwrap();
+	let first_txid = node.onchain_payment().send_to_address(&first_address, 100_000, None).unwrap();
+	let second_txid =
+		node.onchain_payment().send_to_address(&second_address, 100_000, None).unwrap();
+
+	wait_for_tx(&electrsd.client, first_txid).await;
+	wait_for_tx(&electrsd.client, second_txid).await;
+
+	let mempool = bitcoind.client.get_raw_mempool().unwrap().into_model().unwrap();
+	assert!(
+		mempool.0.contains(&first_txid) && mempool.0.contains(&second_txid),
+		"both back-to-back transactions must coexist in the mempool"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn split_underpaid_bolt11_payment() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
@@ -8013,6 +8045,43 @@ async fn fs_store_persistence_backwards_compatibility() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_fee_bump_rbf_twice_before_sync() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a.clone(), addr_b],
+		Amount::from_sat(500_000),
+	)
+	.await;
+	node_b.sync_wallets().unwrap();
+	let txid = node_b.onchain_payment().send_to_address(&addr_a, 100_000, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+	node_b.sync_wallets().unwrap();
+	let payment_id = PaymentId(txid.to_byte_array());
+	let first_fee = node_b.payment(&payment_id).unwrap().unwrap().fee_paid_msat.unwrap();
+
+	let first_replacement = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
+	let second_replacement = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
+	assert_ne!(first_replacement, second_replacement);
+	let payment = node_b.payment(&payment_id).unwrap().unwrap();
+	assert!(payment.fee_paid_msat.unwrap() > first_fee);
+	assert!(
+		matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == second_replacement)
+	);
+	wait_for_tx(&electrsd.client, second_replacement).await;
+	node_b.sync_wallets().unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_fee_bump_rbf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
@@ -8038,17 +8107,19 @@ async fn onchain_fee_bump_rbf() {
 	let amount_to_send_sats = 100_000;
 	let txid =
 		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+	let payment_id = PaymentId(txid.to_byte_array());
+	let original_payment = node_b
+		.payment(&payment_id)
+		.expect("payment lookup must succeed")
+		.expect("outbound payment must be recorded before wallet sync");
+	let original_fee = original_payment.fee_paid_msat.unwrap();
+
 	wait_for_tx(&electrsd.client, txid).await;
 	// Give the chain source time to index the unconfirmed transaction before syncing.
 	// Without this, Esplora may not yet have the tx, causing sync to miss it and
 	// leaving the BDK wallet graph empty.
 	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
-
-	let payment_id = PaymentId(txid.to_byte_array());
-	let original_payment = node_b.payment(&payment_id).unwrap().unwrap();
-	let original_fee = original_payment.fee_paid_msat.unwrap();
 
 	// Non-existent payment id
 	let fake_txid =

@@ -10,6 +10,7 @@ use std::future::Future;
 use std::ops::Deref;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bdk_chain::spk_client::{FullScanRequest, SyncRequest};
 use bdk_chain::ChainPosition;
@@ -467,6 +468,35 @@ impl Wallet {
 		self.inner.lock().expect("lock").start_full_scan().build()
 	}
 
+	/// A seen-at time under which `tx` takes precedence over everything it conflicts with.
+	///
+	/// BDK keeps, of two conflicting unconfirmed transactions, the one last seen later, and drops a
+	/// transaction evicted at or after the time it was last seen. A transaction keeps its
+	/// ancestors with it, so a descendant of a conflict counts like the conflict itself. The
+	/// current time alone does not settle any of this: each may carry the same second.
+	fn next_seen_at(wallet: &bdk_wallet::Wallet, tx: &Transaction) -> u64 {
+		let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+		let graph = wallet.tx_graph();
+		let latest_timestamp = graph
+			.direct_conflicts(tx)
+			.flat_map(|(_, conflict_txid)| {
+				std::iter::once(conflict_txid)
+					.chain(graph.walk_descendants(conflict_txid, |_, txid| Some(txid)))
+			})
+			.chain(std::iter::once(tx.compute_txid()))
+			.flat_map(|txid| {
+				[
+					graph.get_tx_node(txid).and_then(|node| node.last_seen),
+					graph.get_last_evicted(txid),
+				]
+				.into_iter()
+				.flatten()
+			})
+			.max()
+			.unwrap_or(0);
+		now.max(latest_timestamp.saturating_add(1))
+	}
+
 	pub(crate) fn get_incremental_sync_request(&self) -> SyncRequest<(KeychainKind, u32)> {
 		self.inner.lock().expect("lock").start_sync_with_revealed_spks().build()
 	}
@@ -502,9 +532,15 @@ impl Wallet {
 
 	pub(crate) async fn apply_update(&self, update: impl Into<Update>) -> Result<(), Error> {
 		let mut locked_persister = self.persister.lock().await;
+		let pending_sends = self.pending_send_txids().await;
 		let events = {
 			let mut locked_wallet = self.inner.lock().expect("lock");
-			match locked_wallet.apply_update_events(update) {
+			let applied = locked_wallet.events_helper(|wallet| {
+				wallet.apply_update(update)?;
+				Self::restore_evicted_sends(wallet, &pending_sends);
+				Ok::<_, bdk_chain::local_chain::CannotConnectError>(())
+			});
+			match applied {
 				Ok(events) => events,
 				Err(e) => {
 					log_error!(self.logger, "Sync failed due to chain connection error: {}", e);
@@ -525,6 +561,63 @@ impl Wallet {
 		Ok(())
 	}
 
+	/// The transactions of this node's own on-chain sends that have yet to confirm.
+	async fn pending_send_txids(&self) -> Vec<Txid> {
+		self.payment_stores
+			.pending_payments(|pending| {
+				pending.details().is_some_and(|details| {
+					details.direction == PaymentDirection::Outbound
+						&& details.status == PaymentStatus::Pending
+				})
+			})
+			.await
+			.iter()
+			.filter_map(|pending| match pending.details()?.kind {
+				// A transaction of a channel carries a type, and is LDK's to rebroadcast.
+				PaymentKind::Onchain {
+					txid,
+					status: ConfirmationStatus::Unconfirmed,
+					tx_type: None,
+				} => Some(txid),
+				_ => None,
+			})
+			.collect()
+	}
+
+	/// Returns the given sends to the wallet's view if a chain source update evicted them.
+	///
+	/// A chain source evicts an unconfirmed transaction it does not report, which includes one it
+	/// has yet to see. The inputs of a send the node only just made would then be available for
+	/// another spend until a later update reports the send.
+	///
+	/// A send only returns if that changes nothing else in the wallet's view: returning it over
+	/// a conflict, or along with a parent that is itself gone from the view, would put the
+	/// wallet's own guess above what the chain source reported.
+	fn restore_evicted_sends(wallet: &mut bdk_wallet::Wallet, txids: &[Txid]) {
+		// One send at a time: a send returns only once its parent has, and what the view holds
+		// changes with every send returned.
+		loop {
+			let in_view: HashSet<Txid> = wallet.transactions().map(|tx| tx.tx_node.txid).collect();
+			let graph = wallet.tx_graph();
+			let returning = txids.iter().filter(|txid| !in_view.contains(*txid)).find_map(|txid| {
+				let tx = graph.get_tx(*txid)?;
+				let displaces_a_conflict = graph
+					.direct_conflicts(&tx)
+					.any(|(_, conflict_txid)| in_view.contains(&conflict_txid));
+				let returns_a_parent = tx.input.iter().any(|txin| {
+					let parent_txid = txin.previous_output.txid;
+					graph.get_tx(parent_txid).is_some() && !in_view.contains(&parent_txid)
+				});
+				(!displaces_a_conflict && !returns_a_parent).then_some(tx)
+			});
+			let Some(tx) = returning else {
+				break;
+			};
+			let seen_at = Self::next_seen_at(wallet, &tx);
+			wallet.apply_unconfirmed_txs([(tx, seen_at)]);
+		}
+	}
+
 	#[cfg(feature = "chain-bitcoind")]
 	pub(crate) async fn apply_mempool_txs(
 		&self, unconfirmed_txs: Vec<(Transaction, u64)>, evicted_txids: Vec<(Txid, u64)>,
@@ -534,12 +627,14 @@ impl Wallet {
 		}
 
 		let mut locked_persister = self.persister.lock().await;
+		let pending_sends = self.pending_send_txids().await;
 		let events = {
 			let mut locked_wallet = self.inner.lock().expect("lock");
 			locked_wallet
 				.events_helper(|wallet| -> Result<(), std::convert::Infallible> {
 					wallet.apply_unconfirmed_txs(unconfirmed_txs);
 					wallet.apply_evicted_txs(evicted_txids);
+					Self::restore_evicted_sends(wallet, &pending_sends);
 					Ok(())
 				})
 				.expect("applying mempool updates cannot fail")
@@ -2245,7 +2340,7 @@ impl Wallet {
 			fee_rate.unwrap_or_else(|| self.fee_estimator.estimate_fee_rate(confirmation_target));
 
 		let mut locked_persister = self.persister.lock().await;
-		let (psbt, change_set) = {
+		let (tx, seen_at, events, change_set) = {
 			let mut locked_wallet = self.inner.lock().expect("lock");
 
 			// Prepare the tx_builder. We properly check the reserve requirements (again) further down.
@@ -2369,19 +2464,38 @@ impl Wallet {
 				},
 			}
 
-			(psbt, locked_wallet.take_staged().unwrap_or_default())
+			let tx = psbt.extract_tx().map_err(|e| {
+				log_error!(self.logger, "Failed to extract transaction: {}", e);
+				e
+			})?;
+			// The wallet learns of the transaction here rather than from the next sync, so that
+			// nothing built before then spends the same inputs.
+			let seen_at = Self::next_seen_at(&locked_wallet, &tx);
+			let events = locked_wallet.apply_unconfirmed_txs_events([(tx.clone(), seen_at)]);
+			(tx, seen_at, events, locked_wallet.take_staged().unwrap_or_default())
 		};
-		locked_persister.persist_changeset(change_set).await.map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet: {}", e);
-			Error::PersistenceFailed
-		})?;
-
-		let tx = psbt.extract_tx().map_err(|e| {
-			log_error!(self.logger, "Failed to extract transaction: {}", e);
-			e
-		})?;
-
 		let txid = tx.compute_txid();
+		let recorded = async {
+			self.update_payment_store(events).await.map_err(|e| {
+				log_error!(self.logger, "Failed to update payment store: {}", e);
+				Error::PersistenceFailed
+			})?;
+			locked_persister.persist_changeset(change_set).await.map_err(|e| {
+				log_error!(self.logger, "Failed to persist wallet: {}", e);
+				Error::PersistenceFailed
+			})
+		}
+		.await;
+		if let Err(e) = recorded {
+			// The send is reported as failed, so nothing may broadcast the transaction later on:
+			// it leaves the wallet's view, and its payment record with it.
+			self.inner.lock().expect("lock").apply_evicted_txs([(txid, seen_at)]);
+			if let Err(e) = self.remove_payment(&PaymentId(txid.to_byte_array())).await {
+				log_error!(self.logger, "Failed to remove the payment of a failed send: {}", e);
+			}
+			return Err(e);
+		}
+
 		self.broadcaster.broadcast(tx);
 
 		match send_amount {
@@ -4040,6 +4154,11 @@ impl Wallet {
 
 		let new_txid = fee_bumped_tx.compute_txid();
 
+		// See `send_to_address`: a further bump or send before the next sync builds on the
+		// replacement rather than on the transaction it replaces.
+		let seen_at = Self::next_seen_at(&locked_wallet, &fee_bumped_tx);
+		locked_wallet.apply_unconfirmed_txs([(fee_bumped_tx.clone(), seen_at)]);
+
 		let change_set = locked_wallet.take_staged().unwrap_or_default();
 		drop(locked_wallet);
 
@@ -4060,15 +4179,33 @@ impl Wallet {
 			)
 		};
 
-		locked_persister.persist_changeset(change_set).await.map_err(|e| {
-			log_error!(self.logger, "Failed to persist wallet after fee bump of {}: {}", txid, e);
-			Error::PersistenceFailed
-		})?;
+		let recorded = async {
+			locked_persister.persist_changeset(change_set).await.map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to persist wallet after fee bump of {}: {}",
+					txid,
+					e
+				);
+				Error::PersistenceFailed
+			})?;
 
-		// Taken after the persister, the order wallet sync takes the two locks in.
-		let stores = self.payment_stores.lock().await;
-		stores.insert_or_update_payment(new_payment.clone()).await?;
-		self.upsert_pending_payment(&stores, new_payment, Vec::new()).await?;
+			// Taken after the persister, the order wallet sync takes the two locks in.
+			let stores = self.payment_stores.lock().await;
+			stores.insert_or_update_payment(new_payment.clone()).await?;
+			self.upsert_pending_payment(&stores, new_payment, Vec::new()).await
+		}
+		.await;
+		if let Err(e) = recorded {
+			// The bump is reported as failed and the replacement is not broadcast, so the wallet
+			// and the payment's record go back to the transaction it would have replaced.
+			self.inner.lock().expect("lock").apply_evicted_txs([(new_txid, seen_at)]);
+			let stores = self.payment_stores.lock().await;
+			if let Err(e) = stores.insert_or_update_payment(payment).await {
+				log_error!(self.logger, "Failed to restore the payment of a failed bump: {}", e);
+			}
+			return Err(e);
+		}
 
 		self.broadcaster.broadcast(fee_bumped_tx);
 
@@ -13128,5 +13265,114 @@ mod tests {
 		assert_eq!(inputs.len(), 1);
 		assert_eq!(inputs[0].outpoint(), OutPoint { txid: confirmed_txid, vout: 0 });
 		assert_eq!(inputs[0].output().value, Amount::from_sat(200_000));
+	}
+
+	/// Records `txid` as the transaction of a pending send of this node.
+	async fn record_pending_send(wallet: &Wallet, txid: Txid) {
+		let payment = PaymentDetails::new(
+			PaymentId(txid.to_byte_array()),
+			PaymentKind::Onchain { txid, status: ConfirmationStatus::Unconfirmed, tx_type: None },
+			Some(89_000_000),
+			Some(1_000_000),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		wallet.payment_stores.payment_store().insert(payment.clone()).await.unwrap();
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert(PendingPaymentDetails::new(payment, Vec::new(), Vec::new()))
+			.await
+			.unwrap();
+	}
+
+	/// Lets a wallet sync report `txid` as gone from the chain source's mempool.
+	async fn sync_evicting(wallet: &Wallet, txid: Txid, evicted_at: u64) {
+		let mut tx_update = bdk_chain::TxUpdate::default();
+		tx_update.evicted_ats = [(txid, evicted_at)].into();
+		wallet.apply_update(Update { tx_update, ..Default::default() }).await.unwrap();
+	}
+
+	fn is_in_wallet_view(wallet: &Wallet, txid: Txid) -> bool {
+		wallet.inner.lock().unwrap().get_tx(txid).is_some()
+	}
+
+	/// A chain source that has yet to see a send the node just made reports it as gone, which
+	/// must not free the send's inputs for another spend.
+	#[tokio::test]
+	async fn a_sync_evicting_a_pending_send_returns_it_to_the_wallet() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let coin = wallet_paying_tx(&wallet, 1);
+		let other_coin = wallet_paying_tx(&wallet, 2);
+		let send = tx_spending(&wallet, OutPoint::new(coin.compute_txid(), 0));
+		let unrelated = tx_spending(&wallet, OutPoint::new(other_coin.compute_txid(), 0));
+		insert_confirmed_tx(&wallet, coin, 1);
+		insert_confirmed_tx(&wallet, other_coin, 2);
+		insert_unconfirmed_tx(&wallet, send.clone());
+		insert_unconfirmed_tx(&wallet, unrelated.clone());
+		record_pending_send(&wallet, send.compute_txid()).await;
+
+		sync_evicting(&wallet, send.compute_txid(), 101).await;
+		sync_evicting(&wallet, unrelated.compute_txid(), 101).await;
+
+		assert!(is_in_wallet_view(&wallet, send.compute_txid()));
+		assert!(!is_in_wallet_view(&wallet, unrelated.compute_txid()));
+	}
+
+	/// A send spending the change of another returns with it, whichever of the two is looked at
+	/// first.
+	#[tokio::test]
+	async fn evicted_sends_return_along_with_the_sends_they_spend() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let coin = wallet_paying_tx(&wallet, 1);
+		let parent = tx_spending(&wallet, OutPoint::new(coin.compute_txid(), 0));
+		let child = tx_spending(&wallet, OutPoint::new(parent.compute_txid(), 0));
+		let (parent_txid, child_txid) = (parent.compute_txid(), child.compute_txid());
+		insert_confirmed_tx(&wallet, coin, 1);
+		insert_unconfirmed_tx(&wallet, parent);
+		insert_unconfirmed_tx(&wallet, child);
+		evict_tx(&wallet, parent_txid);
+		evict_tx(&wallet, child_txid);
+		assert!(!is_in_wallet_view(&wallet, parent_txid));
+
+		Wallet::restore_evicted_sends(
+			&mut wallet.inner.lock().unwrap(),
+			&[child_txid, parent_txid],
+		);
+
+		assert!(is_in_wallet_view(&wallet, parent_txid));
+		assert!(is_in_wallet_view(&wallet, child_txid));
+	}
+
+	/// Returning an evicted send must not overrule what the chain source reported about other
+	/// transactions: neither one the send conflicts with, nor the replacement of its parent.
+	#[tokio::test]
+	async fn an_evicted_send_does_not_return_over_other_transactions() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let coin = wallet_paying_tx(&wallet, 1);
+		let parent = tx_spending(&wallet, OutPoint::new(coin.compute_txid(), 0));
+		let mut parent_replacement = parent.clone();
+		parent_replacement.output[0].value = Amount::from_sat(89_000);
+		let child = tx_spending(&wallet, OutPoint::new(parent.compute_txid(), 0));
+		insert_confirmed_tx(&wallet, coin, 1);
+		wallet.inner.lock().unwrap().apply_unconfirmed_txs([
+			(parent.clone(), 100),
+			(child.clone(), 100),
+			(parent_replacement.clone(), 101),
+		]);
+		for tx in [&parent, &child] {
+			record_pending_send(&wallet, tx.compute_txid()).await;
+		}
+		assert!(!is_in_wallet_view(&wallet, parent.compute_txid()));
+		assert!(!is_in_wallet_view(&wallet, child.compute_txid()));
+
+		sync_evicting(&wallet, child.compute_txid(), 102).await;
+
+		assert!(is_in_wallet_view(&wallet, parent_replacement.compute_txid()));
+		assert!(!is_in_wallet_view(&wallet, parent.compute_txid()));
+		assert!(!is_in_wallet_view(&wallet, child.compute_txid()));
 	}
 }
