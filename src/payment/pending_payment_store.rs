@@ -175,7 +175,7 @@ impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(4, conflicting_txids, optional_vec),
 	(6, funding_channels, optional_vec),
 	(8, candidates, optional_vec),
-	(12, locked_rounds, optional_vec),
+	(10, locked_rounds, optional_vec),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
