@@ -71,6 +71,13 @@ where
 
 const DEFAULT_BOLT12_INVOICE_EXPIRY_SECS: u32 = 2 * 60 * 60;
 
+/// The time for which we keep a lease cache target committed for an invoice request if its offer
+/// never expires.
+///
+/// A payer may request any amount at or above the offer's, so each such amount would otherwise leave
+/// behind a target that is refilled indefinitely.
+const INVOICE_REQUEST_CACHE_TARGET_EXPIRY_SECS: u64 = 24 * 60 * 60;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum JitInvoiceRequest {
 	Fixed { amount_msat: u64, absolute_expiry: Option<u64> },
@@ -83,14 +90,17 @@ impl JitInvoiceRequest {
 	}
 
 	fn cache_target(&self) -> (LeaseCacheTargetId, Option<u64>) {
-		match *self {
+		let (id, absolute_expiry) = match *self {
 			Self::Fixed { amount_msat, absolute_expiry } => {
 				(LeaseCacheTargetId::Fixed { amount_msat }, absolute_expiry)
 			},
 			Self::Variable { absolute_expiry, .. } => {
 				(LeaseCacheTargetId::Variable, absolute_expiry)
 			},
-		}
+		};
+		let absolute_expiry = absolute_expiry
+			.unwrap_or_else(|| now_secs().saturating_add(INVOICE_REQUEST_CACHE_TARGET_EXPIRY_SECS));
+		(id, Some(absolute_expiry))
 	}
 }
 
@@ -870,6 +880,28 @@ mod tests {
 
 		assert_eq!(result, Err(()));
 		assert_eq!(*restored.lock().unwrap(), Some(42));
+	}
+
+	#[test]
+	fn invoice_request_cache_targets_expire_by_default() {
+		let before = now_secs();
+		for request in [
+			JitInvoiceRequest::Fixed { amount_msat: 1_000, absolute_expiry: None },
+			JitInvoiceRequest::Variable { amount_msat: 1_000, absolute_expiry: None },
+		] {
+			let (_, absolute_expiry) = request.cache_target();
+			let absolute_expiry =
+				absolute_expiry.expect("a target for an offer without expiry must still expire");
+			assert!(absolute_expiry >= before + 24 * 60 * 60);
+			assert!(absolute_expiry <= now_secs() + 24 * 60 * 60);
+		}
+
+		for request in [
+			JitInvoiceRequest::Fixed { amount_msat: 1_000, absolute_expiry: Some(42) },
+			JitInvoiceRequest::Variable { amount_msat: 1_000, absolute_expiry: Some(42) },
+		] {
+			assert_eq!(request.cache_target().1, Some(42), "the offer's expiry must be kept");
+		}
 	}
 
 	#[test]
