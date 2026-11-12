@@ -22,7 +22,7 @@ use lightning_liquidity::lsps2::msgs::LSPS2RawOpeningFeeParams;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_types::payment::PaymentHash;
 
-use crate::logger::{log_error, LdkLogger};
+use crate::logger::{log_error, log_trace, LdkLogger};
 use crate::types::{ChannelManager, KeysManager, LiquidityManager, PeerManager, Wallet};
 use crate::{total_anchor_channels_reserve_sats, Config};
 
@@ -260,12 +260,44 @@ where
 		}
 	}
 
-	pub(crate) async fn handle_channel_closed(&self, channel_id: ChannelId) {
+	pub(crate) async fn handle_channel_closed(
+		&self, user_channel_id: u128, channel_id: ChannelId, counterparty_node_id: &PublicKey,
+	) {
 		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
+			// A JIT channel closing before it became ready is a failed channel open. This errors
+			// for any channel that isn't such a JIT channel, which is the common case.
+			if let Err(e) = lsps2_service_handler
+				.channel_open_failed(counterparty_node_id, user_channel_id)
+				.await
+			{
+				log_trace!(
+					self.logger,
+					"LSPS2 service did not treat the closure of channel {} as a failed channel open: {:?}",
+					channel_id,
+					e
+				);
+			}
+
 			if let Err(e) = lsps2_service_handler.channel_closed(channel_id).await {
 				log_error!(
 					self.logger,
 					"LSPS2 service failed to handle ChannelClosed event: {:?}",
+					e
+				);
+			}
+		}
+	}
+
+	/// Fails the HTLCs held for the given JIT channel back, allowing the payer to retry.
+	async fn fail_channel_open(&self, counterparty_node_id: &PublicKey, user_channel_id: u128) {
+		if let Some(lsps2_service_handler) = self.liquidity_manager.lsps2_service_handler() {
+			if let Err(e) = lsps2_service_handler
+				.channel_open_failed(counterparty_node_id, user_channel_id)
+				.await
+			{
+				log_error!(
+					self.logger,
+					"LSPS2 service failed to handle failed channel open: {:?}",
 					e
 				);
 			}
@@ -433,28 +465,32 @@ where
 					return;
 				};
 
-				let init_features = if let Some(Some(peer_manager)) =
-					self.peer_manager.read().expect("lock").as_ref().map(|weak| weak.upgrade())
-				{
-					// Fail if we're not connected to the prospective channel partner.
-					if let Some(peer) = peer_manager.peer_by_node_id(&their_network_key) {
-						peer.init_features
-					} else {
-						// TODO: We just silently fail here. Eventually we will need to remember
-						// the pending requests and regularly retry opening the channel until we
-						// succeed.
-						log_error!(
-							self.logger,
-							"Failed to open LSPS2 channel to {} due to peer not being not connected.",
-							their_network_key,
-						);
-						return;
-					}
-				} else {
+				let peer_manager = self
+					.peer_manager
+					.read()
+					.expect("lock")
+					.as_ref()
+					.and_then(|weak| weak.upgrade());
+				let Some(peer_manager) = peer_manager else {
 					debug_assert!(false, "Failed to handle LSPS2ServiceEvent as peer manager isn't available. This should never happen.",);
 					log_error!(self.logger, "Failed to handle LSPS2ServiceEvent as peer manager isn't available. This should never happen.",);
 					return;
 				};
+
+				// Fail if we're not connected to the prospective channel partner.
+				let Some(peer) = peer_manager.peer_by_node_id(&their_network_key) else {
+					log_error!(
+						self.logger,
+						"Failed to open LSPS2 channel to {} due to peer not being not connected.",
+						their_network_key,
+					);
+					// TODO: We fail the payment back here. Eventually we will need to remember
+					// the pending requests and regularly retry opening the channel until we
+					// succeed.
+					self.fail_channel_open(&their_network_key, user_channel_id).await;
+					return;
+				};
+				let init_features = peer.init_features;
 
 				// Fail if we have insufficient onchain funds available.
 				let over_provisioning_msat = amt_to_forward_msat
@@ -480,9 +516,10 @@ where
 						"Unable to create channel due to insufficient funds. Available: {}sats, Required: {}sats",
 						spendable_amount_sats, required_funds_sats,
 					);
-					// TODO: We just silently fail here. Eventually we will need to remember
+					// TODO: We fail the payment back here. Eventually we will need to remember
 					// the pending requests and regularly retry opening the channel until we
 					// succeed.
+					self.fail_channel_open(&their_network_key, user_channel_id).await;
 					return;
 				}
 
@@ -529,9 +566,6 @@ where
 				match result {
 					Ok(_) => {},
 					Err(e) => {
-						// TODO: We just silently fail here. Eventually we will need to remember
-						// the pending requests and regularly retry opening the channel until we
-						// succeed.
 						let zero_reserve_string =
 							if service_config.disable_client_reserve { "0reserve " } else { "" };
 						log_error!(
@@ -541,6 +575,10 @@ where
 							their_network_key,
 							e
 						);
+						// TODO: We fail the payment back here. Eventually we will need to remember
+						// the pending requests and regularly retry opening the channel until we
+						// succeed.
+						self.fail_channel_open(&their_network_key, user_channel_id).await;
 						return;
 					},
 				}
