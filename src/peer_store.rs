@@ -12,7 +12,7 @@ use std::sync::{Arc, RwLock};
 use bitcoin::secp256k1::PublicKey;
 use lightning::impl_writeable_tlv_based;
 use lightning::util::persist::KVStore;
-use lightning::util::ser::{Readable, ReadableArgs, Writeable, Writer};
+use lightning::util::ser::{CollectionLength, Readable, ReadableArgs, Writeable, Writer};
 
 use crate::io::{
 	PEER_INFO_PERSISTENCE_KEY, PEER_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -132,9 +132,11 @@ impl Readable for PeerStoreDeserWrapper {
 	fn read<R: lightning::io::Read>(
 		reader: &mut R,
 	) -> Result<Self, lightning::ln::msgs::DecodeError> {
-		let len: u16 = Readable::read(reader)?;
-		let mut peers = HashMap::with_capacity(len as usize);
-		for _ in 0..len {
+		let len: CollectionLength = Readable::read(reader)?;
+		// We don't preallocate, as a corrupted count would otherwise have us allocate up to
+		// `u64::MAX` entries before failing to read them.
+		let mut peers = HashMap::new();
+		for _ in 0..len.0 {
 			let k: PublicKey = Readable::read(reader)?;
 			let v: PeerInfo = Readable::read(reader)?;
 			peers.insert(k, v);
@@ -147,7 +149,7 @@ pub(crate) struct PeerStoreSerWrapper<'a>(&'a HashMap<PublicKey, PeerInfo>);
 
 impl Writeable for PeerStoreSerWrapper<'_> {
 	fn write<W: Writer>(&self, writer: &mut W) -> Result<(), lightning::io::Error> {
-		(self.0.len() as u16).write(writer)?;
+		CollectionLength(self.0.len() as u64).write(writer)?;
 		for (k, v) in self.0.iter() {
 			k.write(writer)?;
 			v.write(writer)?;
@@ -307,5 +309,29 @@ mod tests {
 		let peer_store = PeerStore::new(store, Arc::new(TestLogger::new()));
 
 		assert_eq!(Ok(()), peer_store.remove_peer(&test_peer_info().node_id).await);
+	}
+
+	#[test]
+	fn peer_store_keeps_legacy_encoding_below_u16_max() {
+		let peer_info = test_peer_info();
+		let mut peers = HashMap::new();
+		peers.insert(peer_info.node_id, peer_info.clone());
+
+		// Before `CollectionLength`, the count was written as a plain `u16`.
+		let mut legacy_bytes = Vec::new();
+		(peers.len() as u16).write(&mut legacy_bytes).unwrap();
+		peer_info.node_id.write(&mut legacy_bytes).unwrap();
+		peer_info.write(&mut legacy_bytes).unwrap();
+
+		assert_eq!(PeerStoreSerWrapper(&peers).encode(), legacy_bytes);
+		let read_peers: PeerStoreDeserWrapper = Readable::read(&mut &legacy_bytes[..]).unwrap();
+		assert_eq!(read_peers.0, peers);
+	}
+
+	#[test]
+	fn peer_store_read_rejects_bogus_peer_count() {
+		// A count of 2^60 + 0xffff peers, followed by no peers at all.
+		let bytes = [0xff, 0xff, 0x10, 0, 0, 0, 0, 0, 0, 0];
+		assert!(<PeerStoreDeserWrapper as Readable>::read(&mut &bytes[..]).is_err());
 	}
 }
