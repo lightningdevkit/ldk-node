@@ -2532,8 +2532,6 @@ where
 					None
 				};
 
-				self.liquidity_source.lsps2_service().handle_channel_closed(channel_id).await;
-
 				let event = Event::ChannelClosed {
 					channel_id,
 					user_channel_id: UserChannelId(user_channel_id),
@@ -2548,6 +2546,13 @@ where
 						return Err(ReplayEvent());
 					},
 				};
+
+				// We only tell the LSPS2 service once the event can't be replayed anymore, as it
+				// would otherwise fail the HTLCs of a payment retried in the meantime.
+				self.liquidity_source
+					.lsps2_service()
+					.handle_channel_closed(user_channel_id, channel_id, &counterparty_node_id)
+					.await;
 
 				if let Some(peer_info) = peer_to_reconnect {
 					self.remove_peer_after_reconnect(peer_info, channel_id);
