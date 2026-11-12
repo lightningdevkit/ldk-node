@@ -13,7 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bip157::chain::ChainState;
 use bip157::{
-	chain::BlockHeaderChanges, Builder as KyotoBuilder, Client, Event as KyotoEvent,
+	chain::BlockHeaderChanges, Builder as KyotoBuilder, Client, Event as KyotoEvent, EventReceiver,
 	HashCheckpoint, Header, IndexedBlock, Info, Node as KyotoNode, Package,
 	Requester as KyotoRequester, TrustedPeer, Warning,
 };
@@ -767,7 +767,7 @@ impl CbfChainSource {
 	//this function is called once per start before we really process the events
 	//we need it to decide if we have been reorganized during the time we were offline
 	async fn preprocess_kyoto_events(
-		mut kyoto_events_rx: mpsc::UnboundedReceiver<KyotoEvent>,
+		mut kyoto_events_rx: EventReceiver,
 		processed_events_tx: mpsc::UnboundedSender<KyotoEvent>, chain_listener: ChainListener,
 		cbf_runtime_status: Arc<Mutex<CbfRuntimeStatus>>, ops_tx: mpsc::UnboundedSender<ChainOp>,
 	) {
