@@ -78,7 +78,7 @@ async fn wait_for_pending_sweep_balance<F>(
 where
 	F: FnMut(&PendingSweepBalance) -> bool,
 {
-	exponential_backoff_poll(|| {
+	exponential_backoff_poll(format!("a pending sweep balance on node {}", node.node_id()), || {
 		node.sync_wallets().unwrap();
 		node.list_balances()
 			.pending_balances_from_channel_closures

@@ -67,4 +67,21 @@ jobs:
 
       - name: Run Eclair integration tests
         run: |
-          RUSTFLAGS="${{ matrix.rustflags }}" cargo test --test integration_tests_eclair -- --show-output --test-threads=1
+          mkdir -p "$RUNNER_TEMP/ldk-node-storage"
+          TMPDIR="$RUNNER_TEMP/ldk-node-storage" RUSTFLAGS="${{ matrix.rustflags }}" cargo test --test integration_tests_eclair -- --show-output --test-threads=1
+
+      - name: Collect service logs
+        if: failure()
+        run: |
+          mkdir -p "$RUNNER_TEMP/ldk-node-storage"
+          docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml logs --no-color --timestamps electrs > "$RUNNER_TEMP/ldk-node-storage/electrs.log" || true
+          docker compose -p ldk-node -f tests/docker/docker-compose-eclair.yml logs --no-color --timestamps eclair > "$RUNNER_TEMP/ldk-node-storage/eclair.log" || true
+
+      - name: Upload LDK node storage and service logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: eclair-${{ matrix.name }}-ldk-node-storage
+          path: ${{ runner.temp }}/ldk-node-storage
+          if-no-files-found: ignore
+          retention-days: 14
