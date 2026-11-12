@@ -128,9 +128,6 @@ const MAX_RESTART_RETRIES: u32 = 5;
 /// Initial backoff delay between restart attempts; doubles each failure.
 const INITIAL_BACKOFF_MS: u64 = 500;
 
-/// Retry matched block downloads before surfacing a CBF sync failure.
-const CBF_BLOCK_FETCH_RETRIES: u8 = 3;
-
 #[cfg(feature = "chain-esplora")]
 const ESPLORA_TIMEOUT: u64 = 2;
 
@@ -338,11 +335,10 @@ const FEE_WINDOW_BLOCKS: u32 = BLOCK_FEE_CACHE_CAPACITY as u32;
 /// Electrum fee sources. Coinbase-derived rates are frequently zero on regtest/signet.
 const CBF_MIN_FEERATE_SAT_PER_KWU: u64 = 250;
 
-/// Per-attempt timeout when downloading a block from a peer — used both for matched blocks we apply
-/// to the listeners and for the coinbase-fee-rate samples. Kyoto queues the request and awaits a
-/// peer response with no timeout of its own, so a slow or unresponsive peer would otherwise park the
-/// fetch forever. Kept short so a single request is bounded and can be retried (or, for fees, only
-/// delays one sample) rather than stalling.
+/// Timeout when downloading a block from a peer for a coinbase-fee-rate sample. Kyoto queues the
+/// request and keeps re-requesting it from other peers with no deadline of its own, so a slow or
+/// unresponsive peer would otherwise park the fetch forever. Kept short so it only delays one
+/// sample rather than stalling the whole update.
 const CBF_BLOCK_FETCH_TIMEOUT_SECS: u64 = 10;
 
 /// Upper bound on how long we wait for a peer to request a broadcast transaction. Kyoto resolves
@@ -839,63 +835,43 @@ impl CbfChainSource {
 					let matched = indexed_filter.contains_any(all_scripts.iter());
 
 					let chop: ChainOp = if matched {
-						let mut attempt = 0;
-						let block = loop {
-							attempt += 1;
-							let handle = match requester.request_block(block_hash) {
-								Ok(handle) => handle,
-								Err(_) => {
-									log_error!(
-										logger,
-										"Failed to obtain receiver for matched CBF block {}; node is stopped",
-										block_hash
-									);
-									let _ =
-										ops_tx.send(ChainOp::Failed { error: Error::NotRunning });
-									return;
-								},
-							};
-
-							// Bound the download so an unresponsive peer can't park the fetch forever,
-							// then flatten the three error layers (timeout / receiver dropped / fetch
-							// error) into a single reason so the retry-or-fail decision is written once.
-							let fetched = tokio::time::timeout(
-								Duration::from_secs(CBF_BLOCK_FETCH_TIMEOUT_SECS),
-								handle,
-							)
-							.await
-							.map_err(|_| {
-								format!("timed out after {}s", CBF_BLOCK_FETCH_TIMEOUT_SECS)
-							})
-							.and_then(|recv| recv.map_err(|_| "receiver was dropped".to_string()))
-							.and_then(|fetch| fetch.map_err(|e| format!("failed: {:?}", e)));
-
-							match fetched {
-								Ok(block) => break block,
-								Err(reason) if attempt < CBF_BLOCK_FETCH_RETRIES => {
-									log_debug!(
-										logger,
-										"CBF block fetch for {} {} on attempt {}; retrying",
-										block_hash,
-										reason,
-										attempt
-									);
-								},
-								Err(reason) => {
-									log_error!(
-										logger,
-										"CBF block fetch for {} {} after {} attempts; giving up",
-										block_hash,
-										reason,
-										CBF_BLOCK_FETCH_RETRIES
-									);
-									let _ =
-										ops_tx.send(ChainOp::Failed { error: Error::TxSyncFailed });
-									return;
-								},
-							}
+						let handle = match requester.request_block(block_hash) {
+							Ok(handle) => handle,
+							Err(_) => {
+								log_error!(
+									logger,
+									"Failed to obtain receiver for matched CBF block {}; node is stopped",
+									block_hash
+								);
+								let _ = ops_tx.send(ChainOp::Failed { error: Error::NotRunning });
+								return;
+							},
 						};
-						ChainOp::ConnectFull { block }
+
+						// Kyoto re-requests a stalled block from other peers on its own, so there is
+						// no deadline here. It only fails the request when the block was reorged
+						// away or the node stopped; either way there is nothing to apply, and a
+						// reorg is announced through its own event.
+						match handle.await {
+							Ok(Ok(block)) => ChainOp::ConnectFull { block },
+							Ok(Err(e)) => {
+								log_debug!(
+									logger,
+									"CBF block {} unavailable ({:?}); skipping",
+									block_hash,
+									e
+								);
+								continue;
+							},
+							Err(_) => {
+								log_debug!(
+									logger,
+									"CBF request for block {} was dropped (reorged away or node stopping); skipping",
+									block_hash
+								);
+								continue;
+							},
+						}
 					} else {
 						ChainOp::ConnectFiltered {
 							header: indexed_filter.header(),
