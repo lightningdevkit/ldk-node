@@ -175,7 +175,6 @@ impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(4, conflicting_txids, optional_vec),
 	(6, funding_channels, optional_vec),
 	(8, candidates, optional_vec),
-	// Type 10 is unused: it held a splice intent that was dropped before any release wrote it.
 	(12, locked_rounds, optional_vec),
 });
 
