@@ -27,7 +27,9 @@ where
 	L::Target: LdkLogger,
 {
 	peers: RwLock<HashMap<PublicKey, PeerInfo>>,
-	mutation_lock: tokio::sync::Mutex<()>,
+	// Serializes mutations. The guarded flag is set while the persisted peer set may differ from
+	// the in-memory one, i.e., once a write was started that we don't know to have succeeded.
+	mutation_lock: tokio::sync::Mutex<bool>,
 	kv_store: Arc<DynStore>,
 	logger: L,
 }
@@ -38,50 +40,54 @@ where
 {
 	pub(crate) fn new(kv_store: Arc<DynStore>, logger: L) -> Self {
 		let peers = RwLock::new(HashMap::new());
-		let mutation_lock = tokio::sync::Mutex::new(());
+		let mutation_lock = tokio::sync::Mutex::new(false);
 		Self { peers, mutation_lock, kv_store, logger }
 	}
 
 	pub(crate) async fn add_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
-		let _guard = self.mutation_lock.lock().await;
-		let data = {
-			let mut locked_peers = self.peers.write().expect("lock");
-			if locked_peers.contains_key(&peer_info.node_id) {
-				return Ok(());
+		self.update_peers(|peers| {
+			if peers.contains_key(&peer_info.node_id) {
+				return false;
 			}
-			locked_peers.insert(peer_info.node_id, peer_info);
-			PeerStoreSerWrapper(&locked_peers).encode()
-		};
-		self.persist_peers(data).await
+			peers.insert(peer_info.node_id, peer_info);
+			true
+		})
+		.await
 	}
 
 	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
-		let _guard = self.mutation_lock.lock().await;
-		let data = {
-			let locked_peers = self.peers.read().expect("lock");
-			let mut updated_peers = locked_peers.clone();
-			updated_peers.remove(node_id);
-			PeerStoreSerWrapper(&updated_peers).encode()
-		};
+		self.update_peers(|peers| peers.remove(node_id).is_some()).await
+	}
+
+	/// Applies `update` to a copy of the peer set, persists the result, and only then publishes
+	/// it to readers, so that the in-memory peer set never gets ahead of the persisted one.
+	///
+	/// `update` returns whether it changed anything. If it didn't, nothing is written, unless an
+	/// earlier write may have left the persisted peer set out of sync.
+	async fn update_peers<F: FnOnce(&mut HashMap<PublicKey, PeerInfo>) -> bool>(
+		&self, update: F,
+	) -> Result<(), Error> {
+		let mut persisted_out_of_sync = self.mutation_lock.lock().await;
+		let mut updated_peers = self.peers.read().expect("lock").clone();
+		let changed = update(&mut updated_peers);
+		if !changed && !*persisted_out_of_sync {
+			return Ok(());
+		}
+		let data = PeerStoreSerWrapper(&updated_peers).encode();
+		// A write that fails or is cancelled may still have reached the store.
+		*persisted_out_of_sync = true;
 		self.persist_peers(data).await?;
-		self.peers.write().expect("lock").remove(node_id);
+		*persisted_out_of_sync = false;
+		*self.peers.write().expect("lock") = updated_peers;
 		Ok(())
 	}
 
 	/// Returns the current in-memory peer set.
-	///
-	/// The async mutation lock serializes `add_peer` and `remove_peer`, but this synchronous
-	/// reader cannot wait on it. Until peer-store reads are async, callers may observe peer
-	/// changes that are still being persisted.
 	pub(crate) fn list_peers(&self) -> Vec<PeerInfo> {
 		self.peers.read().expect("lock").values().cloned().collect()
 	}
 
 	/// Returns the current in-memory peer info for `node_id`.
-	///
-	/// The async mutation lock serializes `add_peer` and `remove_peer`, but this synchronous
-	/// reader cannot wait on it. Until peer-store reads are async, callers may observe peer
-	/// changes that are still being persisted.
 	pub(crate) fn get_peer(&self, node_id: &PublicKey) -> Option<PeerInfo> {
 		self.peers.read().expect("lock").get(node_id).cloned()
 	}
@@ -121,7 +127,7 @@ where
 		let (kv_store, logger) = args;
 		let read_peers: PeerStoreDeserWrapper = Readable::read(reader)?;
 		let peers: RwLock<HashMap<PublicKey, PeerInfo>> = RwLock::new(read_peers.0);
-		let mutation_lock = tokio::sync::Mutex::new(());
+		let mutation_lock = tokio::sync::Mutex::new(false);
 		Ok(Self { peers, mutation_lock, kv_store, logger })
 	}
 }
@@ -219,6 +225,16 @@ mod tests {
 		}
 	}
 
+	fn test_peer_info() -> PeerInfo {
+		PeerInfo {
+			node_id: PublicKey::from_str(
+				"0276607124ebe6a6c9338517b6f485825b27c2dcc0b9fc2aa6a4c0df91194e5993",
+			)
+			.unwrap(),
+			address: SocketAddress::from_str("127.0.0.1:9738").unwrap(),
+		}
+	}
+
 	#[tokio::test]
 	async fn peer_info_persistence() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
@@ -276,5 +292,41 @@ mod tests {
 
 		assert_eq!(Err(Error::PersistenceFailed), peer_store.remove_peer(&node_id).await);
 		assert_eq!(Some(peer_info), peer_store.get_peer(&node_id));
+	}
+
+	#[tokio::test]
+	async fn failed_add_peer_is_not_published_and_retried() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let peer_store = PeerStore::new(store, Arc::new(TestLogger::new()));
+		let peer_info = test_peer_info();
+
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(peer_info.clone()).await);
+		assert_eq!(None, peer_store.get_peer(&peer_info.node_id));
+
+		// A retry has to attempt the write again.
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(peer_info).await);
+	}
+
+	#[tokio::test]
+	async fn removing_unknown_peer_does_not_write() {
+		// Every write to this store fails, so removing only succeeds if nothing is written.
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let peer_store = PeerStore::new(store, Arc::new(TestLogger::new()));
+
+		assert_eq!(Ok(()), peer_store.remove_peer(&test_peer_info().node_id).await);
+	}
+
+	#[tokio::test]
+	async fn unconfirmed_write_is_followed_by_a_rewrite() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(FailingStore));
+		let peer_store = PeerStore::new(store, Arc::new(TestLogger::new()));
+		let peer_info = test_peer_info();
+
+		// A write reported as failed may still have reached the store.
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.add_peer(peer_info.clone()).await);
+
+		// Removing the peer doesn't change the in-memory set, but as we can't tell what the
+		// store holds, it has to be written regardless.
+		assert_eq!(Err(Error::PersistenceFailed), peer_store.remove_peer(&peer_info.node_id).await);
 	}
 }
