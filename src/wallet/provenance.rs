@@ -145,7 +145,7 @@ pub(crate) struct ChannelTxFacts {
 impl_writeable_tlv_based!(ChannelTxFacts, {
 	(0, txid, required),
 	(2, outputs, optional_vec),
-	(4, self_role, option),
+	(4, self_role, upgradable_option),
 	(6, local_figures, option),
 	(8, recorded_at_height, required),
 });
