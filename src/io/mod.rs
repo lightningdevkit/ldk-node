@@ -19,6 +19,8 @@ pub(crate) mod utils;
 #[cfg(feature = "storage-vss")]
 pub mod vss_store;
 
+pub use crate::types::DynStoreRef;
+
 /// The event queue will be persisted under this key.
 pub(crate) const EVENT_QUEUE_PERSISTENCE_PRIMARY_NAMESPACE: &str = "";
 pub(crate) const EVENT_QUEUE_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
