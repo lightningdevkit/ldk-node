@@ -297,7 +297,6 @@ where
 			payment_hash,
 			lsps2_parameters,
 		)?;
-		self.schedule_lease_refill(LeaseCacheTargetId::Fixed { amount_msat }, &connection_manager);
 
 		if was_negotiated {
 			log_info!(self.logger, "JIT-channel invoice created: {}", invoice);
@@ -323,7 +322,6 @@ where
 			payment_hash,
 			lsps2_parameters,
 		)?;
-		self.schedule_lease_refill(LeaseCacheTargetId::Variable, &connection_manager);
 
 		if was_negotiated {
 			log_info!(self.logger, "JIT-channel invoice created: {}", invoice);

@@ -6892,7 +6892,11 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	setup_builder!(client_builder, client_config.node_config);
 	client_builder.set_chain_source_esplora(esplora_url.clone(), Some(sync_config));
 	client_builder.add_liquidity_source(service_node_id, service_addr, None, true);
-	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	let client_store =
+		TestSyncStore::new(client_config.node_config.storage_dir_path.clone().into());
+	let client_node = client_builder
+		.build_with_store(client_config.node_entropy.into(), client_store.clone())
+		.unwrap();
 	client_node.start().unwrap();
 
 	let fee_test_description =
@@ -7162,6 +7166,9 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	expect_payment_received_event!(client_node, variable_amount_msat - variable_fee_msat);
 	expect_event!(service_node, PaymentForwarded);
 	expect_payment_successful_event!(payer_node, variable_payment_id, None);
+
+	// BOLT11 receives are one-off, so none of the above may leave a replacement lease behind.
+	assert!(KVStore::list(&client_store, "lsps2_leases", "").await.unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
