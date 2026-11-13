@@ -2475,13 +2475,15 @@ impl Wallet {
 			(tx, seen_at, events, locked_wallet.take_staged().unwrap_or_default())
 		};
 		let txid = tx.compute_txid();
+		// The wallet is written first: a crash in between then leaves a transaction the next sync
+		// evicts, rather than a payment record for a transaction the wallet does not know.
 		let recorded = async {
-			self.update_payment_store(events).await.map_err(|e| {
-				log_error!(self.logger, "Failed to update payment store: {}", e);
-				Error::PersistenceFailed
-			})?;
 			locked_persister.persist_changeset(change_set).await.map_err(|e| {
 				log_error!(self.logger, "Failed to persist wallet: {}", e);
+				Error::PersistenceFailed
+			})?;
+			self.update_payment_store(events).await.map_err(|e| {
+				log_error!(self.logger, "Failed to update payment store: {}", e);
 				Error::PersistenceFailed
 			})
 		}
@@ -13374,5 +13376,46 @@ mod tests {
 		assert!(is_in_wallet_view(&wallet, parent_replacement.compute_txid()));
 		assert!(!is_in_wallet_view(&wallet, parent.compute_txid()));
 		assert!(!is_in_wallet_view(&wallet, child.compute_txid()));
+	}
+
+	/// A payment record without its transaction in the wallet could neither be bumped nor would a
+	/// sync ever resolve it, whereas a transaction without a record is evicted by the next sync.
+	#[tokio::test]
+	async fn a_crash_during_a_send_leaves_no_payment_without_its_transaction() {
+		let snapshot_store = SnapshotStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(snapshot_store.clone()));
+		let wallet = new_test_wallet(store, false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+		let baseline = snapshot_store.snapshots.lock().unwrap().len();
+
+		let address = bitcoin::Address::p2wpkh(
+			&bitcoin::CompressedPublicKey::from_slice(&[2; 33]).unwrap(),
+			Network::Regtest,
+		);
+		let amount = OnchainSendAmount::ExactRetainingReserve {
+			amount_sats: 50_000,
+			cur_anchor_reserve_sats: 0,
+		};
+		let fee_rate = Some(FeeRate::from_sat_per_kwu(500));
+		let txid = wallet.send_to_address(&address, amount, fee_rate).await.unwrap();
+
+		let snapshots = snapshot_store.snapshots.lock().unwrap().clone();
+		assert!(snapshots.len() > baseline);
+		let mut recorded_at_some_point = false;
+		for snapshot in snapshots.into_iter().skip(baseline) {
+			let is_recorded = snapshot.keys().any(|(primary_namespace, _, _)| {
+				primary_namespace == PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE
+					|| primary_namespace == PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE
+			});
+			recorded_at_some_point |= is_recorded;
+			let store: Arc<DynStore> =
+				Arc::new(DynStoreWrapper(SnapshotStore::from_contents(snapshot)));
+			let wallet = new_test_wallet(store, true).await;
+			assert!(
+				!is_recorded || is_in_wallet_view(&wallet, txid),
+				"a crash point holds the payment record of a transaction the wallet lacks"
+			);
+		}
+		assert!(recorded_at_some_point);
 	}
 }
