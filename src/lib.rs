@@ -1453,6 +1453,12 @@ impl Node {
 				.expect("a 16-byte slice should convert into a [u8; 16]"),
 		);
 
+		// Persist the peer before creating the channel. Once `create_channel` succeeds the
+		// channel exists, so failing afterwards would report a failed initiation for a live
+		// channel, and a caller retrying would open a second one.
+		let peer_was_stored = self.peer_store.get_peer(&peer_info.node_id).is_some();
+		self.runtime.block_on(self.peer_store.add_peer(peer_info.clone()))?;
+
 		// Register the fee-rate override before creating the channel, as the
 		// `FundingGenerationReady` event may be handled before `create_channel` returns.
 		if let Some(fee_rate) = fee_rate {
@@ -1489,7 +1495,6 @@ impl Node {
 					zero_reserve_string,
 					peer_info.node_id
 				);
-				self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
@@ -1500,6 +1505,19 @@ impl Node {
 					e
 				);
 				self.pending_funding_fee_rates.lock().expect("lock").remove(&user_channel_id);
+				// Don't keep reconnecting to a peer we only stored for this attempt.
+				if !peer_was_stored {
+					if let Err(e) =
+						self.runtime.block_on(self.peer_store.remove_peer(&peer_info.node_id))
+					{
+						log_error!(
+							self.logger,
+							"Failed to remove peer {} from peer store: {}",
+							peer_info.node_id,
+							e
+						);
+					}
+				}
 				Err(Error::ChannelCreationFailed)
 			},
 		}
