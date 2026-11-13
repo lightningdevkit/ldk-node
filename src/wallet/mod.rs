@@ -561,8 +561,9 @@ impl Wallet {
 		Ok(())
 	}
 
-	/// The transactions of this node's own on-chain sends that have yet to confirm.
-	async fn pending_send_txids(&self) -> Vec<Txid> {
+	/// The transactions of this node's own on-chain sends that have yet to confirm, each with the
+	/// transactions it replaced.
+	async fn pending_send_txids(&self) -> Vec<(Txid, Vec<Txid>)> {
 		self.payment_stores
 			.pending_payments(|pending| {
 				pending.details().is_some_and(|details| {
@@ -578,7 +579,7 @@ impl Wallet {
 					txid,
 					status: ConfirmationStatus::Unconfirmed,
 					tx_type: None,
-				} => Some(txid),
+				} => Some((txid, pending.conflicting_txids().to_vec())),
 				_ => None,
 			})
 			.collect()
@@ -592,18 +593,21 @@ impl Wallet {
 	///
 	/// A send only returns if that changes nothing else in the wallet's view: returning it over
 	/// a conflict, or along with a parent that is itself gone from the view, would put the
-	/// wallet's own guess above what the chain source reported.
-	fn restore_evicted_sends(wallet: &mut bdk_wallet::Wallet, txids: &[Txid]) {
+	/// wallet's own guess above what the chain source reported. The exception is a conflict the
+	/// send replaced, given along with it: a chain source that has yet to see a fee bump still
+	/// reports the transaction the bump replaced.
+	fn restore_evicted_sends(wallet: &mut bdk_wallet::Wallet, sends: &[(Txid, Vec<Txid>)]) {
 		// One send at a time: a send returns only once its parent has, and what the view holds
 		// changes with every send returned.
 		loop {
 			let in_view: HashSet<Txid> = wallet.transactions().map(|tx| tx.tx_node.txid).collect();
 			let graph = wallet.tx_graph();
-			let returning = txids.iter().filter(|txid| !in_view.contains(*txid)).find_map(|txid| {
+			let evicted = sends.iter().filter(|(txid, _)| !in_view.contains(txid));
+			let returning = evicted.into_iter().find_map(|(txid, replaced)| {
 				let tx = graph.get_tx(*txid)?;
-				let displaces_a_conflict = graph
-					.direct_conflicts(&tx)
-					.any(|(_, conflict_txid)| in_view.contains(&conflict_txid));
+				let displaces_a_conflict = graph.direct_conflicts(&tx).any(|(_, conflict_txid)| {
+					in_view.contains(&conflict_txid) && !replaced.contains(&conflict_txid)
+				});
 				let returns_a_parent = tx.input.iter().any(|txin| {
 					let parent_txid = txin.previous_output.txid;
 					graph.get_tx(parent_txid).is_some() && !in_view.contains(&parent_txid)
@@ -13353,7 +13357,7 @@ mod tests {
 
 		Wallet::restore_evicted_sends(
 			&mut wallet.inner.lock().unwrap(),
-			&[child_txid, parent_txid],
+			&[(child_txid, Vec::new()), (parent_txid, Vec::new())],
 		);
 
 		assert!(is_in_wallet_view(&wallet, parent_txid));
@@ -13429,6 +13433,51 @@ mod tests {
 			);
 		}
 		assert!(recorded_at_some_point);
+	}
+
+	/// A chain source that has yet to see a fee bump still reports the transaction it replaced.
+	/// That must not take the wallet and the payment back to the replaced transaction.
+	#[tokio::test]
+	async fn an_evicted_fee_bump_returns_over_the_transaction_it_replaced() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		let coin = wallet_paying_tx(&wallet, 1);
+		let original = tx_spending(&wallet, OutPoint::new(coin.compute_txid(), 0));
+		let mut bump = original.clone();
+		bump.output[0].value = Amount::from_sat(89_000);
+		let (original_txid, bump_txid) = (original.compute_txid(), bump.compute_txid());
+		insert_confirmed_tx(&wallet, coin, 1);
+		wallet.inner.lock().unwrap().apply_unconfirmed_txs([(original, 100), (bump, 101)]);
+		let payment_id = PaymentId(original_txid.to_byte_array());
+		let payment = PaymentDetails::new(
+			payment_id,
+			PaymentKind::Onchain {
+				txid: bump_txid,
+				status: ConfirmationStatus::Unconfirmed,
+				tx_type: None,
+			},
+			Some(89_000_000),
+			Some(2_000_000),
+			PaymentDirection::Outbound,
+			PaymentStatus::Pending,
+		);
+		wallet.payment_stores.payment_store().insert(payment.clone()).await.unwrap();
+		wallet
+			.payment_stores
+			.pending_payment_store()
+			.insert(PendingPaymentDetails::new(payment.clone(), vec![original_txid], Vec::new()))
+			.await
+			.unwrap();
+
+		let mut tx_update = bdk_chain::TxUpdate::default();
+		tx_update.seen_ats = [(original_txid, 102)].into();
+		tx_update.evicted_ats = [(bump_txid, 102)].into();
+		wallet.apply_update(Update { tx_update, ..Default::default() }).await.unwrap();
+
+		assert!(is_in_wallet_view(&wallet, bump_txid));
+		assert!(!is_in_wallet_view(&wallet, original_txid));
+		let entry = wallet.payment_stores.pending_payment(&payment_id).await.unwrap().unwrap();
+		assert_eq!(entry.details().unwrap().kind, payment.kind);
 	}
 
 	/// A second bump must add the replaced txid to the pending-store entry's `conflicting_txids`.
