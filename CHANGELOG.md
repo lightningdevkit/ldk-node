@@ -35,6 +35,9 @@
   `Config::manually_handle_unknown_bolt11_payments` to `true`. Otherwise
   matching inbound HTLCs will be failed back instead of emitting
   `Event::PaymentClaimable`.
+- `BalanceDetails::spendable_onchain_balance_sats` no longer includes wallet outputs selected
+  as inputs of a channel funding transaction or splice that has yet to confirm. They remain
+  part of `total_onchain_balance_sats` until the transaction is seen by a wallet sync. (#1037)
 
 ## Feature and API updates
 - `Node::splice_out_max` withdraws the maximum available channel balance to an on-chain address.
