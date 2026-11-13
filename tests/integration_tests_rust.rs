@@ -7842,6 +7842,52 @@ async fn lsps2_service_fails_payment_if_it_cannot_open_channel() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_service_fails_payment_if_client_is_disconnected() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let service_store = TestSyncStore::new(random_config().node_config.storage_dir_path.into());
+	let (service_node, client_node, payer_node) =
+		setup_lsps2_nodes(&bitcoind, &electrsd, service_store, 10_000_000, true).await;
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let jit_amount_msat = 100_000_000;
+	let jit_invoice = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel(jit_amount_msat, &invoice_description.into(), 1024, None)
+		.unwrap();
+
+	client_node.stop().unwrap();
+	tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), async {
+		while service_node
+			.list_peers()
+			.iter()
+			.any(|p| p.node_id == client_node.node_id() && p.is_connected)
+		{
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+	})
+	.await
+	.expect("the service should notice the client disconnecting");
+
+	payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	expect_event!(payer_node, PaymentFailed);
+
+	// Once the client is reachable again, a retry of the payment succeeds.
+	client_node.start().unwrap();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+	client_node.connect(service_node.node_id(), service_addr, false).unwrap();
+
+	let payer_payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_event!(service_node, PaymentForwarded);
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+	expect_payment_successful_event!(payer_node, payer_payment_id, None);
+	expect_payment_received_event!(client_node, jit_amount_msat * 99 / 100);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn lsps2_service_fails_payment_if_channel_closes_before_ready() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	// The client doesn't trust the service's unconfirmed channels, leaving the JIT channel pending
