@@ -35,6 +35,9 @@
   `Config::manually_handle_unknown_bolt11_payments` to `true`. Otherwise
   matching inbound HTLCs will be failed back instead of emitting
   `Event::PaymentClaimable`.
+- `BalanceDetails::spendable_onchain_balance_sats` no longer includes wallet outputs selected
+  as inputs of a channel funding transaction or splice that has yet to confirm. They remain
+  part of `total_onchain_balance_sats` until the transaction is seen by a wallet sync. (#1037)
 
 ## Feature and API updates
 - `Node::splice_out_max` withdraws the maximum available channel balance to an on-chain address.
@@ -88,6 +91,10 @@
   current chain tip now aborts with a new `BuildError::ChainTipFetchFailed` variant instead of
   silently pinning the wallet birthday to genesis, which would have forced a full-history rescan
   once the chain source became reachable again. (#884)
+- On-chain sends and fee bumps are now known to the wallet and the payment store as soon as they
+  are made rather than only after the next wallet sync. Previously, a second send made before
+  that sync could spend the same inputs, and a second `OnchainPayment::bump_fee_rbf` of the same
+  payment failed. (#1037)
 
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.

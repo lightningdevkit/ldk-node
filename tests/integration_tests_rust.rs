@@ -1379,10 +1379,8 @@ async fn multi_hop_sending() {
 
 	open_channel(&nodes[0], &nodes[1], 100_000, true, &electrsd).await;
 	open_channel(&nodes[1], &nodes[2], 1_000_000, true, &electrsd).await;
-	// We need to sync wallets in-between back-to-back channel opens from the same node so BDK
-	// wallet picks up on the broadcast funding tx and doesn't double-spend itself.
-	//
-	// TODO: Remove once fixed in BDK.
+	// The wallet learns of a funding transaction's change only from a sync, and the second
+	// channel is funded from the change of the first.
 	nodes[1].sync_wallets().unwrap();
 	open_channel(&nodes[1], &nodes[3], 1_000_000, true, &electrsd).await;
 	open_channel(&nodes[2], &nodes[4], 1_000_000, true, &electrsd).await;
@@ -1642,6 +1640,222 @@ async fn detailed_forwarded_payment_tracking() {
 	let outbound_stats = forwarding.channel_stats(&outbound_channel_id).unwrap().unwrap();
 	assert_eq!(outbound_stats.outbound_payments_forwarded, 1);
 	assert_eq!(outbound_stats.total_outbound_amount_msat, amount_msat);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn back_to_back_onchain_sends_before_sync() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	// Without background sync, so that the wallet does not learn of the first send in between.
+	let node = setup_node(&TestChainSource::Esplora(&electrsd), random_config());
+
+	let funding_address = node.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![funding_address],
+		Amount::from_sat(500_000),
+	)
+	.await;
+	node.sync_wallets().unwrap();
+
+	let first_address = bitcoind.client.new_address().unwrap();
+	let second_address = bitcoind.client.new_address().unwrap();
+	let first_txid = node.onchain_payment().send_to_address(&first_address, 100_000, None).unwrap();
+	let second_txid =
+		node.onchain_payment().send_to_address(&second_address, 100_000, None).unwrap();
+
+	wait_for_tx(&electrsd.client, first_txid).await;
+	wait_for_tx(&electrsd.client, second_txid).await;
+
+	let mempool = bitcoind.client.get_raw_mempool().unwrap().into_model().unwrap();
+	assert!(
+		mempool.0.contains(&first_txid) && mempool.0.contains(&second_txid),
+		"both back-to-back transactions must coexist in the mempool"
+	);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn back_to_back_channel_opens_before_sync() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	// Without background sync, so that the wallet does not learn of the first funding in between.
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let node_a = setup_node(&chain_source, random_config());
+	let node_b = setup_node(&chain_source, random_config());
+
+	let funding_address = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![funding_address],
+		Amount::from_sat(500_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	let first_funding_txo = open_channel_no_wait(&node_a, &node_b, 100_000, None, false).await;
+
+	// The wallet's only coin is spent by the first channel's funding transaction, and its change
+	// is unknown to the wallet until the next sync.
+	let node_b_address = node_b.listening_addresses().unwrap().first().unwrap().clone();
+	assert_eq!(
+		node_a.open_channel(node_b.node_id(), node_b_address, 100_000, None, None, None),
+		Err(NodeError::InsufficientFunds)
+	);
+
+	wait_for_tx(&electrsd.client, first_funding_txo.txid).await;
+	node_a.sync_wallets().unwrap();
+	let second_funding_txo = open_channel_no_wait(&node_a, &node_b, 100_000, None, false).await;
+	wait_for_tx(&electrsd.client, second_funding_txo.txid).await;
+
+	let mempool = bitcoind.client.get_raw_mempool().unwrap().into_model().unwrap();
+	assert!(
+		mempool.0.contains(&first_funding_txo.txid) && mempool.0.contains(&second_funding_txo.txid),
+		"both funding transactions must coexist in the mempool"
+	);
+}
+
+/// Logged by a node as it starts, for every wallet output it unlocks as no channel refers to it.
+const UNLOCKED_UNREFERENCED_OUTPUT: &str = "no channel refers to";
+
+/// Funds `node_a` with two coins and opens a channel from it to `node_b`, returning `node_a`'s id
+/// for the channel once it is ready.
+async fn open_channel_keeping_a_coin(
+	bitcoind: &BitcoinD, electrsd: &ElectrsD, node_a: &TestNode, node_b: &TestNode,
+) -> UserChannelId {
+	let addresses_a = (0..2).map(|_| node_a.onchain_payment().new_address().unwrap()).collect();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		addresses_a,
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	open_channel(node_a, node_b, 500_000, false, electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	user_channel_id_a
+}
+
+/// The inputs of a splice LDK still tracks when the node starts stay locked. Pinned to Esplora so
+/// that node A's wallet syncs only on demand: it has not seen the splice transaction, and the
+/// locks are all that keeps its inputs from being spent again.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn inputs_of_a_pending_splice_stay_locked_across_restart() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let logs_a = Arc::new(CollectingLogWriter::new());
+	let mut config_a = random_config();
+	config_a.store_type = TestStoreType::Sqlite;
+	config_a.log_writer = TestLogWriter::Custom(logs_a.clone());
+	let node_a = setup_node(&chain_source, config_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+	let user_channel_id_a =
+		open_channel_keeping_a_coin(&bitcoind, &electrsd, &node_a, &node_b).await;
+
+	let spendable_before_sats = node_a.list_balances().spendable_onchain_balance_sats;
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 300_000, None).unwrap();
+	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	wait_for_tx(&electrsd.client, splice_txo.txid).await;
+	let spendable_locked_sats = node_a.list_balances().spendable_onchain_balance_sats;
+	assert!(spendable_locked_sats <= spendable_before_sats - 300_000);
+
+	node_a.stop().unwrap();
+	drop(node_a);
+	let node_a = setup_node(&chain_source, config_a);
+
+	assert_eq!(logs_a.count(UNLOCKED_UNREFERENCED_OUTPUT), 0);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, spendable_locked_sats);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// The inputs of a splice LDK no longer tracks when the node starts are unlocked. The splice is
+/// initiated while disconnected, so LDK holds its contribution without negotiating or persisting
+/// it, and drops it across the restart.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn inputs_of_a_splice_lost_across_restart_are_unlocked() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let logs_a = Arc::new(CollectingLogWriter::new());
+	let mut config_a = random_config();
+	config_a.store_type = TestStoreType::Sqlite;
+	config_a.log_writer = TestLogWriter::Custom(logs_a.clone());
+	let node_a = setup_node(&chain_source, config_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+	let user_channel_id_a =
+		open_channel_keeping_a_coin(&bitcoind, &electrsd, &node_a, &node_b).await;
+
+	let spendable_before_sats = node_a.list_balances().spendable_onchain_balance_sats;
+	node_a.disconnect(node_b.node_id()).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 300_000, None).unwrap();
+	let spendable_locked_sats = node_a.list_balances().spendable_onchain_balance_sats;
+	assert!(spendable_locked_sats <= spendable_before_sats - 300_000);
+
+	node_a.stop().unwrap();
+	drop(node_a);
+	let node_a = setup_node(&chain_source, config_a);
+
+	// LDK also reports the contribution it dropped, which returns its inputs as well. The log
+	// line tells that they were returned before that report was handled.
+	assert!(logs_a.count(UNLOCKED_UNREFERENCED_OUTPUT) > 0);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, spendable_before_sats);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// A node that has an outbound channel awaiting confirmation without a record of the inputs its
+/// funding transaction spends cannot tell that channel's locks from leftovers, and keeps every
+/// lock when it starts. Pinned to Esplora so that node A's wallet syncs only on demand.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn locks_are_kept_across_restart_while_a_pending_funding_has_no_recorded_inputs() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let logs_a = Arc::new(CollectingLogWriter::new());
+	let mut config_a = random_config();
+	config_a.log_writer = TestLogWriter::Custom(logs_a.clone());
+	let store_a = TestSyncStore::new(config_a.node_config.storage_dir_path.clone().into());
+	let node_a = setup_node_with_store(&chain_source, config_a.clone(), store_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	let funding_txo = open_channel_no_wait(&node_a, &node_b, 500_000, None, false).await;
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	// The wallet's only coin is locked, and the funding transaction's change unknown to it.
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 0);
+
+	node_a.stop().unwrap();
+	drop(node_a);
+	let facts_keys = KVStore::list(&store_a, "channel_tx_facts", "").await.unwrap();
+	assert!(!facts_keys.is_empty(), "opening the channel recorded its funding");
+	for key in facts_keys {
+		KVStore::remove(&store_a, "channel_tx_facts", "", &key, false).await.unwrap();
+	}
+	let node_a = setup_node_with_store(&chain_source, config_a, store_a);
+
+	assert_eq!(logs_a.count(UNLOCKED_UNREFERENCED_OUTPUT), 0);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 0);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -4744,7 +4958,7 @@ const CLOSED_CHANNEL_PAYMENT_RESOLVED: &str = "of closed channel";
 /// tracks once it promoted a splice round to the channel's funding, however it does.
 const PROMOTED_ROUND_PAYMENT_RESOLVED: &str = "once splice round";
 /// Logged by a node as it returns the addresses of a contribution LDK discarded to the wallet.
-const RECLAIMED_ADDRESSES: &str = "Reclaiming unused addresses from channel";
+const RECLAIMED_ADDRESSES: &str = "Reclaiming unused wallet state from channel";
 /// Logged by a node once it has decided the funding payments of a closed channel by the rounds the
 /// channel's monitor watches, at `ChannelClosed` and for a round LDK discards after the close.
 /// Unlike [`CLOSED_CHANNEL_PAYMENT_RESOLVED`], logged whatever was found, so also when no payment
@@ -6955,16 +7169,22 @@ async fn do_lsps2_client_service_integration(client_trusts_lsp: bool) {
 	let payer_node = payer_builder.build(payer_config.node_entropy.into()).unwrap();
 	payer_node.start().unwrap();
 
-	let service_addr = service_node.onchain_payment().new_address().unwrap();
+	// The service opens four JIT channels below without syncing in between. Each needs a coin of
+	// its own: the wallet learns of a funding transaction's change only from a sync, and the
+	// inputs of a funding transaction withheld for an unclaimed payment stay locked.
+	let mut funded_addrs: Vec<_> =
+		(0..4).map(|_| service_node.onchain_payment().new_address().unwrap()).collect();
 	let client_addr = client_node.onchain_payment().new_address().unwrap();
 	let payer_addr = payer_node.onchain_payment().new_address().unwrap();
+
+	funded_addrs.extend([client_addr, payer_addr]);
 
 	let premine_amount_sat = 10_000_000;
 
 	premine_and_distribute_funds(
 		&bitcoind.client,
 		&electrsd.client,
-		vec![service_addr, client_addr, payer_addr],
+		funded_addrs,
 		Amount::from_sat(premine_amount_sat),
 	)
 	.await;
@@ -8051,6 +8271,43 @@ async fn fs_store_persistence_backwards_compatibility() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn onchain_fee_bump_rbf_twice_before_sync() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let addr_a = node_a.onchain_payment().new_address().unwrap();
+	let addr_b = node_b.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr_a.clone(), addr_b],
+		Amount::from_sat(500_000),
+	)
+	.await;
+	node_b.sync_wallets().unwrap();
+	let txid = node_b.onchain_payment().send_to_address(&addr_a, 100_000, None).unwrap();
+	wait_for_tx(&electrsd.client, txid).await;
+	node_b.sync_wallets().unwrap();
+	let payment_id = PaymentId(txid.to_byte_array());
+	let first_fee = node_b.payment(&payment_id).unwrap().unwrap().fee_paid_msat.unwrap();
+
+	let first_replacement = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
+	let second_replacement = node_b.onchain_payment().bump_fee_rbf(payment_id, None).unwrap();
+	assert_ne!(first_replacement, second_replacement);
+	let payment = node_b.payment(&payment_id).unwrap().unwrap();
+	assert!(payment.fee_paid_msat.unwrap() > first_fee);
+	assert!(
+		matches!(payment.kind, PaymentKind::Onchain { txid, .. } if txid == second_replacement)
+	);
+	wait_for_tx(&electrsd.client, second_replacement).await;
+	node_b.sync_wallets().unwrap();
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_b.sync_wallets().unwrap();
+	assert_eq!(node_b.payment(&payment_id).unwrap().unwrap().status, PaymentStatus::Succeeded);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn onchain_fee_bump_rbf() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);
@@ -8076,17 +8333,19 @@ async fn onchain_fee_bump_rbf() {
 	let amount_to_send_sats = 100_000;
 	let txid =
 		node_b.onchain_payment().send_to_address(&addr_a, amount_to_send_sats, None).unwrap();
+	let payment_id = PaymentId(txid.to_byte_array());
+	let original_payment = node_b
+		.payment(&payment_id)
+		.expect("payment lookup must succeed")
+		.expect("outbound payment must be recorded before wallet sync");
+	let original_fee = original_payment.fee_paid_msat.unwrap();
+
 	wait_for_tx(&electrsd.client, txid).await;
 	// Give the chain source time to index the unconfirmed transaction before syncing.
 	// Without this, Esplora may not yet have the tx, causing sync to miss it and
 	// leaving the BDK wallet graph empty.
 	tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 	node_a.sync_wallets().unwrap();
-	node_b.sync_wallets().unwrap();
-
-	let payment_id = PaymentId(txid.to_byte_array());
-	let original_payment = node_b.payment(&payment_id).unwrap().unwrap();
-	let original_fee = original_payment.fee_paid_msat.unwrap();
 
 	// Non-existent payment id
 	let fake_txid =

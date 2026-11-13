@@ -1054,6 +1054,23 @@ where
 					.await;
 				match funding_transaction {
 					Ok(final_tx) => {
+						// LDK reports a transaction it took and then lets go, but not one it
+						// never took. For the latter the wallet state held for the transaction
+						// is returned here.
+						let release_unused_funding = |tx: bitcoin::Transaction| async move {
+							let inputs =
+								tx.input.into_iter().map(|txin| txin.previous_output).collect();
+							if let Err(e) =
+								self.wallet.release_inputs_and_outputs(inputs, tx.output).await
+							{
+								log_error!(
+									self.logger,
+									"Failed to release the inputs of an unused funding transaction: {}",
+									e
+								);
+							}
+						};
+
 						// Record what the transaction is before handing it to LDK, which is what
 						// authorizes either party to broadcast it. LDK identifies the funding
 						// output by the same script and value, and derives the channel's id from
@@ -1074,17 +1091,22 @@ where
 								counterparty_node_id,
 								channel_id: ChannelId::v1_from_funding_outpoint(funding_txo),
 							};
-							let facts = ChannelTxFacts::new(txid).with_outputs(
-								&channel,
-								Some(UserChannelId(user_channel_id)),
-								ChannelOutputRole::Funding,
-								[vout as u32],
-							);
+							let facts = ChannelTxFacts::new(txid)
+								.with_outputs(
+									&channel,
+									Some(UserChannelId(user_channel_id)),
+									ChannelOutputRole::Funding,
+									[vout as u32],
+								)
+								.with_locked_inputs(
+									final_tx.input.iter().map(|txin| txin.previous_output),
+								);
 							match self.wallet.record_own_funding_tx_facts(facts).await {
 								Ok(FactsRecordOutcome::Recorded) => {},
 								// Admitted however full the store is, the report can only be
-								// refused as too large a record, which one funding output does
-								// not make. Replaying would meet the same refusal, so the
+								// refused as too large a record, which one funding output and
+								// the inputs of a transaction do not make. Replaying would meet
+								// the same refusal, so the
 								// channel is funded with a transaction this node will report
 								// without a classification.
 								Ok(FactsRecordOutcome::Incomplete) => {
@@ -1101,6 +1123,8 @@ where
 										temporary_channel_id,
 										e,
 									);
+									// The replayed event builds another transaction.
+									release_unused_funding(final_tx).await;
 									return Err(ReplayEvent());
 								},
 							}
@@ -1112,6 +1136,7 @@ where
 							);
 						}
 
+						let unused_tx = final_tx.clone();
 						let needs_manual_broadcast = self
 							.liquidity_source
 							.lsps2_service()
@@ -1140,6 +1165,9 @@ where
 							)
 						};
 
+						if result.is_err() {
+							release_unused_funding(unused_tx).await;
+						}
 						match result {
 							Ok(()) => {},
 							Err(APIError::APIMisuseError { err }) => {
@@ -2532,24 +2560,36 @@ where
 					return Err(ReplayEvent());
 				}
 
-				// TODO(#1037): once inputs are locked at coin selection, `inputs` are locks this
-				// event returns: unlock them here.
-				if let FundingInfo::Contribution { inputs: _, outputs } = funding_info {
+				let (inputs, outputs) = match funding_info {
+					FundingInfo::Tx { transaction } => (
+						transaction.input.into_iter().map(|txin| txin.previous_output).collect(),
+						transaction.output,
+					),
+					FundingInfo::Contribution { inputs, outputs } => (
+						inputs,
+						outputs
+							.into_iter()
+							.map(|script_pubkey| bitcoin::TxOut {
+								value: bitcoin::Amount::ZERO,
+								script_pubkey,
+							})
+							.collect(),
+					),
+					// The funding transaction of a channel LDK left to this node to broadcast, or
+					// a splice round this node contributed nothing to. The event does not say what
+					// the transaction spent, but the wallet recorded that for one it built.
+					FundingInfo::OutPoint { outpoint } => {
+						(self.wallet.locked_funding_inputs(&outpoint.txid).await, Vec::new())
+					},
+				};
+				if !inputs.is_empty() || !outputs.is_empty() {
 					log_info!(
 						self.logger,
-						"Reclaiming unused addresses from channel {} funding",
+						"Reclaiming unused wallet state from channel {} funding",
 						channel_id,
 					);
-
-					let outputs = outputs
-						.into_iter()
-						.map(|script_pubkey| bitcoin::TxOut {
-							value: bitcoin::Amount::ZERO,
-							script_pubkey,
-						})
-						.collect();
-					if let Err(e) = self.wallet.release_outputs(outputs).await {
-						log_error!(self.logger, "Failed reclaiming unused addresses: {}", e);
+					if let Err(e) = self.wallet.release_inputs_and_outputs(inputs, outputs).await {
+						log_error!(self.logger, "Failed reclaiming unused wallet state: {}", e);
 						return Err(ReplayEvent());
 					}
 				}
