@@ -227,7 +227,6 @@ where
 			cltv_expiry_delta: state::checked_cltv_expiry_delta(lease.cltv_expiry_delta)
 				.expect("LSPS2 lease CLTV delta was validated before selection"),
 			payment_size_msat: lease.payment_size_msat,
-			valid_until: lease.valid_until,
 		};
 		let payment_metadata = PaymentMetadata {
 			lsps2_parameters: Some(fee_parameters),
