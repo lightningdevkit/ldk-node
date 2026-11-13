@@ -861,6 +861,7 @@ impl From<ChannelConfig> for LdkChannelConfig {
 			max_dust_htlc_exposure: value.max_dust_htlc_exposure.into(),
 			force_close_avoidance_max_fee_satoshis: value.force_close_avoidance_max_fee_satoshis,
 			accept_underpaying_htlcs: value.accept_underpaying_htlcs,
+			..LdkChannelConfig::default()
 		}
 	}
 }
