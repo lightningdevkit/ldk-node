@@ -8801,8 +8801,8 @@ async fn do_lsps2_multi_lsp_picks_cheapest(
 	let route_hint_src = first_hop.expect("route hint should have at least one hop").src_node_id;
 	assert_eq!(route_hint_src, cheap_id, "expected cheaper LSP to be selected.");
 
-	// Consuming the BOLT11 lease schedules a replacement. The BOLT12 flow shares that cache and
-	// must retain the same cheapest-LSP selection regardless of registration order.
+	// The BOLT11 receive leaves no lease behind. The BOLT12 flow negotiates its own and must
+	// retain the same cheapest-LSP selection regardless of registration order.
 	let payment_amount_msat = 100_000_000;
 	let offer =
 		client.bolt12_payment().receive(payment_amount_msat, "multi LSP", None, None).unwrap();
