@@ -322,15 +322,26 @@ where
 			},
 			JitInvoiceRequest::Variable { amount_msat, .. } => {
 				// A BOLT12 invoice request has already resolved the payment amount. Use it to avoid
-				// consuming a cached variable lease outside its advertised range, and record the exact
-				// fee for that amount so payment validation need not accept the broader node-wide cap.
+				// consuming a cached variable lease outside its advertised range or with a fee
+				// exceeding our limit for that amount.
 				self.acquire_variable_lease(Some(amount_msat), &connection_manager).await?
 			},
 		};
-		let fee_parameters = LSPS2Parameters {
-			max_total_opening_fee_msat: Some(total_fee_msat),
-			max_proportional_opening_fee_ppm_msat: None,
-			min_opening_fee_msat: lease.params.min_fee_msat,
+		let fee_parameters = match request {
+			JitInvoiceRequest::Fixed { .. } => LSPS2Parameters {
+				max_total_opening_fee_msat: Some(total_fee_msat),
+				max_proportional_opening_fee_ppm_msat: None,
+				min_opening_fee_msat: lease.params.min_fee_msat,
+			},
+			// The LSP charges a variable lease's fee on the amount that arrives, which a payer may
+			// choose to exceed. Bound the fee by the lease's rate rather than by the fee for the
+			// requested amount, as we would otherwise reject such an overpayment after the LSP has
+			// opened its channel.
+			JitInvoiceRequest::Variable { .. } => LSPS2Parameters {
+				max_total_opening_fee_msat: self.config.lsps2_max_total_lsp_fee_limit_msat,
+				max_proportional_opening_fee_ppm_msat: Some(lease.params.proportional as u64),
+				min_opening_fee_msat: lease.params.min_fee_msat,
+			},
 		};
 
 		// The offers flow currently uses its two-hour default invoice expiry. Never publish a JIT
@@ -1761,6 +1772,50 @@ mod tests {
 				}
 			});
 		}
+	}
+
+	#[test]
+	fn variable_invoice_fee_limit_follows_lease_rate() {
+		let fee_limit_msat = Some(5_000);
+		let (node, lsp_node_id) = test_node_with_fee_limit(fee_limit_msat);
+		let client = node.liquidity_source.lsps2_client();
+		let mut params = fee_cap_test_params();
+		params.min_fee_msat = 10;
+		params.proportional = 10_000;
+		params.max_payment_size_msat = 1_000_000;
+		let lease = PaymentLease {
+			id: PaymentLeaseId { lsp_node_id, intercept_scid: 7 },
+			params,
+			cltv_expiry_delta: 18,
+			payment_size_msat: None,
+			valid_until: now_secs() + 7 * 24 * 60 * 60,
+		};
+		node.runtime.block_on(client.lease_store.insert(lease.clone())).unwrap();
+		client.lease_state.lock().unwrap().insert(lease);
+
+		let request = JitInvoiceRequest::Variable { amount_msat: 100_000, absolute_expiry: None };
+		let metadata = node
+			.runtime
+			.block_on(
+				Arc::clone(&client)
+					.prepare_invoice_response(request, Arc::clone(&node.connection_manager)),
+			)
+			.unwrap();
+		let fee_parameters = PaymentMetadata::decode_from_bolt12_payment_metadata(&metadata)
+			.and_then(|metadata| metadata.lsps2_parameters)
+			.unwrap();
+
+		// The LSP charges for the amount that arrives. A limit fixed to the requested amount's fee of
+		// 1_000 msat would reject any overpayment raising that fee on claim.
+		assert_eq!(
+			fee_parameters,
+			LSPS2Parameters {
+				max_total_opening_fee_msat: fee_limit_msat,
+				max_proportional_opening_fee_ppm_msat: Some(10_000),
+				min_opening_fee_msat: 10,
+			},
+			"a variable lease's fee must be bounded by its rate and the configured limit"
+		);
 	}
 }
 
