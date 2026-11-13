@@ -481,7 +481,7 @@ where
 				let Some(peer) = peer_manager.peer_by_node_id(&their_network_key) else {
 					log_error!(
 						self.logger,
-						"Failed to open LSPS2 channel to {} due to peer not being not connected.",
+						"Failed to open LSPS2 channel to {} due to peer not being connected.",
 						their_network_key,
 					);
 					// TODO: We fail the payment back here. Eventually we will need to remember
