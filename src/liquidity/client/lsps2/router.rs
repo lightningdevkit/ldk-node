@@ -598,7 +598,6 @@ mod tests {
 				intercept_scid: 42,
 				cltv_expiry_delta: 48,
 				payment_size_msat,
-				valid_until: u64::MAX,
 			};
 			for is_announced in [false, true] {
 				let mut channel = first_hop(3_000, None, None);
@@ -633,7 +632,6 @@ mod tests {
 			intercept_scid: 42,
 			cltv_expiry_delta: 48,
 			payment_size_msat: Some(3_000),
-			valid_until: u64::MAX,
 		};
 		let mut missing_forwarding_info = first_hop(3_000, None, None);
 		missing_forwarding_info.counterparty.forwarding_info = None;
@@ -666,7 +664,6 @@ mod tests {
 			intercept_scid: 42,
 			cltv_expiry_delta: 48,
 			payment_size_msat: Some(3_000),
-			valid_until: u64::MAX,
 		};
 		// Too large for a blinded hop, but payers route to a direct path over the public graph.
 		let mut large_cltv_delta = first_hop(3_000, None, None);
@@ -701,7 +698,6 @@ mod tests {
 			intercept_scid: 42,
 			cltv_expiry_delta: 48,
 			payment_size_msat: Some(3_000),
-			valid_until: u64::MAX,
 		};
 
 		let inner_router =
