@@ -37,8 +37,6 @@ pub struct LSPS2LeaseParameters {
 	pub cltv_expiry_delta: u16,
 	/// The fixed amount negotiated for this intercept SCID, or `None` for a variable amount.
 	pub payment_size_msat: Option<u64>,
-	/// Unix timestamp at which these parameters expire.
-	pub valid_until: u64,
 }
 
 impl_writeable_tlv_based!(LSPS2LeaseParameters, {
@@ -46,7 +44,6 @@ impl_writeable_tlv_based!(LSPS2LeaseParameters, {
 	(3, intercept_scid, required),
 	(5, cltv_expiry_delta, required),
 	(7, payment_size_msat, option),
-	(9, valid_until, required),
 });
 
 /// A router wrapper that uses ordinary payment paths when available and LSPS2 JIT paths otherwise.
@@ -383,7 +380,6 @@ mod tests {
 			intercept_scid: 42,
 			cltv_expiry_delta: 48,
 			payment_size_msat: Some(3_000),
-			valid_until: u64::MAX,
 		};
 		let metadata = payment_metadata(parameters);
 		let inner_router = MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::None };
@@ -418,7 +414,6 @@ mod tests {
 			intercept_scid: 42,
 			cltv_expiry_delta: 48,
 			payment_size_msat: Some(3_000),
-			valid_until: u64::MAX,
 		};
 		let metadata = payment_metadata(parameters);
 		let inner_router = MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::None };
@@ -443,7 +438,6 @@ mod tests {
 			intercept_scid: 42,
 			cltv_expiry_delta: 48,
 			payment_size_msat: None,
-			valid_until: u64::MAX,
 		};
 		let metadata = payment_metadata(parameters);
 		let inner_router = MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::None };
@@ -472,7 +466,6 @@ mod tests {
 			intercept_scid: 42,
 			cltv_expiry_delta: 48,
 			payment_size_msat: Some(3_000),
-			valid_until: u64::MAX,
 		};
 		let metadata = payment_metadata(parameters);
 		let inner_router =
@@ -529,7 +522,6 @@ mod tests {
 			intercept_scid: 42,
 			cltv_expiry_delta: 48,
 			payment_size_msat: Some(3_000),
-			valid_until: u64::MAX,
 		};
 		let inner_router =
 			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
@@ -558,7 +550,6 @@ mod tests {
 			intercept_scid: 42,
 			cltv_expiry_delta: 48,
 			payment_size_msat: None,
-			valid_until: u64::MAX,
 		};
 		let inner_router =
 			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
@@ -587,7 +578,6 @@ mod tests {
 			intercept_scid: 42,
 			cltv_expiry_delta: 48,
 			payment_size_msat: Some(3_000),
-			valid_until: u64::MAX,
 		};
 		let inner_router =
 			MockRouter { calls: AtomicUsize::new(0), path_kind: MockPathKind::DirectRecipient };
