@@ -70,9 +70,23 @@ impl RateLimiter {
 		allow
 	}
 
+	/// Returns a token consumed by an admitted request that could not be completed.
+	pub(crate) fn refund(&mut self, user_id: &[u8]) {
+		if let Some(bucket) = self.users.get_mut(user_id) {
+			bucket.tokens = bucket.tokens.saturating_add(1).min(self.capacity);
+		}
+	}
+
 	fn garbage_collect(&mut self, max_idle: Duration) {
 		let now = Instant::now();
 		self.users.retain(|_, bucket| now.duration_since(bucket.last_refill) < max_idle);
+	}
+
+	#[cfg(test)]
+	pub(super) fn advance_refill_interval(&mut self) {
+		for bucket in self.users.values_mut() {
+			bucket.last_refill -= self.refill_interval;
+		}
 	}
 }
 
