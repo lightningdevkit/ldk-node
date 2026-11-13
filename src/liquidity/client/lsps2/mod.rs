@@ -71,11 +71,11 @@ where
 
 const DEFAULT_BOLT12_INVOICE_EXPIRY_SECS: u32 = 2 * 60 * 60;
 
-/// The time for which we keep a lease cache target committed for an invoice request if its offer
-/// never expires.
+/// The longest time for which we keep a lease cache target committed for an invoice request,
+/// applied unless its offer expires earlier.
 ///
 /// A payer may request any amount at or above the offer's, so each such amount would otherwise leave
-/// behind a target that is refilled indefinitely.
+/// behind a target that is refilled for as long as the offer is valid.
 const INVOICE_REQUEST_CACHE_TARGET_EXPIRY_SECS: u64 = 24 * 60 * 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,8 +98,8 @@ impl JitInvoiceRequest {
 				(LeaseCacheTargetId::Variable, absolute_expiry)
 			},
 		};
-		let absolute_expiry = absolute_expiry
-			.unwrap_or_else(|| now_secs().saturating_add(INVOICE_REQUEST_CACHE_TARGET_EXPIRY_SECS));
+		let max_expiry = now_secs().saturating_add(INVOICE_REQUEST_CACHE_TARGET_EXPIRY_SECS);
+		let absolute_expiry = absolute_expiry.map_or(max_expiry, |expiry| expiry.min(max_expiry));
 		(id, Some(absolute_expiry))
 	}
 }
@@ -900,7 +900,20 @@ mod tests {
 			JitInvoiceRequest::Fixed { amount_msat: 1_000, absolute_expiry: Some(42) },
 			JitInvoiceRequest::Variable { amount_msat: 1_000, absolute_expiry: Some(42) },
 		] {
-			assert_eq!(request.cache_target().1, Some(42), "the offer's expiry must be kept");
+			assert_eq!(request.cache_target().1, Some(42), "an earlier offer expiry must be kept");
+		}
+
+		let offer_expiry = Some(before + 365 * 24 * 60 * 60);
+		for request in [
+			JitInvoiceRequest::Fixed { amount_msat: 1_000, absolute_expiry: offer_expiry },
+			JitInvoiceRequest::Variable { amount_msat: 1_000, absolute_expiry: offer_expiry },
+		] {
+			let absolute_expiry = request.cache_target().1.expect("targets always expire");
+			assert!(absolute_expiry >= before + 24 * 60 * 60);
+			assert!(
+				absolute_expiry <= now_secs() + 24 * 60 * 60,
+				"a long-lived offer must not keep the target beyond the default"
+			);
 		}
 	}
 
