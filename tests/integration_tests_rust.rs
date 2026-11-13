@@ -1703,6 +1703,150 @@ async fn back_to_back_channel_opens_before_sync() {
 	);
 }
 
+/// Logged by a node as it starts, for every wallet output it unlocks as no channel refers to it.
+const UNLOCKED_UNREFERENCED_OUTPUT: &str = "no channel refers to";
+
+/// Funds `node_a` with two coins and opens a channel from it to `node_b`, returning `node_a`'s id
+/// for the channel once it is ready.
+async fn open_channel_keeping_a_coin(
+	bitcoind: &BitcoinD, electrsd: &ElectrsD, node_a: &TestNode, node_b: &TestNode,
+) -> UserChannelId {
+	let addresses_a = (0..2).map(|_| node_a.onchain_payment().new_address().unwrap()).collect();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		addresses_a,
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	open_channel(node_a, node_b, 500_000, false, electrsd).await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+	node_a.sync_wallets().unwrap();
+	node_b.sync_wallets().unwrap();
+	let user_channel_id_a = expect_channel_ready_event!(node_a, node_b.node_id());
+	expect_channel_ready_event!(node_b, node_a.node_id());
+	user_channel_id_a
+}
+
+/// The inputs of a splice LDK still tracks when the node starts stay locked. Pinned to Esplora so
+/// that node A's wallet syncs only on demand: it has not seen the splice transaction, and the
+/// locks are all that keeps its inputs from being spent again.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn inputs_of_a_pending_splice_stay_locked_across_restart() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let logs_a = Arc::new(CollectingLogWriter::new());
+	let mut config_a = random_config();
+	config_a.store_type = TestStoreType::Sqlite;
+	config_a.log_writer = TestLogWriter::Custom(logs_a.clone());
+	let node_a = setup_node(&chain_source, config_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+	let user_channel_id_a =
+		open_channel_keeping_a_coin(&bitcoind, &electrsd, &node_a, &node_b).await;
+
+	let spendable_before_sats = node_a.list_balances().spendable_onchain_balance_sats;
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 300_000, None).unwrap();
+	let splice_txo = expect_splice_negotiated_event!(node_a, node_b.node_id());
+	wait_for_tx(&electrsd.client, splice_txo.txid).await;
+	let spendable_locked_sats = node_a.list_balances().spendable_onchain_balance_sats;
+	assert!(spendable_locked_sats <= spendable_before_sats - 300_000);
+
+	node_a.stop().unwrap();
+	drop(node_a);
+	let node_a = setup_node(&chain_source, config_a);
+
+	assert_eq!(logs_a.count(UNLOCKED_UNREFERENCED_OUTPUT), 0);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, spendable_locked_sats);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// The inputs of a splice LDK no longer tracks when the node starts are unlocked. The splice is
+/// initiated while disconnected, so LDK holds its contribution without negotiating or persisting
+/// it, and drops it across the restart.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn inputs_of_a_splice_lost_across_restart_are_unlocked() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let logs_a = Arc::new(CollectingLogWriter::new());
+	let mut config_a = random_config();
+	config_a.store_type = TestStoreType::Sqlite;
+	config_a.log_writer = TestLogWriter::Custom(logs_a.clone());
+	let node_a = setup_node(&chain_source, config_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+	let user_channel_id_a =
+		open_channel_keeping_a_coin(&bitcoind, &electrsd, &node_a, &node_b).await;
+
+	let spendable_before_sats = node_a.list_balances().spendable_onchain_balance_sats;
+	node_a.disconnect(node_b.node_id()).unwrap();
+	node_a.splice_in(&user_channel_id_a, node_b.node_id(), 300_000, None).unwrap();
+	let spendable_locked_sats = node_a.list_balances().spendable_onchain_balance_sats;
+	assert!(spendable_locked_sats <= spendable_before_sats - 300_000);
+
+	node_a.stop().unwrap();
+	drop(node_a);
+	let node_a = setup_node(&chain_source, config_a);
+
+	// LDK also reports the contribution it dropped, which returns its inputs as well. The log
+	// line tells that they were returned before that report was handled.
+	assert!(logs_a.count(UNLOCKED_UNREFERENCED_OUTPUT) > 0);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, spendable_before_sats);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
+/// A node that has an outbound channel awaiting confirmation without a record of the inputs its
+/// funding transaction spends cannot tell that channel's locks from leftovers, and keeps every
+/// lock when it starts. Pinned to Esplora so that node A's wallet syncs only on demand.
+#[cfg(feature = "chain-esplora")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn locks_are_kept_across_restart_while_a_pending_funding_has_no_recorded_inputs() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::Esplora(&electrsd);
+	let logs_a = Arc::new(CollectingLogWriter::new());
+	let mut config_a = random_config();
+	config_a.log_writer = TestLogWriter::Custom(logs_a.clone());
+	let store_a = TestSyncStore::new(config_a.node_config.storage_dir_path.clone().into());
+	let node_a = setup_node_with_store(&chain_source, config_a.clone(), store_a.clone());
+	let node_b = setup_node(&chain_source, random_config());
+
+	let address_a = node_a.onchain_payment().new_address().unwrap();
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![address_a],
+		Amount::from_sat(1_000_000),
+	)
+	.await;
+	node_a.sync_wallets().unwrap();
+
+	let funding_txo = open_channel_no_wait(&node_a, &node_b, 500_000, None, false).await;
+	wait_for_tx(&electrsd.client, funding_txo.txid).await;
+	// The wallet's only coin is locked, and the funding transaction's change unknown to it.
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 0);
+
+	node_a.stop().unwrap();
+	drop(node_a);
+	let facts_keys = KVStore::list(&store_a, "channel_tx_facts", "").await.unwrap();
+	assert!(!facts_keys.is_empty(), "opening the channel recorded its funding");
+	for key in facts_keys {
+		KVStore::remove(&store_a, "channel_tx_facts", "", &key, false).await.unwrap();
+	}
+	let node_a = setup_node_with_store(&chain_source, config_a, store_a);
+
+	assert_eq!(logs_a.count(UNLOCKED_UNREFERENCED_OUTPUT), 0);
+	assert_eq!(node_a.list_balances().spendable_onchain_balance_sats, 0);
+
+	node_a.stop().unwrap();
+	node_b.stop().unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn split_underpaid_bolt11_payment() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
