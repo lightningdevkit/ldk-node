@@ -127,6 +127,9 @@ struct AddressPool {
 	/// Addresses revealed in-memory whose persistence has not succeeded yet. They are published
 	/// to `available` by the next successful [`Wallet::refill_address_pool`] run.
 	unpublished: Vec<(u32, bitcoin::Address)>,
+	/// Whether a background refill task is scheduled or running. Further callback requests are
+	/// coalesced into that task.
+	refill_task_running: bool,
 }
 
 impl AddressPool {
@@ -155,7 +158,7 @@ impl AddressPool {
 				);
 			}
 		}
-		Self { available, unpublished: Vec::new() }
+		Self { available, unpublished: Vec::new(), refill_task_running: false }
 	}
 }
 
@@ -185,6 +188,54 @@ pub(crate) struct Wallet {
 	// How far the dropping of recorded facts has walked the store, and how many records the
 	// store contains.
 	facts_retention: FactsRetention,
+}
+
+struct AddressPoolRefillTask {
+	wallet: Arc<Wallet>,
+	active: bool,
+}
+
+impl AddressPoolRefillTask {
+	async fn run(mut self) {
+		loop {
+			if let Err(e) = self.wallet.refill_address_pool().await {
+				self.complete();
+				log_error!(self.wallet.logger, "Failed to refill the address pool: {}", e);
+				return;
+			}
+
+			if !self.refill_again_or_complete() {
+				return;
+			}
+		}
+	}
+
+	fn refill_again_or_complete(&mut self) -> bool {
+		let mut locked_pool = self.wallet.address_pool.lock().expect("lock");
+		if locked_pool.unpublished.is_empty()
+			&& locked_pool.available.len() >= ADDRESS_POOL_TARGET_SIZE
+		{
+			locked_pool.refill_task_running = false;
+			self.active = false;
+			false
+		} else {
+			true
+		}
+	}
+
+	fn complete(&mut self) {
+		let mut locked_pool = self.wallet.address_pool.lock().expect("lock");
+		locked_pool.refill_task_running = false;
+		self.active = false;
+	}
+}
+
+impl Drop for AddressPoolRefillTask {
+	fn drop(&mut self) {
+		if self.active {
+			self.complete();
+		}
+	}
 }
 
 impl Wallet {
@@ -1832,18 +1883,26 @@ impl Wallet {
 	/// Its reveal is durable either way, so the script always stays watched — the cost is bounded
 	/// address reuse, not fund visibility.
 	pub(crate) fn pop_pooled_address(self: &Arc<Self>) -> Option<bitcoin::Address> {
-		let popped = self.address_pool.lock().expect("lock").available.pop_front();
+		let (popped, spawn_refill_task) = {
+			let mut locked_pool = self.address_pool.lock().expect("lock");
+			let popped = locked_pool.available.pop_front();
+			let spawn_refill_task = if locked_pool.refill_task_running {
+				false
+			} else {
+				locked_pool.refill_task_running = true;
+				true
+			};
+			(popped, spawn_refill_task)
+		};
 
 		// Spawning cancellable lets shutdown abort an in-flight refill rather than wait on it.
 		// Aborting mid-refill (or dropping a refill spawned during shutdown) is safe: the reveals
 		// are staged with the persister in the same critical section that takes them from the
 		// wallet, and nothing is published whose persistence the refill did not see complete.
-		let wallet = Arc::clone(self);
-		self.runtime.spawn_cancellable_background_task(async move {
-			if let Err(e) = wallet.refill_address_pool().await {
-				log_error!(wallet.logger, "Failed to refill the address pool: {}", e);
-			}
-		});
+		if spawn_refill_task {
+			let refill_task = AddressPoolRefillTask { wallet: Arc::clone(self), active: true };
+			self.runtime.spawn_cancellable_background_task(refill_task.run());
+		}
 
 		popped.map(|(_, address)| address)
 	}
@@ -5426,6 +5485,44 @@ mod tests {
 				secondary_namespace,
 				page_token,
 			)
+		}
+	}
+
+	#[tokio::test]
+	async fn pooled_address_refills_are_coalesced_while_persistence_stalls() {
+		let gated_store = GatedStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(gated_store.clone()));
+		let wallet = new_test_wallet(store, false).await;
+		wallet.refill_address_pool().await.unwrap();
+
+		// SignerProvider callbacks are reachable while accepting untrusted inbound channels.
+		// Park the first refill on persistence, as can happen with a slow or unavailable remote
+		// KV store, then make enough synchronous handouts to exhaust the pool. Every call must
+		// reuse the one in-flight refill rather than retaining another task and Wallet Arc.
+		gated_store.gate_writes.store(true, Ordering::Release);
+		let baseline_refs = Arc::strong_count(&wallet);
+		assert!(wallet.pop_pooled_address().is_some());
+		gated_store.write_entered.notified().await;
+
+		for _ in 0..128 {
+			let _ = wallet.pop_pooled_address();
+		}
+		tokio::task::yield_now().await;
+
+		let retained_by_refills = Arc::strong_count(&wallet) - baseline_refs;
+		assert!(
+			retained_by_refills <= 1,
+			"one stalled persistence write retained {retained_by_refills} refill tasks"
+		);
+
+		// Let the coalesced refill finish so the test leaves no background work behind.
+		gated_store.gate_writes.store(false, Ordering::Release);
+		gated_store.release.notify_waiters();
+		for _ in 0..100 {
+			if Arc::strong_count(&wallet) == baseline_refs {
+				break;
+			}
+			tokio::task::yield_now().await;
 		}
 	}
 
