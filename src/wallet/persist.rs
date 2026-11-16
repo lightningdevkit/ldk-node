@@ -29,10 +29,10 @@ use crate::types::DynStore;
 
 /// The persisted derivation indices of the wallet's address pool.
 ///
-/// The record is advisory and reconstructible: it is written before the reveals it references
-/// are necessarily persisted, so it may briefly lead the persisted [`ChangeSet::indexer`].
-/// Readers must validate each index against the wallet's revealed range before handing out any
-/// of the addresses; dropped entries are re-derived to the same indices by the next refill.
+/// The record is written before the reveals it references are necessarily persisted, so it may
+/// briefly lead the persisted [`ChangeSet::indexer`]. Readers must validate each index against
+/// the wallet's revealed range before handing out any of the addresses; dropped entries are
+/// re-derived to the same indices by the next refill.
 ///
 /// [`ChangeSet::indexer`]: bdk_wallet::ChangeSet::indexer
 struct AddressPoolRecord {
@@ -265,16 +265,10 @@ pub(crate) async fn read_address_pool(
 		Err(e) if e.kind() == lightning::io::ErrorKind::NotFound => return Ok(Vec::new()),
 		Err(e) => return Err(e.into()),
 	};
-	let record = match AddressPoolRecord::read(&mut &*reader) {
-		Ok(record) => record,
-		Err(e) => {
-			// The record is a reconstructible cache: a decode failure (corruption, or a
-			// future version's incompatible encoding) at worst costs the pool's indices, so
-			// degrade to an empty pool rather than failing the node's startup.
-			log_error!(logger, "Dropping undecodable address pool: {}", e);
-			return Ok(Vec::new());
-		},
-	};
+	let record = AddressPoolRecord::read(&mut &*reader).map_err(|e| {
+		log_error!(logger, "Failed to deserialize address pool: {}", e);
+		std::io::Error::new(std::io::ErrorKind::InvalidData, "Failed to deserialize address pool")
+	})?;
 	Ok(record.indices)
 }
 

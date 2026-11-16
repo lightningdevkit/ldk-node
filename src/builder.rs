@@ -203,7 +203,7 @@ pub enum BuildError {
 	InvalidNodeAlias,
 	/// An attempt to setup a runtime has failed.
 	RuntimeSetupFailed,
-	/// We failed to read data from the [`KVStore`].
+	/// We failed to read data from the [`KVStore`], or data read from it could not be decoded.
 	///
 	/// [`KVStore`]: lightning::util::persist::KVStore
 	ReadFailed,
