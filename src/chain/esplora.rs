@@ -382,7 +382,7 @@ impl EsploraChainSource {
 			build_fee_rate_cache(estimates, self.config.network).map_err(|e| {
 				log_error!(
 					self.logger,
-					"Failed to retrieve fee rate estimates: empty fee estimates are dissallowed on Mainnet.",
+					"Failed to retrieve fee rate estimates: Esplora server didn't return any usable estimates. This is disallowed on Mainnet.",
 				);
 				e
 			})?;
@@ -555,10 +555,16 @@ impl Filter for EsploraChainSource {
 // urgent targets such as `UrgentOnChainSweep`, we fall back to what
 // `get_fallback_fee_rate_for_network` gives us, just as the Electrum and Bitcoin Core sources do.
 fn build_fee_rate_cache(
-	estimates: HashMap<u16, f64>, network: Network,
+	mut estimates: HashMap<u16, f64>, network: Network,
 ) -> Result<(HashMap<ConfirmationTarget, FeeRate>, Vec<ConfirmationTarget>), Error> {
+	// Note a non-positive value is no more usable than a missing one, so we drop these upfront
+	// rather than letting them pin a target to 1 sat/vb. We need to do this before picking an
+	// estimate, as `convert_fee_rate` settles on the closest block count at or below the
+	// requested one, and a bogus entry there would otherwise shadow a usable one further down.
+	estimates.retain(|_, estimate| *estimate > 0.0);
+
 	if estimates.is_empty() && network == Network::Bitcoin {
-		// Ensure we fail if we didn't receive any estimates.
+		// Ensure we fail if we didn't receive any usable estimates.
 		return Err(Error::FeerateEstimationUpdateFailed);
 	}
 
@@ -569,10 +575,7 @@ fn build_fee_rate_cache(
 	for target in confirmation_targets {
 		let num_blocks = get_num_block_defaults_for_target(target);
 
-		// Note a non-positive value is no more usable than a missing one, so we treat it as
-		// missing rather than letting it pin the target to 1 sat/vb.
-		let converted = esplora_client::convert_fee_rate(num_blocks, estimates.clone())
-			.filter(|converted| *converted > 0.0);
+		let converted = esplora_client::convert_fee_rate(num_blocks, estimates.clone());
 
 		let fee_rate = match converted {
 			Some(converted) => {
@@ -676,6 +679,30 @@ mod tests {
 			);
 			assert!(fell_back.contains(&urgent), "{}", bogus);
 		}
+	}
+
+	#[test]
+	fn non_positive_estimates_dont_shadow_usable_ones() {
+		// `convert_fee_rate` picks the closest block count at or below the requested one, so a
+		// bogus entry at 6 blocks must not keep us from using the estimate we have for 1 block.
+		for bogus in [0.0, -1.0] {
+			let estimates = HashMap::from([(1, 5.0), (6, bogus), (144, 2.0)]);
+			let (cache, fell_back) = build_fee_rate_cache(estimates, Network::Bitcoin).unwrap();
+
+			let urgent = ConfirmationTarget::Lightning(LdkConfirmationTarget::UrgentOnChainSweep);
+			assert_eq!(cache.get(&urgent).unwrap().to_sat_per_kwu(), 1250, "{}", bogus);
+			assert!(!fell_back.contains(&urgent), "{}", bogus);
+		}
+	}
+
+	#[test]
+	fn all_non_positive_estimates_are_rejected_on_mainnet() {
+		// A map holding nothing usable is no better than an empty one.
+		let estimates = HashMap::from([(1, 0.0), (6, -1.0)]);
+		assert!(matches!(
+			build_fee_rate_cache(estimates, Network::Bitcoin),
+			Err(Error::FeerateEstimationUpdateFailed)
+		));
 	}
 
 	#[test]

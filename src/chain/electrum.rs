@@ -814,30 +814,27 @@ pub(crate) async fn get_electrum_fee_rate_cache_update(
 		return Err(Error::FeerateEstimationUpdateFailed);
 	}
 
-	let mut new_fee_rate_cache = HashMap::with_capacity(10);
-	let mut fell_back_targets = Vec::new();
-	for (index, target) in confirmation_targets.into_iter().enumerate() {
-		// `batch_call` gives us one result per request or an error, and the check above
-		// rejects anything else on mainnet. We still index rather than zip so that a short
-		// response could never silently drop the trailing targets from the cache.
-		let raw_fee_rate_btc_per_kvb =
-			raw_estimates_btc_kvb.get(index).and_then(|raw| raw.as_f64());
+	let estimates_btc_per_kvb =
+		raw_estimates_btc_kvb.iter().map(|raw| raw.as_f64()).collect::<Vec<_>>();
 
-		let (fee_rate, fell_back) =
-			fee_rate_from_estimate(target, raw_fee_rate_btc_per_kvb, network);
+	let (new_fee_rate_cache, fell_back_targets) =
+		build_fee_rate_cache(&estimates_btc_per_kvb, network).map_err(|e| {
+			log_error!(
+				logger,
+				"Failed to retrieve fee rate estimates: Electrum server didn't return any usable estimates. This is disallowed on Mainnet."
+			);
+			e
+		})?;
 
-		if fell_back {
-			fell_back_targets.push(target);
+	for target in confirmation_targets {
+		if let Some(fee_rate) = new_fee_rate_cache.get(&target) {
+			log_trace!(
+				logger,
+				"Fee rate estimation updated for {:?}: {} sats/kwu",
+				target,
+				fee_rate.to_sat_per_kwu(),
+			);
 		}
-
-		new_fee_rate_cache.insert(target, fee_rate);
-
-		log_trace!(
-			logger,
-			"Fee rate estimation updated for {:?}: {} sats/kwu",
-			target,
-			fee_rate.to_sat_per_kwu(),
-		);
 	}
 
 	// On `regtest`/`signet` we expect to fall back for every target, so a warning would be
@@ -852,6 +849,37 @@ pub(crate) async fn get_electrum_fee_rate_cache_update(
 	}
 
 	Ok(new_fee_rate_cache)
+}
+
+// Builds the fee rate cache from the raw `estimatefee` results the Electrum server returned for
+// our confirmation targets, in the order of `get_all_conf_targets`.
+//
+// Targets without a usable estimate fall back individually, but, just as for an empty Esplora
+// response, we reject the update on mainnet if the server gave us no usable estimate at all.
+fn build_fee_rate_cache(
+	estimates_btc_per_kvb: &[Option<f64>], network: Network,
+) -> Result<(HashMap<ConfirmationTarget, FeeRate>, Vec<ConfirmationTarget>), Error> {
+	let confirmation_targets = get_all_conf_targets();
+
+	let mut new_fee_rate_cache = HashMap::with_capacity(10);
+	let mut fell_back_targets = Vec::new();
+	for (index, target) in confirmation_targets.into_iter().enumerate() {
+		let estimate_btc_per_kvb = estimates_btc_per_kvb.get(index).copied().flatten();
+		let (fee_rate, fell_back) = fee_rate_from_estimate(target, estimate_btc_per_kvb, network);
+
+		if fell_back {
+			fell_back_targets.push(target);
+		}
+
+		new_fee_rate_cache.insert(target, fee_rate);
+	}
+
+	if fell_back_targets.len() == confirmation_targets.len() && network == Network::Bitcoin {
+		// Ensure we fail if we didn't receive any usable estimates.
+		return Err(Error::FeerateEstimationUpdateFailed);
+	}
+
+	Ok((new_fee_rate_cache, fell_back_targets))
 }
 
 // Converts a raw `estimatefee` result, as returned by the Electrum server for `target`, into the
@@ -1078,8 +1106,8 @@ mod tests {
 	#[test]
 	fn missing_estimates_fall_back_per_network() {
 		// `-1` is what Electrum serves when it has no estimate for the requested block count,
-		// and a short batch response leaves us without a value at all. Neither is a usable
-		// estimate.
+		// and a result that isn't a number leaves us without a value at all. Neither is a
+		// usable estimate.
 		for raw in [None, Some(-1.0)] {
 			// On mainnet/testnet the target's own default decides, rather than the relay floor
 			// silently downgrading urgent targets to 1 sat/vb.
@@ -1130,6 +1158,37 @@ mod tests {
 				);
 			}
 		}
+	}
+
+	#[test]
+	fn all_unusable_estimates_are_rejected_on_mainnet_only() {
+		let target_count = get_all_conf_targets().len();
+
+		// Whether the server answers `-1` for every block count or hands us nothing we could
+		// parse, we have no usable estimate at all, which we reject on mainnet just as we do an
+		// empty Esplora response.
+		for estimates in [vec![Some(-1.0); target_count], vec![None; target_count], Vec::new()] {
+			assert!(matches!(
+				build_fee_rate_cache(&estimates, Network::Bitcoin),
+				Err(Error::FeerateEstimationUpdateFailed)
+			));
+
+			// Off mainnet we carry on with every target on its fallback.
+			for network in [Network::Testnet, Network::Signet, Network::Regtest] {
+				let (cache, fell_back) = build_fee_rate_cache(&estimates, network).unwrap();
+				assert_eq!(cache.len(), target_count, "{}", network);
+				assert_eq!(fell_back.len(), target_count, "{}", network);
+			}
+		}
+
+		// A single usable estimate is enough to carry on on mainnet, with only the remaining
+		// targets falling back.
+		let mut estimates = vec![Some(-1.0); target_count];
+		estimates[0] = Some(0.00002);
+		let (cache, fell_back) = build_fee_rate_cache(&estimates, Network::Bitcoin).unwrap();
+		assert_eq!(cache.len(), target_count);
+		assert_eq!(fell_back.len(), target_count - 1);
+		assert_eq!(cache.get(&get_all_conf_targets()[0]).unwrap().to_sat_per_kwu(), 500);
 	}
 
 	#[test]

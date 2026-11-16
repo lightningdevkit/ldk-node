@@ -653,12 +653,23 @@ impl BitcoindChainSource {
 					// can simply be unreliable. Note this keeps whatever estimates we did get
 					// for the remaining targets.
 					let fallback_fee_rate = get_fallback_fee_rate_for_network(target, network);
-					log_error!(
-						self.logger,
-						"Failed to retrieve fee rate estimates: {}. Falling back to {} sats/kwu.",
-						e,
-						fallback_fee_rate.to_sat_per_kwu(),
-					);
+					// On `regtest`/`signet` we expect to end up here for every target, so an
+					// error would be pure noise there.
+					if matches!(network, Network::Regtest | Network::Signet) {
+						log_trace!(
+							self.logger,
+							"Failed to retrieve fee rate estimates: {}. Falling back to {} sats/kwu.",
+							e,
+							fallback_fee_rate.to_sat_per_kwu(),
+						);
+					} else {
+						log_error!(
+							self.logger,
+							"Failed to retrieve fee rate estimates: {}. Falling back to {} sats/kwu.",
+							e,
+							fallback_fee_rate.to_sat_per_kwu(),
+						);
+					}
 					fallback_fee_rate
 				},
 			};
