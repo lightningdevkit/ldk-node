@@ -3073,9 +3073,14 @@ mod tests {
 	use std::sync::atomic::{AtomicU16, Ordering};
 	use std::time::Duration;
 
+	use lightning::ln::outbound_payment::RecipientOnionFields;
 	use lightning::util::test_utils::TestLogger;
+	use lightning::util::wallet_utils::Wallet as LdkWallet;
+	use lightning_types::payment::PaymentSecret;
 
 	use super::*;
+	use crate::builder::NodeBuilder;
+	use crate::entropy::NodeEntropy;
 	use crate::io::test_utils::InMemoryStore;
 	use crate::payment::store::LSPS2Parameters;
 	use crate::types::DynStoreWrapper;
@@ -3277,6 +3282,139 @@ mod tests {
 				),
 				None
 			);
+		}
+	}
+
+	fn test_node_and_event_handler() -> (crate::Node, EventHandler<Arc<Logger>>) {
+		let mut builder = NodeBuilder::from_config(Config::default());
+		builder.set_log_facade_logger();
+		#[cfg(not(feature = "uniffi"))]
+		let entropy = NodeEntropy::from_seed_bytes([42; 64]);
+		#[cfg(feature = "uniffi")]
+		let entropy = NodeEntropy::from_seed_bytes(vec![42; 64]).unwrap();
+		let node = builder.build_with_store(entropy, InMemoryStore::new()).unwrap();
+
+		let bump_tx_event_handler = Arc::new(BumpTransactionEventHandler::new(
+			Arc::clone(&node.tx_broadcaster),
+			Arc::new(LdkWallet::new(Arc::clone(&node.wallet), Arc::clone(&node.logger))),
+			Arc::clone(&node.keys_manager),
+			Arc::clone(&node.logger),
+		));
+		let event_handler = EventHandler::new(
+			Arc::clone(&node.event_queue),
+			Arc::clone(&node.wallet),
+			bump_tx_event_handler,
+			Arc::clone(&node.channel_manager),
+			Arc::clone(&node.chain_monitor),
+			Arc::clone(&node.connection_manager),
+			Arc::clone(&node.output_sweeper),
+			Arc::clone(&node.network_graph),
+			Arc::clone(&node.liquidity_source),
+			Arc::clone(&node.payment_store),
+			Arc::clone(&node.forwarding_store),
+			Arc::clone(&node.peer_store),
+			Arc::clone(&node.keys_manager),
+			None,
+			Arc::clone(&node.onion_messenger),
+			node.om_mailbox.clone(),
+			node.prober.clone(),
+			Arc::clone(&node.runtime),
+			Arc::clone(&node.logger),
+			Arc::clone(&node.config),
+			Arc::clone(&node.pending_funding_fee_rates),
+		);
+		(node, event_handler)
+	}
+
+	#[test]
+	fn claimable_payment_is_refused_unless_withheld_fee_is_allowed() {
+		const MAX_TOTAL_OPENING_FEE_MSAT: u64 = 2_000;
+		let allowing_metadata = PaymentMetadata {
+			lsps2_parameters: Some(LSPS2Parameters {
+				max_total_opening_fee_msat: Some(MAX_TOTAL_OPENING_FEE_MSAT),
+				max_proportional_opening_fee_ppm_msat: None,
+				min_opening_fee_msat: 1_000,
+			}),
+			lsps2_lease_parameters: None,
+		}
+		.encode();
+
+		let (node, event_handler) = test_node_and_event_handler();
+
+		// Each payment awaits a manual claim, so that one passing the fee check is surfaced as
+		// claimable without `ChannelManager` having to know its HTLCs.
+		let cases = [
+			(1, Some(allowing_metadata.clone()), MAX_TOTAL_OPENING_FEE_MSAT, false),
+			(2, Some(allowing_metadata), MAX_TOTAL_OPENING_FEE_MSAT + 1, true),
+			(3, None, 1, true),
+		];
+		for (hash_byte, payment_metadata, counterparty_skimmed_fee_msat, expect_refusal) in cases {
+			let payment_hash = PaymentHash([hash_byte; 32]);
+			let payment_id = PaymentId(payment_hash.0);
+			let payment_secret = PaymentSecret([hash_byte; 32]);
+			let amount_msat = 100_000;
+			let payment = PaymentDetails::new(
+				payment_id,
+				PaymentKind::Bolt11 {
+					hash: payment_hash,
+					preimage: None,
+					secret: Some(payment_secret),
+					counterparty_skimmed_fee_msat: None,
+				},
+				None,
+				None,
+				PaymentDirection::Inbound,
+				PaymentStatus::Pending,
+			);
+			let mut onion_fields = RecipientOnionFields::secret_only(payment_secret, amount_msat);
+			onion_fields.payment_metadata = payment_metadata;
+			let event = LdkEvent::PaymentClaimable {
+				receiver_node_id: None,
+				payment_hash,
+				onion_fields: Some(onion_fields),
+				amount_msat,
+				counterparty_skimmed_fee_msat,
+				purpose: PaymentPurpose::Bolt11InvoicePayment {
+					payment_preimage: None,
+					payment_secret,
+				},
+				receiving_channel_ids: Vec::new(),
+				claim_deadline: None,
+				payment_id: Some(payment_id),
+			};
+
+			let (status, queued_event) = node.runtime.block_on(async {
+				node.payment_store.insert(payment).await.unwrap();
+				event_handler.handle_event(event).await.unwrap();
+				let status = node.payment_store.get(&payment_id).await.unwrap().unwrap().status;
+				let queued_event = node.event_queue.next_event();
+				if queued_event.is_some() {
+					node.event_queue.event_handled().await.unwrap();
+				}
+				(status, queued_event)
+			});
+
+			if expect_refusal {
+				assert_eq!(
+					status,
+					PaymentStatus::Failed,
+					"A withheld fee of {counterparty_skimmed_fee_msat} msat must fail the payment"
+				);
+				assert_eq!(
+					queued_event, None,
+					"A refused payment must not be offered for claiming"
+				);
+			} else {
+				assert_eq!(
+					status,
+					PaymentStatus::Pending,
+					"A withheld fee of {counterparty_skimmed_fee_msat} msat must be accepted"
+				);
+				assert!(
+					matches!(queued_event, Some(Event::PaymentClaimable { .. })),
+					"An accepted payment must be offered for claiming, got {queued_event:?}"
+				);
+			}
 		}
 	}
 
