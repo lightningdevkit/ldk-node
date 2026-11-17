@@ -1,0 +1,14 @@
+[package]
+name = "ldk-node-rusqlite-compat"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+publish = false
+
+# Resolve as a downstream application, without LDK Node's legacy test dependencies.
+[workspace]
+
+[dependencies]
+ldk-node = { path = "../.." }
+rusqlite = "=0.39.0"
+tokio = { version = "1.39", features = ["macros", "rt"] }

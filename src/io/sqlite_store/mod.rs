@@ -260,17 +260,10 @@ impl SqliteStoreInner {
 
 		if version_res == 0 {
 			// New database, set our SCHEMA_USER_VERSION and continue
-			connection
-				.pragma(
-					Some(rusqlite::DatabaseName::Main),
-					"user_version",
-					SCHEMA_USER_VERSION,
-					|_| Ok(()),
-				)
-				.map_err(|e| {
-					let msg = format!("Failed to set PRAGMA user_version: {}", e);
-					io::Error::new(io::ErrorKind::Other, msg)
-				})?;
+			connection.pragma_update(None, "user_version", SCHEMA_USER_VERSION).map_err(|e| {
+				let msg = format!("Failed to set PRAGMA user_version: {}", e);
+				io::Error::new(io::ErrorKind::Other, msg)
+			})?;
 		} else if version_res < SCHEMA_USER_VERSION {
 			migrations::migrate_schema(
 				&mut connection,
