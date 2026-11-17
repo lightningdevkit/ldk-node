@@ -3163,9 +3163,11 @@ impl Wallet {
 		let figures = recorded_figures.unwrap_or(figures);
 		let direction = figures.direction;
 		// Only the signed round awaits broadcast: LDK broadcast the others once their signatures
-		// were exchanged.
+		// were exchanged. Its figures are those its facts carry, so the entry agrees with them.
 		if let Some(signed) = history.iter_mut().find(|candidate| candidate.txid == txid) {
 			signed.awaiting_broadcast = true;
+			signed.amount_msat = figures.amount_msat;
+			signed.fee_paid_msat = figures.fee_paid_msat;
 		}
 
 		let prior_pending = stores.pending_payment(&payment_id).await?;
@@ -3173,12 +3175,13 @@ impl Wallet {
 		if prior_pending.as_ref().is_some_and(|entry| entry.candidate(txid).is_some()) {
 			return Ok(SignedFundingRecord::Recorded);
 		}
-		// Merge LDK's history into the recorded one — refreshing the rounds both list, appending
-		// the new ones — rather than replace it: LDK's history omits a recorded round it has since
-		// abandoned, whose removal is `drop_abandoned_splice_rounds`' job once LDK reports the
-		// failure, so a recorded round LDK no longer lists must survive the write.
+		// Merge LDK's history into the recorded one — appending the new rounds — rather than
+		// replace it: LDK's history omits a recorded round it has since abandoned, whose removal is
+		// `drop_abandoned_splice_rounds`' job once LDK reports the failure, so a recorded round LDK
+		// no longer lists must survive the write. A recorded round keeps its figures, which its
+		// immutable facts carry too, however LDK has since adjusted the contribution's fee fields.
 		//
-		// Refreshing an earlier round clears its awaiting-broadcast mark, which is right only
+		// The merge clears an earlier round's awaiting-broadcast mark, which is right only
 		// because LDK refuses a new negotiation while one awaits signatures and handles events in
 		// order, stopping at the first failure: the earlier round's `SpliceNegotiated` event was
 		// pushed before this signing event and has been handled by now. Should LDK ever reorder
@@ -3187,7 +3190,7 @@ impl Wallet {
 			prior_pending.as_ref().map(|entry| entry.candidates().to_vec()).unwrap_or_default();
 		for candidate in history {
 			match recorded.iter_mut().find(|stored| stored.txid == candidate.txid) {
-				Some(stored) => *stored = candidate,
+				Some(stored) => stored.awaiting_broadcast = false,
 				None => recorded.push(candidate),
 			}
 		}
@@ -6772,7 +6775,60 @@ mod tests {
 		assert_eq!(figures.funding_payment_id, id);
 		assert_eq!(figures.fee_paid_msat, Some(300_000), "the recorded share stands");
 		let entry = entry_of(&wallet, &id).await.expect("entry");
-		assert!(entry.candidate(txid).expect("candidate").awaiting_broadcast);
+		let round = entry.candidate(txid).expect("candidate");
+		assert!(round.awaiting_broadcast);
+		assert_eq!(
+			(round.amount_msat, round.fee_paid_msat),
+			(figures.amount_msat, figures.fee_paid_msat),
+			"the entry reports the figures the facts record",
+		);
+	}
+
+	/// A later signing lists the earlier rounds of the history again, from a contribution LDK may
+	/// have adjusted the fee fields of since. The rounds already recorded keep their figures,
+	/// which their immutable facts carry too, so a confirmation reports the same figures whether
+	/// it is applied from the entry or recorded from the facts.
+	#[tokio::test]
+	async fn a_later_signing_keeps_the_recorded_figures_of_earlier_rounds() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		let (tx1, contribution1) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid1 = tx1.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid1, Some(contribution1))]);
+		wallet.record_signed_funding(&tx1, &candidates).await.unwrap();
+		let id = wallet.find_payment_by_txid(txid1).await.unwrap().expect("id");
+
+		// The fee bump lists the first round with an adjusted estimated fee.
+		let splice_out = tx1.output.last().expect("the splice-out output").clone();
+		let adjusted = test_funding_contribution_with_outputs(900, 253, &[splice_out]);
+		let (tx2, contribution2) = splice_out_round(&wallet, 2, 500_000, 600);
+		let txid2 = tx2.compute_txid();
+		let candidates = splice_candidates(
+			counterparty_node_id,
+			channel_id,
+			&[(txid1, Some(adjusted)), (txid2, Some(contribution2))],
+		);
+		wallet.record_signed_funding(&tx2, &candidates).await.unwrap();
+
+		let figures = wallet
+			.channel_tx_facts(&txid1)
+			.await
+			.expect("facts")
+			.local_figures
+			.expect("this node's share");
+		assert_eq!(figures.fee_paid_msat, Some(300_000));
+		let entry = entry_of(&wallet, &id).await.expect("entry");
+		let round = entry.candidate(txid1).expect("candidate");
+		assert!(!round.awaiting_broadcast, "the later signing clears the earlier round's mark");
+		assert_eq!(
+			(round.amount_msat, round.fee_paid_msat),
+			(figures.amount_msat, figures.fee_paid_msat),
+			"the entry keeps the figures the facts record",
+		);
+		assert!(entry.candidate(txid2).expect("candidate").awaiting_broadcast);
 	}
 
 	/// The counterparty broadcasts the round it has our signatures for before this node has
