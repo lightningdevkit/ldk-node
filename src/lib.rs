@@ -1589,10 +1589,12 @@ impl Node {
 		Ok(new_channel_anchor_reserve_sats(&self.config, peer_node_id, anchor_channel))
 	}
 
+	/// Returns the spendable on-chain balance, i.e., excluding the anchor reserve, that
+	/// `amount_sats` was checked against.
 	fn check_sufficient_onchain_funds(
 		&self, amount_sats: u64, peer_node_id: &PublicKey,
 		new_channel_with_funding_fee_rate: Option<bitcoin::FeeRate>,
-	) -> Result<(), Error> {
+	) -> Result<u64, Error> {
 		let action_str = if new_channel_with_funding_fee_rate.is_some() {
 			"create channel"
 		} else {
@@ -1645,7 +1647,7 @@ impl Node {
 			}
 		}
 
-		Ok(())
+		Ok(spendable_amount_sats)
 	}
 
 	/// Connect to a node and open a new unannounced channel.
