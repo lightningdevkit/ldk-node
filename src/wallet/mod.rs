@@ -111,6 +111,8 @@ pub(crate) mod payment_tracker;
 pub(crate) mod persist;
 pub(crate) mod provenance;
 pub(crate) mod ser;
+#[cfg(test)]
+mod test_utils;
 
 pub(crate) const DUST_LIMIT_SATS: u64 = 546;
 
@@ -4969,11 +4971,11 @@ mod tests {
 		PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 	};
 	use crate::types::{DynStore, DynStoreWrapper, UserChannelId};
-	use crate::wallet::payment_tracker::{
-		test_funding_contribution_with_outputs, test_funding_contribution_with_parts,
-	};
 	use crate::wallet::provenance::{
 		live_channels_of, ChannelOutput, ChannelOutputFact, ChannelOutputRole, LocalFundingFigures,
+	};
+	use crate::wallet::test_utils::{
+		test_funding_contribution_with_outputs, test_funding_contribution_with_parts,
 	};
 	use crate::{NodeMetrics, PersistedNodeMetrics};
 
