@@ -44,6 +44,7 @@ use vss_client::util::retry::{
 };
 use vss_client::util::storable_builder::{EntropySource, StorableBuilder};
 
+use crate::builder::optionally_install_rustls_cryptoprovider;
 use crate::entropy::NodeEntropy;
 use crate::io::utils::check_namespace_key_validity;
 use crate::lnurl_auth::LNURL_AUTH_HARDENED_CHILD_INDEX;
@@ -99,6 +100,10 @@ impl VssStore {
 		base_url: String, store_id: String, vss_seed: [u8; 32],
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> io::Result<Self> {
+		// Setting up the store already issues requests to the VSS server, which requires a
+		// `CryptoProvider` to be available for TLS connections.
+		optionally_install_rustls_cryptoprovider();
+
 		let next_version = AtomicU64::new(1);
 		let internal_runtime =
 			Arc::new(StoreRuntime::new("ldk-node-vss-runtime", INTERNAL_RUNTIME_WORKERS, "VSS")?);
