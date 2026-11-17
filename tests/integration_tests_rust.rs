@@ -2976,7 +2976,7 @@ async fn do_connection_restart_behavior(persist: bool) {
 		let peer_details_b = node_b.list_peers().first().unwrap().clone();
 		assert_eq!(peer_details_b.node_id, node_id_a);
 		assert_eq!(peer_details_b.is_persisted, false);
-		assert!(peer_details_a.is_connected);
+		assert!(peer_details_b.is_connected);
 	} else {
 		// Sleep a bit so that an unexpected reconnect would have had time to happen.
 		tokio::time::sleep(std::time::Duration::from_secs(5)).await;
