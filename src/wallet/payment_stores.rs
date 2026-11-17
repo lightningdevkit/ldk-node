@@ -69,11 +69,6 @@ impl PaymentStores {
 		self.pending_payment_store.get(id).await
 	}
 
-	/// Whether the pending store has an entry under `id`.
-	pub(super) async fn has_pending_payment(&self, id: &PaymentId) -> Result<bool, Error> {
-		self.pending_payment_store.contains_key(id).await
-	}
-
 	/// The pending-store entries matching `f`.
 	pub(super) async fn pending_payments<F: FnMut(&&PendingPaymentDetails) -> bool>(
 		&self, f: F,

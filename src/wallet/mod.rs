@@ -429,11 +429,11 @@ impl Wallet {
 	}
 
 	/// [`Self::tx_provenance`] for a decision that must not be taken on a partial answer: a fact
-	/// that cannot be read fails the caller rather than being left out.
+	/// that cannot be read fails the caller rather than being left out. `self_facts` is the
+	/// caller's read of `tx`'s own facts.
 	async fn read_tx_provenance(
-		&self, txid: Txid, tx: &Transaction,
+		&self, self_facts: Option<ChannelTxFacts>, tx: &Transaction,
 	) -> Result<TxProvenance, Error> {
-		let self_facts = self.channel_tx_facts_store.get(&txid).await?;
 		let parents: HashSet<Txid> =
 			tx.input.iter().map(|input| input.previous_output.txid).collect();
 		let mut parent_facts = HashMap::new();
@@ -1023,13 +1023,24 @@ impl Wallet {
 		// (or duplicating) the record that write had just made.
 		let stores = self.payment_stores.lock().await;
 
-		let mut payment_id = self
-			.find_payment_by_txid(txid)
-			.await?
-			.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+		// One read of the transaction's facts serves both resolving its payment and, should the
+		// record be written from the transaction, its provenance.
+		let self_facts = self.channel_tx_facts_store.get(&txid).await;
+		let (found_id, found_entry) = self.find_payment_of_tx(txid, &self_facts).await?;
+		let mut payment_id = found_id.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+		let entry = match found_entry {
+			Some(entry) => Some(entry),
+			None => stores.pending_payment(&payment_id).await?,
+		};
 
 		match self
-			.apply_funding_status_update_locked(&stores, payment_id, txid, confirmation_status)
+			.apply_funding_status_update_locked(
+				&stores,
+				payment_id,
+				entry,
+				txid,
+				confirmation_status,
+			)
 			.await?
 		{
 			FundingStatusUpdate::Applied => return Ok(()),
@@ -1057,7 +1068,7 @@ impl Wallet {
 		// record is classified or settled its amount and fee are never written again.
 		// So a fact that cannot be read fails the pass, as a write that fails does,
 		// rather than write the record on that view.
-		let provenance = self.read_tx_provenance(txid, tx).await?;
+		let provenance = self.read_tx_provenance(self_facts?, tx).await?;
 		let payment = {
 			let locked_wallet = self.inner.lock().expect("lock");
 			self.create_payment_from_tx(
@@ -2989,11 +3000,18 @@ impl Wallet {
 	/// A history no live record tracks gets a fresh id. The caller holds the cross-store lock:
 	/// resolved outside it, the id could go stale against a record wallet sync creates for the
 	/// same transaction before the caller's write.
+	/// `signed_facts` is the caller's read of the facts of the round `signed_txid`.
 	async fn resolve_interactive_funding_id(
-		&self, stores: &PaymentStoresGuard<'_>, candidates: &[FundingCandidate],
+		&self, stores: &PaymentStoresGuard<'_>, candidates: &[FundingCandidate], signed_txid: Txid,
+		signed_facts: &Result<Option<ChannelTxFacts>, Error>,
 	) -> Result<PaymentId, Error> {
 		for candidate in candidates.iter() {
-			if let Some(id) = self.find_payment_by_txid(candidate.txid).await? {
+			let found = if candidate.txid == signed_txid {
+				self.find_payment_of_tx(candidate.txid, signed_facts).await?.0
+			} else {
+				self.find_payment_by_txid(candidate.txid).await?
+			};
+			if let Some(id) = found {
 				let failed = stores
 					.payment(&id)
 					.await?
@@ -3135,11 +3153,25 @@ impl Wallet {
 		// it. Those facts are immutable, so a replay adopts them rather than deriving figures
 		// afresh: LDK may have adjusted the contribution's fee fields since, and a second answer
 		// would be refused rather than recorded, leaving the event replaying forever.
-		let recorded_figures =
-			self.channel_tx_facts(&txid).await.and_then(|facts| facts.local_figures);
+		let signed_facts = self.channel_tx_facts_store.get(&txid).await;
+		let recorded_figures = match &signed_facts {
+			Ok(facts) => facts.as_ref().and_then(|facts| facts.local_figures.clone()),
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to read what this node recorded about transaction {}: {}",
+					txid,
+					e,
+				);
+				None
+			},
+		};
 		let payment_id = match &recorded_figures {
 			Some(figures) => figures.funding_payment_id,
-			None => self.resolve_interactive_funding_id(&stores, candidates).await?,
+			None => {
+				self.resolve_interactive_funding_id(&stores, candidates, txid, &signed_facts)
+					.await?
+			},
 		};
 		let (figures, mut history) =
 			match self.interactive_funding_figures(payment_id, candidates, signed_round, tx) {
@@ -3698,8 +3730,15 @@ impl Wallet {
 			// anything the record needs — the actively-broadcast candidate stays the record's
 			// current txid.
 			if matches!(status, ConfirmationStatus::Confirmed { .. }) {
+				let entry = stores.pending_payment(&id).await?;
 				match self
-					.apply_funding_status_update_locked(stores, id, duplicate_txid, status.clone())
+					.apply_funding_status_update_locked(
+						stores,
+						id,
+						entry,
+						duplicate_txid,
+						status.clone(),
+					)
 					.await?
 				{
 					FundingStatusUpdate::Applied => {},
@@ -3889,15 +3928,36 @@ impl Wallet {
 	/// graduated out of the pending store. Otherwise the pending store is asked, by the record's
 	/// own transaction, by its candidate history and by the conflicts wallet sync listed for it.
 	async fn find_payment_by_txid(&self, target_txid: Txid) -> Result<Option<PaymentId>, Error> {
-		if let Some(figures) =
-			self.channel_tx_facts(&target_txid).await.and_then(|facts| facts.local_figures)
-		{
-			return Ok(Some(figures.funding_payment_id));
+		let self_facts = self.channel_tx_facts_store.get(&target_txid).await;
+		Ok(self.find_payment_of_tx(target_txid, &self_facts).await?.0)
+	}
+
+	/// [`Self::find_payment_by_txid`] from an already made read of the transaction's own facts,
+	/// returning the pending entry the payment was found through, if any. A failed read is
+	/// logged and leaves the answer to the pending store.
+	async fn find_payment_of_tx(
+		&self, target_txid: Txid, self_facts: &Result<Option<ChannelTxFacts>, Error>,
+	) -> Result<(Option<PaymentId>, Option<PendingPaymentDetails>), Error> {
+		match self_facts {
+			Ok(facts) => {
+				if let Some(figures) = facts.as_ref().and_then(|facts| facts.local_figures.as_ref())
+				{
+					return Ok((Some(figures.funding_payment_id), None));
+				}
+			},
+			Err(e) => {
+				log_error!(
+					self.logger,
+					"Failed to read what this node recorded about transaction {}: {}",
+					target_txid,
+					e,
+				);
+			},
 		}
 
 		let direct_payment_id = PaymentId(target_txid.to_byte_array());
-		if self.payment_stores.has_pending_payment(&direct_payment_id).await? {
-			return Ok(Some(direct_payment_id));
+		if let Some(entry) = self.payment_stores.pending_payment(&direct_payment_id).await? {
+			return Ok((Some(direct_payment_id), Some(entry)));
 		}
 
 		let owns = |p: &PendingPaymentDetails| {
@@ -3907,7 +3967,7 @@ impl Wallet {
 				// (an earlier RBF round may confirm) back to the record.
 				|| p.candidate(target_txid).is_some()
 		};
-		let matches = self
+		let mut matches = self
 			.payment_stores
 			.pending_payments(|p| owns(p) || p.conflicting_txids().contains(&target_txid))
 			.await;
@@ -3915,11 +3975,13 @@ impl Wallet {
 		// records as its own (a splice round that replaced a close, say) matches both. The entry
 		// that owns it is its record; the conflict listing is only how a replaced round of a
 		// record with no candidates (an ordinary payment's RBF history) maps back to its record.
-		if let Some(entry) = matches.iter().find(|p| owns(p)).or(matches.first()) {
-			return Ok(Some(entry.id()));
+		let index = matches.iter().position(|p| owns(p)).unwrap_or(0);
+		if index < matches.len() {
+			let entry = matches.swap_remove(index);
+			return Ok((Some(entry.id()), Some(entry)));
 		}
 
-		Ok(None)
+		Ok((None, None))
 	}
 
 	/// If `payment_id` refers to a classified funding payment, refreshes its confirmation status
@@ -3935,16 +3997,16 @@ impl Wallet {
 	/// through its own last write, not just across this call — so that a funding-record writer's
 	/// two-store write pair cannot interleave with the caller's decision sequence. The `stores` guard
 	/// proves the lock is held across this call; the rest of that contract is the caller's.
+	/// `pending_payment` is the entry under `payment_id`, read under the same hold of the lock.
 	async fn apply_funding_status_update_locked(
-		&self, stores: &PaymentStoresGuard<'_>, payment_id: PaymentId, event_txid: Txid,
+		&self, stores: &PaymentStoresGuard<'_>, payment_id: PaymentId,
+		pending_payment: Option<PendingPaymentDetails>, event_txid: Txid,
 		confirmation_status: ConfirmationStatus,
 	) -> Result<FundingStatusUpdate, Error> {
-		// The caller's wallet-level lock keeps the candidate history stable while we await its
-		// read. The funding-type gate, the candidate lookup, and the write then share the payment
-		// store's mutation lock: against a separate payment `get`, a funding-record write merging
-		// in between would have its `tx_type` and contribution figures clobbered by this stale
-		// snapshot.
-		let pending_payment = stores.pending_payment(&payment_id).await?;
+		// The caller's lock keeps the candidate history stable. The funding-type gate, the
+		// candidate lookup, and the write then share the payment store's mutation lock: against a
+		// separate payment `get`, a funding-record write merging in between would have its
+		// `tx_type` and contribution figures clobbered by this stale snapshot.
 		let mut outcome = FundingStatusUpdate::NotFunding;
 		let mut handled = None;
 		stores
@@ -4062,7 +4124,8 @@ impl Wallet {
 		// re-signed by this node alone. Fee-bumping a pending splice goes through
 		// `bump_channel_funding_fee` instead. A fact that cannot be read is no answer about the
 		// transaction, and refuses the replacement with the error.
-		let provenance = self.read_tx_provenance(txid, &old_tx).await?;
+		let self_facts = self.channel_tx_facts_store.get(&txid).await?;
+		let provenance = self.read_tx_provenance(self_facts, &old_tx).await?;
 		if let Some(tx_type) = provenance.classify(&old_tx) {
 			log_error!(
 				self.logger,
@@ -9582,6 +9645,93 @@ mod tests {
 		let payment_id = PaymentId(txid.to_byte_array());
 		assert!(record_of(&wallet, &payment_id).await.is_some());
 		assert_eq!(reads, 2, "recording an unknown transaction re-read the payment store");
+	}
+
+	/// A transaction nothing is on record about has no facts, and an absent record is not cached,
+	/// so every read of its facts reaches the store. Resolving its payment and recording it from
+	/// its provenance share one read of its own facts; only its parents' facts are read besides.
+	#[tokio::test]
+	async fn an_ordinary_transaction_has_its_own_facts_read_once_per_wallet_event() {
+		let counting_store = ReadCountingStore::new();
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(counting_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+
+		let tx = wallet_paying_tx(&wallet, 1);
+		let txid = tx.compute_txid();
+		let parents: HashSet<Txid> =
+			tx.input.iter().map(|input| input.previous_output.txid).collect();
+		let reads_before = counting_store.reads(CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE);
+		let event = WalletEvent::TxUnconfirmed { txid, tx: Arc::new(tx), old_block_time: None };
+		wallet.update_payment_store(vec![event]).await.unwrap();
+		let reads =
+			counting_store.reads(CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE) - reads_before;
+
+		assert!(record_of(&wallet, &PaymentId(txid.to_byte_array())).await.is_some());
+		assert_eq!(reads, 1 + parents.len(), "the event read the transaction's own facts twice");
+	}
+
+	/// After a restart emptied the facts cache, the read of a listed splice round's facts fails.
+	/// The round still resolves to its funding payment through the pending entry listing it: a
+	/// wallet event for it is not recorded from the wallet's view, under the round's own id or
+	/// the payment's, while no record exists yet, and once the record exists the event updates
+	/// it, needing no facts.
+	#[tokio::test]
+	async fn a_listed_round_whose_facts_cannot_be_read_resolves_through_its_entry() {
+		let fail_store =
+			FailSwitchStore::failing_only(CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE);
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(fail_store.clone()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+
+		let (tx, contribution) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		let candidates =
+			splice_candidates(counterparty_node_id, channel_id, &[(txid, Some(contribution))]);
+		wallet.record_signed_funding(&tx, &candidates).await.unwrap();
+		let id = wallet.find_payment_by_txid(txid).await.unwrap().expect("id");
+		let txid_id = PaymentId(txid.to_byte_array());
+		assert_ne!(id, txid_id);
+		let entry = entry_of(&wallet, &id).await.expect("entry");
+
+		// No record yet: the event fails rather than record the round from the wallet's view.
+		let restarted = new_test_wallet(Arc::clone(&store), true).await;
+		insert_entry(&restarted, entry.clone()).await;
+		insert_unconfirmed_tx(&restarted, tx.clone());
+		let unconfirmed =
+			WalletEvent::TxUnconfirmed { txid, tx: Arc::new(tx.clone()), old_block_time: None };
+		fail_store.fail_reads.store(true, Ordering::Release);
+		let result = restarted.update_payment_store(vec![unconfirmed.clone()]).await;
+		fail_store.fail_reads.store(false, Ordering::Release);
+		assert!(matches!(result, Err(Error::PersistenceFailed)), "{:?}", result);
+		assert!(record_of(&restarted, &id).await.is_none());
+		assert!(record_of(&restarted, &txid_id).await.is_none());
+
+		// With the reads back the record is written from the round's facts.
+		restarted.update_payment_store(vec![unconfirmed]).await.unwrap();
+		let recorded = record_of(&restarted, &id).await.expect("record");
+		assert_eq!(recorded.amount_msat, Some(500_300_000));
+
+		// The record exists: the confirmation resolves through the entry and updates it.
+		let reloaded = new_test_wallet(Arc::clone(&store), true).await;
+		insert_entry(&reloaded, entry_of(&restarted, &id).await.expect("entry")).await;
+		let confirmed = WalletEvent::TxConfirmed {
+			txid,
+			tx: Arc::new(tx),
+			block_time: confirmed_block_time(100),
+			old_block_time: None,
+		};
+		fail_store.fail_reads.store(true, Ordering::Release);
+		let result = reloaded.update_payment_store(vec![confirmed]).await;
+		fail_store.fail_reads.store(false, Ordering::Release);
+		assert!(result.is_ok(), "{:?}", result);
+		let payment = record_of(&reloaded, &id).await.expect("record");
+		assert!(matches!(
+			payment.kind,
+			PaymentKind::Onchain { txid: t, status: ConfirmationStatus::Confirmed { .. }, .. }
+				if t == txid
+		));
+		assert_eq!(payment.amount_msat, Some(500_300_000));
+		assert!(record_of(&reloaded, &txid_id).await.is_none());
 	}
 
 	/// A funding record wallet sync created for a round this node had not recorded keeps the
