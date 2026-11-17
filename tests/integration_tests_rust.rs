@@ -7491,13 +7491,18 @@ async fn bolt12_lsps2_client_service_integration() {
 	let client_addr = client_node.listening_addresses().unwrap().first().unwrap().clone();
 	payer_node.connect(client_node.node_id(), client_addr, false).unwrap();
 
-	let service_onchain_addr = service_node.onchain_payment().new_address().unwrap();
+	// The service opens three JIT channels below without mining or syncing in between. Each
+	// needs a coin of its own: a funding transaction's inputs stay locked until the wallet sees
+	// it confirm, and the wallet learns of its change only from a sync.
+	let mut funded_addrs: Vec<_> =
+		(0..3).map(|_| service_node.onchain_payment().new_address().unwrap()).collect();
 	let client_onchain_addr = client_node.onchain_payment().new_address().unwrap();
 	let payer_onchain_addr = payer_node.onchain_payment().new_address().unwrap();
+	funded_addrs.extend([client_onchain_addr, payer_onchain_addr]);
 	premine_and_distribute_funds(
 		&bitcoind.client,
 		&electrsd.client,
-		vec![service_onchain_addr, client_onchain_addr, payer_onchain_addr],
+		funded_addrs,
 		Amount::from_sat(10_000_000),
 	)
 	.await;
