@@ -68,8 +68,6 @@ use crate::data_store::{KeepAllEntries, KeepLeastRecentlyUsed};
 use crate::data_store::{StorableObject, UpdatableObject};
 use crate::fee_estimator::{ConfirmationTarget, FeeEstimator, OnchainFeeEstimator};
 use crate::logger::{log_debug, log_error, log_info, log_trace, log_warn, LdkLogger, Logger};
-#[cfg(test)]
-use crate::payment::pending_payment_store::PendingPaymentDetailsUpdate;
 use crate::payment::store::{Channel, ConfirmationStatus, PaymentDetailsUpdate};
 use crate::payment::{
 	FundingTxCandidate, PaymentDetails, PaymentDirection, PaymentKind, PaymentStatus,
@@ -3763,9 +3761,7 @@ impl Wallet {
 					return Ok(None);
 				}
 				Ok(match existing {
-					None => {
-						Some(PendingPaymentDetails::new(payment, conflicting_txids, Vec::new()))
-					},
+					None => Some(PendingPaymentDetails::new(payment, conflicting_txids)),
 					// Promote an entry that has no record yet: wallet sync saw the splice
 					// transaction before this node recorded a payment for it. The entry keeps
 					// its signed rounds and gains the record.
@@ -3775,9 +3771,7 @@ impl Wallet {
 						Some(entry)
 					},
 					Some(mut tracked) => {
-						let fresh =
-							PendingPaymentDetails::new(payment, conflicting_txids, Vec::new());
-						tracked.update(fresh.to_update()).then_some(tracked)
+						tracked.merge_observed(&payment, conflicting_txids).then_some(tracked)
 					},
 				})
 			})
@@ -5246,8 +5240,23 @@ mod tests {
 	async fn track_pending(wallet: &Wallet, details: PaymentDetails, conflicting_txids: Vec<Txid>) {
 		let stores = wallet.payment_stores.lock().await;
 		stores.insert_or_update_payment(details.clone()).await.unwrap();
-		let entry = PendingPaymentDetails::new(details, conflicting_txids, Vec::new());
-		stores.pending_payment_store().insert_or_update(entry).await.unwrap();
+		stores
+			.pending_payment_store()
+			.mutate(&details.id, |existing| match existing {
+				Some(existing) => {
+					let mut merged = existing.clone();
+					merged.merge_observed(&details, conflicting_txids).then_some(merged)
+				},
+				None => Some(PendingPaymentDetails::new(details.clone(), conflicting_txids)),
+			})
+			.await
+			.unwrap();
+	}
+
+	/// Writes `entry` where the store has no entry under its id yet.
+	async fn insert_entry(wallet: &Wallet, entry: PendingPaymentDetails) {
+		assert!(entry_of(wallet, &entry.id).await.is_none());
+		wallet.payment_stores.pending_payment_store().insert(entry).await.unwrap();
 	}
 
 	/// Records that wallet sync saw `conflicting_txids` conflict with the payment's transaction.
@@ -5255,11 +5264,18 @@ mod tests {
 		wallet
 			.payment_stores
 			.pending_payment_store()
-			.update(PendingPaymentDetailsUpdate {
-				id,
-				payment_update: None,
-				conflicting_txids: Some(conflicting_txids),
-				candidates: Vec::new(),
+			.mutate(&id, |existing| {
+				let mut entry = existing?.clone();
+				let current_txid = match entry.details().map(|details| &details.kind) {
+					Some(PaymentKind::Onchain { txid, .. }) => Some(*txid),
+					_ => None,
+				};
+				let mut conflicting_txids = conflicting_txids;
+				conflicting_txids.retain(|txid| Some(*txid) != current_txid);
+				(entry.conflicting_txids != conflicting_txids).then(|| {
+					entry.conflicting_txids = conflicting_txids;
+					entry
+				})
 			})
 			.await
 			.unwrap();
@@ -8207,8 +8223,8 @@ mod tests {
 		// classification above landed.
 		let mut stale = interactive_funding_details(payment_id, txid, Some(0), Some(0));
 		stale.kind = PaymentKind::Onchain { txid, status: confirmed, tx_type };
-		let entry = PendingPaymentDetails::new(stale, Vec::new(), Vec::new());
-		wallet.payment_stores.pending_payment_store().insert_or_update(entry).await.unwrap();
+		let entry = PendingPaymentDetails::new(stale, Vec::new());
+		insert_entry(&wallet, entry).await;
 
 		let block_id =
 			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
@@ -8257,8 +8273,8 @@ mod tests {
 			status: confirmed,
 			tx_type: Some(TransactionType::InteractiveFunding { channels: vec![] }),
 		};
-		let entry = PendingPaymentDetails::new(snapshot, Vec::new(), Vec::new());
-		wallet.payment_stores.pending_payment_store().insert_or_update(entry).await.unwrap();
+		let entry = PendingPaymentDetails::new(snapshot, Vec::new());
+		insert_entry(&wallet, entry).await;
 
 		let block_id =
 			|height| BlockId { height, hash: bitcoin::BlockHash::from_byte_array([7u8; 32]) };
@@ -8314,8 +8330,9 @@ mod tests {
 			},
 		];
 		let details = interactive_funding_details(payment_id, txid3, Some(1_000_000), Some(700));
-		let entry = PendingPaymentDetails::new(details, Vec::new(), candidates);
-		wallet.payment_stores.pending_payment_store().insert_or_update(entry).await.unwrap();
+		let mut entry = PendingPaymentDetails::new(details, Vec::new());
+		entry.candidates = candidates;
+		insert_entry(&wallet, entry).await;
 
 		// The first candidate resolves via the txid-derived id and the active candidate via the
 		// record's current txid; the middle one must resolve through the candidate history.
@@ -9141,8 +9158,9 @@ mod tests {
 			fee_paid_msat: Some(500),
 			awaiting_broadcast: false,
 		}];
-		let entry = PendingPaymentDetails::new(snapshot, vec![close_txid], candidates);
-		wallet.payment_stores.pending_payment_store().insert_or_update(entry).await.unwrap();
+		let mut entry = PendingPaymentDetails::new(snapshot, vec![close_txid]);
+		entry.candidates = candidates;
+		insert_entry(&wallet, entry).await;
 
 		insert_confirmed_tx(&wallet, close_tx, 5);
 
@@ -9192,8 +9210,9 @@ mod tests {
 			fee_paid_msat: Some(500),
 			awaiting_broadcast: false,
 		}];
-		let entry = PendingPaymentDetails::new(snapshot, vec![close_txid], candidates);
-		wallet.payment_stores.pending_payment_store().insert_or_update(entry).await.unwrap();
+		let mut entry = PendingPaymentDetails::new(snapshot, vec![close_txid]);
+		entry.candidates = candidates;
+		insert_entry(&wallet, entry).await;
 
 		insert_confirmed_tx(&wallet, close_tx, 5);
 
@@ -10160,13 +10179,8 @@ mod tests {
 			PaymentStatus::Pending,
 		);
 		wallet.payment_stores.payment_store().insert_or_update(duplicate.clone()).await.unwrap();
-		let duplicate_entry = PendingPaymentDetails::new(duplicate.clone(), Vec::new(), Vec::new());
-		wallet
-			.payment_stores
-			.pending_payment_store()
-			.insert_or_update(duplicate_entry.clone())
-			.await
-			.unwrap();
+		let duplicate_entry = PendingPaymentDetails::new(duplicate.clone(), Vec::new());
+		insert_entry(&wallet, duplicate_entry.clone()).await;
 		let entry_before = entry_of(&wallet, &id).await.expect("entry");
 		let rounds = entry_before.candidates().to_vec();
 
@@ -12151,7 +12165,6 @@ mod tests {
 		let entry = PendingPaymentDetails::new(
 			funding_payment(id, close_txid, PaymentStatus::Pending),
 			Vec::new(),
-			Vec::new(),
 		);
 		wallet.payment_stores.pending_payment_store().insert(entry).await.unwrap();
 
@@ -12175,16 +12188,16 @@ mod tests {
 		// A pending record listing the funding transaction among its candidates: its
 		// classification can still be written, and these facts are what would write it.
 		let id = PaymentId([44u8; 32]);
-		let entry = PendingPaymentDetails::new(
+		let mut entry = PendingPaymentDetails::new(
 			funding_payment(id, Txid::from_byte_array([45u8; 32]), PaymentStatus::Pending),
 			Vec::new(),
-			vec![FundingTxCandidate {
-				txid: funding_txid,
-				amount_msat: Some(1_000),
-				fee_paid_msat: Some(10),
-				awaiting_broadcast: false,
-			}],
 		);
+		entry.candidates = vec![FundingTxCandidate {
+			txid: funding_txid,
+			amount_msat: Some(1_000),
+			fee_paid_msat: Some(10),
+			awaiting_broadcast: false,
+		}];
 		wallet.payment_stores.pending_payment_store().insert(entry).await.unwrap();
 
 		chain_tip_changed(&wallet, LONG_AFTER).await;
@@ -12496,7 +12509,7 @@ mod tests {
 		wallet
 			.payment_stores
 			.pending_payment_store()
-			.insert(PendingPaymentDetails::new(payment, Vec::new(), Vec::new()))
+			.insert(PendingPaymentDetails::new(payment, Vec::new()))
 			.await
 			.unwrap();
 	}
@@ -12662,7 +12675,7 @@ mod tests {
 		wallet
 			.payment_stores
 			.pending_payment_store()
-			.insert(PendingPaymentDetails::new(payment.clone(), vec![original_txid], Vec::new()))
+			.insert(PendingPaymentDetails::new(payment.clone(), vec![original_txid]))
 			.await
 			.unwrap();
 
@@ -12706,7 +12719,7 @@ mod tests {
 		wallet
 			.payment_stores
 			.pending_payment_store()
-			.insert(PendingPaymentDetails::new(payment, vec![original_txid], Vec::new()))
+			.insert(PendingPaymentDetails::new(payment, vec![original_txid]))
 			.await
 			.unwrap();
 
@@ -12794,7 +12807,7 @@ mod tests {
 			PaymentStatus::Pending,
 		);
 		wallet.payment_stores.payment_store().insert(details.clone()).await.unwrap();
-		let entry = PendingPaymentDetails::new(details, vec![txid_a], Vec::new());
+		let entry = PendingPaymentDetails::new(details, vec![txid_a]);
 		wallet.payment_stores.pending_payment_store().insert(entry).await.unwrap();
 
 		// Bump again: B -> C.
