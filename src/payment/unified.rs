@@ -121,7 +121,8 @@ impl UnifiedPayment {
 	/// - `amount_sats`: The amount to be received, specified in satoshis.
 	/// - `description`: A description or note associated with the payment.
 	///   This message is visible to the payer and can provide context or details about the payment.
-	/// - `expiry_sec`: The expiration time for the payment, specified in seconds.
+	/// - `expiry_sec`: The expiration time for the payment, specified in seconds. It applies
+	///   to both the BOLT11 invoice and the BOLT12 offer.
 	///
 	/// Returns a payable URI that can be used to request and receive a payment of the amount
 	/// given. Failure to generate the on-chain address will result in an error return
@@ -139,14 +140,18 @@ impl UnifiedPayment {
 
 		let onchain_address = self.onchain_payment.new_address()?;
 
-		let bolt12_offer =
-			match self.bolt12_payment.receive_inner(amount_msats, description, None, None) {
-				Ok(offer) => Some(maybe_wrap(offer)),
-				Err(e) => {
-					log_error!(self.logger, "Failed to create offer: {}", e);
-					None
-				},
-			};
+		let bolt12_offer = match self.bolt12_payment.receive_inner(
+			amount_msats,
+			description,
+			Some(expiry_sec),
+			None,
+		) {
+			Ok(offer) => Some(maybe_wrap(offer)),
+			Err(e) => {
+				log_error!(self.logger, "Failed to create offer: {}", e);
+				None
+			},
+		};
 
 		let invoice_description = Bolt11InvoiceDescription::Direct(
 			Description::new(description.to_string()).map_err(|_| Error::InvoiceCreationFailed)?,
