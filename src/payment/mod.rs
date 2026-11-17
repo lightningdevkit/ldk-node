@@ -16,7 +16,6 @@ pub(crate) mod forwarding_store;
 mod hrn;
 mod metadata;
 mod onchain;
-pub(crate) mod pending_payment_store;
 mod spontaneous;
 pub(crate) mod store;
 #[cfg(feature = "unified-payments")]
@@ -34,7 +33,6 @@ pub use forwarding::{
 pub(crate) use hrn::HRNResolver;
 pub(crate) use metadata::PaymentMetadata;
 pub use onchain::OnchainPayment;
-pub(crate) use pending_payment_store::{FundingTxCandidate, PendingPaymentDetails};
 pub use spontaneous::SpontaneousPayment;
 pub use store::{
 	Channel, ConfirmationStatus, LSPS2Parameters, PageToken, PaymentDetails, PaymentDetailsPage,

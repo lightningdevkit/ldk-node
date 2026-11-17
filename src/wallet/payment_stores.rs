@@ -6,20 +6,21 @@
 // accordance with one or both of these licenses.
 
 //! The wallet's payment stores behind one API, so that every write the wallet makes to them
-//! happens under the lock that keeps a payment record and its pending-store entry consistent.
+//! happens under the lock that keeps a payment record and its tracker entry consistent.
 
 use std::ops::Deref;
 use std::sync::Arc;
 
 use lightning::ln::channelmanager::PaymentId;
 
-use crate::payment::{PaymentDetails, PendingPaymentDetails};
-use crate::types::{PaymentStore, PendingPaymentStore};
+use crate::payment::PaymentDetails;
+use crate::types::{OnchainPaymentTracker, PaymentStore};
+use crate::wallet::payment_tracker::TrackedOnchainPayment;
 use crate::Error;
 
-/// The wallet's payment store and pending payment store, with the lock serializing their writers.
+/// The wallet's payment store and payment tracker, with the lock serializing their writers.
 ///
-/// The writers must observe the payment record and its pending-store entry (candidate history
+/// The writers must observe the payment record and its tracker entry (candidate history
 /// included) as one consistent unit: wallet sync's event arms and the funding-record writers each
 /// hold the lock from payment-id resolution through their last write. Without the lock, a
 /// confirmation landing between a writer's two store writes sees the record but not the candidate
@@ -33,7 +34,7 @@ use crate::Error;
 /// guard.
 pub(super) struct PaymentStores {
 	payment_store: Arc<PaymentStore>,
-	pending_payment_store: Arc<PendingPaymentStore>,
+	payment_tracker: Arc<OnchainPaymentTracker>,
 	update_lock: tokio::sync::Mutex<()>,
 }
 
@@ -47,9 +48,9 @@ pub(super) struct PaymentStoresGuard<'a> {
 
 impl PaymentStores {
 	pub(super) fn new(
-		payment_store: Arc<PaymentStore>, pending_payment_store: Arc<PendingPaymentStore>,
+		payment_store: Arc<PaymentStore>, payment_tracker: Arc<OnchainPaymentTracker>,
 	) -> Self {
-		Self { payment_store, pending_payment_store, update_lock: tokio::sync::Mutex::new(()) }
+		Self { payment_store, payment_tracker, update_lock: tokio::sync::Mutex::new(()) }
 	}
 
 	/// Takes the lock for as long as the returned guard lives.
@@ -62,18 +63,18 @@ impl PaymentStores {
 		self.payment_store.get(id).await
 	}
 
-	/// The pending-store entry stored under `id`, if any.
-	pub(super) async fn pending_payment(
+	/// The tracker entry stored under `id`, if any.
+	pub(super) async fn tracked_payment(
 		&self, id: &PaymentId,
-	) -> Result<Option<PendingPaymentDetails>, Error> {
-		self.pending_payment_store.get(id).await
+	) -> Result<Option<TrackedOnchainPayment>, Error> {
+		self.payment_tracker.get(id).await
 	}
 
-	/// The pending-store entries matching `f`.
-	pub(super) async fn pending_payments<F: FnMut(&&PendingPaymentDetails) -> bool>(
+	/// The tracker entries matching `f`.
+	pub(super) async fn tracked_payments<F: FnMut(&&TrackedOnchainPayment) -> bool>(
 		&self, f: F,
-	) -> Vec<PendingPaymentDetails> {
-		self.pending_payment_store.list_filter(f).await
+	) -> Vec<TrackedOnchainPayment> {
+		self.payment_tracker.list_filter(f).await
 	}
 }
 
@@ -84,10 +85,10 @@ impl PaymentStores {
 		&self.payment_store
 	}
 
-	/// The pending payment store itself, for tests to set up and inspect entries around the
+	/// The payment tracker itself, for tests to set up and inspect entries around the
 	/// wallet's API.
-	pub(super) fn pending_payment_store(&self) -> &PendingPaymentStore {
-		&self.pending_payment_store
+	pub(super) fn payment_tracker(&self) -> &OnchainPaymentTracker {
+		&self.payment_tracker
 	}
 }
 
@@ -125,20 +126,20 @@ impl PaymentStoresGuard<'_> {
 		self.stores.payment_store.mutate(id, f).await
 	}
 
-	/// Removes the pending-store entry stored under `id`, if any.
-	pub(super) async fn remove_pending_payment(&self, id: &PaymentId) -> Result<(), Error> {
-		self.stores.pending_payment_store.remove(id).await
+	/// Removes the tracker entry stored under `id`, if any.
+	pub(super) async fn remove_tracked_payment(&self, id: &PaymentId) -> Result<(), Error> {
+		self.stores.payment_tracker.remove(id).await
 	}
 
-	/// Transforms the pending-store entry stored under `id` through `f` and persists the result,
+	/// Transforms the tracker entry stored under `id` through `f` and persists the result,
 	/// all in one critical section of the store; see
 	/// [`DataStore::mutate`](crate::data_store::DataStore::mutate).
-	pub(super) async fn mutate_pending_payment<F>(
+	pub(super) async fn mutate_tracked_payment<F>(
 		&self, id: &PaymentId, f: F,
-	) -> Result<Option<PendingPaymentDetails>, Error>
+	) -> Result<Option<TrackedOnchainPayment>, Error>
 	where
-		F: FnOnce(Option<&PendingPaymentDetails>) -> Option<PendingPaymentDetails>,
+		F: FnOnce(Option<&TrackedOnchainPayment>) -> Option<TrackedOnchainPayment>,
 	{
-		self.stores.pending_payment_store.mutate(id, f).await
+		self.stores.payment_tracker.mutate(id, f).await
 	}
 }

@@ -624,7 +624,7 @@ pub(crate) struct RetentionCheck<'a> {
 	pub retention_blocks: u32,
 	/// The channels this node still has on-chain state for.
 	pub live_channels: &'a HashSet<ChannelId>,
-	/// The transactions the pending payment store still refers to — its records' own
+	/// The transactions the payment tracker still refers to — its records' own
 	/// transactions, their interactive-funding candidates, the rounds that locked and the
 	/// conflicts wallet sync listed. A payment is pending exactly while its classification can
 	/// still be written onto it, so a transaction listed here has yet to reach its record.
