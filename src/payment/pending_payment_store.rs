@@ -43,17 +43,40 @@ impl_writeable_tlv_based!(FundingTxCandidate, {
 	(6, awaiting_broadcast, required),
 });
 
+/// The interactive-funding (splice) part of a [`PendingPaymentDetails`] entry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FundingRounds {
+	/// The channels whose interactive funding the entry tracks, as the signing of a round or the
+	/// record's classification listed them.
+	pub channels: Vec<Channel>,
+	/// This node's per-candidate funding figures across the RBF history, keyed by each
+	/// candidate's txid and recorded as each round is signed.
+	pub rounds: Vec<FundingTxCandidate>,
+	/// The candidates LDK promoted to the channel's funding, as `ChannelReady` reported them.
+	/// A zero-conf splice locks before its transaction confirms, and every later splice builds
+	/// on it, so such a round can still confirm once the channel's funding has moved on from
+	/// it and once the channel has closed, when LDK no longer tracks it. Kept apart from the
+	/// rounds, which each funding-record write replaces as a whole.
+	pub locked: Vec<Txid>,
+}
+
+impl_writeable_tlv_based!(FundingRounds, {
+	(0, channels, optional_vec),
+	(2, rounds, optional_vec),
+	(4, locked, optional_vec),
+});
+
 /// A pending payment tracked by LDK Node, keyed by [`PaymentId`].
 ///
 /// The payment's record in the payment store is what says its status, confirmation, direction and
 /// transaction type; an entry only indexes the transactions that may still change the record.
 /// Each part of an entry is written by a different subsystem and is present on its own schedule,
-/// so all of them are optional. Signing a round of a splice adds the round to `candidates` and
-/// lists the `funding_channels` it belongs to, before any transaction anyone has seen; wallet
+/// so all of them are optional. Signing a round of a splice adds the round to the `funding`
+/// rounds and lists the channels it belongs to, before any transaction anyone has seen; wallet
 /// sync sets `txid` once it observes the transaction, and records `conflicting_txids` for any
-/// wallet transaction; the `ChannelReady` arm records `locked_rounds`. A splice uses all of them;
-/// the fields do not partition by payment type. An entry with none of them tracks no payment and
-/// is removed.
+/// wallet transaction; the `ChannelReady` arm records locked rounds. A splice uses all of them;
+/// the fields do not partition by payment type. An entry with neither a txid nor any funding
+/// round tracks no payment and is removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PendingPaymentDetails {
 	/// The payment this entry tracks.
@@ -64,35 +87,17 @@ pub(crate) struct PendingPaymentDetails {
 	pub txid: Option<Txid>,
 	/// Transaction IDs wallet sync observed to have replaced or to conflict with this
 	/// payment, used to map later events about those txids back to this record. This is
-	/// BDK's view, distinct from `candidates`: it can list conflicts that were never
+	/// BDK's view, distinct from the funding rounds: it can list conflicts that were never
 	/// negotiated candidates, while a candidate replaced between wallet syncs may never
 	/// appear here (it gets no `TxReplaced` event of its own).
 	pub conflicting_txids: Vec<Txid>,
-	/// The channels whose interactive funding this entry tracks, as the signing of a round or the
-	/// record's classification listed them. Empty for a non-funding payment.
-	pub funding_channels: Vec<Channel>,
-	/// For interactive funding (splices), this node's per-candidate funding figures across the
-	/// RBF history, keyed by each candidate's txid and recorded as each round is signed.
-	/// Empty for non-funding payments.
-	pub candidates: Vec<FundingTxCandidate>,
-	/// The candidates LDK promoted to the channel's funding, as `ChannelReady` reported them.
-	/// A zero-conf splice locks before its transaction confirms, and every later splice builds
-	/// on it, so such a round can still confirm once the channel's funding has moved on from
-	/// it and once the channel has closed, when LDK no longer tracks it. Kept apart from the
-	/// candidates, which each funding-record write replaces as a whole.
-	pub locked_rounds: Vec<Txid>,
+	/// The interactive-funding state of a splice; `None` for a non-funding payment.
+	pub funding: Option<FundingRounds>,
 }
 
 impl PendingPaymentDetails {
 	pub(crate) fn new(id: PaymentId, txid: Txid, conflicting_txids: Vec<Txid>) -> Self {
-		Self {
-			id,
-			txid: Some(txid),
-			conflicting_txids,
-			funding_channels: Vec::new(),
-			candidates: Vec::new(),
-			locked_rounds: Vec::new(),
-		}
+		Self { id, txid: Some(txid), conflicting_txids, funding: None }
 	}
 
 	/// An entry for the rounds of an interactive funding of `funding_channels` this node has
@@ -101,14 +106,9 @@ impl PendingPaymentDetails {
 	pub(crate) fn signed_rounds(
 		id: PaymentId, funding_channels: Vec<Channel>, candidates: Vec<FundingTxCandidate>,
 	) -> Self {
-		Self {
-			id,
-			txid: None,
-			conflicting_txids: Vec::new(),
-			funding_channels,
-			candidates,
-			locked_rounds: Vec::new(),
-		}
+		let funding =
+			FundingRounds { channels: funding_channels, rounds: candidates, locked: Vec::new() };
+		Self { id, txid: None, conflicting_txids: Vec::new(), funding: Some(funding) }
 	}
 
 	/// The payment record's current transaction, or `None` for a splice whose transaction has not
@@ -122,44 +122,61 @@ impl PendingPaymentDetails {
 		&self.conflicting_txids
 	}
 
+	/// The interactive-funding state, created empty if the entry has none yet.
+	pub(crate) fn funding_mut(&mut self) -> &mut FundingRounds {
+		self.funding.get_or_insert_with(FundingRounds::default)
+	}
+
 	/// The rounds LDK promoted to the channel's funding, as `ChannelReady` reported them.
 	pub(crate) fn locked_rounds(&self) -> &[Txid] {
-		&self.locked_rounds
+		self.funding.as_ref().map_or(&[], |funding| &funding.locked)
 	}
 
 	/// Records that LDK promoted the round with the given txid to the channel's funding. Returns
 	/// whether the record changed: a round recorded as promoted already leaves it as it is.
 	pub(crate) fn record_locked_round(&mut self, txid: Txid) -> bool {
-		if self.locked_rounds.contains(&txid) {
+		if self.locked_rounds().contains(&txid) {
 			return false;
 		}
-		self.locked_rounds.push(txid);
+		self.funding_mut().locked.push(txid);
 		true
 	}
 
 	/// Returns this node's recorded funding figures for the candidate with the given txid, if any.
 	pub(crate) fn candidate(&self, txid: Txid) -> Option<&FundingTxCandidate> {
-		self.candidates.iter().find(|candidate| candidate.txid == txid)
+		self.candidates().iter().find(|candidate| candidate.txid == txid)
 	}
 
 	/// This node's recorded funding figures across the candidate history, in LDK's order; empty
 	/// for a splice without a signed round yet and for non-funding payments.
 	pub(crate) fn candidates(&self) -> &[FundingTxCandidate] {
-		&self.candidates
+		self.funding.as_ref().map_or(&[], |funding| &funding.rounds)
+	}
+
+	/// Replaces the recorded candidate history.
+	pub(crate) fn set_candidates(&mut self, candidates: Vec<FundingTxCandidate>) {
+		self.funding_mut().rounds = candidates;
+	}
+
+	/// Drops the candidates with the given txids from the recorded history.
+	pub(crate) fn drop_candidates(&mut self, txids: &[Txid]) {
+		if let Some(funding) = self.funding.as_mut() {
+			funding.rounds.retain(|candidate| !txids.contains(&candidate.txid));
+		}
 	}
 
 	/// The channels of the interactive funding this entry tracks.
 	pub(crate) fn funding_channels(&self) -> &[Channel] {
-		&self.funding_channels
+		self.funding.as_ref().map_or(&[], |funding| &funding.channels)
 	}
 
 	/// Lists `channels` as the channels of the interactive funding this entry tracks, unless it
 	/// lists some already. Returns whether the entry changed.
 	pub(crate) fn track_funding_channels(&mut self, channels: &[Channel]) -> bool {
-		if !self.funding_channels.is_empty() || channels.is_empty() {
+		if !self.funding_channels().is_empty() || channels.is_empty() {
 			return false;
 		}
-		self.funding_channels = channels.to_vec();
+		self.funding_mut().channels = channels.to_vec();
 		true
 	}
 
@@ -185,7 +202,7 @@ impl PendingPaymentDetails {
 
 	/// Whether this entry tracks nothing anymore and can be dropped.
 	pub(crate) fn is_empty(&self) -> bool {
-		self.txid.is_none() && self.candidates.is_empty() && self.locked_rounds.is_empty()
+		self.txid.is_none() && self.candidates().is_empty() && self.locked_rounds().is_empty()
 	}
 }
 
@@ -193,9 +210,7 @@ impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(0, id, required),
 	(2, txid, option),
 	(4, conflicting_txids, optional_vec),
-	(6, funding_channels, optional_vec),
-	(8, candidates, optional_vec),
-	(10, locked_rounds, optional_vec),
+	(6, funding, option),
 });
 
 impl StorableObject for PendingPaymentDetails {
@@ -319,7 +334,7 @@ mod tests {
 
 		let mut pending =
 			PendingPaymentDetails::new(payment_id, rbf_txid, vec![first_txid, counterparty_txid]);
-		pending.candidates = candidates;
+		pending.set_candidates(candidates);
 
 		// Each candidate resolves to its own figures, so a non-last candidate that confirms reports
 		// its own (lower) fee rather than the last-broadcast candidate's.
@@ -374,12 +389,12 @@ mod tests {
 		let txid = Txid::from_byte_array([8u8; 32]);
 		let mut record =
 			PendingPaymentDetails::new(payment_id, txid, vec![Txid::from_byte_array([9u8; 32])]);
-		record.candidates = vec![FundingTxCandidate {
+		record.set_candidates(vec![FundingTxCandidate {
 			txid,
 			amount_msat: Some(1_000),
 			fee_paid_msat: Some(100),
 			awaiting_broadcast: false,
-		}];
+		}]);
 
 		let encoded = record.encode();
 		let decoded = PendingPaymentDetails::read(&mut &encoded[..]).unwrap();
@@ -388,8 +403,11 @@ mod tests {
 		assert_eq!(decoded.txid(), Some(txid));
 
 		// The rounds of a splice signed before any transaction was observed.
-		let signed =
-			PendingPaymentDetails::signed_rounds(payment_id, Vec::new(), record.candidates);
+		let signed = PendingPaymentDetails::signed_rounds(
+			payment_id,
+			Vec::new(),
+			record.candidates().to_vec(),
+		);
 		let decoded = PendingPaymentDetails::read(&mut &signed.encode()[..]).unwrap();
 		assert_eq!(decoded, signed);
 		assert_eq!(decoded.txid(), None);
@@ -409,7 +427,7 @@ mod tests {
 		let payment_id = PaymentId([1u8; 32]);
 		let txid = candidates.last().expect("at least one candidate").txid;
 		let mut entry = PendingPaymentDetails::new(payment_id, txid, vec![]);
-		entry.candidates = candidates;
+		entry.set_candidates(candidates);
 		entry
 	}
 
