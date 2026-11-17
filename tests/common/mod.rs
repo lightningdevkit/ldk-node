@@ -620,6 +620,18 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 		peer_node.sync_wallets().unwrap();
 	}
 
+	// The sweeper only tracks the output once the `SpendableOutputs` event was handled in the
+	// background, and only broadcasts the sweep on a subsequent sync.
+	exponential_backoff_poll(|| {
+		node.sync_wallets().unwrap();
+		let pending_balances = node.list_balances().pending_balances_from_channel_closures;
+		let is_broadcast = pending_balances
+			.iter()
+			.any(|balance| !matches!(balance, PendingSweepBalance::PendingBroadcast { .. }));
+		is_broadcast.then_some(())
+	})
+	.await;
+
 	let balances = node.list_balances();
 	assert!(balances.lightning_balances.is_empty(), "Unexpected balance state: {:?}", balances);
 	assert_eq!(balances.pending_balances_from_channel_closures.len(), 1);
