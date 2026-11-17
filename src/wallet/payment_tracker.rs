@@ -112,22 +112,6 @@ impl TrackedOnchainPayment {
 		Self { id, txid: None, conflicting_txids: Vec::new(), funding: Some(funding) }
 	}
 
-	/// The payment record's current transaction, or `None` for a splice whose transaction has not
-	/// been observed.
-	pub(crate) fn txid(&self) -> Option<Txid> {
-		self.txid
-	}
-
-	/// Transaction IDs that have replaced or conflict with this payment.
-	pub(crate) fn conflicting_txids(&self) -> &[Txid] {
-		&self.conflicting_txids
-	}
-
-	/// The interactive-funding state, created empty if the entry has none yet.
-	pub(crate) fn funding_mut(&mut self) -> &mut FundingRounds {
-		self.funding.get_or_insert_with(FundingRounds::default)
-	}
-
 	/// The rounds LDK promoted to the channel's funding, as `ChannelReady` reported them.
 	pub(crate) fn locked_rounds(&self) -> &[Txid] {
 		self.funding.as_ref().map_or(&[], |funding| &funding.locked)
@@ -139,7 +123,7 @@ impl TrackedOnchainPayment {
 		if self.locked_rounds().contains(&txid) {
 			return false;
 		}
-		self.funding_mut().locked.push(txid);
+		self.funding.get_or_insert_with(FundingRounds::default).locked.push(txid);
 		true
 	}
 
@@ -152,11 +136,6 @@ impl TrackedOnchainPayment {
 	/// for a splice without a signed round yet and for non-funding payments.
 	pub(crate) fn candidates(&self) -> &[FundingTxCandidate] {
 		self.funding.as_ref().map_or(&[], |funding| &funding.rounds)
-	}
-
-	/// Replaces the recorded candidate history.
-	pub(crate) fn set_candidates(&mut self, candidates: Vec<FundingTxCandidate>) {
-		self.funding_mut().rounds = candidates;
 	}
 
 	/// Drops the candidates with the given txids from the recorded history.
@@ -177,7 +156,7 @@ impl TrackedOnchainPayment {
 		if !self.funding_channels().is_empty() || channels.is_empty() {
 			return false;
 		}
-		self.funding_mut().channels = channels.to_vec();
+		self.funding.get_or_insert_with(FundingRounds::default).channels = channels.to_vec();
 		true
 	}
 
@@ -266,7 +245,7 @@ mod tests {
 
 		let mut pending =
 			TrackedOnchainPayment::new(payment_id, rbf_txid, vec![first_txid, counterparty_txid]);
-		pending.set_candidates(candidates);
+		pending.funding.get_or_insert_with(Default::default).rounds = candidates;
 
 		// Each candidate resolves to its own figures, so a non-last candidate that confirms reports
 		// its own (lower) fee rather than the last-broadcast candidate's.
@@ -294,9 +273,9 @@ mod tests {
 			TrackedOnchainPayment::new(payment_id, replacement_txid, vec![original_txid]);
 
 		assert!(pending_payment.merge_observed(original_txid, Vec::new()));
-		assert_eq!(pending_payment.txid(), Some(original_txid));
+		assert_eq!(pending_payment.txid, Some(original_txid));
 		assert_eq!(
-			pending_payment.conflicting_txids(),
+			pending_payment.conflicting_txids,
 			Vec::<Txid>::new(),
 			"current txid must not remain in its own conflict list"
 		);
@@ -321,18 +300,18 @@ mod tests {
 		let txid = Txid::from_byte_array([8u8; 32]);
 		let mut record =
 			TrackedOnchainPayment::new(payment_id, txid, vec![Txid::from_byte_array([9u8; 32])]);
-		record.set_candidates(vec![FundingTxCandidate {
+		record.funding.get_or_insert_with(Default::default).rounds = vec![FundingTxCandidate {
 			txid,
 			amount_msat: Some(1_000),
 			fee_paid_msat: Some(100),
 			awaiting_broadcast: false,
-		}]);
+		}];
 
 		let encoded = record.encode();
 		let decoded = TrackedOnchainPayment::read(&mut &encoded[..]).unwrap();
 		assert_eq!(record, decoded);
 		assert_eq!(decoded.id(), payment_id);
-		assert_eq!(decoded.txid(), Some(txid));
+		assert_eq!(decoded.txid, Some(txid));
 
 		// The rounds of a splice signed before any transaction was observed.
 		let signed = TrackedOnchainPayment::signed_rounds(
@@ -342,7 +321,7 @@ mod tests {
 		);
 		let decoded = TrackedOnchainPayment::read(&mut &signed.encode()[..]).unwrap();
 		assert_eq!(decoded, signed);
-		assert_eq!(decoded.txid(), None);
+		assert_eq!(decoded.txid, None);
 	}
 
 	/// A candidate with the given txid byte, with a stake of ours in it if `ours`.
@@ -359,7 +338,7 @@ mod tests {
 		let payment_id = PaymentId([1u8; 32]);
 		let txid = candidates.last().expect("at least one candidate").txid;
 		let mut entry = TrackedOnchainPayment::new(payment_id, txid, vec![]);
-		entry.set_candidates(candidates);
+		entry.funding.get_or_insert_with(Default::default).rounds = candidates;
 		entry
 	}
 
