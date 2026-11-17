@@ -9,8 +9,8 @@ use bitcoin::Txid;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
 
-use crate::data_store::{StorableObject, StorableObjectUpdate, UpdatableObject};
-use crate::payment::store::{Channel, PaymentDetailsUpdate, TransactionType};
+use crate::data_store::{StorableObject, UpdatableObject};
+use crate::payment::store::{Channel, TransactionType};
 use crate::payment::{PaymentDetails, PaymentKind};
 
 /// One candidate transaction in an interactive-funding (splice) RBF history, holding this node's
@@ -83,15 +83,13 @@ pub(crate) struct PendingPaymentDetails {
 }
 
 impl PendingPaymentDetails {
-	pub(crate) fn new(
-		details: PaymentDetails, conflicting_txids: Vec<Txid>, candidates: Vec<FundingTxCandidate>,
-	) -> Self {
+	pub(crate) fn new(details: PaymentDetails, conflicting_txids: Vec<Txid>) -> Self {
 		Self {
 			id: details.id,
 			details: Some(details),
 			conflicting_txids,
 			funding_channels: Vec::new(),
-			candidates,
+			candidates: Vec::new(),
 			locked_rounds: Vec::new(),
 		}
 	}
@@ -163,6 +161,35 @@ impl PendingPaymentDetails {
 		}
 	}
 
+	/// Merges what wallet sync observed about the entry's payment into it: `payment`'s update is
+	/// applied to the recorded payment, if any, and a non-empty `conflicting_txids` replaces the
+	/// recorded conflicts. The payment's current txid never stays listed as its own conflict.
+	/// Returns whether the entry changed.
+	pub(crate) fn merge_observed(
+		&mut self, payment: &PaymentDetails, conflicting_txids: Vec<Txid>,
+	) -> bool {
+		let mut updated = false;
+		if let Some(details) = self.details.as_mut() {
+			updated |= details.update(payment.to_update());
+		}
+
+		if !conflicting_txids.is_empty() && self.conflicting_txids != conflicting_txids {
+			self.conflicting_txids = conflicting_txids;
+			updated = true;
+		}
+
+		if let Some(PaymentKind::Onchain { txid, .. }) =
+			self.details.as_ref().map(|details| &details.kind)
+		{
+			let txid = *txid;
+			let conflicts_len = self.conflicting_txids.len();
+			self.conflicting_txids.retain(|conflicting_txid| *conflicting_txid != txid);
+			updated |= self.conflicting_txids.len() != conflicts_len;
+		}
+
+		updated
+	}
+
 	/// Whether this entry tracks nothing anymore and can be dropped.
 	pub(crate) fn is_empty(&self) -> bool {
 		self.details.is_none() && self.candidates.is_empty() && self.locked_rounds.is_empty()
@@ -178,101 +205,11 @@ impl_writeable_tlv_based!(PendingPaymentDetails, {
 	(10, locked_rounds, optional_vec),
 });
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PendingPaymentDetailsUpdate {
-	pub id: PaymentId,
-	pub payment_update: Option<PaymentDetailsUpdate>,
-	pub conflicting_txids: Option<Vec<Txid>>,
-	pub candidates: Vec<FundingTxCandidate>,
-}
-
 impl StorableObject for PendingPaymentDetails {
 	type Id = PaymentId;
 
 	fn id(&self) -> Self::Id {
 		self.id
-	}
-}
-
-impl UpdatableObject for PendingPaymentDetails {
-	type Update = PendingPaymentDetailsUpdate;
-
-	fn update(&mut self, update: Self::Update) -> bool {
-		let mut updated = false;
-
-		// Update the underlying payment details if present. An entry with no record yet is not
-		// given one here: only the writer that observed the transaction knows what the record
-		// says, and it sets the field directly.
-		if let (Some(payment_update), Some(details)) =
-			(update.payment_update, self.details.as_mut())
-		{
-			updated |= details.update(payment_update);
-		}
-
-		if let Some(new_conflicting_txids) = update.conflicting_txids {
-			if self.conflicting_txids != new_conflicting_txids {
-				self.conflicting_txids = new_conflicting_txids;
-				updated = true;
-			}
-		}
-
-		if let Some(PaymentKind::Onchain { txid, .. }) =
-			self.details.as_ref().map(|details| &details.kind)
-		{
-			let txid = *txid;
-			let conflicts_len = self.conflicting_txids.len();
-			self.conflicting_txids.retain(|conflicting_txid| *conflicting_txid != txid);
-			updated |= self.conflicting_txids.len() != conflicts_len;
-		}
-
-		// Each funding-record write passes the candidate history as of its own round, so a
-		// non-empty update replaces the stored list. An empty update (e.g. a non-funding
-		// payment) leaves it untouched. Dropping an abandoned round, the only writer that
-		// shrinks it, goes through the store's `mutate` instead.
-		if !update.candidates.is_empty() && self.candidates != update.candidates {
-			self.candidates = update.candidates;
-			updated = true;
-		}
-
-		updated
-	}
-
-	fn to_update(&self) -> Self::Update {
-		self.into()
-	}
-}
-
-impl StorableObjectUpdate<PendingPaymentDetails> for PendingPaymentDetailsUpdate {
-	fn id(&self) -> <PendingPaymentDetails as StorableObject>::Id {
-		self.id
-	}
-}
-
-impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
-	fn from(value: &PendingPaymentDetails) -> Self {
-		match &value.details {
-			// For an entry without a record yet, a payment-tracking merge can only apply its
-			// candidate history.
-			None => Self {
-				id: value.id,
-				payment_update: None,
-				conflicting_txids: None,
-				candidates: value.candidates.clone(),
-			},
-			Some(details) => {
-				let conflicting_txids = if value.conflicting_txids.is_empty() {
-					None
-				} else {
-					Some(value.conflicting_txids.clone())
-				};
-				Self {
-					id: details.id,
-					payment_update: Some(details.to_update()),
-					conflicting_txids,
-					candidates: value.candidates.clone(),
-				}
-			},
-		}
 	}
 }
 
@@ -403,8 +340,8 @@ mod tests {
 			PaymentDirection::Outbound,
 			PaymentStatus::Pending,
 		);
-		let pending =
-			PendingPaymentDetails::new(details, vec![first_txid, counterparty_txid], candidates);
+		let mut pending = PendingPaymentDetails::new(details, vec![first_txid, counterparty_txid]);
+		pending.candidates = candidates;
 
 		// Each candidate resolves to its own figures, so a non-last candidate that confirms reports
 		// its own (lower) fee rather than the last-broadcast candidate's.
@@ -442,16 +379,10 @@ mod tests {
 		let mut pending_payment = PendingPaymentDetails::new(
 			pending_onchain_payment(payment_id, replacement_txid),
 			vec![original_txid],
-			Vec::new(),
 		);
-		let update = PendingPaymentDetails::new(
-			pending_onchain_payment(payment_id, original_txid),
-			Vec::new(),
-			Vec::new(),
-		)
-		.to_update();
+		let observed = pending_onchain_payment(payment_id, original_txid);
 
-		assert!(pending_payment.update(update));
+		assert!(pending_payment.merge_observed(&observed, Vec::new()));
 		assert_eq!(
 			pending_payment.conflicting_txids(),
 			Vec::<Txid>::new(),
@@ -464,16 +395,16 @@ mod tests {
 		// An entry carrying a payment record and its candidate history.
 		let payment_id = PaymentId([7u8; 32]);
 		let txid = Txid::from_byte_array([8u8; 32]);
-		let record = PendingPaymentDetails::new(
+		let mut record = PendingPaymentDetails::new(
 			pending_onchain_payment(payment_id, txid),
 			vec![Txid::from_byte_array([9u8; 32])],
-			vec![FundingTxCandidate {
-				txid,
-				amount_msat: Some(1_000),
-				fee_paid_msat: Some(100),
-				awaiting_broadcast: false,
-			}],
 		);
+		record.candidates = vec![FundingTxCandidate {
+			txid,
+			amount_msat: Some(1_000),
+			fee_paid_msat: Some(100),
+			awaiting_broadcast: false,
+		}];
 
 		let encoded = record.encode();
 		let decoded = PendingPaymentDetails::read(&mut &encoded[..]).unwrap();
@@ -495,7 +426,10 @@ mod tests {
 	fn entry(candidates: Vec<FundingTxCandidate>) -> PendingPaymentDetails {
 		let payment_id = PaymentId([1u8; 32]);
 		let txid = candidates.last().expect("at least one candidate").txid;
-		PendingPaymentDetails::new(pending_onchain_payment(payment_id, txid), vec![], candidates)
+		let mut entry =
+			PendingPaymentDetails::new(pending_onchain_payment(payment_id, txid), vec![]);
+		entry.candidates = candidates;
+		entry
 	}
 
 	/// An entry written by a node from before the rounds LDK promoted were kept on it reads as an
@@ -524,8 +458,8 @@ mod tests {
 		assert_eq!(decoded, stored);
 	}
 
-	/// The rounds LDK promoted round-trip with the entry, absent or present, and the merge of a
-	/// record's full update, as wallet sync writes it, leaves them.
+	/// The rounds LDK promoted round-trip with the entry, absent or present, and the merge of what
+	/// wallet sync observed about the payment leaves them.
 	#[test]
 	fn locked_rounds_round_trip_and_survive_a_merge() {
 		let mut stored = entry(vec![candidate(2, false)]);
@@ -539,9 +473,9 @@ mod tests {
 			Readable::read(&mut &stored.encode()[..]).expect("encoding must round-trip");
 		assert_eq!(decoded, stored);
 
-		let synced = entry(vec![candidate(2, false), candidate(3, false)]);
-		assert!(stored.update(synced.to_update()));
-		assert_eq!(stored.candidates().len(), 2);
+		let observed = pending_onchain_payment(stored.id, test_txid(3));
+		assert!(stored.merge_observed(&observed, Vec::new()));
+		assert_eq!(stored.candidates(), &[candidate(2, false)]);
 		assert_eq!(stored.locked_rounds(), &[test_txid(2)]);
 	}
 }
