@@ -51,6 +51,9 @@ use crate::{Error, PersistedNodeMetrics};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
 const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
+// Bitcoin Core's mempool-based fee estimation can change estimates between blocks, so we also
+// refresh fee rate estimates periodically rather than only on new blocks.
+const FEE_RATE_REFRESH_INTERVAL_SECS: u64 = 30;
 
 type BitcoindSpvClient =
 	SpvClient<ChainPoller<Arc<BitcoindClient>, BitcoindClient>, Arc<ChainListener>>;
@@ -366,7 +369,9 @@ impl BitcoindChainSource {
 		// Start the polling loop. We update fee rate estimates on the same tick right after polling
 		// for chain data, as using separate timers would allow chain polls taking longer than the
 		// polling interval to starve the fee rate updates.
+		let fee_rate_refresh_interval = Duration::from_secs(FEE_RATE_REFRESH_INTERVAL_SECS);
 		let mut last_best_block_hash = None;
+		let mut last_fee_rate_update: Option<Instant> = None;
 		loop {
 			tokio::select! {
 				biased;
@@ -399,7 +404,9 @@ impl BitcoindChainSource {
 			}
 
 			let current_best_block_hash = channel_manager.current_best_block().block_hash;
-			if last_best_block_hash != Some(current_best_block_hash) {
+			let fee_rate_refresh_due = last_fee_rate_update
+				.map_or(true, |last_update| last_update.elapsed() >= fee_rate_refresh_interval);
+			if last_best_block_hash != Some(current_best_block_hash) || fee_rate_refresh_due {
 				tokio::select! {
 					biased;
 					_ = stop_sync_receiver.changed() => {
@@ -412,6 +419,7 @@ impl BitcoindChainSource {
 					update_res = self.update_fee_rate_estimates() => {
 						if update_res.is_ok() {
 							last_best_block_hash = Some(current_best_block_hash);
+							last_fee_rate_update = Some(Instant::now());
 						}
 					}
 				}
