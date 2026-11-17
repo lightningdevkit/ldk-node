@@ -26,7 +26,7 @@ use lightning_liquidity::lsps1::client::LSPS1ClientConfig as LdkLSPS1ClientConfi
 use lightning_liquidity::lsps2::client::LSPS2ClientConfig as LdkLSPS2ClientConfig;
 use lightning_liquidity::lsps2::service::LSPS2ServiceConfig as LdkLSPS2ServiceConfig;
 use lightning_liquidity::{LiquidityClientConfig, LiquidityServiceConfig};
-pub use service::lsps2::LSPS2ServiceConfig;
+pub use service::lsps2::{LSPS2ChannelConfig, LSPS2ServiceConfig};
 use tokio::sync::oneshot;
 
 use crate::builder::BuildError;
