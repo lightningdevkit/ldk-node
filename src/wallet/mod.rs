@@ -782,78 +782,7 @@ impl Wallet {
 						timestamp: block_time.confirmation_time,
 					};
 
-					// Hold the cross-store lock from payment-id resolution through the last write:
-					// a funding-record write landing in between would leave the id resolved
-					// against a torn candidate index and the generic fallback below overwriting
-					// (or duplicating) the record that write had just made.
-					let stores = self.payment_stores.lock().await;
-
-					let mut payment_id = self
-						.find_payment_by_txid(txid)
-						.await?
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
-
-					match self
-						.apply_funding_status_update_locked(
-							&stores,
-							payment_id,
-							txid,
-							confirmation_status,
-						)
-						.await?
-					{
-						FundingStatusUpdate::Applied => continue,
-						FundingStatusUpdate::NotFunding => {},
-						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead, unless a
-						// settled funding payment sits there already.
-						FundingStatusUpdate::Foreign => {
-							match self.foreign_transaction_payment_id(payment_id, txid).await? {
-								Some(fallback_id) => payment_id = fallback_id,
-								None => {
-									log_debug!(
-										self.logger,
-										"Skipping wallet event for transaction {} of a settled funding payment",
-										txid,
-									);
-									continue;
-								},
-							}
-						},
-					}
-
-					// A record written from the wallet's own view would misread a shared input of
-					// an interactively negotiated funding as wholly this node's, and once the
-					// record is classified or settled its amount and fee are never written again.
-					// So a fact that cannot be read fails the pass, as a write that fails does,
-					// rather than write the record on that view.
-					let provenance = self.read_tx_provenance(txid, &tx).await?;
-					let payment = {
-						let locked_wallet = self.inner.lock().expect("lock");
-						self.create_payment_from_tx(
-							&locked_wallet,
-							txid,
-							payment_id,
-							&tx,
-							&provenance,
-							payment_status,
-							confirmation_status,
-						)
-					};
-
-					stores.insert_or_update_payment(payment.clone()).await?;
-
-					if payment_status == PaymentStatus::Pending {
-						self.upsert_pending_payment(&stores, payment, Vec::new()).await?;
-					} else {
-						// The transaction was first observed already confirmed through the reorg
-						// depth, so the record is written settled and never graduates. An entry
-						// under its id that no record promoted yet -- the signed rounds of a splice
-						// whose transaction nothing had observed before -- tracked this payment
-						// alone, and with the payment settled tracks nothing further, as the entry
-						// of a graduated record does.
-						stores.remove_pending_payment(&payment_id).await?;
-					}
+					self.record_wallet_tx(txid, &tx, payment_status, confirmation_status).await?;
 				},
 				WalletEvent::ChainTipChanged { new_tip, .. } => {
 					let pending_payments: Vec<PendingPaymentDetails> = self
@@ -989,66 +918,19 @@ impl Wallet {
 					}
 				},
 				WalletEvent::TxUnconfirmed { txid, tx, .. } => {
-					// See `TxConfirmed`: id resolution and the writes below must not interleave
-					// with the funding-record writers.
-					let stores = self.payment_stores.lock().await;
-
-					let mut payment_id = self
-						.find_payment_by_txid(txid)
-						.await?
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
-
-					match self
-						.apply_funding_status_update_locked(
-							&stores,
-							payment_id,
-							txid,
-							ConfirmationStatus::Unconfirmed,
-						)
-						.await?
-					{
-						FundingStatusUpdate::Applied => continue,
-						FundingStatusUpdate::NotFunding => {},
-						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead, unless a
-						// settled funding payment sits there already.
-						FundingStatusUpdate::Foreign => {
-							match self.foreign_transaction_payment_id(payment_id, txid).await? {
-								Some(fallback_id) => payment_id = fallback_id,
-								None => {
-									log_debug!(
-										self.logger,
-										"Skipping wallet event for transaction {} of a settled funding payment",
-										txid,
-									);
-									continue;
-								},
-							}
-						},
-					}
-
-					// See `TxConfirmed`: a fact that cannot be read fails the pass.
-					let provenance = self.read_tx_provenance(txid, &tx).await?;
-					let payment = {
-						let locked_wallet = self.inner.lock().expect("lock");
-						self.create_payment_from_tx(
-							&locked_wallet,
-							txid,
-							payment_id,
-							&tx,
-							&provenance,
-							PaymentStatus::Pending,
-							ConfirmationStatus::Unconfirmed,
-						)
-					};
-					stores.insert_or_update_payment(payment.clone()).await?;
-					self.upsert_pending_payment(&stores, payment, Vec::new()).await?;
+					self.record_wallet_tx(
+						txid,
+						&tx,
+						PaymentStatus::Pending,
+						ConfirmationStatus::Unconfirmed,
+					)
+					.await?;
 				},
 				WalletEvent::TxReplaced { txid, conflicts, .. } => {
-					// See `TxConfirmed`: id resolution and the writes below must not interleave
-					// with the funding-record writers. The pending entry written below embeds a
-					// read of the payment record, which must not go stale against a concurrent
-					// write either.
+					// See `record_wallet_tx`: id resolution and the writes below must not
+					// interleave with the funding-record writers. The pending entry written below
+					// embeds a read of the payment record, which must not go stale against a
+					// concurrent write either.
 					let stores = self.payment_stores.lock().await;
 
 					let Some(payment_id) = self.find_payment_by_txid(txid).await? else {
@@ -1094,60 +976,13 @@ impl Wallet {
 					self.upsert_pending_payment(&stores, payment, conflict_txids).await?;
 				},
 				WalletEvent::TxDropped { txid, tx } => {
-					// See `TxConfirmed`: id resolution and the writes below must not interleave
-					// with the funding-record writers.
-					let stores = self.payment_stores.lock().await;
-
-					let mut payment_id = self
-						.find_payment_by_txid(txid)
-						.await?
-						.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
-
-					match self
-						.apply_funding_status_update_locked(
-							&stores,
-							payment_id,
-							txid,
-							ConfirmationStatus::Unconfirmed,
-						)
-						.await?
-					{
-						FundingStatusUpdate::Applied => continue,
-						FundingStatusUpdate::NotFunding => {},
-						// Not part of the funding payment's history (e.g. a close spending the
-						// funding outpoint): record it under its own id below instead, unless a
-						// settled funding payment sits there already.
-						FundingStatusUpdate::Foreign => {
-							match self.foreign_transaction_payment_id(payment_id, txid).await? {
-								Some(fallback_id) => payment_id = fallback_id,
-								None => {
-									log_debug!(
-										self.logger,
-										"Skipping wallet event for transaction {} of a settled funding payment",
-										txid,
-									);
-									continue;
-								},
-							}
-						},
-					}
-
-					// See `TxConfirmed`: a fact that cannot be read fails the pass.
-					let provenance = self.read_tx_provenance(txid, &tx).await?;
-					let payment = {
-						let locked_wallet = self.inner.lock().expect("lock");
-						self.create_payment_from_tx(
-							&locked_wallet,
-							txid,
-							payment_id,
-							&tx,
-							&provenance,
-							PaymentStatus::Pending,
-							ConfirmationStatus::Unconfirmed,
-						)
-					};
-					stores.insert_or_update_payment(payment.clone()).await?;
-					self.upsert_pending_payment(&stores, payment, Vec::new()).await?;
+					self.record_wallet_tx(
+						txid,
+						&tx,
+						PaymentStatus::Pending,
+						ConfirmationStatus::Unconfirmed,
+					)
+					.await?;
 				},
 				_ => {
 					continue;
@@ -1155,6 +990,82 @@ impl Wallet {
 			};
 		}
 
+		Ok(())
+	}
+
+	/// Records the wallet transaction `txid` with the given status, resolving the payment it
+	/// belongs to and keeping its pending-store entry in step with the record.
+	async fn record_wallet_tx(
+		&self, txid: Txid, tx: &Transaction, payment_status: PaymentStatus,
+		confirmation_status: ConfirmationStatus,
+	) -> Result<(), Error> {
+		// Hold the cross-store lock from payment-id resolution through the last write:
+		// a funding-record write landing in between would leave the id resolved
+		// against a torn candidate index and the generic fallback below overwriting
+		// (or duplicating) the record that write had just made.
+		let stores = self.payment_stores.lock().await;
+
+		let mut payment_id = self
+			.find_payment_by_txid(txid)
+			.await?
+			.unwrap_or_else(|| PaymentId(txid.to_byte_array()));
+
+		match self
+			.apply_funding_status_update_locked(&stores, payment_id, txid, confirmation_status)
+			.await?
+		{
+			FundingStatusUpdate::Applied => return Ok(()),
+			FundingStatusUpdate::NotFunding => {},
+			// Not part of the funding payment's history (e.g. a close spending the
+			// funding outpoint): record it under its own id below instead, unless a
+			// settled funding payment sits there already.
+			FundingStatusUpdate::Foreign => {
+				match self.foreign_transaction_payment_id(payment_id, txid).await? {
+					Some(fallback_id) => payment_id = fallback_id,
+					None => {
+						log_debug!(
+							self.logger,
+							"Skipping wallet event for transaction {} of a settled funding payment",
+							txid,
+						);
+						return Ok(());
+					},
+				}
+			},
+		}
+
+		// A record written from the wallet's own view would misread a shared input of
+		// an interactively negotiated funding as wholly this node's, and once the
+		// record is classified or settled its amount and fee are never written again.
+		// So a fact that cannot be read fails the pass, as a write that fails does,
+		// rather than write the record on that view.
+		let provenance = self.read_tx_provenance(txid, tx).await?;
+		let payment = {
+			let locked_wallet = self.inner.lock().expect("lock");
+			self.create_payment_from_tx(
+				&locked_wallet,
+				txid,
+				payment_id,
+				tx,
+				&provenance,
+				payment_status,
+				confirmation_status,
+			)
+		};
+
+		stores.insert_or_update_payment(payment.clone()).await?;
+
+		if payment_status == PaymentStatus::Pending {
+			self.upsert_pending_payment(&stores, payment, Vec::new()).await?;
+		} else {
+			// The transaction was first observed already confirmed through the reorg
+			// depth, so the record is written settled and never graduates. An entry
+			// under its id that no record promoted yet -- the signed rounds of a splice
+			// whose transaction nothing had observed before -- tracked this payment
+			// alone, and with the payment settled tracks nothing further, as the entry
+			// of a graduated record does.
+			stores.remove_pending_payment(&payment_id).await?;
+		}
 		Ok(())
 	}
 
