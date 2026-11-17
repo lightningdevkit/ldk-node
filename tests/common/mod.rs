@@ -620,11 +620,26 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 		peer_node.sync_wallets().unwrap();
 	}
 
-	let balances = node.list_balances();
-	assert!(balances.lightning_balances.is_empty(), "Unexpected balance state: {:?}", balances);
-	assert_eq!(balances.pending_balances_from_channel_closures.len(), 1);
-	match balances.pending_balances_from_channel_closures[0] {
-		PendingSweepBalance::BroadcastAwaitingConfirmation { .. } => {
+	// SpendableOutputs can be handled after sync_wallets has already run the sweeper. The
+	// output is then tracked but still PendingBroadcast. Keep syncing until a spending
+	// transaction exists rather than assuming the event and its broadcast completed together.
+	let pending_balance = exponential_backoff_poll(|| {
+		node.sync_wallets().unwrap();
+		peer_node.sync_wallets().unwrap();
+		let balances = node.list_balances();
+		assert!(balances.lightning_balances.is_empty(), "Unexpected balance state: {:?}", balances);
+		assert_eq!(balances.pending_balances_from_channel_closures.len(), 1);
+		match &balances.pending_balances_from_channel_closures[0] {
+			PendingSweepBalance::PendingBroadcast { .. } => None,
+			balance => Some(balance.clone()),
+		}
+	})
+	.await;
+	match pending_balance {
+		PendingSweepBalance::BroadcastAwaitingConfirmation { latest_spending_txid, .. } => {
+			// The broadcaster queues transactions asynchronously. Observe this particular sweep
+			// in the backend before mining the block that is supposed to confirm it.
+			wait_for_tx(electrsd, latest_spending_txid).await;
 			generate_blocks_and_wait(bitcoind, electrsd, 1).await;
 			node.sync_wallets().unwrap();
 			peer_node.sync_wallets().unwrap();
@@ -633,11 +648,11 @@ async fn settle_force_close_balance<E: ElectrumApi>(
 			assert_eq!(node.list_balances().pending_balances_from_channel_closures.len(), 1);
 			match node.list_balances().pending_balances_from_channel_closures[0] {
 				PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
-				_ => panic!("Unexpected balance state!"),
+				ref balance => panic!("Unexpected balance state: {:?}", balance),
 			}
 		},
 		PendingSweepBalance::AwaitingThresholdConfirmations { .. } => {},
-		_ => panic!("Unexpected balance state!"),
+		balance => panic!("Unexpected balance state: {:?}", balance),
 	}
 
 	generate_blocks_and_wait(bitcoind, electrsd, 5).await;
