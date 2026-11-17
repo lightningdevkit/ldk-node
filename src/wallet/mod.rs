@@ -1438,7 +1438,7 @@ impl Wallet {
 			Some(details) if details.status == PaymentStatus::Pending => details,
 			_ => return Ok(false),
 		};
-		let (conflicting_txids, candidates) = (&entry.conflicting_txids, &entry.candidates);
+		let (conflicting_txids, candidates) = (&entry.conflicting_txids, entry.candidates());
 		let record_txid = match details.kind {
 			PaymentKind::Onchain {
 				txid,
@@ -3271,12 +3271,11 @@ impl Wallet {
 				let mut entry = existing.cloned().unwrap_or_else(|| {
 					PendingPaymentDetails::signed_rounds(payment_id, Vec::new(), Vec::new())
 				});
-				if entry.funding_channels.is_empty() && !funding_channels.is_empty() {
-					entry.funding_channels = funding_channels.clone();
+				if entry.track_funding_channels(&funding_channels) {
 					changed = true;
 				}
-				if entry.candidates != recorded {
-					entry.candidates = recorded.clone();
+				if entry.candidates() != recorded.as_slice() {
+					entry.set_candidates(recorded.clone());
 					changed = true;
 				}
 				changed.then_some(entry)
@@ -3332,10 +3331,10 @@ impl Wallet {
 			let marked = stores
 				.mutate_pending_payment(&payment_id, |existing| {
 					let mut entry = existing?.clone();
-					let round = entry
-						.candidates
-						.iter_mut()
-						.find(|candidate| candidate.txid == txid && candidate.awaiting_broadcast)?;
+					let round =
+						entry.funding.as_mut()?.rounds.iter_mut().find(|candidate| {
+							candidate.txid == txid && candidate.awaiting_broadcast
+						})?;
 					round.awaiting_broadcast = false;
 					Some(entry)
 				})
@@ -3452,11 +3451,9 @@ impl Wallet {
 					.mutate_pending_payment(&payment_id, |existing| {
 						let mut entry = existing?.clone();
 						if handed_back.is_some() {
-							entry.candidates.retain(|c| !abandoned_txids.contains(&c.txid));
+							entry.drop_candidates(&abandoned_txids);
 						} else {
-							entry.candidates.clear();
-							entry.locked_rounds.clear();
-							entry.funding_channels.clear();
+							entry.funding = None;
 						}
 						emptied = entry.is_empty();
 						(!emptied).then_some(entry)
@@ -3561,10 +3558,11 @@ impl Wallet {
 					// With its history gone, the entry tracks the channels of the record's own
 					// classification, if any.
 					if handed_back.is_none() {
-						entry.candidates.clear();
-						entry.funding_channels = record_channels;
+						let funding = entry.funding_mut();
+						funding.rounds.clear();
+						funding.channels = record_channels;
 					} else {
-						entry.candidates.retain(|c| !abandoned_txids.contains(&c.txid));
+						entry.drop_candidates(&abandoned_txids);
 					}
 					if let Some(txid) = current_txid {
 						entry.txid = Some(txid);
@@ -3669,7 +3667,7 @@ impl Wallet {
 					let mut entry = existing.cloned().unwrap_or_else(|| {
 						PendingPaymentDetails::signed_rounds(id, Vec::new(), Vec::new())
 					});
-					entry.candidates = candidates.clone();
+					entry.set_candidates(candidates.clone());
 					Some(entry)
 				})
 				.await?;
@@ -8776,7 +8774,7 @@ mod tests {
 		];
 		let details = interactive_funding_details(payment_id, txid3, Some(1_000_000), Some(700));
 		let mut entry = entry_for(&details, Vec::new());
-		entry.candidates = candidates;
+		entry.set_candidates(candidates);
 		insert_entry(&wallet, entry).await;
 
 		// The first candidate resolves via the txid-derived id and the active candidate via the
@@ -9330,7 +9328,7 @@ mod tests {
 		let payment = record_of(&wallet, &payment_id).await.unwrap();
 		assert_eq!(payment.status, PaymentStatus::Pending, "the unseen round can still confirm");
 		let entry = entry_of(&wallet, &payment_id).await.unwrap();
-		assert_eq!(entry.candidates.len(), 2, "both rounds stay on record");
+		assert_eq!(entry.candidates().len(), 2, "both rounds stay on record");
 
 		// The first round turns up in the mempool, and a second close spends its input and
 		// confirms to depth too: no round can confirm now.
@@ -9601,7 +9599,7 @@ mod tests {
 			awaiting_broadcast: false,
 		}];
 		let mut entry = entry_for(&snapshot, vec![close_txid]);
-		entry.candidates = candidates;
+		entry.set_candidates(candidates);
 		insert_entry(&wallet, entry).await;
 
 		insert_confirmed_tx(&wallet, close_tx, 5);
@@ -9653,7 +9651,7 @@ mod tests {
 			awaiting_broadcast: false,
 		}];
 		let mut entry = entry_for(&snapshot, vec![close_txid]);
-		entry.candidates = candidates;
+		entry.set_candidates(candidates);
 		insert_entry(&wallet, entry).await;
 
 		insert_confirmed_tx(&wallet, close_tx, 5);
@@ -12719,12 +12717,12 @@ mod tests {
 			&funding_payment(id, Txid::from_byte_array([45u8; 32]), PaymentStatus::Pending),
 			Vec::new(),
 		);
-		entry.candidates = vec![FundingTxCandidate {
+		entry.set_candidates(vec![FundingTxCandidate {
 			txid: funding_txid,
 			amount_msat: Some(1_000),
 			fee_paid_msat: Some(10),
 			awaiting_broadcast: false,
-		}];
+		}]);
 		wallet.payment_stores.pending_payment_store().insert(entry).await.unwrap();
 
 		chain_tip_changed(&wallet, LONG_AFTER).await;
