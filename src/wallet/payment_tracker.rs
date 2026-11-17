@@ -8,6 +8,7 @@
 use bitcoin::Txid;
 use lightning::impl_writeable_tlv_based;
 use lightning::ln::channelmanager::PaymentId;
+use lightning::ln::types::ChannelId;
 
 use crate::data_store::StorableObject;
 use crate::payment::store::Channel;
@@ -43,7 +44,7 @@ impl_writeable_tlv_based!(FundingTxCandidate, {
 	(6, awaiting_broadcast, required),
 });
 
-/// The interactive-funding (splice) part of a [`PendingPaymentDetails`] entry.
+/// The interactive-funding (splice) part of a [`TrackedOnchainPayment`] entry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FundingRounds {
 	/// The channels whose interactive funding the entry tracks, as the signing of a round or the
@@ -66,7 +67,7 @@ impl_writeable_tlv_based!(FundingRounds, {
 	(4, locked, optional_vec),
 });
 
-/// A pending payment tracked by LDK Node, keyed by [`PaymentId`].
+/// A pending on-chain payment tracked by LDK Node, keyed by [`PaymentId`].
 ///
 /// The payment's record in the payment store is what says its status, confirmation, direction and
 /// transaction type; an entry only indexes the transactions that may still change the record.
@@ -78,7 +79,7 @@ impl_writeable_tlv_based!(FundingRounds, {
 /// the fields do not partition by payment type. An entry with neither a txid nor any funding
 /// round tracks no payment and is removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PendingPaymentDetails {
+pub(crate) struct TrackedOnchainPayment {
 	/// The payment this entry tracks.
 	pub id: PaymentId,
 	/// The payment record's current transaction, or `None` for a splice whose transaction wallet
@@ -95,7 +96,7 @@ pub(crate) struct PendingPaymentDetails {
 	pub funding: Option<FundingRounds>,
 }
 
-impl PendingPaymentDetails {
+impl TrackedOnchainPayment {
 	pub(crate) fn new(id: PaymentId, txid: Txid, conflicting_txids: Vec<Txid>) -> Self {
 		Self { id, txid: Some(txid), conflicting_txids, funding: None }
 	}
@@ -206,19 +207,24 @@ impl PendingPaymentDetails {
 	}
 }
 
-impl_writeable_tlv_based!(PendingPaymentDetails, {
+impl_writeable_tlv_based!(TrackedOnchainPayment, {
 	(0, id, required),
 	(2, txid, option),
 	(4, conflicting_txids, optional_vec),
 	(6, funding, option),
 });
 
-impl StorableObject for PendingPaymentDetails {
+impl StorableObject for TrackedOnchainPayment {
 	type Id = PaymentId;
 
 	fn id(&self) -> Self::Id {
 		self.id
 	}
+}
+
+/// Whether `entry` tracks the funding payment of a splice into `channel_id`.
+pub(crate) fn tracks_channel(entry: &TrackedOnchainPayment, channel_id: ChannelId) -> bool {
+	entry.funding_channels().iter().any(|channel| channel.channel_id == channel_id)
 }
 
 /// Builds a [`FundingContribution`] for tests through its `Readable` impl — the only path open
@@ -333,7 +339,7 @@ mod tests {
 		];
 
 		let mut pending =
-			PendingPaymentDetails::new(payment_id, rbf_txid, vec![first_txid, counterparty_txid]);
+			TrackedOnchainPayment::new(payment_id, rbf_txid, vec![first_txid, counterparty_txid]);
 		pending.set_candidates(candidates);
 
 		// Each candidate resolves to its own figures, so a non-last candidate that confirms reports
@@ -359,7 +365,7 @@ mod tests {
 		let payment_id = PaymentId(original_txid.to_byte_array());
 
 		let mut pending_payment =
-			PendingPaymentDetails::new(payment_id, replacement_txid, vec![original_txid]);
+			TrackedOnchainPayment::new(payment_id, replacement_txid, vec![original_txid]);
 
 		assert!(pending_payment.merge_observed(original_txid, Vec::new()));
 		assert_eq!(pending_payment.txid(), Some(original_txid));
@@ -375,7 +381,7 @@ mod tests {
 	#[test]
 	fn observing_the_tracked_transaction_again_changes_nothing() {
 		let txid = test_txid(1);
-		let mut entry = PendingPaymentDetails::new(PaymentId([1u8; 32]), txid, vec![test_txid(2)]);
+		let mut entry = TrackedOnchainPayment::new(PaymentId([1u8; 32]), txid, vec![test_txid(2)]);
 		let before = entry.clone();
 		assert!(!entry.merge_observed(txid, Vec::new()));
 		assert!(!entry.merge_observed(txid, vec![test_txid(2)]));
@@ -388,7 +394,7 @@ mod tests {
 		let payment_id = PaymentId([7u8; 32]);
 		let txid = Txid::from_byte_array([8u8; 32]);
 		let mut record =
-			PendingPaymentDetails::new(payment_id, txid, vec![Txid::from_byte_array([9u8; 32])]);
+			TrackedOnchainPayment::new(payment_id, txid, vec![Txid::from_byte_array([9u8; 32])]);
 		record.set_candidates(vec![FundingTxCandidate {
 			txid,
 			amount_msat: Some(1_000),
@@ -397,18 +403,18 @@ mod tests {
 		}]);
 
 		let encoded = record.encode();
-		let decoded = PendingPaymentDetails::read(&mut &encoded[..]).unwrap();
+		let decoded = TrackedOnchainPayment::read(&mut &encoded[..]).unwrap();
 		assert_eq!(record, decoded);
 		assert_eq!(decoded.id(), payment_id);
 		assert_eq!(decoded.txid(), Some(txid));
 
 		// The rounds of a splice signed before any transaction was observed.
-		let signed = PendingPaymentDetails::signed_rounds(
+		let signed = TrackedOnchainPayment::signed_rounds(
 			payment_id,
 			Vec::new(),
 			record.candidates().to_vec(),
 		);
-		let decoded = PendingPaymentDetails::read(&mut &signed.encode()[..]).unwrap();
+		let decoded = TrackedOnchainPayment::read(&mut &signed.encode()[..]).unwrap();
 		assert_eq!(decoded, signed);
 		assert_eq!(decoded.txid(), None);
 	}
@@ -423,10 +429,10 @@ mod tests {
 		}
 	}
 
-	fn entry(candidates: Vec<FundingTxCandidate>) -> PendingPaymentDetails {
+	fn entry(candidates: Vec<FundingTxCandidate>) -> TrackedOnchainPayment {
 		let payment_id = PaymentId([1u8; 32]);
 		let txid = candidates.last().expect("at least one candidate").txid;
-		let mut entry = PendingPaymentDetails::new(payment_id, txid, vec![]);
+		let mut entry = TrackedOnchainPayment::new(payment_id, txid, vec![]);
 		entry.set_candidates(candidates);
 		entry
 	}
@@ -436,13 +442,13 @@ mod tests {
 	#[test]
 	fn locked_rounds_round_trip_and_survive_a_merge() {
 		let mut stored = entry(vec![candidate(2, false)]);
-		let decoded: PendingPaymentDetails =
+		let decoded: TrackedOnchainPayment =
 			Readable::read(&mut &stored.encode()[..]).expect("encoding must round-trip");
 		assert!(decoded.locked_rounds().is_empty());
 
 		assert!(stored.record_locked_round(test_txid(2)));
 		assert!(!stored.record_locked_round(test_txid(2)));
-		let decoded: PendingPaymentDetails =
+		let decoded: TrackedOnchainPayment =
 			Readable::read(&mut &stored.encode()[..]).expect("encoding must round-trip");
 		assert_eq!(decoded, stored);
 

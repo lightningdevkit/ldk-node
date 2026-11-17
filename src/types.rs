@@ -45,10 +45,9 @@ use crate::liquidity::client::lsps2::router::LSPS2Router;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
 use crate::payment::NodeOffersMessageHandler;
-use crate::payment::{
-	ChannelPairForwardingStats, ForwardedPaymentDetails, PaymentDetails, PendingPaymentDetails,
-};
+use crate::payment::{ChannelPairForwardingStats, ForwardedPaymentDetails, PaymentDetails};
 use crate::runtime::RuntimeSpawner;
+use crate::wallet::payment_tracker::TrackedOnchainPayment;
 use crate::wallet::provenance::ChannelTxFacts;
 
 #[cfg(feature = "uniffi")]
@@ -757,4 +756,5 @@ impl From<&(u64, Vec<u8>)> for CustomTlvRecord {
 	}
 }
 
-pub(crate) type PendingPaymentStore = DataStore<PendingPaymentDetails, Arc<Logger>, KeepAllEntries>;
+pub(crate) type OnchainPaymentTracker =
+	DataStore<TrackedOnchainPayment, Arc<Logger>, KeepAllEntries>;
