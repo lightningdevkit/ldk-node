@@ -105,7 +105,7 @@ bdk_electrum = { version = "0.24.0", default-features = false, features = ["use-
 bdk_wallet = { version = "3.2.0", default-features = false, features = ["std", "keys-bip39"]}
 
 bitreq = { version = "0.3", default-features = false, features = ["async-https", "json-using-serde"] }
-rustls = { version = "0.23", default-features = false }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # rusqlite 0.40.0 and 0.40.1 do not compile on our MSRV.
 rusqlite = { version = ">=0.31.0, <0.40.0", features = ["bundled"], optional = true }
 bitcoin = "0.32.7"

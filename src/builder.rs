@@ -2658,7 +2658,7 @@ fn build_with_store_internal(
 	})
 }
 
-fn optionally_install_rustls_cryptoprovider() {
+pub(crate) fn optionally_install_rustls_cryptoprovider() {
 	// Acquire a global Mutex, ensuring that only one process at a time install the provider. This
 	// is mostly required for running tests concurrently.
 	static INIT_CRYPTO: Once = Once::new();
