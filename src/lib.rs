@@ -1614,8 +1614,13 @@ impl Node {
 		};
 		let cur_anchor_reserve_sats =
 			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
-		let spendable_amount_sats =
-			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0);
+		let spendable_amount_sats = if new_channel_with_funding_fee_rate.is_some() {
+			self.wallet.get_spendable_amount_sats(cur_anchor_reserve_sats).unwrap_or(0)
+		} else {
+			// A splice-in only spends confirmed outputs, and the check of its built contribution
+			// leaves out unconfirmed change, so check against the same funds before coin selection.
+			self.wallet.get_confirmed_unlocked_amount_sats().saturating_sub(cur_anchor_reserve_sats)
+		};
 
 		if spendable_amount_sats < amount_sats {
 			log_error!(
@@ -1660,6 +1665,65 @@ impl Node {
 		}
 
 		Ok(())
+	}
+
+	/// Checks, now that the fee of `contribution` is known, that it leaves the anchor reserve in
+	/// place. Otherwise, fails with [`Error::ChannelSplicingFailed`], after returning the inputs
+	/// and outputs `contribution` reserved for itself to the wallet via
+	/// `Wallet::release_inputs_and_outputs`. Those it inherited from a pending splice stay
+	/// reserved.
+	///
+	/// Once the transaction of `contribution` confirms, we hold `confirmed_unlocked_sats`, read
+	/// before `contribution` was built as building it locks the inputs it selects, plus the inputs
+	/// of `prior_contribution`, the contribution it replaces, which are ours again unless
+	/// `contribution` spends them too. What `contribution` may take from our wallet at most, see
+	/// [`max_wallet_spend_sats`], must leave the anchor reserve of those funds, unless it takes no
+	/// more than `prior_contribution` already may.
+	fn check_sufficient_onchain_funds_for_contribution(
+		&self, contribution: FundingContribution, prior_contribution: Option<&FundingContribution>,
+		confirmed_unlocked_sats: u64,
+	) -> Result<FundingContribution, Error> {
+		let required_funds_sats = max_wallet_spend_sats(&contribution);
+		if required_funds_sats <= prior_contribution.map_or(0, max_wallet_spend_sats) {
+			return Ok(contribution);
+		}
+
+		let prior_inputs_sats: u64 = prior_contribution.map_or(0, |prior_contribution| {
+			prior_contribution.inputs().iter().map(|input| input.output().value.to_sat()).sum()
+		});
+		let cur_anchor_reserve_sats =
+			total_anchor_channels_reserve_sats(&self.channel_manager, &self.config);
+		let available_funds_sats = confirmed_unlocked_sats
+			.saturating_add(prior_inputs_sats)
+			.saturating_sub(cur_anchor_reserve_sats);
+		if required_funds_sats <= available_funds_sats {
+			return Ok(contribution);
+		}
+
+		let action_str =
+			if prior_contribution.is_some() { "bump the splice fee" } else { "splice-in" };
+		log_error!(
+			self.logger,
+			"Unable to {} due to insufficient funds. Available: {}sats, Required: {}sats (including fees)",
+			action_str,
+			available_funds_sats,
+			required_funds_sats,
+		);
+
+		// Return what was set aside for the contribution we drop, but nothing it inherited from a
+		// pending splice: that splice's transaction may still confirm.
+		let inputs = contribution.reserved_inputs().map(|input| input.outpoint()).collect();
+		let outputs = contribution.reserved_outputs().cloned().collect();
+		if let Err(e) =
+			self.runtime.block_on(self.wallet.release_inputs_and_outputs(inputs, outputs))
+		{
+			log_error!(
+				self.logger,
+				"Failed to release the inputs of a dropped splice contribution: {}",
+				e
+			);
+		}
+		Err(Error::ChannelSplicingFailed)
 	}
 
 	/// Connect to a node and open a new unannounced channel.
@@ -1942,10 +2006,6 @@ impl Node {
 			});
 			let max_feerate = max_funding_feerate(min_feerate);
 
-			if let FundingAmount::Exact { amount_sats } = splice_amount_sats {
-				self.check_sufficient_onchain_funds(amount_sats, &counterparty_node_id, None)?;
-			}
-
 			let funding_template = self
 				.channel_manager
 				.splice_channel(&channel_details.channel_id, &counterparty_node_id)
@@ -1973,18 +2033,35 @@ impl Node {
 			};
 
 			let contribution = match splice_amount_sats {
-				FundingAmount::Exact { amount_sats } => self
-					.runtime
-					.block_on(funding_template.splice_in(
-						Amount::from_sat(amount_sats),
-						feerate,
-						max_feerate,
-						Arc::clone(&self.wallet),
-					))
-					.map_err(|e| {
-						log_error!(self.logger, "Failed to splice channel: {}", e);
-						Error::ChannelSplicingFailed
-					})?,
+				FundingAmount::Exact { amount_sats } => {
+					// Only checked here, so that a pending splice of ours, whose inputs are locked,
+					// fails above as such rather than for lack of funds.
+					self.check_sufficient_onchain_funds(amount_sats, &counterparty_node_id, None)?;
+
+					// Coin selection locks the inputs it picks, so read our funds before it.
+					let confirmed_unlocked_sats = self.wallet.get_confirmed_unlocked_amount_sats();
+
+					let contribution = self
+						.runtime
+						.block_on(funding_template.splice_in(
+							Amount::from_sat(amount_sats),
+							feerate,
+							max_feerate,
+							Arc::clone(&self.wallet),
+						))
+						.map_err(|e| {
+							log_error!(self.logger, "Failed to splice channel: {}", e);
+							Error::ChannelSplicingFailed
+						})?;
+
+					// The fee for our contribution is paid from the same on-chain funds as the
+					// amount, and coin selection doesn't keep the anchor reserve aside.
+					self.check_sufficient_onchain_funds_for_contribution(
+						contribution,
+						None,
+						confirmed_unlocked_sats,
+					)?
+				},
 				FundingAmount::Max => self.splice_in_with_all_contribution(
 					funding_template,
 					Vec::new(),
@@ -2163,6 +2240,12 @@ impl Node {
 	/// As with the estimate, we may pay up to 1.5 times this feerate: when the channel already has a
 	/// pending splice that requires a higher feerate to be replaced, or when the counterparty
 	/// initiates a splice concurrently and our contribution is added to theirs.
+	///
+	/// The fee for our contribution is paid from the same on-chain funds as `splice_amount_sats`.
+	/// Together with the most we may pay in fees, as described above, the amount must fit within our
+	/// confirmed on-chain funds beyond the anchor reserve. If the amount alone doesn't, this fails
+	/// with [`NodeError::InsufficientFunds`], and if the fees don't, with
+	/// [`NodeError::ChannelSplicingFailed`].
 	///
 	/// # Experimental API
 	///
@@ -2947,6 +3030,41 @@ fn max_splice_out_output(
 	Ok(output)
 }
 
+/// The most `contribution` may take from our on-chain wallet once its transaction confirms: its
+/// inputs, less the least change it may return.
+///
+/// After we built `contribution`, LDK may still raise its fee up to its maximum feerate, when our
+/// contribution joins a splice the counterparty initiated or the RBF minimum feerate rises. It
+/// pays the difference from the change, and drops the change entirely if less than dust would be
+/// left.
+fn max_wallet_spend_sats(contribution: &FundingContribution) -> u64 {
+	let inputs_sats: u64 =
+		contribution.inputs().iter().map(|input| input.output().value.to_sat()).sum();
+	let Some(change_output) = contribution.change_output() else {
+		return inputs_sats;
+	};
+
+	// At the same weight, the fee scales with the feerate, and as the acceptor we pay for less
+	// weight. Fees are rounded up, so this is at least the increase LDK may apply.
+	let fee_sats = contribution.estimated_fee().to_sat();
+	let feerate_sat_per_kwu = contribution.feerate().to_sat_per_kwu();
+	let max_feerate_sat_per_kwu = contribution.max_feerate().to_sat_per_kwu();
+	let max_fee_increase_sats = if feerate_sat_per_kwu == 0 {
+		0
+	} else {
+		fee_sats
+			.saturating_mul(max_feerate_sat_per_kwu.saturating_sub(feerate_sat_per_kwu))
+			.div_ceil(feerate_sat_per_kwu)
+	};
+
+	let dust_limit_sats = change_output.script_pubkey.minimal_non_dust().to_sat();
+	let min_change_sats = match change_output.value.to_sat().checked_sub(max_fee_increase_sats) {
+		Some(change_sats) if change_sats >= dust_limit_sats => change_sats,
+		_ => 0,
+	};
+	inputs_sats.saturating_sub(min_change_sats)
+}
+
 impl Drop for Node {
 	fn drop(&mut self) {
 		let _ = self.stop();
@@ -3181,5 +3299,77 @@ mod tests {
 		assert_eq!(new.latest_fee_rate_cache_update_timestamp, Some(1_200));
 		assert_eq!(new.latest_pathfinding_scores_sync_timestamp, Some(1_300));
 		assert_eq!(new.latest_node_announcement_broadcast_timestamp, Some(2_000));
+	}
+
+	fn test_p2wpkh_script(seed: u8) -> bitcoin::ScriptBuf {
+		use bitcoin::hashes::Hash;
+		bitcoin::ScriptBuf::new_p2wpkh(&bitcoin::WPubkeyHash::from_byte_array([seed; 20]))
+	}
+
+	/// A contribution spending a 100,000 sat coin, with the given change, whose fee of 1,001 sats
+	/// at 1,000 sat/kwu may rise up to `max_feerate_sat_per_kwu`.
+	fn test_splice_in_contribution(
+		change_sat: Option<u64>, max_feerate_sat_per_kwu: u64,
+	) -> FundingContribution {
+		let prevtx = bitcoin::Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: bitcoin::absolute::LockTime::ZERO,
+			input: vec![bitcoin::TxIn::default()],
+			output: vec![bitcoin::TxOut {
+				value: Amount::from_sat(100_000),
+				script_pubkey: test_p2wpkh_script(1),
+			}],
+		};
+		let change_output = change_sat.map(|change_sat| bitcoin::TxOut {
+			value: Amount::from_sat(change_sat),
+			script_pubkey: test_p2wpkh_script(2),
+		});
+		crate::payment::pending_payment_store::test_funding_contribution_with_parts(
+			1_001,
+			1_000,
+			max_feerate_sat_per_kwu,
+			&[prevtx],
+			&[],
+			change_output.as_ref(),
+		)
+	}
+
+	#[test]
+	fn max_wallet_spend_without_change_is_all_inputs() {
+		assert_eq!(max_wallet_spend_sats(&test_splice_in_contribution(None, 1_500)), 100_000);
+	}
+
+	#[test]
+	fn max_wallet_spend_holds_back_change_for_a_higher_fee() {
+		// At 1.5 times the feerate, the fee of 1,001 sats may rise by 500.5 sats, rounded up.
+		assert_eq!(
+			max_wallet_spend_sats(&test_splice_in_contribution(Some(10_000), 1_500)),
+			100_000 - 10_000 + 501
+		);
+		// Without room to raise the feerate, all of the change comes back.
+		assert_eq!(
+			max_wallet_spend_sats(&test_splice_in_contribution(Some(10_000), 1_000)),
+			100_000 - 10_000
+		);
+	}
+
+	#[test]
+	fn max_wallet_spend_counts_change_left_below_dust_as_spent() {
+		let dust_limit_sat = test_p2wpkh_script(2).minimal_non_dust().to_sat();
+		// Change left at the dust limit after the higher fee is kept.
+		assert_eq!(
+			max_wallet_spend_sats(&test_splice_in_contribution(Some(501 + dust_limit_sat), 1_500)),
+			100_000 - dust_limit_sat
+		);
+		// Below it, the change is dropped and spent along with the inputs.
+		assert_eq!(
+			max_wallet_spend_sats(&test_splice_in_contribution(
+				Some(501 + dust_limit_sat - 1),
+				1_500
+			)),
+			100_000
+		);
+		// So is change that can't even cover the higher fee.
+		assert_eq!(max_wallet_spend_sats(&test_splice_in_contribution(Some(400), 1_500)), 100_000);
 	}
 }
