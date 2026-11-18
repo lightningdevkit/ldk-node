@@ -823,15 +823,15 @@ impl UtxoSource for UtxoSourceClient {
 pub enum BitcoindClient {
 	Rpc {
 		rpc_client: Arc<RpcClient>,
-		latest_mempool_timestamp: AtomicU64,
-		mempool_entries_cache: tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
+		mempool_eviction_timestamp: AtomicU64,
+		mempool_entries_cache: tokio::sync::Mutex<HashMap<Txid, CachedMempoolEntry>>,
 		mempool_txs_cache: tokio::sync::Mutex<HashMap<Txid, (Transaction, u64)>>,
 	},
 	Rest {
 		rest_client: Arc<RestClient>,
 		rpc_client: Arc<RpcClient>,
-		latest_mempool_timestamp: AtomicU64,
-		mempool_entries_cache: tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
+		mempool_eviction_timestamp: AtomicU64,
+		mempool_entries_cache: tokio::sync::Mutex<HashMap<Txid, CachedMempoolEntry>>,
 		mempool_txs_cache: tokio::sync::Mutex<HashMap<Txid, (Transaction, u64)>>,
 	},
 }
@@ -844,11 +844,16 @@ impl BitcoindClient {
 
 		let rpc_client = Arc::new(RpcClient::new(&rpc_credentials, url));
 
-		let latest_mempool_timestamp = AtomicU64::new(0);
+		let mempool_eviction_timestamp = AtomicU64::new(0);
 
 		let mempool_entries_cache = tokio::sync::Mutex::new(HashMap::new());
 		let mempool_txs_cache = tokio::sync::Mutex::new(HashMap::new());
-		Self::Rpc { rpc_client, latest_mempool_timestamp, mempool_entries_cache, mempool_txs_cache }
+		Self::Rpc {
+			rpc_client,
+			mempool_eviction_timestamp,
+			mempool_entries_cache,
+			mempool_txs_cache,
+		}
 	}
 
 	/// Creates a new, primarily REST API client for the chain interactions
@@ -867,7 +872,7 @@ impl BitcoindClient {
 		let rpc_credentials = rpc_credentials(rpc_user, rpc_password);
 		let rpc_client = Arc::new(RpcClient::new(&rpc_credentials, rpc_url));
 
-		let latest_mempool_timestamp = AtomicU64::new(0);
+		let mempool_eviction_timestamp = AtomicU64::new(0);
 
 		let mempool_entries_cache = tokio::sync::Mutex::new(HashMap::new());
 		let mempool_txs_cache = tokio::sync::Mutex::new(HashMap::new());
@@ -875,7 +880,7 @@ impl BitcoindClient {
 		Self::Rest {
 			rest_client,
 			rpc_client,
-			latest_mempool_timestamp,
+			mempool_eviction_timestamp,
 			mempool_entries_cache,
 			mempool_txs_cache,
 		}
@@ -1189,7 +1194,7 @@ impl BitcoindClient {
 	}
 
 	async fn update_mempool_entries_cache_inner(
-		&self, mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
+		&self, mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, CachedMempoolEntry>>,
 	) -> Result<(), BitcoindClientError> {
 		let mempool_txids = self.get_raw_mempool().await?;
 
@@ -1207,7 +1212,7 @@ impl BitcoindClient {
 			}
 
 			if let Some(entry) = self.get_mempool_entry(txid).await? {
-				mempool_entries_cache.insert(txid, entry.clone());
+				mempool_entries_cache.insert(txid, CachedMempoolEntry { entry, emitted: false });
 			}
 		}
 
@@ -1239,13 +1244,13 @@ impl BitcoindClient {
 	) -> Result<Vec<(Transaction, u64)>, BitcoindClientError> {
 		match self {
 			BitcoindClient::Rpc {
-				latest_mempool_timestamp,
+				mempool_eviction_timestamp,
 				mempool_entries_cache,
 				mempool_txs_cache,
 				..
 			} => {
 				self.get_mempool_transactions_and_timestamp_at_height_inner(
-					latest_mempool_timestamp,
+					mempool_eviction_timestamp,
 					mempool_entries_cache,
 					mempool_txs_cache,
 					best_processed_height,
@@ -1253,13 +1258,13 @@ impl BitcoindClient {
 				.await
 			},
 			BitcoindClient::Rest {
-				latest_mempool_timestamp,
+				mempool_eviction_timestamp,
 				mempool_entries_cache,
 				mempool_txs_cache,
 				..
 			} => {
 				self.get_mempool_transactions_and_timestamp_at_height_inner(
-					latest_mempool_timestamp,
+					mempool_eviction_timestamp,
 					mempool_entries_cache,
 					mempool_txs_cache,
 					best_processed_height,
@@ -1270,65 +1275,34 @@ impl BitcoindClient {
 	}
 
 	async fn get_mempool_transactions_and_timestamp_at_height_inner(
-		&self, latest_mempool_timestamp: &AtomicU64,
-		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
+		&self, mempool_eviction_timestamp: &AtomicU64,
+		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, CachedMempoolEntry>>,
 		mempool_txs_cache: &tokio::sync::Mutex<HashMap<Txid, (Transaction, u64)>>,
 		best_processed_height: u32,
 	) -> Result<Vec<(Transaction, u64)>, BitcoindClientError> {
-		let prev_mempool_time = latest_mempool_timestamp.load(Ordering::Relaxed);
-		let mut latest_time = prev_mempool_time;
+		let mut latest_time = mempool_eviction_timestamp.load(Ordering::Relaxed);
 
 		self.update_mempool_entries_cache().await?;
 
-		let mempool_entries_cache = mempool_entries_cache.lock().await;
+		let mut mempool_entries_cache = mempool_entries_cache.lock().await;
 		let mut mempool_txs_cache = mempool_txs_cache.lock().await;
-		// Only keep transactions we may still have to emit, i.e., those that entered the mempool
-		// above our best processed height and those a failed poll fetched but didn't emit. Once a
-		// poll succeeds, `latest_mempool_timestamp` advances and the latter are dropped here, so we
-		// don't keep a full copy of the mempool in memory.
-		mempool_txs_cache.retain(|txid, _| {
-			mempool_entries_cache.get(txid).is_some_and(|entry| {
-				entry.height > best_processed_height || entry.time > prev_mempool_time
-			})
-		});
-		mempool_txs_cache.shrink_to_fit();
 
-		let mut txs_to_emit = Vec::new();
-		for (txid, entry) in mempool_entries_cache.iter() {
-			if entry.time > latest_time {
-				latest_time = entry.time;
-			}
-
-			// Avoid emitting transactions that are already emitted if we can guarantee
-			// blocks containing ancestors are already emitted. The bitcoind rpc interface
-			// provides us with the block height that the tx is introduced to the mempool.
-			// If we have already emitted the block of height, we can assume that all
-			// ancestor txs have been processed by the receiver.
-			let ancestor_within_height = entry.height <= best_processed_height;
-			let is_already_emitted = entry.time <= prev_mempool_time;
-			if is_already_emitted && ancestor_within_height {
-				continue;
-			}
-
-			if let Some((cached_tx, cached_time)) = mempool_txs_cache.get(txid) {
-				txs_to_emit.push((cached_tx.clone(), *cached_time));
-				continue;
-			}
-
-			match self.get_raw_transaction(&entry.txid).await {
-				Ok(Some(tx)) => {
-					mempool_txs_cache.insert(entry.txid, (tx.clone(), entry.time));
-					txs_to_emit.push((tx, entry.time));
-				},
-				Ok(None) => {
-					continue;
-				},
-				Err(e) => return Err(e),
-			};
+		if let Some(newest_entry_time) =
+			mempool_entries_cache.values().map(|cached| cached.entry.time).max()
+		{
+			latest_time = latest_time.max(newest_entry_time);
 		}
 
+		let txs_to_emit = emit_new_mempool_txs(
+			&mut mempool_entries_cache,
+			&mut mempool_txs_cache,
+			best_processed_height,
+			|txid| async move { self.get_raw_transaction(&txid).await },
+		)
+		.await?;
+
 		if !txs_to_emit.is_empty() {
-			latest_mempool_timestamp.store(latest_time, Ordering::Release);
+			mempool_eviction_timestamp.store(latest_time, Ordering::Release);
 		}
 		Ok(txs_to_emit)
 	}
@@ -1341,17 +1315,17 @@ impl BitcoindClient {
 		&self, bdk_unconfirmed_txids: Vec<Txid>,
 	) -> Result<Vec<(Txid, u64)>, BitcoindClientError> {
 		match self {
-			BitcoindClient::Rpc { latest_mempool_timestamp, mempool_entries_cache, .. } => {
+			BitcoindClient::Rpc { mempool_eviction_timestamp, mempool_entries_cache, .. } => {
 				Self::get_evicted_mempool_txids_and_timestamp_inner(
-					latest_mempool_timestamp,
+					mempool_eviction_timestamp,
 					mempool_entries_cache,
 					bdk_unconfirmed_txids,
 				)
 				.await
 			},
-			BitcoindClient::Rest { latest_mempool_timestamp, mempool_entries_cache, .. } => {
+			BitcoindClient::Rest { mempool_eviction_timestamp, mempool_entries_cache, .. } => {
 				Self::get_evicted_mempool_txids_and_timestamp_inner(
-					latest_mempool_timestamp,
+					mempool_eviction_timestamp,
 					mempool_entries_cache,
 					bdk_unconfirmed_txids,
 				)
@@ -1361,16 +1335,16 @@ impl BitcoindClient {
 	}
 
 	async fn get_evicted_mempool_txids_and_timestamp_inner(
-		latest_mempool_timestamp: &AtomicU64,
-		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, MempoolEntry>>,
+		mempool_eviction_timestamp: &AtomicU64,
+		mempool_entries_cache: &tokio::sync::Mutex<HashMap<Txid, CachedMempoolEntry>>,
 		bdk_unconfirmed_txids: Vec<Txid>,
 	) -> Result<Vec<(Txid, u64)>, BitcoindClientError> {
-		let latest_mempool_timestamp = latest_mempool_timestamp.load(Ordering::Relaxed);
+		let mempool_eviction_timestamp = mempool_eviction_timestamp.load(Ordering::Relaxed);
 		let mempool_entries_cache = mempool_entries_cache.lock().await;
 		let evicted_txids = bdk_unconfirmed_txids
 			.into_iter()
 			.filter(|txid| !mempool_entries_cache.contains_key(txid))
-			.map(|txid| (txid, latest_mempool_timestamp))
+			.map(|txid| (txid, mempool_eviction_timestamp))
 			.collect();
 		Ok(evicted_txids)
 	}
@@ -1554,6 +1528,67 @@ impl TryInto<SubmitPackageResponse> for JsonResponse {
 	}
 }
 
+/// Returns the mempool transactions we haven't handed out yet, and marks them as emitted.
+///
+/// Entry times only have second resolution, so we track what we emitted per entry rather than
+/// comparing times. Entries are only marked once all transactions were fetched, so a failed call
+/// doesn't mark transactions the receiver never got.
+async fn emit_new_mempool_txs<F, Fut, E>(
+	mempool_entries: &mut HashMap<Txid, CachedMempoolEntry>,
+	mempool_txs: &mut HashMap<Txid, (Transaction, u64)>, best_processed_height: u32,
+	mut fetch_tx: F,
+) -> Result<Vec<(Transaction, u64)>, E>
+where
+	F: FnMut(Txid) -> Fut,
+	Fut: Future<Output = Result<Option<Transaction>, E>>,
+{
+	// Only keep transactions we may still have to emit, i.e., those that entered the mempool
+	// above our best processed height and those a failed call fetched but didn't emit, so we
+	// don't keep a full copy of the mempool in memory.
+	mempool_txs.retain(|txid, _| {
+		mempool_entries
+			.get(txid)
+			.is_some_and(|cached| cached.entry.height > best_processed_height || !cached.emitted)
+	});
+	mempool_txs.shrink_to_fit();
+
+	let mut txs_to_emit = Vec::new();
+	let mut emitted_txids = Vec::new();
+	for CachedMempoolEntry { entry, emitted } in mempool_entries.values() {
+		// Avoid emitting transactions that are already emitted if we can guarantee blocks
+		// containing ancestors are already emitted. The bitcoind rpc interface provides us with
+		// the block height that the tx is introduced to the mempool. If we have already emitted
+		// the block of height, we can assume that all ancestor txs have been processed by the
+		// receiver.
+		let ancestor_within_height = entry.height <= best_processed_height;
+		if *emitted && ancestor_within_height {
+			continue;
+		}
+
+		if let Some((cached_tx, cached_time)) = mempool_txs.get(&entry.txid) {
+			txs_to_emit.push((cached_tx.clone(), *cached_time));
+			emitted_txids.push(entry.txid);
+			continue;
+		}
+
+		match fetch_tx(entry.txid).await? {
+			Some(tx) => {
+				mempool_txs.insert(entry.txid, (tx.clone(), entry.time));
+				txs_to_emit.push((tx, entry.time));
+				emitted_txids.push(entry.txid);
+			},
+			None => continue,
+		}
+	}
+
+	for txid in emitted_txids {
+		if let Some(cached) = mempool_entries.get_mut(&txid) {
+			cached.emitted = true;
+		}
+	}
+	Ok(txs_to_emit)
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct MempoolEntry {
 	/// The transaction id
@@ -1562,6 +1597,13 @@ pub(crate) struct MempoolEntry {
 	time: u64,
 	/// Block height when transaction entered pool
 	height: u32,
+}
+
+/// A [`MempoolEntry`] in our cache, alongside whether we emitted its transaction already.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedMempoolEntry {
+	entry: MempoolEntry,
+	emitted: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1598,11 +1640,13 @@ impl std::error::Error for BitcoindClientError {}
 
 #[cfg(test)]
 mod tests {
-	use std::collections::HashSet;
+	use std::collections::{HashMap, HashSet};
 	use std::sync::Mutex;
 	use std::time::Duration;
 
+	use bitcoin::absolute::LockTime;
 	use bitcoin::hashes::Hash;
+	use bitcoin::transaction::Version;
 	use bitcoin::{FeeRate, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
 	use lightning_block_sync::http::JsonResponse;
 	use proptest::arbitrary::any;
@@ -1611,11 +1655,85 @@ mod tests {
 	use serde_json::json;
 
 	use crate::chain::bitcoind::{
-		acquire_initial_wallet_sync_guard, FeeResponse, GetMempoolEntryResponse,
-		GetRawMempoolResponse, GetRawTransactionResponse, MempoolMinFeeResponse,
+		acquire_initial_wallet_sync_guard, emit_new_mempool_txs, CachedMempoolEntry, FeeResponse,
+		GetMempoolEntryResponse, GetRawMempoolResponse, GetRawTransactionResponse, MempoolEntry,
+		MempoolMinFeeResponse,
 	};
 	use crate::chain::{WalletSyncGuard, WalletSyncStatus};
 	use crate::Error;
+
+	fn insert_mempool_entry(
+		entries: &mut HashMap<Txid, CachedMempoolEntry>, seed: u8, time: u64, height: u32,
+	) {
+		let txid = Txid::from_byte_array([seed; 32]);
+		let entry = MempoolEntry { txid, time, height };
+		entries.insert(txid, CachedMempoolEntry { entry, emitted: false });
+	}
+
+	// Emits the new mempool transactions, identified by their seeds, fetching all of them
+	// successfully except for the one with the `failing` seed.
+	async fn emit_mempool_txs(
+		entries: &mut HashMap<Txid, CachedMempoolEntry>,
+		txs: &mut HashMap<Txid, (Transaction, u64)>, best_processed_height: u32,
+		failing: Option<u8>,
+	) -> Result<HashSet<u8>, ()> {
+		let emitted =
+			emit_new_mempool_txs(entries, txs, best_processed_height, |txid| async move {
+				let seed = txid.to_byte_array()[0];
+				if failing == Some(seed) {
+					return Err(());
+				}
+				Ok(Some(Transaction {
+					version: Version::TWO,
+					lock_time: LockTime::from_consensus(seed as u32),
+					input: Vec::new(),
+					output: Vec::new(),
+				}))
+			})
+			.await?;
+		Ok(emitted.iter().map(|(tx, _)| tx.lock_time.to_consensus_u32() as u8).collect())
+	}
+
+	#[tokio::test]
+	async fn mempool_tx_sharing_timestamp_with_emitted_tx_is_emitted() {
+		let (mut entries, mut txs) = (HashMap::new(), HashMap::new());
+		insert_mempool_entry(&mut entries, 1, 100, 5);
+
+		let emitted = emit_mempool_txs(&mut entries, &mut txs, 5, None).await;
+		assert_eq!(emitted, Ok(HashSet::from([1])));
+
+		// Entry times only have second resolution.
+		insert_mempool_entry(&mut entries, 2, 100, 5);
+
+		let emitted = emit_mempool_txs(&mut entries, &mut txs, 5, None).await;
+		assert_eq!(emitted, Ok(HashSet::from([2])));
+	}
+
+	#[tokio::test]
+	async fn mempool_txs_with_unprocessed_ancestors_are_emitted_again() {
+		let (mut entries, mut txs) = (HashMap::new(), HashMap::new());
+		// The tx entered the mempool at a height we haven't processed yet.
+		insert_mempool_entry(&mut entries, 1, 100, 6);
+
+		for _ in 0..2 {
+			let emitted = emit_mempool_txs(&mut entries, &mut txs, 5, None).await;
+			assert_eq!(emitted, Ok(HashSet::from([1])));
+		}
+		assert_eq!(emit_mempool_txs(&mut entries, &mut txs, 6, None).await, Ok(HashSet::new()));
+	}
+
+	#[tokio::test]
+	async fn failed_fetch_does_not_mark_mempool_txs_as_emitted() {
+		let (mut entries, mut txs) = (HashMap::new(), HashMap::new());
+		insert_mempool_entry(&mut entries, 1, 100, 5);
+		insert_mempool_entry(&mut entries, 2, 100, 5);
+
+		assert_eq!(emit_mempool_txs(&mut entries, &mut txs, 5, Some(2)).await, Err(()));
+
+		let emitted = emit_mempool_txs(&mut entries, &mut txs, 5, None).await;
+		assert_eq!(emitted, Ok(HashSet::from([1, 2])));
+		assert_eq!(emit_mempool_txs(&mut entries, &mut txs, 5, None).await, Ok(HashSet::new()));
+	}
 
 	#[tokio::test]
 	async fn initial_sync_waits_for_in_progress_sync() {
