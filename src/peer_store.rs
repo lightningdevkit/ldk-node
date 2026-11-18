@@ -55,6 +55,22 @@ where
 		.await
 	}
 
+	/// Stores `peer_info`, replacing the address when it differs.
+	///
+	/// No-ops when the peer is already stored at the same address. Callers must only pass an
+	/// address that was just dialed successfully: an unverified address must not overwrite a
+	/// working one. Use [`Self::add_peer`] when the address may not have been dialed.
+	pub(crate) async fn upsert_peer(&self, peer_info: PeerInfo) -> Result<(), Error> {
+		self.update_peers(|peers| match peers.get(&peer_info.node_id) {
+			Some(existing) if existing == &peer_info => false,
+			_ => {
+				peers.insert(peer_info.node_id, peer_info);
+				true
+			},
+		})
+		.await
+	}
+
 	pub(crate) async fn remove_peer(&self, node_id: &PublicKey) -> Result<(), Error> {
 		self.update_peers(|peers| peers.remove(node_id).is_some()).await
 	}
@@ -354,5 +370,20 @@ mod tests {
 		// Removing the peer doesn't change the in-memory set, but as we can't tell what the
 		// store holds, it has to be written regardless.
 		assert_eq!(Err(Error::PersistenceFailed), peer_store.remove_peer(&peer_info.node_id).await);
+	}
+
+	#[tokio::test]
+	async fn upsert_peer_replaces_stored_address() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let peer_store = PeerStore::new(store, Arc::new(TestLogger::new()));
+
+		let old = test_peer_info();
+		let new = PeerInfo {
+			node_id: old.node_id,
+			address: SocketAddress::from_str("127.0.0.1:9739").unwrap(),
+		};
+		peer_store.add_peer(old).await.unwrap();
+		peer_store.upsert_peer(new.clone()).await.unwrap();
+		assert_eq!(peer_store.get_peer(&new.node_id), Some(new));
 	}
 }
