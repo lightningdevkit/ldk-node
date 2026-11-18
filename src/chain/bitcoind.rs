@@ -370,8 +370,9 @@ impl BitcoindChainSource {
 		// for chain data, as using separate timers would allow chain polls taking longer than the
 		// polling interval to starve the fee rate updates.
 		let fee_rate_refresh_interval = Duration::from_secs(FEE_RATE_REFRESH_INTERVAL_SECS);
-		let mut last_best_block_hash = None;
-		let mut last_fee_rate_update: Option<Instant> = None;
+		// We just updated fee rate estimates when initializing the wallets, so skip the initial update.
+		let mut last_best_block_hash = channel_manager.current_best_block().block_hash;
+		let mut last_fee_rate_update = Instant::now();
 		loop {
 			tokio::select! {
 				biased;
@@ -404,9 +405,8 @@ impl BitcoindChainSource {
 			}
 
 			let current_best_block_hash = channel_manager.current_best_block().block_hash;
-			let fee_rate_refresh_due = last_fee_rate_update
-				.map_or(true, |last_update| last_update.elapsed() >= fee_rate_refresh_interval);
-			if last_best_block_hash != Some(current_best_block_hash) || fee_rate_refresh_due {
+			let fee_rate_refresh_due = last_fee_rate_update.elapsed() >= fee_rate_refresh_interval;
+			if last_best_block_hash != current_best_block_hash || fee_rate_refresh_due {
 				tokio::select! {
 					biased;
 					_ = stop_sync_receiver.changed() => {
@@ -418,8 +418,8 @@ impl BitcoindChainSource {
 					}
 					update_res = self.update_fee_rate_estimates() => {
 						if update_res.is_ok() {
-							last_best_block_hash = Some(current_best_block_hash);
-							last_fee_rate_update = Some(Instant::now());
+							last_best_block_hash = current_best_block_hash;
+							last_fee_rate_update = Instant::now();
 						}
 					}
 				}
