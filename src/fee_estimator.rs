@@ -180,7 +180,8 @@ pub(crate) fn apply_post_estimation_adjustments(
 /// The most we are willing to pay for a channel funding transaction: `1.5x` our funding feerate
 /// estimate. Used as the `max_feerate` ceiling for splices and their RBF fee bumps.
 pub(crate) fn max_funding_feerate(estimate: FeeRate) -> FeeRate {
-	FeeRate::from_sat_per_kwu(estimate.to_sat_per_kwu() * 3 / 2)
+	let sats_per_kwu = estimate.to_sat_per_kwu();
+	FeeRate::from_sat_per_kwu(sats_per_kwu.saturating_add(sats_per_kwu / 2))
 }
 
 /// Picks the `(target, max)` feerates for replacing a pending splice's in-flight funding
