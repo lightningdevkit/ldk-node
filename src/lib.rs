@@ -1650,6 +1650,57 @@ impl Node {
 		Ok(spendable_amount_sats)
 	}
 
+	/// Checks, now that the fee of `contribution` is known, that it leaves the anchor reserve in
+	/// place. Otherwise, releases what it reserved for itself and fails with
+	/// [`Error::InsufficientFunds`].
+	///
+	/// What a contribution takes from our wallet is its inputs minus its change, fee included.
+	/// When it replaces `prior_contribution`, only what it takes beyond that one counts. This must
+	/// fit within `spendable_amount_sats`, the spendable balance read before `contribution` was
+	/// built, as building it locks the inputs it selects.
+	fn check_sufficient_onchain_funds_for_contribution(
+		&self, contribution: FundingContribution, prior_contribution: Option<&FundingContribution>,
+		spendable_amount_sats: u64,
+	) -> Result<FundingContribution, Error> {
+		let action_str =
+			if prior_contribution.is_some() { "bump the splice fee" } else { "splice-in" };
+		let wallet_funds_sats = |contribution: &FundingContribution| {
+			let inputs_sats: u64 =
+				contribution.inputs().iter().map(|input| input.output().value.to_sat()).sum();
+			let change_sats =
+				contribution.change_output().map_or(0, |output| output.value.to_sat());
+			inputs_sats.saturating_sub(change_sats)
+		};
+		let required_funds_sats = wallet_funds_sats(&contribution)
+			.saturating_sub(prior_contribution.map_or(0, wallet_funds_sats));
+		if required_funds_sats <= spendable_amount_sats {
+			return Ok(contribution);
+		}
+
+		log_error!(
+			self.logger,
+			"Unable to {} due to insufficient funds. Available: {}sats, Required: {}sats (including fee)",
+			action_str,
+			spendable_amount_sats,
+			required_funds_sats,
+		);
+
+		// Return what was set aside for the contribution we drop, but nothing it inherited from a
+		// pending splice: that splice's transaction may still confirm.
+		let inputs = contribution.reserved_inputs().map(|input| input.outpoint()).collect();
+		let outputs = contribution.reserved_outputs().cloned().collect();
+		if let Err(e) =
+			self.runtime.block_on(self.wallet.release_inputs_and_outputs(inputs, outputs))
+		{
+			log_error!(
+				self.logger,
+				"Failed to release the inputs of a dropped splice contribution: {}",
+				e
+			);
+		}
+		Err(Error::InsufficientFunds)
+	}
+
 	/// Connect to a node and open a new unannounced channel.
 	///
 	/// To open an announced channel, see [`Node::open_announced_channel`].
@@ -1980,43 +2031,12 @@ impl Node {
 						})?;
 
 					// The fee for our contribution is paid from the same on-chain funds as the
-					// amount, and coin selection doesn't keep the anchor reserve aside. Now that the
-					// fee is known, check that what the contribution takes from our wallet, its
-					// inputs minus its change, still leaves the reserve in place.
-					let inputs_sats: u64 = contribution
-						.inputs()
-						.iter()
-						.map(|input| input.output().value.to_sat())
-						.sum();
-					let change_sats =
-						contribution.change_output().map_or(0, |output| output.value.to_sat());
-					let required_funds_sats = inputs_sats.saturating_sub(change_sats);
-					if required_funds_sats > spendable_amount_sats {
-						log_error!(
-							self.logger,
-							"Unable to splice-in due to insufficient funds. Available: {}sats, Required: {}sats (including fee)",
-							spendable_amount_sats,
-							required_funds_sats,
-						);
-
-						// Return what coin selection set aside for the contribution we drop.
-						let inputs =
-							contribution.inputs().iter().map(|input| input.outpoint()).collect();
-						let outputs = contribution.change_output().cloned().into_iter().collect();
-						if let Err(e) = self
-							.runtime
-							.block_on(self.wallet.release_inputs_and_outputs(inputs, outputs))
-						{
-							log_error!(
-								self.logger,
-								"Failed to release the inputs of a dropped splice contribution: {}",
-								e
-							);
-						}
-						return Err(Error::InsufficientFunds);
-					}
-
-					contribution
+					// amount, and coin selection doesn't keep the anchor reserve aside.
+					self.check_sufficient_onchain_funds_for_contribution(
+						contribution,
+						None,
+						spendable_amount_sats,
+					)?
 				},
 				FundingAmount::Max => self.splice_in_with_all_contribution(
 					funding_template,
