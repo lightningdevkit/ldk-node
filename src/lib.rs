@@ -1501,8 +1501,14 @@ impl Node {
 					e
 				);
 				self.pending_funding_fee_rates.lock().expect("lock").remove(&user_channel_id);
-				// Don't keep reconnecting to a peer we only stored for this attempt.
-				if !peer_was_stored {
+				// Don't keep reconnecting to a peer we only stored for this attempt. A
+				// concurrent `open_channel` to the same peer may have stored it too and
+				// succeeded in the meantime, so keep it while we have a channel with it.
+				let has_channels = !self
+					.channel_manager
+					.list_channels_with_counterparty(&peer_info.node_id)
+					.is_empty();
+				if !peer_was_stored && !has_channels {
 					if let Err(e) =
 						self.runtime.block_on(self.peer_store.remove_peer(&peer_info.node_id))
 					{
