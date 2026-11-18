@@ -2364,8 +2364,9 @@ impl Node {
 	///
 	/// [`Node::bump_channel_funding_fee`] preserves the destination output value, including for
 	/// maximum withdrawals. If the channel cannot cover the higher fee, it may fund the entire
-	/// output and fees from the on-chain wallet instead, leaving the channel balance unwithdrawn.
-	/// It does not reduce the destination output to pay the additional fee.
+	/// output and fees from the on-chain wallet instead, leaving the channel balance unwithdrawn,
+	/// or fail with [`NodeError::ChannelSplicingFailed`] if that would spend part of the anchor
+	/// reserve. It does not reduce the destination output to pay the additional fee.
 	///
 	/// Success means the contribution was submitted, not that the splice has completed. Monitor
 	/// [`Event::SpliceNegotiated`] or [`Event::SpliceNegotiationFailed`] for the negotiation result,
@@ -2493,6 +2494,12 @@ impl Node {
 	/// fees, leaving the channel balance unwithdrawn. This also applies to withdrawals created
 	/// with [`Node::splice_out_max`]; the output is not reduced to cover the higher fee.
 	///
+	/// The replacement may take more from our on-chain funds than the pending splice, such as for
+	/// the higher fee of a splice-in or a withdrawal funded by wallet inputs. If so, our confirmed
+	/// on-chain funds must still cover the anchor reserve once it confirms, even at the most we may
+	/// pay in fees as described below. Otherwise, this fails with
+	/// [`NodeError::ChannelSplicingFailed`].
+	///
 	/// A splice of all on-chain funds (see [`Node::splice_in_with_all`]) has no amount to preserve:
 	/// the bump is paid by adding less to the channel, or, if the pending splice's maximum feerate
 	/// does not allow that or less than dust would be left to add, the splice is rebuilt from all
@@ -2544,6 +2551,10 @@ impl Node {
 				return Err(Error::ChannelSplicingFailed);
 			};
 
+			// Coin selection for the replacement, if LDK needs one, locks the inputs it picks, so
+			// read our funds before it.
+			let confirmed_unlocked_sats = self.wallet.get_confirmed_unlocked_amount_sats();
+
 			let rbf_template = funding_template.clone();
 			let prior_value_added_sats = funding_template
 				.prior_contribution()
@@ -2572,7 +2583,15 @@ impl Node {
 				},
 			};
 			let contribution = match adjusted {
-				Some(contribution) => contribution,
+				// The replacement may take more from our wallet than the pending splice does: a
+				// splice-in pays the higher fee from its change or newly selected coins, and a
+				// splice-out whose channel balance can't cover it is funded from our wallet
+				// entirely. Neither keeps the anchor reserve aside.
+				Some(contribution) => self.check_sufficient_onchain_funds_for_contribution(
+					contribution,
+					funding_template.prior_contribution(),
+					confirmed_unlocked_sats,
+				)?,
 				// The pending splice spends manually selected inputs, as a splice-in of all funds
 				// does, so replace it with one built the same way from all confirmed funds: its
 				// inputs and any coins confirmed since.

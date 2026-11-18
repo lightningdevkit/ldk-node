@@ -122,6 +122,11 @@
   transaction when checking the anchor reserve, including the higher fee of up to 1.5 times the
   feerate we may still pay, and fails with `NodeError::ChannelSplicingFailed` if paying it could
   spend part of the reserve. Previously, the fee could be paid from the reserve.
+- `Node::bump_channel_funding_fee` now checks the anchor reserve as well, and fails with
+  `NodeError::ChannelSplicingFailed` if the replacement takes more from our on-chain funds than
+  the pending splice and could spend part of the reserve. Previously, the reserve could pay the
+  higher fee of a splice-in, or fund a splice-out's withdrawal when the channel balance couldn't
+  cover the higher fee.
 
 # 0.7.0 - Dec. 3, 2025
 This seventh minor release introduces numerous new features, bug fixes, and API improvements. In particular, it adds support for channel Splicing, Async Payments, as well as sourcing chain data from a Bitcoin Core REST backend.
