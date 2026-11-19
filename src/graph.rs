@@ -152,9 +152,13 @@ impl From<lightning::routing::gossip::NodeInfo> for NodeInfo {
 #[cfg(feature = "uniffi")]
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct NodeAnnouncementInfo {
+	/// Protocol features the node announced support for.
+	pub features: Arc<crate::ffi::NodeFeatures>,
 	/// When the last known update to the node state was issued.
 	/// Value is opaque, as set in the announcement.
 	pub last_update: u32,
+	/// Color assigned to the node, as three bytes holding the red, green, and blue components.
+	pub rgb: Vec<u8>,
 	/// Moniker assigned to the node.
 	/// May be invalid or malicious (eg control chars),
 	/// should not be exposed to the user.
@@ -167,9 +171,41 @@ pub struct NodeAnnouncementInfo {
 impl From<lightning::routing::gossip::NodeAnnouncementInfo> for NodeAnnouncementInfo {
 	fn from(value: lightning::routing::gossip::NodeAnnouncementInfo) -> Self {
 		Self {
+			features: Arc::new(value.features().clone().into()),
 			last_update: value.last_update(),
+			rgb: value.rgb().to_vec(),
 			alias: value.alias().to_string(),
 			addresses: value.addresses().iter().cloned().collect(),
 		}
+	}
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod tests {
+	use lightning::routing::gossip::{
+		NodeAlias, NodeAnnouncementDetails, NodeAnnouncementInfo as LdkNodeAnnouncementInfo,
+	};
+	use lightning_types::features::NodeFeatures as LdkNodeFeatures;
+
+	use super::NodeAnnouncementInfo;
+
+	#[test]
+	fn node_announcement_info_conversion_keeps_features_and_rgb() {
+		let mut features = LdkNodeFeatures::empty();
+		features.set_keysend_optional();
+		let rgb = [1, 2, 3];
+		let ldk_info = LdkNodeAnnouncementInfo::Local(NodeAnnouncementDetails {
+			features: features.clone(),
+			last_update: 42,
+			rgb,
+			alias: NodeAlias([0; 32]),
+			addresses: Vec::new(),
+		});
+
+		let info: NodeAnnouncementInfo = ldk_info.into();
+
+		assert_eq!(info.features.inner, features);
+		assert_eq!(info.rgb, rgb.to_vec());
+		assert_eq!(info.last_update, 42);
 	}
 }
