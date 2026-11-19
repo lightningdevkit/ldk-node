@@ -11645,6 +11645,7 @@ mod tests {
 		let contribution = test_funding_contribution_with_parts(
 			300,
 			253,
+			253,
 			std::slice::from_ref(&prevtx),
 			&[],
 			None,

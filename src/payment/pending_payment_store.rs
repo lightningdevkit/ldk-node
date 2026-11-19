@@ -286,18 +286,18 @@ impl From<&PendingPaymentDetails> for PendingPaymentDetailsUpdate {
 pub(crate) fn test_funding_contribution_with_outputs(
 	estimated_fee_sat: u64, feerate: u64, outputs: &[bitcoin::TxOut],
 ) -> lightning::ln::funding::FundingContribution {
-	test_funding_contribution_with_parts(estimated_fee_sat, feerate, &[], outputs, None)
+	test_funding_contribution_with_parts(estimated_fee_sat, feerate, feerate, &[], outputs, None)
 }
 
 /// Builds a [`FundingContribution`] for tests from its parts: the given estimated fee, an input
 /// spending output 0 — which must be P2WPKH — of each given previous transaction, the given
-/// contributed outputs and change output, and the given input-selection feerate (also used as
-/// the maximum), with the is-splice flag set.
+/// contributed outputs and change output, and the given input-selection and maximum feerates,
+/// with the is-splice flag set.
 ///
 /// [`FundingContribution`]: lightning::ln::funding::FundingContribution
 #[cfg(test)]
 pub(crate) fn test_funding_contribution_with_parts(
-	estimated_fee_sat: u64, feerate: u64, prevtxs: &[bitcoin::Transaction],
+	estimated_fee_sat: u64, feerate: u64, max_feerate: u64, prevtxs: &[bitcoin::Transaction],
 	outputs: &[bitcoin::TxOut], change_output: Option<&bitcoin::TxOut>,
 ) -> lightning::ln::funding::FundingContribution {
 	use lightning::util::ser::{BigSize, Writeable};
@@ -340,7 +340,7 @@ pub(crate) fn test_funding_contribution_with_parts(
 	records.extend_from_slice(&[9, 8]); // (9, feerate)
 	records.extend_from_slice(&feerate.to_be_bytes());
 	records.extend_from_slice(&[11, 8]); // (11, max_feerate)
-	records.extend_from_slice(&feerate.to_be_bytes());
+	records.extend_from_slice(&max_feerate.to_be_bytes());
 	records.extend_from_slice(&[13, 1, 1]); // (13, is_splice: true)
 	let mut tlv_bytes = Vec::new();
 	// BigSize length prefix over the TLV records above.
