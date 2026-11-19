@@ -7,11 +7,10 @@
 
 use std::ops::Deref;
 use std::sync::{Arc, RwLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::secp256k1::PublicKey;
 use bitcoin::Transaction;
-use chrono::Utc;
 use lightning::events::HTLCHandlingFailureType;
 use lightning::ln::channelmanager::InterceptId;
 use lightning::ln::types::ChannelId;
@@ -343,7 +342,12 @@ where
 						}
 					}
 
-					let valid_until = LSPSDateTime(Utc::now() + LSPS2_GETINFO_REQUEST_EXPIRY);
+					let now = SystemTime::now()
+						.duration_since(UNIX_EPOCH)
+						.expect("system clock to be ahead of the unix epoch");
+					let valid_until = LSPSDateTime::new_from_duration_since_epoch(
+						now + LSPS2_GETINFO_REQUEST_EXPIRY,
+					);
 					let opening_fee_params = LSPS2RawOpeningFeeParams {
 						min_fee_msat: service_config.min_channel_opening_fee_msat,
 						proportional: service_config.channel_opening_fee_ppm,

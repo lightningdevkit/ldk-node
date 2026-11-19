@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::Utc;
 use ldk_node::logger::{LogContext, LogLevel, LogRecord, LogWriter};
 #[cfg(not(feature = "uniffi"))]
 use log::Record as LogFacadeRecord;
@@ -17,6 +17,37 @@ impl Default for TestLogWriter {
 	fn default() -> Self {
 		TestLogWriter::FileWriter
 	}
+}
+
+/// Returns the current UTC time formatted as `YYYY-MM-DD hh:mm:ss.mmm`.
+fn utc_timestamp_now() -> String {
+	let since_epoch = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+	let secs = since_epoch.as_secs();
+	let secs_of_day = secs % 86_400;
+
+	// Converts the day count to a proleptic Gregorian date, counting years from March 1st so
+	// that the leap day falls at the end of the year.
+	let days = secs / 86_400 + 719_468;
+	let era = days / 146_097;
+	let day_of_era = days % 146_097;
+	let year_of_era =
+		(day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+	let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+	let shifted_month = (5 * day_of_year + 2) / 153;
+	let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+	let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+	let year = year_of_era + era * 400 + u64::from(month <= 2);
+
+	format!(
+		"{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+		year,
+		month,
+		day,
+		secs_of_day / 3_600,
+		secs_of_day % 3_600 / 60,
+		secs_of_day % 60,
+		since_epoch.subsec_millis(),
+	)
 }
 
 pub(crate) struct MockLogFacadeLogger {
@@ -41,7 +72,7 @@ impl LogFacadeLog for MockLogFacadeLogger {
 	fn log(&self, record: &log::Record) {
 		let message = format!(
 			"{} {:<5} [{}:{}] {}",
-			Utc::now().format("%Y-%m-%d %H:%M:%S"),
+			&utc_timestamp_now()[.."YYYY-MM-DD hh:mm:ss".len()],
 			record.level().to_string(),
 			record.module_path().unwrap(),
 			record.line().unwrap(),
@@ -158,7 +189,7 @@ impl LogWriter for MultiNodeLogger {
 		let log = format!(
 			"[{}] {} {:<5} [{}:{}] {}{}\n",
 			self.node_id,
-			Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+			utc_timestamp_now(),
 			record.level.to_string(),
 			record.module_path,
 			record.line,

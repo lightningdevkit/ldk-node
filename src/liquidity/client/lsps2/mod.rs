@@ -1340,10 +1340,18 @@ mod tests {
 	use super::*;
 	use std::future::poll_fn;
 	use std::task::Poll;
+	use std::time::{SystemTime, UNIX_EPOCH};
+
+	use lightning_liquidity::lsps0::ser::LSPSDateTime;
 
 	use crate::builder::NodeBuilder;
 	use crate::entropy::NodeEntropy;
 	use crate::io::test_utils::InMemoryStore;
+
+	fn datetime_from_now(offset: Duration) -> LSPSDateTime {
+		let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+		LSPSDateTime::new_from_duration_since_epoch(now + offset)
+	}
 
 	fn rejection_test_node() -> (crate::Node, PublicKey) {
 		test_node_with_fee_limit(None)
@@ -1381,10 +1389,7 @@ mod tests {
 			let params = LSPS2OpeningFeeParams {
 				min_fee_msat: 1,
 				proportional: 1,
-				valid_until: (chrono::Utc::now() + chrono::Duration::days(2))
-					.to_rfc3339()
-					.parse()
-					.unwrap(),
+				valid_until: datetime_from_now(Duration::from_secs(2 * 24 * 60 * 60)),
 				min_lifetime: 1,
 				max_client_to_self_delay: 1,
 				min_payment_size_msat: 1,
@@ -1450,11 +1455,9 @@ mod tests {
 		let params = |valid_until: u64| LSPS2OpeningFeeParams {
 			min_fee_msat: 1,
 			proportional: 1,
-			valid_until: chrono::DateTime::from_timestamp(valid_until as i64, 0)
-				.unwrap()
-				.to_rfc3339()
-				.parse()
-				.unwrap(),
+			valid_until: LSPSDateTime::new_from_duration_since_epoch(Duration::from_secs(
+				valid_until,
+			)),
 			min_lifetime: 1,
 			max_client_to_self_delay: 1,
 			min_payment_size_msat: 1,
@@ -1588,11 +1591,9 @@ mod tests {
 			params: LSPS2OpeningFeeParams {
 				min_fee_msat: 1,
 				proportional: 1,
-				valid_until: chrono::DateTime::from_timestamp(valid_until as i64, 0)
-					.unwrap()
-					.to_rfc3339()
-					.parse()
-					.unwrap(),
+				valid_until: LSPSDateTime::new_from_duration_since_epoch(Duration::from_secs(
+					valid_until,
+				)),
 				min_lifetime: 1,
 				max_client_to_self_delay: 1,
 				min_payment_size_msat: 1,
@@ -1768,11 +1769,9 @@ mod tests {
 			params: LSPS2OpeningFeeParams {
 				min_fee_msat: 1,
 				proportional: 1,
-				valid_until: chrono::DateTime::from_timestamp(valid_until as i64, 0)
-					.unwrap()
-					.to_rfc3339()
-					.parse()
-					.unwrap(),
+				valid_until: LSPSDateTime::new_from_duration_since_epoch(Duration::from_secs(
+					valid_until,
+				)),
 				min_lifetime: 1,
 				max_client_to_self_delay: 1,
 				min_payment_size_msat: 1,
@@ -1898,11 +1897,10 @@ mod tests {
 
 	#[test]
 	fn opening_params_must_cover_invoice_lifetime() {
-		let valid_until = chrono::Utc::now() + chrono::Duration::hours(3);
 		let mut params = LSPS2OpeningFeeParams {
 			min_fee_msat: 1,
 			proportional: 1,
-			valid_until: valid_until.to_rfc3339().parse().unwrap(),
+			valid_until: datetime_from_now(Duration::from_secs(3 * 60 * 60)),
 			min_lifetime: 1,
 			max_client_to_self_delay: 1,
 			min_payment_size_msat: 1,
@@ -1915,9 +1913,7 @@ mod tests {
 		assert!(!opening_fee_params_valid_for(&params, u64::MAX));
 
 		let invoice_lifetime_secs = 2 * 60 * 60;
-		let valid_until =
-			chrono::Utc::now() + chrono::Duration::seconds(invoice_lifetime_secs as i64 + 1);
-		params.valid_until = valid_until.to_rfc3339().parse().unwrap();
+		params.valid_until = datetime_from_now(Duration::from_secs(invoice_lifetime_secs + 1));
 		assert!(
 			!opening_fee_params_valid_for(&params, invoice_lifetime_secs),
 			"opening parameters leave no time for the buy round trip"
@@ -1953,10 +1949,7 @@ mod tests {
 		LSPS2OpeningFeeParams {
 			min_fee_msat: 1_500,
 			proportional: 0,
-			valid_until: (chrono::Utc::now() + chrono::Duration::days(2))
-				.to_rfc3339()
-				.parse()
-				.unwrap(),
+			valid_until: datetime_from_now(Duration::from_secs(2 * 24 * 60 * 60)),
 			min_lifetime: 1,
 			max_client_to_self_delay: 1,
 			min_payment_size_msat: 1,
