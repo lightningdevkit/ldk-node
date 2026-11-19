@@ -1342,6 +1342,12 @@ fn build_with_store_internal(
 					log_error!(logger, "Failed to apply checkpoint during wallet setup: {}", e);
 					BuildError::WalletSetupFailed
 				})?;
+				// Persist the checkpoint right away, as the wallet would otherwise reload at
+				// genesis if we're restarted before its first sync.
+				wallet.persist(&mut wallet_persister).map_err(|e| {
+					log_error!(logger, "Failed to persist checkpoint during wallet setup: {}", e);
+					BuildError::WalletSetupFailed
+				})?;
 			}
 			wallet
 		},

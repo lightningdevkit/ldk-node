@@ -2449,3 +2449,57 @@ async fn lsps2_lsp_trusts_client_but_client_does_not_claim() {
 		Some(6)
 	);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn wallet_birthday_survives_restart_before_first_sync() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
+	let seed_bytes = vec![42u8; 64];
+
+	// Learn the wallet's first address via a throwaway node sharing the seed.
+	let helper_node = setup_node(&chain_source, random_config(true), Some(seed_bytes.clone()));
+	let addr = helper_node.onchain_payment().new_address().unwrap();
+	helper_node.stop().unwrap();
+
+	// Pay to the address before the node under test is first built, i.e., before its birthday.
+	let premine_amount_sat = 100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	let config = random_config(true);
+	let build_node = || {
+		setup_builder!(builder, config.node_config);
+		let rpc_host = bitcoind.params.rpc_socket.ip().to_string();
+		let rpc_port = bitcoind.params.rpc_socket.port();
+		let values = bitcoind.params.get_cookie_values().unwrap().unwrap();
+		builder.set_chain_source_bitcoind_rpc(rpc_host, rpc_port, values.user, values.password);
+		#[cfg(feature = "uniffi")]
+		builder.set_entropy_seed_bytes(seed_bytes.clone()).unwrap();
+		#[cfg(not(feature = "uniffi"))]
+		{
+			let mut bytes = [0u8; 64];
+			bytes.copy_from_slice(&seed_bytes);
+			builder.set_entropy_seed_bytes(bytes);
+		}
+		builder.build().unwrap()
+	};
+
+	// Build the node for the first time, but drop it before it ever syncs.
+	drop(build_node());
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+
+	let node = build_node();
+	node.start().unwrap();
+	node.sync_wallets().unwrap();
+
+	// A wallet that kept its birthday doesn't see the earlier payment.
+	assert_eq!(node.list_balances().total_onchain_balance_sats, 0);
+	node.stop().unwrap();
+}
