@@ -9863,3 +9863,48 @@ async fn lsps2_service_funding_fee_does_not_spend_anchor_reserve() {
 	client_node.stop().unwrap();
 	payer_node.stop().unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn wallet_birthday_survives_restart_before_first_sync() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = TestChainSource::BitcoindRpcSync(&bitcoind);
+
+	// Learn one of the wallet's addresses via a throwaway node sharing the entropy.
+	let helper_config = random_config();
+	let node_entropy = helper_config.node_entropy;
+	let helper_node = setup_node(&chain_source, helper_config);
+	let addr = helper_node.onchain_payment().new_address().unwrap();
+	helper_node.stop().unwrap();
+
+	// Pay to the address before the node under test is first built, i.e., before its birthday.
+	let premine_amount_sat = 100_000;
+	premine_and_distribute_funds(
+		&bitcoind.client,
+		&electrsd.client,
+		vec![addr],
+		Amount::from_sat(premine_amount_sat),
+	)
+	.await;
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 6).await;
+
+	let mut config = random_config();
+	config.node_entropy = node_entropy;
+	let build_node = || {
+		setup_builder!(builder, config.node_config);
+		configure_chain_source(&chain_source, &mut builder, &config);
+		builder.build(config.node_entropy.into()).unwrap()
+	};
+
+	// Build the node for the first time, but drop it before it ever syncs.
+	drop(build_node());
+
+	generate_blocks_and_wait(&bitcoind.client, &electrsd.client, 1).await;
+
+	let node = build_node();
+	node.start().unwrap();
+	node.sync_wallets().unwrap();
+
+	// A wallet that kept its birthday doesn't see the earlier payment.
+	assert_eq!(node.list_balances().total_onchain_balance_sats, 0);
+	node.stop().unwrap();
+}
