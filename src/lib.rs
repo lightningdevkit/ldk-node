@@ -91,6 +91,8 @@ compile_error!("at least one chain source feature must be enabled");
 mod balance;
 mod builder;
 mod chain;
+#[cfg(feature = "chain-esplora")]
+pub use crate::chain::EsploraHeaderProvider;
 pub mod config;
 mod connection;
 mod data_store;
