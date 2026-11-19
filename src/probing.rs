@@ -806,6 +806,7 @@ impl ProbingStrategy for RandomWalkStrategy {
 }
 
 /// Periodically dispatches probes according to a [`ProbingStrategy`].
+#[cfg_attr(feature = "uniffi", derive(uniffi::Object))]
 pub struct Prober {
 	pub(crate) channel_manager: Arc<ChannelManager>,
 	pub(crate) logger: Arc<Logger>,
@@ -825,6 +826,7 @@ fn fmt_path(path: &lightning::routing::router::Path) -> String {
 		.join(" -> ")
 }
 
+#[cfg_attr(feature = "uniffi", uniffi::export)]
 impl Prober {
 	/// Returns the total millisatoshis currently locked in in-flight probes.
 	pub fn locked_msat(&self) -> u64 {
@@ -843,7 +845,9 @@ impl Prober {
 			})
 			.sum();
 	}
+}
 
+impl Prober {
 	pub(crate) fn handle_background_probe_successful(&self, path: &Path, payment_id: PaymentId) {
 		log_debug!(
 			self.logger,
