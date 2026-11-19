@@ -1389,8 +1389,15 @@ impl Node {
 	}
 
 	/// Returns a reference to the [`Prober`], or `None` if no probing strategy is configured.
+	#[cfg(not(feature = "uniffi"))]
 	pub fn prober(&self) -> Option<&Prober> {
 		self.prober.as_deref()
+	}
+
+	/// Returns the [`Prober`], or `None` if no probing strategy is configured.
+	#[cfg(feature = "uniffi")]
+	pub fn prober(&self) -> Option<Arc<Prober>> {
+		self.prober.clone()
 	}
 
 	/// Retrieve a list of known channels.
