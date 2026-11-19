@@ -6035,15 +6035,15 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn loading_survives_an_undecodable_pool_record() {
+	async fn loading_fails_on_an_undecodable_pool_record() {
 		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
 		{
 			let wallet = new_test_wallet(Arc::clone(&store), false).await;
 			wallet.refill_address_pool().await.unwrap();
 		}
 
-		// Corrupt the record itself: the pool is a reconstructible cache, so an undecodable
-		// record must not prevent the node from starting.
+		// Corrupt the record itself: silently starting with an empty pool would reveal fresh
+		// indices past the old pooled ones, so the read must fail instead.
 		KVStore::write(
 			&*store,
 			BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
@@ -6054,9 +6054,40 @@ mod tests {
 		.await
 		.unwrap();
 
+		let logger = Logger::new_log_facade();
+		let err = persist::read_address_pool(&*store, &logger).await.unwrap_err();
+		assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+	}
+
+	#[tokio::test]
+	async fn loading_starts_a_fresh_pool_on_a_deleted_pool_record() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		wallet.refill_address_pool().await.unwrap();
+		let last_revealed =
+			wallet.inner.lock().unwrap().derivation_index(KeychainKind::External).unwrap();
+		drop(wallet);
+
+		// A missing record is indistinguishable from a wallet that predates the pool, whose
+		// revealed indices were all handed out, so loading reveals a fresh pool past them.
+		KVStore::remove(
+			&*store,
+			BDK_WALLET_ADDRESS_POOL_PRIMARY_NAMESPACE,
+			BDK_WALLET_ADDRESS_POOL_SECONDARY_NAMESPACE,
+			BDK_WALLET_ADDRESS_POOL_KEY,
+			false,
+		)
+		.await
+		.unwrap();
+
+		let logger = Logger::new_log_facade();
+		assert!(persist::read_address_pool(&*store, &logger).await.unwrap().is_empty());
+
 		let wallet = new_test_wallet(Arc::clone(&store), true).await;
 		wallet.refill_address_pool().await.unwrap();
-		assert_eq!(pooled_indices(&wallet).len(), ADDRESS_POOL_TARGET_SIZE);
+		let expected: Vec<u32> =
+			(last_revealed + 1..=last_revealed + ADDRESS_POOL_TARGET_SIZE as u32).collect();
+		assert_eq!(pooled_indices(&wallet), expected);
 	}
 
 	/// An in-memory store whose pool-record writes can be made to fail while wallet-changeset
