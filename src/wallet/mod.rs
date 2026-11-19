@@ -2322,6 +2322,24 @@ impl Wallet {
 		self.get_balances(total_anchor_channels_reserve_sats).map(|(_, s)| s)
 	}
 
+	/// Returns the value of our confirmed outputs that are neither spent nor locked for a pending
+	/// funding transaction.
+	///
+	/// Unlike [`Self::get_spendable_amount_sats`], this leaves out unconfirmed change. A pending
+	/// splice's change is only counted there once wallet sync has seen its transaction, while its
+	/// inputs are locked from the start.
+	pub(crate) fn get_confirmed_unlocked_amount_sats(&self) -> u64 {
+		let locked_wallet = self.inner.lock().expect("lock");
+		locked_wallet
+			.list_unspent()
+			.filter(|utxo| {
+				utxo.chain_position.is_confirmed()
+					&& !locked_wallet.is_outpoint_locked(utxo.outpoint)
+			})
+			.map(|utxo| utxo.txout.value.to_sat())
+			.sum()
+	}
+
 	fn build_drain_psbt(
 		&self, locked_wallet: &mut PersistedWallet<KVStoreWalletPersister>,
 		drain_script: ScriptBuf, cur_anchor_reserve_sats: u64, fee_rate: FeeRate,
@@ -11645,6 +11663,7 @@ mod tests {
 		let contribution = test_funding_contribution_with_parts(
 			300,
 			253,
+			253,
 			std::slice::from_ref(&prevtx),
 			&[],
 			None,
@@ -13751,6 +13770,56 @@ mod tests {
 			.await
 			.unwrap();
 		assert_eq!(selected_outpoints(&third), first_outpoints);
+	}
+
+	/// The anchor reserve check of a splice must not depend on whether wallet sync has seen the
+	/// splice transaction yet, so neither may the funds it checks against.
+	#[tokio::test]
+	async fn confirmed_unlocked_amount_does_not_depend_on_seeing_a_splice() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(store, false).await;
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 1), 1);
+		insert_confirmed_tx(&wallet, wallet_paying_tx(&wallet, 2), 2);
+		assert_eq!(wallet.get_confirmed_unlocked_amount_sats(), 180_000);
+
+		// Coin selection for a splice locks the inputs it picks.
+		let payment = TxOut {
+			value: Amount::from_sat(50_000),
+			script_pubkey: ScriptBuf::new_p2wpkh(&WPubkeyHash::from_byte_array([1; 20])),
+		};
+		let fee_rate = FeeRate::from_sat_per_kwu(250);
+		let selection =
+			Wallet::select_confirmed_utxos(&wallet, Vec::new(), &[payment.clone()], fee_rate)
+				.await
+				.unwrap();
+		let inputs_sats: u64 =
+			selection.confirmed_utxos.iter().map(|utxo| utxo.output().value.to_sat()).sum();
+		let change_output = selection.change_output.clone().expect("the selection has change");
+		let confirmed_unlocked_sats = wallet.get_confirmed_unlocked_amount_sats();
+		assert_eq!(confirmed_unlocked_sats, 180_000 - inputs_sats);
+		let spendable_sats = wallet.get_spendable_amount_sats(0).unwrap();
+
+		// Once wallet sync sees the splice transaction, its inputs are spent rather than locked
+		// and its change counts as spendable, but our confirmed, unlocked funds stay the same.
+		let splice_tx = Transaction {
+			version: bitcoin::transaction::Version::TWO,
+			lock_time: LockTime::ZERO,
+			input: selection
+				.confirmed_utxos
+				.iter()
+				.map(|utxo| bitcoin::TxIn {
+					previous_output: utxo.outpoint(),
+					..Default::default()
+				})
+				.collect(),
+			output: vec![payment, change_output.clone()],
+		};
+		insert_unconfirmed_tx(&wallet, splice_tx);
+		assert_eq!(
+			wallet.get_spendable_amount_sats(0).unwrap(),
+			spendable_sats + change_output.value.to_sat()
+		);
+		assert_eq!(wallet.get_confirmed_unlocked_amount_sats(), confirmed_unlocked_sats);
 	}
 
 	#[tokio::test]
