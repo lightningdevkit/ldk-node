@@ -20,7 +20,7 @@ use std::time::SystemTime;
 use bdk_wallet::descriptor::IntoWalletDescriptor;
 use bdk_wallet::signer::SignersContainer;
 use bdk_wallet::template::Bip84;
-use bdk_wallet::{KeychainKind, Wallet as BdkWallet};
+use bdk_wallet::{AsyncWalletPersister, KeychainKind, Wallet as BdkWallet};
 use bitcoin::bip32::{ChildNumber, Xpriv};
 use bitcoin::key::Secp256k1;
 use bitcoin::secp256k1::PublicKey;
@@ -1876,13 +1876,11 @@ fn build_with_store_internal(
 				return Err(BuildError::ChainTipFetchFailed);
 			}
 
-			let mut wallet = runtime
-				.block_on(async {
-					BdkWallet::create(descriptor, change_descriptor)
-						.network(config.network)
-						.create_wallet_async(&mut wallet_persister)
-						.await
-				})
+			// We hold off on persisting the wallet until its initial checkpoint is in place, as
+			// a wallet persisted without it would reload at genesis.
+			let mut wallet = BdkWallet::create(descriptor.clone(), change_descriptor.clone())
+				.network(config.network)
+				.create_wallet_no_persist()
 				.map_err(|e| {
 					log_error!(logger, "Failed to set up wallet: {}", e);
 					BuildError::WalletSetupFailed
@@ -1959,7 +1957,33 @@ fn build_with_store_internal(
 					BuildError::WalletSetupFailed
 				})?;
 			}
-			wallet
+
+			// BDK can't turn a wallet created in memory into a persisted one, so we write its
+			// initial state ourselves and load it back, which the persister serves from memory.
+			let initial_change_set = wallet.take_staged().unwrap_or_default();
+			runtime.block_on(async {
+				AsyncWalletPersister::persist(&mut wallet_persister, &initial_change_set)
+					.await
+					.map_err(|e| {
+						log_error!(logger, "Failed to persist initial wallet state: {}", e);
+						BuildError::WalletSetupFailed
+					})?;
+
+				BdkWallet::load()
+					.descriptor(KeychainKind::External, Some(descriptor))
+					.descriptor(KeychainKind::Internal, Some(change_descriptor))
+					.check_network(config.network)
+					.load_wallet_async(&mut wallet_persister)
+					.await
+					.map_err(|e| {
+						log_error!(logger, "Failed to load initial wallet state: {}", e);
+						BuildError::WalletSetupFailed
+					})?
+					.ok_or_else(|| {
+						log_error!(logger, "Failed to load initial wallet state: no data found");
+						BuildError::WalletSetupFailed
+					})
+			})?
 		},
 	};
 
