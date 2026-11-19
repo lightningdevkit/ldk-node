@@ -30,6 +30,7 @@ pub(crate) async fn open_channel_to_external<E: ElectrumApi>(
 	let funding_txo = expect_channel_pending_event!(node, ext_node_id);
 	super::super::wait_for_tx(electrs, funding_txo.txid).await;
 	generate_blocks_and_wait(bitcoind, electrs, 10).await;
+	super::wait_for_peer_block_sync(peer, bitcoind).await;
 	super::sync_wallets_with_retry(node).await;
 	let user_channel_id = expect_channel_ready_event!(node, ext_node_id);
 
