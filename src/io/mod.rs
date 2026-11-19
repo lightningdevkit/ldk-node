@@ -34,8 +34,8 @@ pub(crate) const PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "payments";
 pub(crate) const PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
 /// The pending payment information will be persisted under this prefix.
-pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE: &str = "pending_payments";
-pub(crate) const PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
+pub(crate) const ONCHAIN_PAYMENT_TRACKER_PERSISTENCE_PRIMARY_NAMESPACE: &str = "pending_payments";
+pub(crate) const ONCHAIN_PAYMENT_TRACKER_PERSISTENCE_SECONDARY_NAMESPACE: &str = "";
 
 /// The channel transaction provenance facts will be persisted under this prefix.
 pub(crate) const CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE: &str = "channel_tx_facts";
