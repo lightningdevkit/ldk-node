@@ -73,6 +73,7 @@ interface Node {
 	OnchainPayment onchain_payment();
 	Liquidity liquidity();
 	ForwardingAnalytics forwarding_analytics();
+	Prober? prober();
 	[Throws=NodeError]
 	void lnurl_auth(string lnurl);
 	[Throws=NodeError]
@@ -147,6 +148,8 @@ interface FeeRate {
 typedef interface Liquidity;
 
 typedef interface ForwardingAnalytics;
+
+typedef interface Prober;
 
 [Error]
 enum NodeError {

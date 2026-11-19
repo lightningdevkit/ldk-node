@@ -863,6 +863,7 @@ async fn aggregate_expired_forwarded_payments_at(
 /// [`bucket_start_timestamp`]: crate::payment::ChannelPairForwardingStats::bucket_start_timestamp
 /// [`bucket_size_secs`]: crate::payment::ChannelPairForwardingStats::bucket_size_secs
 /// [`aggregated_at_timestamp`]: crate::payment::ChannelPairForwardingStats::aggregated_at_timestamp
+#[cfg_attr(feature = "uniffi", uniffi::export)]
 pub fn aggregate_channel_pair_stats(
 	buckets: &[ChannelPairForwardingStats],
 ) -> Option<ChannelPairForwardingStats> {
