@@ -26,6 +26,8 @@ pub(crate) struct Runtime {
 	background_tasks: Mutex<JoinSet<()>>,
 	cancellable_background_tasks: Mutex<CancellableBackgroundTasks>,
 	background_processor_task: Mutex<Option<JoinHandle<()>>>,
+	/// Cancels the tasks of every [`MonitorPersistenceSpawner`] once the [`Runtime`] is dropped.
+	monitor_persistence_cancellation_token: CancellationToken,
 	logger: Arc<Logger>,
 }
 
@@ -77,12 +79,14 @@ impl Runtime {
 		let background_tasks = Mutex::new(JoinSet::new());
 		let cancellable_background_tasks = Mutex::new(CancellableBackgroundTasks::new());
 		let background_processor_task = Mutex::new(None);
+		let monitor_persistence_cancellation_token = CancellationToken::new();
 
 		Ok(Self {
 			mode,
 			background_tasks,
 			cancellable_background_tasks,
 			background_processor_task,
+			monitor_persistence_cancellation_token,
 			logger,
 		})
 	}
@@ -92,12 +96,14 @@ impl Runtime {
 		let background_tasks = Mutex::new(JoinSet::new());
 		let cancellable_background_tasks = Mutex::new(CancellableBackgroundTasks::new());
 		let background_processor_task = Mutex::new(None);
+		let monitor_persistence_cancellation_token = CancellationToken::new();
 
 		Self {
 			mode,
 			background_tasks,
 			cancellable_background_tasks,
 			background_processor_task,
+			monitor_persistence_cancellation_token,
 			logger,
 		}
 	}
@@ -295,6 +301,12 @@ impl Runtime {
 	}
 }
 
+impl Drop for Runtime {
+	fn drop(&mut self) {
+		self.monitor_persistence_cancellation_token.cancel();
+	}
+}
+
 enum RuntimeMode {
 	Owned(tokio::runtime::Runtime),
 	Handle(tokio::runtime::Handle),
@@ -384,16 +396,19 @@ impl Drop for StoreRuntime {
 	}
 }
 
+#[cfg(feature = "chain-bitcoind")]
 pub(crate) struct RuntimeSpawner {
 	runtime: Arc<Runtime>,
 }
 
+#[cfg(feature = "chain-bitcoind")]
 impl RuntimeSpawner {
 	pub(crate) fn new(runtime: Arc<Runtime>) -> Self {
 		Self { runtime }
 	}
 }
 
+#[cfg(feature = "chain-bitcoind")]
 impl FutureSpawner for RuntimeSpawner {
 	type E = tokio::sync::oneshot::error::RecvError;
 	type SpawnedFutureResult<O> = tokio::sync::oneshot::Receiver<O>;
@@ -405,6 +420,52 @@ impl FutureSpawner for RuntimeSpawner {
 			// We don't care if the send works or not, if the receiver is dropped its not our
 			// problem.
 			let _ = result.send(future.await);
+		});
+		output
+	}
+}
+
+/// The [`FutureSpawner`] of our `ChannelMonitor` persister.
+///
+/// The persister reports each completed `ChannelMonitor` write to the `ChainMonitor` from a task
+/// spawned here. If that task never ran, the channel would keep waiting on the write until the
+/// node is rebuilt, so unlike [`Runtime::spawn_cancellable_background_task`] its tasks are neither
+/// cancelled nor refused when the node is stopped, and only cancelled once the [`Runtime`] is
+/// dropped.
+pub(crate) struct MonitorPersistenceSpawner {
+	// Only a handle rather than an `Arc<Runtime>`: the spawned tasks own the persister, which owns
+	// this spawner, so they must not keep the runtime alive.
+	handle: tokio::runtime::Handle,
+	cancellation_token: CancellationToken,
+}
+
+impl MonitorPersistenceSpawner {
+	pub(crate) fn new(runtime: &Runtime) -> Self {
+		Self {
+			handle: runtime.handle().clone(),
+			cancellation_token: runtime.monitor_persistence_cancellation_token.clone(),
+		}
+	}
+}
+
+impl FutureSpawner for MonitorPersistenceSpawner {
+	type E = tokio::sync::oneshot::error::RecvError;
+	type SpawnedFutureResult<O> = tokio::sync::oneshot::Receiver<O>;
+	fn spawn<O: Send + 'static, F: Future<Output = O> + Send + 'static>(
+		&self, future: F,
+	) -> Self::SpawnedFutureResult<O> {
+		let (result, output) = tokio::sync::oneshot::channel();
+		let cancellation_token = self.cancellation_token.clone();
+		self.handle.spawn(async move {
+			tokio::select! {
+				biased;
+				_ = cancellation_token.cancelled() => {},
+				// We don't care if the send works or not, if the receiver is dropped its not our
+				// problem.
+				res = future => {
+					let _ = result.send(res);
+				},
+			}
 		});
 		output
 	}
@@ -616,5 +677,84 @@ mod tests {
 			)
 		});
 		assert!(task_was_dropped, "dropping the runtime should cancel detached tasks");
+	}
+
+	#[test]
+	fn monitor_persistence_tasks_are_not_cancelled_by_stop() {
+		let runtime = test_runtime();
+		let spawner = MonitorPersistenceSpawner::new(&runtime);
+
+		// A write that is still in flight when the node stops.
+		let (in_flight_started_sender, in_flight_started_receiver) = oneshot::channel();
+		let (in_flight_release_sender, in_flight_release_receiver) = oneshot::channel::<()>();
+		let in_flight = spawner.spawn(async move {
+			let _ = in_flight_started_sender.send(());
+			in_flight_release_receiver.await.expect("test should still be running");
+		});
+		runtime.block_on(async {
+			in_flight_started_receiver.await.expect("in-flight task should start");
+		});
+
+		runtime.abort_cancellable_background_tasks();
+
+		// A write spawned while the node is stopping, e.g., by the background processor's final
+		// flush.
+		let late = spawner.spawn(async {});
+		let _ = in_flight_release_sender.send(());
+		let (in_flight_res, late_res) = runtime.block_on(async {
+			tokio::time::timeout(Duration::from_secs(1), async { tokio::join!(in_flight, late) })
+				.await
+				.expect("monitor persistence tasks should complete after stop")
+		});
+		assert!(in_flight_res.is_ok(), "in-flight task should complete after stop");
+		assert!(late_res.is_ok(), "task spawned during stop should complete");
+	}
+
+	#[test]
+	fn dropping_runtime_cancels_monitor_persistence_tasks() {
+		fn spawn_pending_task_owning_spawner(
+			runtime: &Runtime,
+		) -> (oneshot::Receiver<()>, oneshot::Receiver<()>) {
+			// Like the persister's tasks, the task owns the spawner that spawned it.
+			let spawner = Arc::new(MonitorPersistenceSpawner::new(runtime));
+			let task_spawner = Arc::clone(&spawner);
+			let (started_sender, started_receiver) = oneshot::channel();
+			let (dropped_sender, dropped_receiver) = oneshot::channel();
+			let _ = spawner.spawn(async move {
+				let _spawner = task_spawner;
+				let _drop_notifier = DropNotifier(Some(dropped_sender));
+				let _ = started_sender.send(());
+				std::future::pending::<()>().await;
+			});
+			(started_receiver, dropped_receiver)
+		}
+
+		// A runtime we own.
+		let runtime = test_runtime();
+		let (started_receiver, dropped_receiver) = spawn_pending_task_owning_spawner(&runtime);
+		started_receiver.blocking_recv().expect("task should start");
+		drop(runtime);
+		assert!(
+			dropped_receiver.blocking_recv().is_ok(),
+			"task should be dropped with the runtime"
+		);
+
+		// An externally supplied runtime handle.
+		let tokio_runtime =
+			tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("test runtime");
+		let runtime = Runtime::with_handle(
+			tokio_runtime.handle().clone(),
+			Arc::new(Logger::new_log_facade()),
+		);
+		let (started_receiver, dropped_receiver) = spawn_pending_task_owning_spawner(&runtime);
+		started_receiver.blocking_recv().expect("task should start");
+		drop(runtime);
+		let task_was_dropped = tokio_runtime.block_on(async {
+			matches!(
+				tokio::time::timeout(Duration::from_secs(1), dropped_receiver).await,
+				Ok(Ok(()))
+			)
+		});
+		assert!(task_was_dropped, "dropping the runtime should cancel monitor persistence tasks");
 	}
 }

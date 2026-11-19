@@ -48,7 +48,7 @@ use crate::payment::NodeOffersMessageHandler;
 use crate::payment::{
 	ChannelPairForwardingStats, ForwardedPaymentDetails, PaymentDetails, PendingPaymentDetails,
 };
-use crate::runtime::RuntimeSpawner;
+use crate::runtime::MonitorPersistenceSpawner;
 use crate::wallet::provenance::ChannelTxFacts;
 
 #[cfg(feature = "uniffi")]
@@ -212,7 +212,7 @@ impl<T: PaginatedKVStore + Send + Sync> DynStoreTrait for DynStoreWrapper<T> {
 
 pub(crate) type AsyncPersister = MonitorUpdatingPersisterAsync<
 	DynStoreRef,
-	RuntimeSpawner,
+	MonitorPersistenceSpawner,
 	Arc<Logger>,
 	Arc<KeysManager>,
 	Arc<KeysManager>,
@@ -228,7 +228,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
 	Arc<Logger>,
 	chainmonitor::AsyncPersister<
 		DynStoreRef,
-		RuntimeSpawner,
+		MonitorPersistenceSpawner,
 		Arc<Logger>,
 		Arc<KeysManager>,
 		Arc<KeysManager>,
