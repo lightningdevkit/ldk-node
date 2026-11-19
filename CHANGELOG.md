@@ -45,6 +45,15 @@
 - `BalanceDetails::spendable_onchain_balance_sats` no longer includes wallet outputs selected
   as inputs of a channel funding transaction or splice that has yet to confirm. They remain
   part of `total_onchain_balance_sats` until the transaction is seen by a wallet sync. (#1037)
+- Splices on zero-conf channels, e.g., with peers in `Config::trusted_peers_0conf` or LSPs
+  trusted for zero-conf, are no longer zero-conf themselves. Following LDK, a splice now
+  requires six confirmations before it locks, independent of the channel's own minimum depth.
+  This also applies to existing channels.
+- An LSPS2 service now enforces the `max_client_to_self_delay` agreed upon in the selected
+  opening fee parameters when opening a JIT channel. If the client's `to_self_delay` exceeds it,
+  the channel open fails. LDK clients use a `to_self_delay` of 144 blocks by default, so a
+  service configured with a lower `LSPS2ServiceConfig::max_client_to_self_delay` will fail to
+  open JIT channels to them.
 
 ## Feature and API updates
 - `Node::splice_out_max` withdraws the maximum available channel balance to an on-chain address.
