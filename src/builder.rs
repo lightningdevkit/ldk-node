@@ -1079,10 +1079,7 @@ impl Builder {
 	) {
 		self.inner.write().expect("lock").set_chain_source_esplora(server_url, sync_config);
 	}
-}
 
-#[cfg(all(feature = "uniffi", feature = "chain-esplora"))]
-impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to source its chain data from the given Esplora server.
 	///
 	/// The given `headers` will be included in all requests to the Esplora server, typically used for
