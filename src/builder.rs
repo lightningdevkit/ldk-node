@@ -1216,10 +1216,7 @@ impl Builder {
 			trust_peer_0conf,
 		);
 	}
-}
 
-#[cfg(feature = "uniffi")]
-impl ArcedNodeBuilder {
 	/// Configures the [`Node`] instance to provide an [LSPS2] service, issuing just-in-time
 	/// channels to clients.
 	///
