@@ -414,6 +414,7 @@ where
 				pending_check_order_status_requests: Mutex::new(HashMap::new()),
 				discovery_done_rx: discovery_done_rx.clone(),
 				liquidity_manager: Arc::clone(&liquidity_manager),
+				supports_large_channels: self.channel_manager.node_features().supports_wumbo(),
 				logger: self.logger.clone(),
 			}),
 			lsps2_client: Arc::new(LSPS2Client {
