@@ -29,6 +29,8 @@ use crate::runtime::Runtime;
 use crate::types::{LiquidityManager, Wallet};
 use crate::Error;
 
+const MAX_STANDARD_CHANNEL_SIZE_SAT: u64 = 16_777_216;
+
 pub(crate) struct LSPS1Client<L: Deref>
 where
 	L::Target: LdkLogger,
@@ -42,6 +44,7 @@ where
 		Mutex<HashMap<LSPSRequestId, PendingRequest<LSPS1OrderStatus>>>,
 	pub(crate) discovery_done_rx: tokio::sync::watch::Receiver<bool>,
 	pub(crate) liquidity_manager: Arc<LiquidityManager>,
+	pub(crate) supports_large_channels: bool,
 	pub(crate) logger: L,
 }
 
@@ -89,6 +92,16 @@ where
 		&self, lsp_balance_sat: u64, client_balance_sat: u64, channel_expiry_blocks: u32,
 		announce_channel: bool, refund_address: bitcoin::Address, node_id: &PublicKey,
 	) -> Result<LSPS1OrderStatus, Error> {
+		let channel_size_sat = lsp_balance_sat.saturating_add(client_balance_sat);
+		if channel_size_sat > MAX_STANDARD_CHANNEL_SIZE_SAT && !self.supports_large_channels {
+			log_error!(
+				self.logger,
+				"Requested channel size of {}sat exceeds the standard channel limit, but large channels are not supported.",
+				channel_size_sat
+			);
+			return Err(Error::LiquidityRequestFailed);
+		}
+
 		let lsps1_node = select_lsps_for_protocol(&self.lsp_nodes, 1, Some(node_id))
 			.ok_or(Error::LiquiditySourceUnavailable)?;
 
@@ -98,8 +111,6 @@ where
 		})?;
 
 		let lsp_limits = self.lsps1_request_opening_params(node_id).await?.supported_options;
-		let channel_size_sat = lsp_balance_sat.saturating_add(client_balance_sat);
-
 		if channel_size_sat < lsp_limits.min_channel_balance_sat
 			|| channel_size_sat > lsp_limits.max_channel_balance_sat
 		{
