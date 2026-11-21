@@ -1977,7 +1977,7 @@ impl NodeFeatures {
 
 	/// Returns the BOLT 9 big-endian encoded representation of these features.
 	pub fn to_bytes(&self) -> Vec<u8> {
-		self.inner.encode()
+		self.inner.le_flags().iter().rev().copied().collect()
 	}
 
 	/// Whether this node's `node_announcement` advertises support for `option_data_loss_protect`.
@@ -2369,7 +2369,7 @@ impl InitFeatures {
 
 	/// Returns the BOLT 9 big-endian encoded representation of these features.
 	pub fn to_bytes(&self) -> Vec<u8> {
-		self.inner.encode()
+		self.inner.le_flags().iter().rev().copied().collect()
 	}
 
 	/// Whether the peer's `init` message advertises support for `option_static_remotekey`.
@@ -2654,6 +2654,19 @@ mod tests {
 	use lightning::offers::refund::RefundBuilder;
 
 	use super::*;
+
+	#[test]
+	fn test_feature_bytes_roundtrip() {
+		for bytes in [vec![], vec![2], vec![0x80, 0, 0, 0, 0, 0, 0], vec![1; 126]] {
+			let node_features = NodeFeatures::from_bytes(&bytes);
+			assert_eq!(node_features.to_bytes(), bytes);
+			assert_eq!(NodeFeatures::from_bytes(&node_features.to_bytes()), node_features);
+
+			let init_features = InitFeatures::from_bytes(&bytes);
+			assert_eq!(init_features.to_bytes(), bytes);
+			assert_eq!(InitFeatures::from_bytes(&init_features.to_bytes()), init_features);
+		}
+	}
 
 	fn create_test_bolt11_invoice() -> (LdkBolt11Invoice, Bolt11Invoice) {
 		let invoice_string = "lnbc1pn8g249pp5f6ytj32ty90jhvw69enf30hwfgdhyymjewywcmfjevflg6s4z86qdqqcqzzgxqyz5vqrzjqwnvuc0u4txn35cafc7w94gxvq5p3cu9dd95f7hlrh0fvs46wpvhdfjjzh2j9f7ye5qqqqryqqqqthqqpysp5mm832athgcal3m7h35sc29j63lmgzvwc5smfjh2es65elc2ns7dq9qrsgqu2xcje2gsnjp0wn97aknyd3h58an7sjj6nhcrm40846jxphv47958c6th76whmec8ttr2wmg6sxwchvxmsc00kqrzqcga6lvsf9jtqgqy5yexa";
