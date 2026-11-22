@@ -44,9 +44,9 @@ use crate::ffi::maybe_wrap;
 use crate::liquidity::client::lsps2::router::LSPS2Router;
 use crate::logger::Logger;
 use crate::message_handler::NodeCustomMessageHandler;
-use crate::payment::NodeOffersMessageHandler;
 use crate::payment::{
-	ChannelPairForwardingStats, ForwardedPaymentDetails, PaymentDetails, PendingPaymentDetails,
+	ChannelPairForwardingStats, ForwardedPaymentDetails, NodeOffersMessageHandler, PaymentDetails,
+	PendingPaymentDetails,
 };
 use crate::runtime::RuntimeSpawner;
 use crate::wallet::provenance::ChannelTxFacts;

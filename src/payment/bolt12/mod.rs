@@ -11,8 +11,6 @@
 
 mod offers;
 
-pub(crate) use offers::NodeOffersMessageHandler;
-
 use std::num::NonZeroU64;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -30,6 +28,7 @@ use lightning::sign::{EntropySource, NodeSigner};
 use lightning::util::ser::{Readable, Writeable};
 use lightning_types::payment::PaymentPreimage;
 use lightning_types::string::UntrustedString;
+pub(crate) use offers::NodeOffersMessageHandler;
 
 use crate::config::{AsyncPaymentsRole, Config};
 use crate::connection::ConnectionManager;

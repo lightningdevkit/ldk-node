@@ -32,6 +32,12 @@ use lightning_types::payment::PaymentHash;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
 
+use self::router::LSPS2LeaseParameters;
+use self::state::{
+	is_lease_usable, is_lease_valid_for, now_secs, LSPS2LeaseState, LeaseCacheTarget,
+	LeaseCacheTargetId, LeaseCacheTargetStore, PaymentLease, PaymentLeaseId, PaymentLeaseStore,
+	PendingLeaseRequestState, MIN_CACHED_LEASE_REMAINING_SECS,
+};
 use crate::connection::ConnectionManager;
 use crate::liquidity::{
 	select_all_lsps_for_protocol, select_lsps_for_protocol, LspConfig, LspNode, PendingRequest,
@@ -43,13 +49,6 @@ use crate::payment::PaymentMetadata;
 use crate::runtime::Runtime;
 use crate::types::{ChannelManager, KeysManager, LiquidityManager};
 use crate::{Config, Error};
-
-use self::router::LSPS2LeaseParameters;
-use self::state::{
-	is_lease_usable, is_lease_valid_for, now_secs, LSPS2LeaseState, LeaseCacheTarget,
-	LeaseCacheTargetId, LeaseCacheTargetStore, PaymentLease, PaymentLeaseId, PaymentLeaseStore,
-	PendingLeaseRequestState, MIN_CACHED_LEASE_REMAINING_SECS,
-};
 
 // LSPS2 requires two blocks more than the usual final CLTV delta.
 const LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA: u16 = MIN_FINAL_CLTV_EXPIRY_DELTA + 2;
@@ -1337,10 +1336,10 @@ pub(crate) struct LSPS2BuyResponse {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
 	use std::future::poll_fn;
 	use std::task::Poll;
 
+	use super::*;
 	use crate::builder::NodeBuilder;
 	use crate::entropy::NodeEntropy;
 	use crate::io::test_utils::InMemoryStore;

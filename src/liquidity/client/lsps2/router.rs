@@ -7,8 +7,9 @@
 
 //! Router helpers for injecting LSPS2 blinded payment paths.
 
-use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
+use std::sync::Arc;
 
+use bitcoin::secp256k1::{self, PublicKey, Secp256k1};
 use lightning::blinded_path::payment::{
 	BlindedPaymentPath, ForwardTlvs, PaymentConstraints, PaymentContext, PaymentForwardNode,
 	PaymentRelay, ReceiveTlvs,
@@ -22,12 +23,10 @@ use lightning::routing::router::{InFlightHtlcs, Route, RouteParameters, Router};
 use lightning::sign::{EntropySource, ReceiveAuthKey};
 use lightning::types::features::BlindedHopFeatures;
 use lightning::types::payment::PaymentHash;
-use std::sync::Arc;
-
-use crate::payment::PaymentMetadata;
-use crate::types::Graph;
 
 use super::LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA;
+use crate::payment::PaymentMetadata;
+use crate::types::Graph;
 
 /// Parameters needed to construct an LSPS2 blinded payment path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,11 +217,11 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 
 #[cfg(test)]
 mod tests {
-	use super::*;
+	use core::sync::atomic::{AtomicUsize, Ordering};
+	use std::collections::BTreeMap;
 
 	use bitcoin::secp256k1::SecretKey;
 	use bitcoin::Network;
-	use core::sync::atomic::{AtomicUsize, Ordering};
 	use lightning::blinded_path::payment::{Bolt12OfferContext, PaymentConstraints};
 	use lightning::ln::channel_state::{
 		ChannelCounterparty, ChannelShutdownState, CounterpartyForwardingInfo,
@@ -233,8 +232,8 @@ mod tests {
 	use lightning::offers::offer::OfferId;
 	use lightning::types::features::{ChannelFeatures, InitFeatures};
 	use lightning::types::payment::PaymentSecret;
-	use std::collections::BTreeMap;
 
+	use super::*;
 	use crate::logger::Logger;
 
 	#[derive(Clone)]

@@ -36,17 +36,15 @@ use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use tokio::sync::Mutex as AsyncMutex;
 
+use super::LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA;
 use crate::data_store::{DataStore, StorableObject, StorableObjectId};
-use crate::hex_utils;
 use crate::io::{
 	LSPS2_CACHE_TARGET_PERSISTENCE_KEY, LSPS2_CACHE_TARGET_PERSISTENCE_PRIMARY_NAMESPACE,
 	LSPS2_CACHE_TARGET_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::logger::{log_error, LdkLogger};
 use crate::types::DynStore;
-use crate::Error;
-
-use super::LSPS2_MIN_FINAL_CLTV_EXPIRY_DELTA;
+use crate::{hex_utils, Error};
 
 pub(crate) const MIN_CACHED_LEASE_REMAINING_SECS: u64 = 24 * 60 * 60;
 
@@ -555,7 +553,6 @@ pub(crate) fn now_secs() -> u64 {
 mod tests {
 	use std::sync::Arc;
 
-	use super::*;
 	use bitcoin::secp256k1::{Secp256k1, SecretKey};
 	use lightning::io;
 	use lightning::ln::channelmanager::MIN_FINAL_CLTV_EXPIRY_DELTA;
@@ -563,6 +560,7 @@ mod tests {
 	use lightning::util::ser::{Readable, Writeable};
 	use lightning::util::test_utils::TestLogger;
 
+	use super::*;
 	use crate::io::test_utils::InMemoryStore;
 	use crate::io::{
 		LSPS2_CACHE_TARGET_PERSISTENCE_KEY, LSPS2_CACHE_TARGET_PERSISTENCE_PRIMARY_NAMESPACE,
