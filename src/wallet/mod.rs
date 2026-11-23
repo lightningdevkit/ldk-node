@@ -7801,6 +7801,11 @@ mod tests {
 
 		wallet.drop_abandoned_splice_rounds(channel_id, &[counterparty_txid]).await.unwrap();
 
+		let entry = entry_of(&wallet, &id).await.expect("entry");
+		assert!(entry.candidates().is_empty());
+		assert_eq!(entry.funding_channels(), &details_channels(&observed));
+		assert!(tracks_channel(&entry, channel_id));
+
 		insert_confirmed_tx(&wallet, counterparty_tx.clone(), 100);
 		let event = WalletEvent::TxConfirmed {
 			txid: counterparty_txid,
@@ -8599,6 +8604,33 @@ mod tests {
 		wallet.update_payment_store(vec![unconfirmed]).await.unwrap();
 		assert_eq!(record_of(&wallet, &id).await.expect("record").status, PaymentStatus::Pending);
 		assert!(entry_of(&wallet, &id).await.is_some(), "a reorged-out payment is tracked again");
+	}
+
+	/// A transaction already known to be an interactive funding when wallet sync first sees it gets
+	/// an entry tracking the funding's channels.
+	#[tokio::test]
+	async fn observing_a_classified_funding_tracks_the_channels() {
+		let store: Arc<DynStore> = Arc::new(DynStoreWrapper(InMemoryStore::new()));
+		let wallet = new_test_wallet(Arc::clone(&store), false).await;
+		let (counterparty_node_id, channel_id) = test_counterparty_and_channel();
+		let channel = Channel { counterparty_node_id, channel_id };
+
+		let (tx, _) = splice_out_round(&wallet, 1, 500_000, 300);
+		let txid = tx.compute_txid();
+		wallet
+			.record_channel_tx_facts(ChannelTxFacts::new(txid).with_self_role(
+				TransactionType::InteractiveFunding { channels: vec![channel.clone()] },
+			))
+			.await
+			.unwrap();
+		observe_unconfirmed(&wallet, &tx).await;
+
+		let id = PaymentId(txid.to_byte_array());
+		let record = record_of(&wallet, &id).await.expect("record");
+		assert_eq!(details_channels(&record), vec![channel.clone()]);
+		let entry = entry_of(&wallet, &id).await.expect("entry");
+		assert_eq!(entry.funding_channels(), &[channel]);
+		assert!(tracks_channel(&entry, channel_id));
 	}
 
 	/// A record the chain-tip pass classifies as an interactive funding gets its entry tracking the
