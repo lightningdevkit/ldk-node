@@ -43,7 +43,9 @@ use crate::fee_estimator::{
 	get_num_block_defaults_for_target, ConfirmationTarget, OnchainFeeEstimator,
 };
 use crate::io::utils::update_and_persist_node_metrics;
-use crate::logger::{log_bytes, log_debug, log_error, log_info, log_trace, LdkLogger, Logger};
+use crate::logger::{
+	log_bytes, log_debug, log_error, log_info, log_trace, log_warn, LdkLogger, Logger,
+};
 use crate::payment::NodeOffersMessageHandler;
 use crate::tx_broadcaster::SortedTransactions;
 use crate::types::{Broadcaster, ChainMonitor, ChannelManager, DynStore, Sweeper, Wallet};
@@ -602,7 +604,7 @@ impl BitcoindChainSource {
 		}
 		let confirmation_targets = get_all_conf_targets();
 
-		let mut new_fee_rate_cache = HashMap::with_capacity(10);
+		let mut estimates = Vec::with_capacity(confirmation_targets.len());
 		let now = Instant::now();
 		for target in confirmation_targets {
 			let fee_rate_update_res = match target {
@@ -636,52 +638,64 @@ impl BitcoindChainSource {
 				},
 			};
 
-			let fee_rate = match (fee_rate_update_res, self.config.network) {
-				(Ok(rate), _) => {
-					// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
-					// require some post-estimation adjustments to the fee rates, which we do here.
-					apply_post_estimation_adjustments(target, rate)
-				},
-				(Err(e), Network::Bitcoin) => {
-					// Strictly fail on mainnet.
-					log_error!(self.logger, "Failed to retrieve fee rate estimates: {}", e);
-					return Err(Error::FeerateEstimationUpdateFailed);
-				},
-				(Err(e), network) => {
-					// Off mainnet we carry on with this target's fallback: on regtest/signet
-					// there is no fee market to begin with, and on testnet `estimatesmartfee`
-					// can simply be unreliable. Note this keeps whatever estimates we did get
-					// for the remaining targets.
-					let fallback_fee_rate = get_fallback_fee_rate_for_network(target, network);
-					// On `regtest`/`signet` we expect to end up here for every target, so an
-					// error would be pure noise there.
-					if matches!(network, Network::Regtest | Network::Signet) {
+			let estimate = match fee_rate_update_res {
+				Ok(rate) => Some(rate),
+				Err(e) => {
+					// Note `estimatesmartfee` errors out if it has no estimate for the requested
+					// block count, which on `regtest`/`signet` is the case for every target, so
+					// we keep quiet there.
+					if matches!(self.config.network, Network::Regtest | Network::Signet) {
 						log_trace!(
 							self.logger,
-							"Failed to retrieve fee rate estimates: {}. Falling back to {} sats/kwu.",
+							"Failed to retrieve fee rate estimate for {:?}: {}",
+							target,
 							e,
-							fallback_fee_rate.to_sat_per_kwu(),
 						);
 					} else {
-						log_error!(
+						log_debug!(
 							self.logger,
-							"Failed to retrieve fee rate estimates: {}. Falling back to {} sats/kwu.",
+							"Failed to retrieve fee rate estimate for {:?}: {}",
+							target,
 							e,
-							fallback_fee_rate.to_sat_per_kwu(),
 						);
 					}
-					fallback_fee_rate
+					None
 				},
 			};
+			estimates.push((target, estimate));
+		}
 
-			new_fee_rate_cache.insert(target, fee_rate);
+		let (new_fee_rate_cache, fell_back_targets) =
+			build_fee_rate_cache(&estimates, self.config.network).map_err(|e| {
+				log_error!(
+					self.logger,
+					"Failed to retrieve fee rate estimates: Bitcoin Core didn't return any usable estimates. This is disallowed on Mainnet.",
+				);
+				e
+			})?;
 
-			log_trace!(
+		// On `regtest`/`signet` we expect to fall back for every target, so a warning would be
+		// pure noise there. Elsewhere it means we're pricing transactions off defaults rather
+		// than off the chain, which shouldn't pass silently.
+		if !fell_back_targets.is_empty()
+			&& !matches!(self.config.network, Network::Regtest | Network::Signet)
+		{
+			log_warn!(
 				self.logger,
-				"Fee rate estimation updated for {:?}: {} sats/kwu",
-				target,
-				fee_rate.to_sat_per_kwu(),
+				"Received no usable fee rate estimate for {:?}, falling back to their defaults.",
+				fell_back_targets,
 			);
+		}
+
+		for target in confirmation_targets {
+			if let Some(fee_rate) = new_fee_rate_cache.get(&target) {
+				log_trace!(
+					self.logger,
+					"Fee rate estimation updated for {:?}: {} sats/kwu",
+					target,
+					fee_rate.to_sat_per_kwu(),
+				);
+			}
 		}
 
 		if self.fee_estimator.set_fee_rate_cache(new_fee_rate_cache) {
@@ -1643,6 +1657,47 @@ impl fmt::Display for BitcoindClientError {
 
 impl std::error::Error for BitcoindClientError {}
 
+// Builds the fee rate cache from the estimates Bitcoin Core gave us for our confirmation targets.
+//
+// Targets without an estimate fall back individually, but, just as the Esplora and Electrum
+// sources do, we reject the update on mainnet if we didn't get a single usable estimate.
+//
+// Note we don't count the mempool minimum fee towards that, which we use for
+// `MinAllowedAnchorChannelRemoteFee`, as Bitcoin Core reports it even when it has no fee
+// estimates at all, e.g., while still syncing.
+fn build_fee_rate_cache(
+	estimates: &[(ConfirmationTarget, Option<FeeRate>)], network: Network,
+) -> Result<(HashMap<ConfirmationTarget, FeeRate>, Vec<ConfirmationTarget>), Error> {
+	let mut new_fee_rate_cache = HashMap::with_capacity(estimates.len());
+	let mut fell_back_targets = Vec::new();
+	for &(target, estimate) in estimates {
+		let fee_rate = match estimate {
+			// LDK 0.0.118 introduced changes to the `ConfirmationTarget` semantics that
+			// require some post-estimation adjustments to the fee rates, which we do here.
+			Some(estimate) => apply_post_estimation_adjustments(target, estimate),
+			// We have no estimate to adjust, so we fall back.
+			None => {
+				fell_back_targets.push(target);
+				get_fallback_fee_rate_for_network(target, network)
+			},
+		};
+
+		new_fee_rate_cache.insert(target, fee_rate);
+	}
+
+	let mempool_min_fee_target =
+		ConfirmationTarget::Lightning(LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee);
+	let received_any_estimate = estimates
+		.iter()
+		.any(|(target, estimate)| *target != mempool_min_fee_target && estimate.is_some());
+	if !received_any_estimate && network == Network::Bitcoin {
+		// Ensure we fail if we didn't receive any usable estimates.
+		return Err(Error::FeerateEstimationUpdateFailed);
+	}
+
+	Ok((new_fee_rate_cache, fell_back_targets))
+}
+
 #[cfg(test)]
 mod tests {
 	use std::collections::{HashMap, HashSet};
@@ -1652,7 +1707,8 @@ mod tests {
 	use bitcoin::absolute::LockTime;
 	use bitcoin::hashes::Hash;
 	use bitcoin::transaction::Version;
-	use bitcoin::{FeeRate, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
+	use bitcoin::{FeeRate, Network, OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid, Witness};
+	use lightning::chain::chaininterface::ConfirmationTarget as LdkConfirmationTarget;
 	use lightning_block_sync::http::JsonResponse;
 	use proptest::arbitrary::any;
 	use proptest::collection::vec;
@@ -1660,11 +1716,14 @@ mod tests {
 	use serde_json::json;
 
 	use crate::chain::bitcoind::{
-		acquire_initial_wallet_sync_guard, emit_new_mempool_txs, CachedMempoolEntry, FeeResponse,
-		GetMempoolEntryResponse, GetRawMempoolResponse, GetRawTransactionResponse, MempoolEntry,
-		MempoolMinFeeResponse,
+		acquire_initial_wallet_sync_guard, build_fee_rate_cache, emit_new_mempool_txs,
+		CachedMempoolEntry, FeeResponse, GetMempoolEntryResponse, GetRawMempoolResponse,
+		GetRawTransactionResponse, MempoolEntry, MempoolMinFeeResponse,
 	};
 	use crate::chain::{WalletSyncGuard, WalletSyncStatus};
+	use crate::fee_estimator::{
+		get_all_conf_targets, get_fallback_rate_for_target, ConfirmationTarget,
+	};
 	use crate::Error;
 
 	fn insert_mempool_entry(
@@ -1823,6 +1882,84 @@ mod tests {
 				lock_time: bitcoin::absolute::LockTime::from_consensus(lock_time),
 			}
 		}
+	}
+
+	#[test]
+	fn failed_estimates_fall_back_per_target() {
+		// Bitcoin Core only failed to estimate the urgent target, e.g., as it lacks the data for
+		// it, so the remaining targets keep their estimates rather than the update being dropped.
+		let urgent = ConfirmationTarget::Lightning(LdkConfirmationTarget::UrgentOnChainSweep);
+		let max = ConfirmationTarget::Lightning(LdkConfirmationTarget::MaximumFeeEstimate);
+		let estimates = get_all_conf_targets()
+			.into_iter()
+			.map(|target| {
+				let estimate = (target != urgent).then(|| FeeRate::from_sat_per_kwu(500));
+				(target, estimate)
+			})
+			.collect::<Vec<_>>();
+
+		for network in [Network::Bitcoin, Network::Testnet] {
+			let (cache, fell_back) = build_fee_rate_cache(&estimates, network).unwrap();
+			assert_eq!(cache.len(), get_all_conf_targets().len(), "{}", network);
+			assert_eq!(fell_back, vec![urgent], "{}", network);
+
+			// The failed target gets its own default rather than the 1 sat/vb floor.
+			assert_eq!(
+				cache.get(&urgent).unwrap().to_sat_per_kwu(),
+				get_fallback_rate_for_target(urgent) as u64,
+				"{}",
+				network
+			);
+
+			// While the estimates we did get are adjusted as usual, i.e., `x * 1.1 + 2500` here.
+			assert_eq!(cache.get(&max).unwrap().to_sat_per_kwu(), 3050, "{}", network);
+		}
+	}
+
+	#[test]
+	fn all_failed_estimates_are_rejected_on_mainnet_only() {
+		let estimates =
+			get_all_conf_targets().into_iter().map(|target| (target, None)).collect::<Vec<_>>();
+
+		assert!(matches!(
+			build_fee_rate_cache(&estimates, Network::Bitcoin),
+			Err(Error::FeerateEstimationUpdateFailed)
+		));
+
+		// Off mainnet we carry on with every target on its fallback, which on regtest/signet is
+		// the adjusted 1 sat/vb stand-in, i.e., 2775 sats/kwu for `MaximumFeeEstimate`.
+		for network in [Network::Testnet, Network::Signet, Network::Regtest] {
+			let (cache, fell_back) = build_fee_rate_cache(&estimates, network).unwrap();
+			assert_eq!(cache.len(), get_all_conf_targets().len(), "{}", network);
+			assert_eq!(fell_back.len(), get_all_conf_targets().len(), "{}", network);
+		}
+		for network in [Network::Signet, Network::Regtest] {
+			let (cache, _) = build_fee_rate_cache(&estimates, network).unwrap();
+			let max = ConfirmationTarget::Lightning(LdkConfirmationTarget::MaximumFeeEstimate);
+			assert_eq!(cache.get(&max).unwrap().to_sat_per_kwu(), 2775, "{}", network);
+		}
+	}
+
+	#[test]
+	fn mempool_min_fee_alone_is_rejected_on_mainnet() {
+		// Bitcoin Core reports its mempool minimum fee even if it has no fee estimates at all, so
+		// that alone mustn't be enough to carry on with every other target on its default.
+		let mempool_min_fee_target =
+			ConfirmationTarget::Lightning(LdkConfirmationTarget::MinAllowedAnchorChannelRemoteFee);
+		let estimates = get_all_conf_targets()
+			.into_iter()
+			.map(|target| {
+				let estimate =
+					(target == mempool_min_fee_target).then(|| FeeRate::from_sat_per_kwu(253));
+				(target, estimate)
+			})
+			.collect::<Vec<_>>();
+
+		assert!(matches!(
+			build_fee_rate_cache(&estimates, Network::Bitcoin),
+			Err(Error::FeerateEstimationUpdateFailed)
+		));
+		assert!(build_fee_rate_cache(&estimates, Network::Testnet).is_ok());
 	}
 
 	proptest! {
