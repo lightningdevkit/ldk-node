@@ -62,6 +62,8 @@ impl NetworkGraph {
 #[cfg(feature = "uniffi")]
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ChannelInfo {
+	/// Protocol features of a channel communicated during its announcement.
+	pub features: Arc<crate::ffi::ChannelFeatures>,
 	/// Source node of the first direction of a channel
 	pub node_one: NodeId,
 	/// Details about the first direction of a channel
@@ -78,6 +80,7 @@ pub struct ChannelInfo {
 impl From<lightning::routing::gossip::ChannelInfo> for ChannelInfo {
 	fn from(value: lightning::routing::gossip::ChannelInfo) -> Self {
 		Self {
+			features: Arc::new(value.features.into()),
 			node_one: value.node_one,
 			one_to_two: value.one_to_two.map(|u| u.into()),
 			node_two: value.node_two,
@@ -182,12 +185,42 @@ impl From<lightning::routing::gossip::NodeAnnouncementInfo> for NodeAnnouncement
 
 #[cfg(all(test, feature = "uniffi"))]
 mod tests {
-	use lightning::routing::gossip::{
-		NodeAlias, NodeAnnouncementDetails, NodeAnnouncementInfo as LdkNodeAnnouncementInfo,
-	};
-	use lightning_types::features::NodeFeatures as LdkNodeFeatures;
+	use std::sync::Arc;
 
-	use super::NodeAnnouncementInfo;
+	use bitcoin::Network;
+	use lightning::routing::gossip::{
+		NodeAlias, NodeAnnouncementDetails, NodeAnnouncementInfo as LdkNodeAnnouncementInfo, NodeId,
+	};
+	use lightning_types::features::{
+		ChannelFeatures as LdkChannelFeatures, NodeFeatures as LdkNodeFeatures,
+	};
+
+	use super::{NetworkGraph, NodeAnnouncementInfo};
+	use crate::ffi::ChannelFeatures;
+	use crate::logger::Logger;
+	use crate::types::Graph;
+
+	#[test]
+	fn channel_info_conversion_keeps_features() {
+		let graph = Arc::new(Graph::new(Network::Regtest, Arc::new(Logger::new_log_facade())));
+		let features = LdkChannelFeatures::from_be_bytes(vec![0x02, 0x00]);
+		graph
+			.add_channel_from_partial_announcement(
+				42,
+				None,
+				0,
+				features.clone(),
+				NodeId::from_slice(&[2; 33]).unwrap(),
+				NodeId::from_slice(&[3; 33]).unwrap(),
+			)
+			.unwrap();
+
+		let info = NetworkGraph::new(graph).channel(42).unwrap();
+
+		assert_eq!(info.features.inner, features);
+		assert_eq!(info.features.to_bytes(), vec![0x02, 0x00]);
+		assert_eq!(ChannelFeatures::from_bytes(&info.features.to_bytes()), *info.features);
+	}
 
 	#[test]
 	fn node_announcement_info_conversion_keeps_features_and_rgb() {
