@@ -6306,14 +6306,61 @@ mod tests {
 			.unwrap();
 	}
 
-	/// Inserts `tx` into the BDK wallet as canonically unconfirmed (seen in the mempool).
+	/// Signs the inputs of `tx` that spend outputs of the wallet's, leaving its other inputs as
+	/// they are. BDK only takes in an unconfirmed transaction if its spends of the wallet's
+	/// outputs are validly signed, as they are in any transaction a chain source relays.
+	fn sign_wallet_inputs(wallet: &Wallet, tx: Transaction) -> Transaction {
+		let locked = wallet.inner.lock().unwrap();
+		let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+		let mut wallet_inputs = Vec::new();
+		for (index, txin) in psbt.unsigned_tx.input.iter().enumerate() {
+			let Some(txout) = locked.tx_graph().get_txout(txin.previous_output) else {
+				continue;
+			};
+			if locked.is_mine(txout.script_pubkey.clone()) {
+				psbt.inputs[index].witness_utxo = Some(txout.clone());
+				wallet_inputs.push(index);
+			}
+		}
+
+		let mut sign_options = SignOptions::default();
+		sign_options.trust_witness_utxo = true;
+		locked.sign_with_signers(&mut psbt, &wallet.signers.each_ref(), sign_options).unwrap();
+		for index in wallet_inputs {
+			assert!(psbt.inputs[index].final_script_witness.is_some());
+		}
+		psbt.extract_tx_unchecked_fee_rate()
+	}
+
+	/// Inserts `tx` into the BDK wallet as canonically unconfirmed (seen in the mempool), with
+	/// its spends of the wallet's outputs signed.
 	fn insert_unconfirmed_tx(wallet: &Wallet, tx: Transaction) {
+		let tx = sign_wallet_inputs(wallet, tx);
 		let txid = tx.compute_txid();
 		let mut locked = wallet.inner.lock().unwrap();
 		let mut tx_update = bdk_chain::TxUpdate::default();
 		tx_update.txs = vec![Arc::new(tx)];
 		tx_update.seen_ats = [(txid, 100)].into();
 		locked.apply_update(Update { tx_update, ..Default::default() }).unwrap();
+		assert!(
+			locked.tx_graph().get_tx(txid).is_some(),
+			"the wallet must take the transaction in"
+		);
+	}
+
+	/// Lets the BDK wallet see each of `txs` in the mempool at the time given with it, one after
+	/// the other, with its spends of the wallet's outputs signed.
+	fn apply_unconfirmed_txs(wallet: &Wallet, txs: impl IntoIterator<Item = (Transaction, u64)>) {
+		for (tx, seen_at) in txs {
+			let tx = sign_wallet_inputs(wallet, tx);
+			let txid = tx.compute_txid();
+			let mut locked = wallet.inner.lock().unwrap();
+			locked.apply_unconfirmed_txs([(tx, seen_at)]);
+			assert!(
+				locked.tx_graph().get_tx(txid).is_some(),
+				"the wallet must take the transaction in"
+			);
+		}
 	}
 
 	/// Marks `txid` as evicted from the mempool after it was seen, so the BDK wallet still has
@@ -13356,11 +13403,10 @@ mod tests {
 		parent_replacement.output[0].value = Amount::from_sat(89_000);
 		let child = tx_spending(&wallet, OutPoint::new(parent.compute_txid(), 0));
 		insert_confirmed_tx(&wallet, coin, 1);
-		wallet.inner.lock().unwrap().apply_unconfirmed_txs([
-			(parent.clone(), 100),
-			(child.clone(), 100),
-			(parent_replacement.clone(), 101),
-		]);
+		apply_unconfirmed_txs(
+			&wallet,
+			[(parent.clone(), 100), (child.clone(), 100), (parent_replacement.clone(), 101)],
+		);
 		for tx in [&parent, &child] {
 			record_pending_send(&wallet, tx.compute_txid()).await;
 		}
@@ -13427,7 +13473,7 @@ mod tests {
 		bump.output[0].value = Amount::from_sat(89_000);
 		let (original_txid, bump_txid) = (original.compute_txid(), bump.compute_txid());
 		insert_confirmed_tx(&wallet, coin, 1);
-		wallet.inner.lock().unwrap().apply_unconfirmed_txs([(original, 100), (bump, 101)]);
+		apply_unconfirmed_txs(&wallet, [(original, 100), (bump, 101)]);
 		let payment_id = PaymentId(original_txid.to_byte_array());
 		let payment = PaymentDetails::new(
 			payment_id,
@@ -13472,7 +13518,7 @@ mod tests {
 		bump.output[0].value = Amount::from_sat(89_000);
 		let (original_txid, bump_txid) = (original.compute_txid(), bump.compute_txid());
 		insert_confirmed_tx(&wallet, coin, 1);
-		wallet.inner.lock().unwrap().apply_unconfirmed_txs([(original.clone(), 100), (bump, 101)]);
+		apply_unconfirmed_txs(&wallet, [(original.clone(), 100), (bump, 101)]);
 		let payment = PaymentDetails::new(
 			PaymentId(original_txid.to_byte_array()),
 			PaymentKind::Onchain {
@@ -13554,10 +13600,9 @@ mod tests {
 			builder
 				.add_recipient(recipient, Amount::from_sat(100_000))
 				.fee_rate(FeeRate::from_sat_per_kwu(500));
-			let tx = builder.finish().unwrap().unsigned_tx;
-			locked_wallet.apply_unconfirmed_txs([(tx.clone(), 1)]);
-			tx
+			builder.finish().unwrap().unsigned_tx
 		};
+		apply_unconfirmed_txs(&wallet, [(tx_b.clone(), 1)]);
 		let txid_b = tx_b.compute_txid();
 
 		// The stores hold what the first bump (A -> B) and its sync left behind: the payment id
