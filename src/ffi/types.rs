@@ -2728,6 +2728,23 @@ mod tests {
 	}
 
 	#[test]
+	fn all_networks_roundtrip_through_ffi() {
+		use uniffi::{Lift, Lower};
+
+		for network in [
+			Network::Bitcoin,
+			Network::Testnet,
+			Network::Testnet4,
+			Network::Signet,
+			Network::Regtest,
+		] {
+			let lowered = <Network as Lower<crate::UniFfiTag>>::lower(network);
+			let lifted = <Network as Lift<crate::UniFfiTag>>::try_lift(lowered).unwrap();
+			assert_eq!(lifted, network);
+		}
+	}
+
+	#[test]
 	fn test_channel_type_feature_accessors() {
 		let mut optional = LdkChannelTypeFeatures::empty();
 		optional.set_scid_privacy_optional();
