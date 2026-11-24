@@ -318,7 +318,7 @@ impl Node {
 				// Startup spawns background tasks before it can fail, e.g., when binding our
 				// listening addresses. Wind them all back down rather than leaving them running
 				// behind a node that never came up.
-				self.shutdown();
+				let _ = self.shutdown();
 				Err(e)
 			},
 		}
@@ -816,6 +816,8 @@ impl Node {
 		let background_onion_messenger = Arc::clone(&self.onion_messenger);
 		let background_logger = Arc::clone(&self.logger);
 		let background_error_logger = Arc::clone(&self.logger);
+		let background_failure_stop_sender = self.stop_sender.clone();
+		let background_failure_peer_man = Arc::clone(&self.peer_manager);
 		let background_scorer = Arc::clone(&self.scorer);
 		let stop_bp = self.background_processor_stop_sender.subscribe();
 		let sleeper_logger = Arc::clone(&self.logger);
@@ -839,7 +841,7 @@ impl Node {
 		};
 
 		self.runtime.spawn_background_processor_task(async move {
-			process_events_async(
+			let res = process_events_async(
 				background_persister,
 				|e| background_event_handler.handle_event(e),
 				background_chain_mon,
@@ -861,11 +863,19 @@ impl Node {
 					)
 				},
 			)
-			.await
-			.unwrap_or_else(|e| {
-				log_error!(background_error_logger, "Failed to process events: {}", e);
-				panic!("Failed to process events");
-			});
+			.await;
+
+			if let Err(e) = &res {
+				log_error!(
+					background_error_logger,
+					"Background processing of events failed, halting node activity: {}",
+					e
+				);
+				let _ = background_failure_stop_sender.send(());
+				background_failure_peer_man.disconnect_all_peers();
+			}
+
+			res
 		});
 
 		let mut stop_liquidity_handler = self.stop_sender.subscribe();
@@ -968,6 +978,9 @@ impl Node {
 	/// Disconnects all peers, stops all running background tasks, and shuts down [`Node`].
 	///
 	/// After this returns most API methods will return [`Error::NotRunning`].
+	///
+	/// Returns [`Error::PersistenceFailed`] if background event processing failed. The node is
+	/// shut down regardless.
 	pub fn stop(&self) -> Result<(), Error> {
 		let mut is_running_lock = self.is_running.write().expect("lock");
 		if !*is_running_lock {
@@ -976,11 +989,16 @@ impl Node {
 
 		log_info!(self.logger, "Shutting down LDK Node with node ID {}...", self.node_id());
 
-		self.shutdown();
+		let shutdown_res = self.shutdown();
 
-		log_info!(self.logger, "Shutdown complete.");
 		*is_running_lock = false;
-		Ok(())
+		match shutdown_res {
+			Ok(()) => log_info!(self.logger, "Shutdown complete."),
+			Err(_) => {
+				log_error!(self.logger, "Shutdown complete, but background processing failed.")
+			},
+		}
+		shutdown_res
 	}
 
 	/// Winds down everything [`Node::start_inner`] may have brought up.
@@ -989,7 +1007,7 @@ impl Node {
 	/// also used to clean up after a [`Node::start`] that failed part-way through, in which case
 	/// some of the background tasks below were never spawned and the shutdown signals accordingly
 	/// find no receivers.
-	fn shutdown(&self) {
+	fn shutdown(&self) -> Result<(), Error> {
 		// Prevent blocking Electrum syncs from making any further callbacks before persistence
 		// tasks stop accepting work.
 		self.chain_source.begin_shutdown();
@@ -1021,10 +1039,12 @@ impl Node {
 		}
 
 		// Finally, wait until background processing stopped, at least until a timeout is reached.
-		self.runtime.wait_on_background_processor_task();
+		let background_processor_res = self.runtime.wait_on_background_processor_task();
 
 		#[cfg(tokio_unstable)]
 		self.runtime.log_metrics();
+
+		background_processor_res
 	}
 
 	/// Returns the status of the [`Node`].
