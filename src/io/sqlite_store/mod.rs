@@ -1378,6 +1378,181 @@ mod tests {
 			assert_eq!(response.keys, vec!["key_c", "key_b", "key_a"]);
 		}
 	}
+
+	fn read_user_version(connection: &Connection) -> u16 {
+		connection
+			.query_row("SELECT user_version FROM pragma_user_version", [], |row| row.get(0))
+			.unwrap()
+	}
+
+	#[tokio::test]
+	async fn value_edge_cases_persist_as_blobs() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("value_edge_cases_persist_as_blobs");
+		let db_file_name = "test_db".to_string();
+		let kv_table_name = "test_table".to_string();
+
+		let ns = "test_ns";
+		let sub = "test_sub";
+		let values: Vec<(&str, Vec<u8>)> = vec![
+			("empty", Vec::new()),
+			("nul_bytes", vec![0u8; 64]),
+			("all_bytes", (0..=u8::MAX).collect()),
+			("large", (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect()),
+		];
+
+		{
+			let store = SqliteStore::new(
+				temp_path.clone(),
+				Some(db_file_name.clone()),
+				Some(kv_table_name.clone()),
+			)
+			.unwrap();
+
+			for (key, value) in &values {
+				KVStore::write(&store, ns, sub, key, value.clone()).await.unwrap();
+				assert_eq!(&KVStore::read(&store, ns, sub, key).await.unwrap(), value);
+			}
+
+			// Replacing a large value with a shorter one must not leave stale bytes behind.
+			KVStore::write(&store, ns, sub, "shrunk", vec![7u8; 1024 * 1024]).await.unwrap();
+			KVStore::write(&store, ns, sub, "shrunk", vec![8u8; 3]).await.unwrap();
+
+			// Don't drop/cleanup since we want to reopen
+			std::mem::forget(store);
+		}
+
+		{
+			// Values of any length, including zero, need to be stored as BLOBs rather than as
+			// NULL or TEXT, as they otherwise couldn't be read back.
+			let connection = Connection::open(temp_path.join(&db_file_name)).unwrap();
+			assert_eq!(read_user_version(&connection), SCHEMA_USER_VERSION);
+
+			let sql = format!(
+				"SELECT typeof(value), length(value) FROM {} WHERE key=:key;",
+				kv_table_name
+			);
+			let mut stmt = connection.prepare_cached(&sql).unwrap();
+			let expected = values.iter().map(|(key, value)| (*key, value.len()));
+			for (key, expected_len) in expected.chain(std::iter::once(("shrunk", 3))) {
+				let (value_type, len): (String, i64) = stmt
+					.query_row(named_params! { ":key": key }, |row| Ok((row.get(0)?, row.get(1)?)))
+					.unwrap();
+				assert_eq!(value_type, "blob", "unexpected storage class for {}", key);
+				assert_eq!(len as usize, expected_len, "unexpected length for {}", key);
+			}
+		}
+
+		let store = SqliteStore::new(temp_path, Some(db_file_name), Some(kv_table_name)).unwrap();
+		for (key, value) in &values {
+			assert_eq!(&KVStore::read(&store, ns, sub, key).await.unwrap(), value);
+		}
+		assert_eq!(KVStore::read(&store, ns, sub, "shrunk").await.unwrap(), vec![8u8; 3]);
+
+		let mut listed_keys = KVStore::list(&store, ns, sub).await.unwrap();
+		listed_keys.sort();
+		assert_eq!(listed_keys, vec!["all_bytes", "empty", "large", "nul_bytes", "shrunk"]);
+	}
+
+	#[tokio::test]
+	async fn migrates_database_written_by_v0_7() {
+		use ldk_node_070::io::sqlite_store::SqliteStore as OldSqliteStore;
+		use ldk_node_070::lightning::util::persist::KVStoreSync as OldKVStoreSync;
+
+		let mut temp_path = random_storage_path();
+		temp_path.push("migrates_database_written_by_v0_7");
+		let db_file_name = "test_db".to_string();
+		let kv_table_name = "test_table".to_string();
+
+		let ns = "test_ns";
+		let sub = "test_sub";
+		let values: Vec<(&str, Vec<u8>)> = vec![
+			("key_0", vec![42u8; 32]),
+			("key_1", Vec::new()),
+			("key_2", (0..=u8::MAX).collect()),
+			("key_3", (0..1024 * 1024).map(|i| (i % 251) as u8).collect()),
+		];
+
+		{
+			let old_store = OldSqliteStore::new(
+				temp_path.clone(),
+				Some(db_file_name.clone()),
+				Some(kv_table_name.clone()),
+			)
+			.unwrap();
+			for (key, value) in &values {
+				OldKVStoreSync::write(&old_store, ns, sub, key, value.clone()).unwrap();
+			}
+			OldKVStoreSync::write(&old_store, "other_ns", "", "other_key", vec![1u8; 8]).unwrap();
+		}
+
+		{
+			let connection = Connection::open(temp_path.join(&db_file_name)).unwrap();
+			assert_eq!(read_user_version(&connection), 2);
+		}
+
+		let store =
+			SqliteStore::new(temp_path.clone(), Some(db_file_name.clone()), Some(kv_table_name))
+				.unwrap();
+
+		{
+			let connection = Connection::open(temp_path.join(&db_file_name)).unwrap();
+			assert_eq!(read_user_version(&connection), SCHEMA_USER_VERSION);
+		}
+
+		for (key, value) in &values {
+			assert_eq!(&KVStore::read(&store, ns, sub, key).await.unwrap(), value);
+		}
+		assert_eq!(KVStore::read(&store, "other_ns", "", "other_key").await.unwrap(), vec![1u8; 8]);
+
+		// Pre-existing entries are ordered by their insertion order, newest first.
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
+		assert_eq!(response.keys, vec!["key_3", "key_2", "key_1", "key_0"]);
+
+		KVStore::write(&store, ns, sub, "key_new", vec![99u8; 8]).await.unwrap();
+		KVStore::write(&store, ns, sub, "key_0", vec![43u8; 32]).await.unwrap();
+		KVStore::remove(&store, ns, sub, "key_2", false).await.unwrap();
+		let response = PaginatedKVStore::list_paginated(&store, ns, sub, None).await.unwrap();
+		assert_eq!(response.keys, vec!["key_new", "key_3", "key_1", "key_0"]);
+		assert_eq!(KVStore::read(&store, ns, sub, "key_0").await.unwrap(), vec![43u8; 32]);
+
+		do_read_write_remove_list_persist(&store).await;
+	}
+
+	#[tokio::test(flavor = "multi_thread")]
+	async fn write_waits_for_lock_held_by_other_connection() {
+		use std::time::{Duration, Instant};
+
+		let mut temp_path = random_storage_path();
+		temp_path.push("write_waits_for_lock_held_by_other_connection");
+		let db_file_name = "test_db".to_string();
+
+		let store = SqliteStore::new(
+			temp_path.clone(),
+			Some(db_file_name.clone()),
+			Some("test_table".to_string()),
+		)
+		.unwrap();
+		KVStore::write(&store, "test_ns", "", "key_a", vec![1u8; 8]).await.unwrap();
+
+		let competing_connection = Connection::open(temp_path.join(&db_file_name)).unwrap();
+		competing_connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+		let hold_duration = Duration::from_millis(500);
+		let start = Instant::now();
+		let competing_thread = std::thread::spawn(move || {
+			std::thread::sleep(hold_duration);
+			competing_connection.execute_batch("COMMIT").unwrap();
+		});
+
+		// Rather than failing right away, the write needs to wait for the lock to be released.
+		KVStore::write(&store, "test_ns", "", "key_b", vec![2u8; 8]).await.unwrap();
+		assert!(start.elapsed() >= hold_duration);
+		competing_thread.join().unwrap();
+
+		assert_eq!(KVStore::read(&store, "test_ns", "", "key_a").await.unwrap(), vec![1u8; 8]);
+		assert_eq!(KVStore::read(&store, "test_ns", "", "key_b").await.unwrap(), vec![2u8; 8]);
+	}
 }
 
 #[cfg(ldk_bench)]
