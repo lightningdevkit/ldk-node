@@ -1540,10 +1540,6 @@ impl Node {
 				.try_into()
 				.expect("a 16-byte slice should convert into a [u8; 16]"),
 		);
-
-		// Persist the peer before creating the channel. Once `create_channel` succeeds the
-		// channel exists, so failing afterwards would report a failed initiation for a live
-		// channel, and a caller retrying would open a second one.
 		self.runtime.block_on(self.peer_store.add_peer(peer_info.clone()))?;
 
 		// Register the fee-rate override before creating the channel, as the
