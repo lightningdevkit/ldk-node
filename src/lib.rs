@@ -3343,7 +3343,7 @@ mod tests {
 			value: Amount::from_sat(change_sat),
 			script_pubkey: test_p2wpkh_script(2),
 		});
-		crate::payment::pending_payment_store::test_funding_contribution_with_parts(
+		crate::wallet::test_utils::test_funding_contribution_with_parts(
 			1_001,
 			1_000,
 			max_feerate_sat_per_kwu,

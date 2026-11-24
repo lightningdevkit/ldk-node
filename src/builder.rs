@@ -87,10 +87,10 @@ use crate::io::{
 	self, CHANNEL_FORWARDING_STATS_PERSISTENCE_SECONDARY_NAMESPACE,
 	CHANNEL_TX_FACTS_PERSISTENCE_PRIMARY_NAMESPACE,
 	CHANNEL_TX_FACTS_PERSISTENCE_SECONDARY_NAMESPACE,
-	FORWARDED_PAYMENT_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-	PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
-	PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-	PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+	FORWARDED_PAYMENT_PERSISTENCE_PRIMARY_NAMESPACE,
+	ONCHAIN_PAYMENT_TRACKER_PERSISTENCE_PRIMARY_NAMESPACE,
+	ONCHAIN_PAYMENT_TRACKER_PERSISTENCE_SECONDARY_NAMESPACE,
+	PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE, PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
 };
 use crate::liquidity::client::lsps2::router::LSPS2Router;
 use crate::liquidity::{LSPS2ServiceConfig, LiquiditySourceBuilder, LspConfig};
@@ -111,8 +111,8 @@ use crate::runtime::{Runtime, RuntimeSpawner};
 use crate::tx_broadcaster::TransactionBroadcaster;
 use crate::types::{
 	AsyncPersister, ChainMonitor, ChannelManager, ChannelTxFactsStore, DynStore, DynStoreRef,
-	DynStoreWrapper, GossipSync, Graph, KeysManager, MessageRouter, OnionMessenger, PaymentStore,
-	PeerManager, PendingPaymentStore,
+	DynStoreWrapper, GossipSync, Graph, KeysManager, MessageRouter, OnchainPaymentTracker,
+	OnionMessenger, PaymentStore, PeerManager,
 };
 use crate::wallet::persist::{read_address_pool, KVStoreWalletPersister};
 use crate::wallet::provenance::NodeChannelLiveness;
@@ -1605,7 +1605,7 @@ fn build_with_store_internal(
 		payment_store_res,
 		channel_forwarding_stats_res,
 		node_metris_res,
-		pending_payment_store_res,
+		payment_tracker_res,
 		channel_tx_facts_store_res,
 		address_pool_res,
 	) = runtime.block_on(async move {
@@ -1626,8 +1626,8 @@ fn build_with_store_internal(
 			read_node_metrics(&*kv_store_ref, Arc::clone(&logger_ref)),
 			read_all_objects(
 				&*kv_store_ref,
-				PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE,
-				PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE,
+				ONCHAIN_PAYMENT_TRACKER_PERSISTENCE_PRIMARY_NAMESPACE,
+				ONCHAIN_PAYMENT_TRACKER_PERSISTENCE_SECONDARY_NAMESPACE,
 				Arc::clone(&logger_ref),
 			),
 			read_n_objects(
@@ -1963,15 +1963,15 @@ fn build_with_store_internal(
 		},
 	};
 
-	let pending_payment_store = match pending_payment_store_res {
+	let payment_tracker = match payment_tracker_res {
 		// NOTE: This store must keep all its entries in memory: the wallet scans it in full on
 		// every chain tip change and to resolve replaced transactions. It stays bounded anyway,
 		// as entries are removed once a payment is no longer pending.
-		Ok(pending_payments) => Arc::new(PendingPaymentStore::new(
-			pending_payments,
+		Ok(tracked_payments) => Arc::new(OnchainPaymentTracker::new(
+			tracked_payments,
 			KeepAllEntries,
-			PENDING_PAYMENT_INFO_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
-			PENDING_PAYMENT_INFO_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
+			ONCHAIN_PAYMENT_TRACKER_PERSISTENCE_PRIMARY_NAMESPACE.to_string(),
+			ONCHAIN_PAYMENT_TRACKER_PERSISTENCE_SECONDARY_NAMESPACE.to_string(),
 			Arc::clone(&kv_store),
 			Arc::clone(&logger),
 		)),
@@ -2019,7 +2019,7 @@ fn build_with_store_internal(
 		Arc::clone(&runtime),
 		Arc::clone(&config),
 		Arc::clone(&logger),
-		Arc::clone(&pending_payment_store),
+		Arc::clone(&payment_tracker),
 		Arc::clone(&channel_tx_facts_store),
 	));
 
