@@ -27,3 +27,21 @@ jobs:
         uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # Accepted advisories, none of which affect runtime code we ship. Remove the entries once:
+          # - h2, rustls, rustls-webpki, webpki-roots: the `ldk-node` 0.6.2 dev-dependency is dropped.
+          # - 2026-0374 (basic-toml): `uniffi` uses an `askama` release including askama-rs/askama#771.
+          # - 2026-0441 (pin-utils): `electrsd` uses `nix` 0.31.4+ and can launch Esplora's `electrs`,
+          #   which only accepts `--cookie`.
+          # - 2026-0542 (humantime): `lnd_grpc_rust` uses `pretty_env_logger` 0.6 or newer.
+          ignore: >-
+            RUSTSEC-2026-0098,
+            RUSTSEC-2026-0099,
+            RUSTSEC-2026-0104,
+            RUSTSEC-2026-0258,
+            RUSTSEC-2026-0346,
+            RUSTSEC-2026-0349,
+            RUSTSEC-2026-0374,
+            RUSTSEC-2026-0381,
+            RUSTSEC-2026-0382,
+            RUSTSEC-2026-0441,
+            RUSTSEC-2026-0542
