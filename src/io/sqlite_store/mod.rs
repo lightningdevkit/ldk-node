@@ -23,7 +23,7 @@ use lightning::util::persist::{
 	KVStore, MigratableKVStore, PageToken, PaginatedKVStore, PaginatedListResponse,
 };
 use lightning_types::string::PrintableString;
-use rusqlite::{named_params, Connection};
+use sqlite_thin::{named_params, Connection};
 
 use crate::io::utils::{check_namespace_key_validity, create_dir_all_private};
 use crate::runtime::StoreRuntime;
@@ -395,7 +395,7 @@ impl SqliteStoreInner {
 				|row| row.get(0),
 			)
 			.map_err(|e| match e {
-				rusqlite::Error::QueryReturnedNoRows => {
+				sqlite_thin::Error::QueryReturnedNoRows => {
 					let msg = format!(
 						"Failed to read as key could not be found: {}/{}/{}",
 						PrintableString(primary_namespace),
@@ -563,7 +563,7 @@ impl SqliteStoreInner {
 			.query_row(&count_sql, [], |row| {
 				let count: i64 = row.get(0)?;
 				usize::try_from(count)
-					.map_err(|_| rusqlite::Error::IntegralValueOutOfRange(0, count))
+					.map_err(|_| sqlite_thin::Error::IntegralValueOutOfRange(0, count))
 			})
 			.map_err(|e| {
 				let msg = format!("Failed to count rows: {}", e);

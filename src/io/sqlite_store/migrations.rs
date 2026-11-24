@@ -6,7 +6,7 @@
 // accordance with one or both of these licenses.
 
 use lightning::io;
-use rusqlite::Connection;
+use sqlite_thin::Connection;
 
 pub(super) fn migrate_schema(
 	connection: &mut Connection, kv_table_name: &str, mut from_version: u16, to_version: u16,
@@ -68,7 +68,7 @@ fn migrate_v1_to_v2(connection: &mut Connection, kv_table_name: &str) -> io::Res
 }
 
 fn migrate_v2_to_v3(connection: &mut Connection, kv_table_name: &str) -> io::Result<()> {
-	let map_err = |e: rusqlite::Error| -> io::Error {
+	let map_err = |e: sqlite_thin::Error| -> io::Error {
 		let msg = format!("Failed to migrate table {} from v2 to v3: {}", kv_table_name, e);
 		io::Error::new(io::ErrorKind::Other, msg)
 	};
@@ -166,7 +166,7 @@ mod tests {
 	use std::fs;
 
 	use lightning::util::persist::{KVStore, PaginatedKVStore};
-	use rusqlite::{named_params, Connection};
+	use sqlite_thin::{named_params, Connection};
 
 	use crate::io::sqlite_store::SqliteStore;
 	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
