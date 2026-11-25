@@ -14,9 +14,9 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use bitcoin::secp256k1::PublicKey;
-use chrono::Utc;
 use lightning::ln::types::ChannelId;
 use lightning::types::payment::PaymentHash;
 pub use lightning::util::logger::Level as LogLevel;
@@ -25,6 +25,41 @@ pub(crate) use lightning::{log_bytes, log_debug, log_error, log_info, log_trace,
 use log::{Level as LogFacadeLevel, Record as LogFacadeRecord};
 
 use crate::io::utils::create_dir_all_private;
+
+/// Displays a duration since the Unix epoch as a `YYYY-MM-DD hh:mm:ss.mmm` UTC timestamp.
+struct UtcTimestamp(Duration);
+
+impl fmt::Display for UtcTimestamp {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		let secs = self.0.as_secs();
+		let secs_of_day = secs % 86_400;
+
+		// Converts the day count to a proleptic Gregorian date, counting years from March 1st so
+		// that the leap day falls at the end of the year.
+		let days = secs / 86_400 + 719_468;
+		let era = days / 146_097;
+		let day_of_era = days % 146_097;
+		let year_of_era =
+			(day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+		let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+		let shifted_month = (5 * day_of_year + 2) / 153;
+		let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
+		let month = if shifted_month < 10 { shifted_month + 3 } else { shifted_month - 9 };
+		let year = year_of_era + era * 400 + u64::from(month <= 2);
+
+		write!(
+			f,
+			"{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+			year,
+			month,
+			day,
+			secs_of_day / 3_600,
+			secs_of_day % 3_600 / 60,
+			secs_of_day % 60,
+			self.0.subsec_millis(),
+		)
+	}
+}
 
 fn open_log_file(file_path: &str) -> std::io::Result<fs::File> {
 	let mut options = fs::OpenOptions::new();
@@ -210,9 +245,11 @@ impl LogWriter for Writer {
 					return;
 				}
 
+				let since_epoch =
+					SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
 				let log = format!(
 					"{} {:<5} [{}:{}] {}{}\n",
-					Utc::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+					UtcTimestamp(since_epoch),
 					record.level.to_string(),
 					record.module_path,
 					record.line,
@@ -323,6 +360,22 @@ mod tests {
 	use super::*;
 	#[cfg(unix)]
 	use crate::io::test_utils::random_storage_path;
+
+	#[test]
+	fn formats_utc_timestamps() {
+		for (secs, millis, expected) in [
+			(0, 0, "1970-01-01 00:00:00.000"),
+			(951782399, 999, "2000-02-28 23:59:59.999"),
+			(951782400, 0, "2000-02-29 00:00:00.000"),
+			(1709251199, 7, "2024-02-29 23:59:59.007"),
+			(1709251200, 0, "2024-03-01 00:00:00.000"),
+			(1794960000, 123, "2026-11-18 00:00:00.123"),
+			(4102444799, 50, "2099-12-31 23:59:59.050"),
+		] {
+			let since_epoch = Duration::from_secs(secs) + Duration::from_millis(millis);
+			assert_eq!(UtcTimestamp(since_epoch).to_string(), expected);
+		}
+	}
 
 	#[cfg(unix)]
 	#[test]
