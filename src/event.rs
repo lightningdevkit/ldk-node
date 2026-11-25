@@ -2097,7 +2097,10 @@ where
 
 				let mut channel_override_config = None;
 
-				if self.liquidity_source.get_lsp_config(&counterparty_node_id, 2).await.is_some() {
+				// This must not depend on protocol discovery having succeeded: an LSP may open a
+				// channel for a JIT invoice it issued before we last restarted, and the override
+				// cannot be set once the channel is accepted.
+				if self.liquidity_source.is_lsps_node(&counterparty_node_id) {
 					// When we're an LSPS2 client, allow claiming underpaying HTLCs as the LSP will skim off some fee. We'll
 					// check that they don't take too much before claiming.
 					channel_override_config = Some(ChannelConfigOverrides {

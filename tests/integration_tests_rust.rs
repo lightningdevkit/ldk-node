@@ -8685,6 +8685,21 @@ async fn setup_lsps2_nodes<S: PaginatedKVStore + Send + Sync + 'static>(
 	bitcoind: &BitcoinD, electrsd: &ElectrsD, service_store: S, service_funds_sat: u64,
 	client_trusts_0conf: bool,
 ) -> (TestNode, TestNode, TestNode) {
+	let (service_node, client_node, payer_node, _) = setup_lsps2_nodes_with_client_config(
+		bitcoind,
+		electrsd,
+		service_store,
+		service_funds_sat,
+		client_trusts_0conf,
+	)
+	.await;
+	(service_node, client_node, payer_node)
+}
+
+async fn setup_lsps2_nodes_with_client_config<S: PaginatedKVStore + Send + Sync + 'static>(
+	bitcoind: &BitcoinD, electrsd: &ElectrsD, service_store: S, service_funds_sat: u64,
+	client_trusts_0conf: bool,
+) -> (TestNode, TestNode, TestNode, TestConfig) {
 	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
 
 	let mut sync_config = EsploraSyncConfig::default();
@@ -8757,7 +8772,7 @@ async fn setup_lsps2_nodes<S: PaginatedKVStore + Send + Sync + 'static>(
 	expect_channel_ready_event!(payer_node, service_node.node_id());
 	expect_channel_ready_event!(service_node, payer_node.node_id());
 
-	(service_node, client_node, payer_node)
+	(service_node, client_node, payer_node, client_config)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -8889,6 +8904,60 @@ async fn lsps2_service_fails_payment_if_client_is_disconnected() {
 	client_node.start().unwrap();
 	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
 	client_node.connect(service_node.node_id(), service_addr, false).unwrap();
+
+	let payer_payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
+	expect_channel_pending_event!(service_node, client_node.node_id());
+	expect_channel_ready_event!(service_node, client_node.node_id());
+	expect_event!(service_node, PaymentForwarded);
+	expect_channel_pending_event!(client_node, service_node.node_id());
+	expect_channel_ready_event!(client_node, service_node.node_id());
+	expect_payment_successful_event!(payer_node, payer_payment_id, None);
+	expect_payment_received_event!(client_node, jit_amount_msat * 99 / 100);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn lsps2_client_receives_jit_payment_before_discovering_lsp() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let service_store = TestSyncStore::new(random_config().node_config.storage_dir_path.into());
+	let (service_node, client_node, payer_node, client_config) =
+		setup_lsps2_nodes_with_client_config(&bitcoind, &electrsd, service_store, 10_000_000, true)
+			.await;
+	let service_node_id = service_node.node_id();
+	let service_addr = service_node.listening_addresses().unwrap().first().unwrap().clone();
+	let client_node_id = client_node.node_id();
+	let client_addr = client_node.listening_addresses().unwrap().first().unwrap().clone();
+
+	let invoice_description =
+		Bolt11InvoiceDescription::Direct(Description::new(String::from("asdf")).unwrap());
+	let jit_amount_msat = 100_000_000;
+	let jit_invoice = client_node
+		.bolt11_payment()
+		.receive_via_jit_channel(jit_amount_msat, &invoice_description.into(), 1024)
+		.unwrap();
+
+	// Restart the client while the service is down, so that it cannot learn which protocols its
+	// LSP supports.
+	client_node.stop().unwrap();
+	drop(client_node);
+	service_node.stop().unwrap();
+
+	let esplora_url = format!("http://{}", electrsd.esplora_url.as_ref().unwrap());
+	let mut sync_config = EsploraSyncConfig::default();
+	sync_config.background_sync_config = None;
+	setup_builder!(client_builder, client_config.node_config);
+	client_builder.set_chain_source_esplora(esplora_url, Some(sync_config));
+	client_builder.add_liquidity_source(service_node_id, service_addr.clone(), None, true);
+	let client_node = client_builder.build(client_config.node_entropy.into()).unwrap();
+	client_node.start().unwrap();
+
+	// Protocol discovery is retried with a growing delay, first after 5 and then after another
+	// 10 seconds. Bring the service back right after the first retry failed, so that the payment
+	// below reaches the client before the second one.
+	tokio::time::sleep(Duration::from_secs(6)).await;
+	service_node.start().unwrap();
+	service_node.connect(client_node_id, client_addr, false).unwrap();
+	payer_node.connect(service_node_id, service_addr, false).unwrap();
+	wait_for_channel_ready_to_send(&payer_node, &service_node, jit_amount_msat).await;
 
 	let payer_payment_id = payer_node.bolt11_payment().send(&jit_invoice, None).unwrap();
 	expect_channel_pending_event!(service_node, client_node.node_id());
