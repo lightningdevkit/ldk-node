@@ -5025,7 +5025,8 @@ mod tests {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 			page_token: Option<PageToken>,
-		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
 			PaginatedKVStore::list_paginated(
 				&*self.inner,
 				primary_namespace,
@@ -5145,7 +5146,8 @@ mod tests {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 			page_token: Option<PageToken>,
-		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
 			PaginatedKVStore::list_paginated(
 				&*self.inner,
 				primary_namespace,
@@ -5225,7 +5227,8 @@ mod tests {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 			page_token: Option<PageToken>,
-		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
 			PaginatedKVStore::list_paginated(
 				&*self.inner,
 				primary_namespace,
@@ -5788,7 +5791,8 @@ mod tests {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 			_page_token: Option<PageToken>,
-		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
 			let keys = self
 				.data
 				.lock()
@@ -5912,7 +5916,8 @@ mod tests {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 			page_token: Option<PageToken>,
-		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
 			PaginatedKVStore::list_paginated(
 				&*self.inner,
 				primary_namespace,
@@ -6120,7 +6125,8 @@ mod tests {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 			page_token: Option<PageToken>,
-		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
 			PaginatedKVStore::list_paginated(
 				&*self.inner,
 				primary_namespace,
@@ -6267,7 +6273,8 @@ mod tests {
 		fn list_paginated(
 			&self, primary_namespace: &str, secondary_namespace: &str,
 			page_token: Option<PageToken>,
-		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send {
+		) -> impl Future<Output = Result<PaginatedListResponse, io::Error>> + 'static + Send
+		{
 			PaginatedKVStore::list_paginated(
 				&*self.inner,
 				primary_namespace,

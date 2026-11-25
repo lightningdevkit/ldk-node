@@ -1029,7 +1029,8 @@ mod forwarding_stats_tests {
 	impl KVStore for FailRemoveForKey {
 		fn read(
 			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send
+		{
 			self.inner.read(primary_namespace, secondary_namespace, key)
 		}
 		fn write(
@@ -1053,7 +1054,8 @@ mod forwarding_stats_tests {
 		}
 		fn list(
 			&self, primary_namespace: &str, secondary_namespace: &str,
-		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send
+		{
 			self.inner.list(primary_namespace, secondary_namespace)
 		}
 	}

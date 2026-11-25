@@ -575,7 +575,8 @@ mod tests {
 	impl KVStore for FailingStore {
 		fn read(
 			&self, _primary_namespace: &str, _secondary_namespace: &str, _key: &str,
-		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send
+		{
 			async { Err(io::Error::new(io::ErrorKind::Other, "read failed")) }
 		}
 
@@ -593,7 +594,8 @@ mod tests {
 
 		fn list(
 			&self, _primary_namespace: &str, _secondary_namespace: &str,
-		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send
+		{
 			async { Err(io::Error::new(io::ErrorKind::Other, "list failed")) }
 		}
 	}
@@ -1080,7 +1082,8 @@ mod tests {
 	impl KVStore for LeaseRemovalFailingStore {
 		fn read(
 			&self, primary_namespace: &str, secondary_namespace: &str, key: &str,
-		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send {
+		) -> impl std::future::Future<Output = Result<Vec<u8>, io::Error>> + 'static + Send
+		{
 			KVStore::read(&*self.0, primary_namespace, secondary_namespace, key)
 		}
 
@@ -1107,7 +1110,8 @@ mod tests {
 
 		fn list(
 			&self, primary_namespace: &str, secondary_namespace: &str,
-		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send {
+		) -> impl std::future::Future<Output = Result<Vec<String>, io::Error>> + 'static + Send
+		{
 			KVStore::list(&*self.0, primary_namespace, secondary_namespace)
 		}
 	}

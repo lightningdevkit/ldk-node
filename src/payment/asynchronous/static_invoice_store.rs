@@ -97,15 +97,13 @@ impl StaticInvoiceStore {
 					)
 				})
 		})
-		.or_else(
-			|e| {
-				if e.kind() == lightning::io::ErrorKind::NotFound {
-					Ok(None)
-				} else {
-					Err(e)
-				}
-			},
-		)
+		.or_else(|e| {
+			if e.kind() == lightning::io::ErrorKind::NotFound {
+				Ok(None)
+			} else {
+				Err(e)
+			}
+		})
 	}
 
 	pub(crate) async fn handle_persist_static_invoice(

@@ -214,7 +214,8 @@ impl PaginatedKVStore for InMemoryStore {
 impl MigratableKVStore for InMemoryStore {
 	fn list_all_keys(
 		&self,
-	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send {
+	) -> impl Future<Output = Result<Vec<(String, String, String)>, io::Error>> + 'static + Send
+	{
 		let res = self.list_all_keys_internal();
 		async move { res }
 	}
