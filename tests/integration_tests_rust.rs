@@ -8790,7 +8790,15 @@ async fn lsps2_service_prunes_closed_channel_state() {
 
 	assert_eq!(list_lsps2_peer_states().await, vec![client_node.node_id().to_string()]);
 
-	client_node.close_channel(&client_user_channel_id, service_node.node_id()).unwrap();
+	// The client may still be persisting the monitor updates for the claim it just made, and LDK
+	// won't begin a cooperative shutdown while one is in flight.
+	tokio::time::timeout(Duration::from_secs(common::INTEROP_TIMEOUT_SECS), async {
+		while client_node.close_channel(&client_user_channel_id, service_node.node_id()).is_err() {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+	})
+	.await
+	.expect("the client should be able to close the channel");
 	expect_event!(client_node, ChannelClosed);
 	expect_event!(service_node, ChannelClosed);
 
