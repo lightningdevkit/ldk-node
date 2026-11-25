@@ -329,7 +329,8 @@ mod tests {
 
 		fn list(
 			&self, _primary_namespace: &str, _secondary_namespace: &str,
-		) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + 'static + Send>> {
+		) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + 'static + Send>>
+		{
 			Box::pin(async { Err(io::Error::new(io::ErrorKind::Other, "list failed")) })
 		}
 	}
