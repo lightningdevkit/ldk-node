@@ -97,6 +97,9 @@
   transaction.
 
 ## Bug Fixes and Improvements
+- VSS base URLs with a trailing slash are now handled: trailing slashes are trimmed before
+  the URL is passed to the client, which previously produced request paths such as
+  `//getObject` that VSS servers reject.
 - `Node::bump_channel_funding_fee` can now fee-bump a splice made with
   `Node::splice_in_with_all` without spending the anchor reserve or failing for lack of a change
   output. The splice now spends the wallet's confirmed UTXOs in full, so a bump is paid by adding

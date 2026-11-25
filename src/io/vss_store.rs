@@ -100,6 +100,9 @@ impl VssStore {
 		base_url: String, store_id: String, vss_seed: [u8; 32],
 		header_provider: Arc<dyn VssHeaderProvider>,
 	) -> io::Result<Self> {
+		// remove trailing slash
+		let base_url = base_url.trim_end_matches('/').to_string();
+
 		// Setting up the store already issues requests to the VSS server, which requires a
 		// `CryptoProvider` to be available for TLS connections.
 		optionally_install_rustls_cryptoprovider();
@@ -1118,7 +1121,7 @@ impl VssStoreBuilder {
 }
 
 #[cfg(test)]
-mod nonce_tests {
+mod mock_server {
 	use std::io::{Read, Write};
 	use std::net::{TcpListener, TcpStream};
 
@@ -1126,7 +1129,7 @@ mod nonce_tests {
 
 	use super::*;
 
-	fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
+	pub(super) fn read_request(stream: &mut TcpStream) -> (String, Vec<u8>) {
 		let mut request = Vec::new();
 		let header_end = loop {
 			let mut buffer = [0; 1024];
@@ -1156,7 +1159,7 @@ mod nonce_tests {
 		(path, request[header_end..header_end + content_length].to_vec())
 	}
 
-	fn write_response(stream: &mut TcpStream, status: &str, body: Vec<u8>) {
+	pub(super) fn write_response(stream: &mut TcpStream, status: &str, body: Vec<u8>) {
 		let headers = format!(
 			"HTTP/1.1 {status}\r\ncontent-length: {}\r\nvss-protocol-version: 0\r\nconnection: close\r\n\r\n",
 			body.len()
@@ -1165,7 +1168,7 @@ mod nonce_tests {
 		stream.write_all(&body).unwrap();
 	}
 
-	fn serve_empty_vss(listener: TcpListener) -> Vec<PutObjectRequest> {
+	pub(super) fn serve_empty_vss(listener: TcpListener) -> Vec<PutObjectRequest> {
 		let mut put_requests = Vec::new();
 		while put_requests.len() < 2 {
 			let (mut stream, _) = listener.accept().unwrap();
@@ -1197,6 +1200,53 @@ mod nonce_tests {
 		put_requests
 	}
 
+	pub(super) fn serve_recording_vss(
+		listener: TcpListener, expected_writes: usize,
+	) -> Vec<String> {
+		let mut paths = Vec::new();
+		let mut writes = 0;
+		while writes < expected_writes {
+			let (mut stream, _) = listener.accept().unwrap();
+			let (path, _) = read_request(&mut stream);
+			paths.push(path.clone());
+
+			// Dispatch on the final path segment so that a malformed path such as
+			// `//getObject` is recorded and answered instead of aborting the mock server.
+			match path.rsplit('/').next().unwrap_or_default() {
+				"getObject" => {
+					let response = ErrorResponse {
+						error_code: ErrorCode::NoSuchKeyException.into(),
+						message: "missing".to_string(),
+					};
+					write_response(&mut stream, "404 Not Found", response.encode_to_vec());
+				},
+				"listKeyVersions" => write_response(
+					&mut stream,
+					"200 OK",
+					ListKeyVersionsResponse::default().encode_to_vec(),
+				),
+				"putObjects" => {
+					writes += 1;
+					write_response(
+						&mut stream,
+						"200 OK",
+						PutObjectResponse::default().encode_to_vec(),
+					);
+				},
+				_ => panic!("unexpected VSS endpoint: {path}"),
+			}
+		}
+		paths
+	}
+}
+
+#[cfg(test)]
+mod nonce_tests {
+	use std::net::TcpListener;
+
+	use super::mock_server::serve_empty_vss;
+	use super::*;
+
 	fn nonce(request: &PutObjectRequest) -> Vec<u8> {
 		let storable = Storable::decode(&request.transaction_items[0].value[..]).unwrap();
 		storable.encryption_metadata.unwrap().nonce
@@ -1222,6 +1272,40 @@ mod nonce_tests {
 			nonce(&put_requests[0]),
 			nonce(&put_requests[1]),
 			"schema setup and the first store write reused an encryption nonce"
+		);
+	}
+}
+
+#[cfg(test)]
+mod url_tests {
+	use std::collections::HashMap;
+	use std::net::TcpListener;
+	use std::sync::Arc;
+
+	use vss_client::headers::FixedHeaders;
+
+	use super::mock_server::serve_recording_vss;
+	use super::*;
+
+	#[tokio::test]
+	async fn trailing_slash_base_url_yields_valid_request_paths() {
+		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+		let base_url = format!("http://{}/", listener.local_addr().unwrap());
+		let server = std::thread::spawn(move || serve_recording_vss(listener, 2));
+
+		let store = VssStore::new(
+			base_url,
+			"store".to_string(),
+			[42; 32],
+			Arc::new(FixedHeaders::new(HashMap::new())),
+		)
+		.unwrap();
+		KVStore::write(&store, "namespace", "", "key", vec![42]).await.unwrap();
+
+		let paths = server.join().unwrap();
+		assert!(
+			paths.iter().all(|path| !path.contains("//")),
+			"VSS client requested malformed paths: {paths:?}"
 		);
 	}
 }
