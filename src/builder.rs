@@ -2013,7 +2013,8 @@ mod tests {
 
 		fn list(
 			&self, primary_namespace: &str, secondary_namespace: &str,
-		) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + 'static + Send>> {
+		) -> Pin<Box<dyn Future<Output = Result<Vec<String>, io::Error>> + 'static + Send>>
+		{
 			let res = KVStoreSync::list(self, primary_namespace, secondary_namespace);
 			Box::pin(async move { res })
 		}
