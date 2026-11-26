@@ -35,7 +35,7 @@ pub use lightning::ln::outbound_payment::Retry;
 pub use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
 pub use lightning::offers::offer::OfferId;
-use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
+use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer, Quantity as LdkQuantity};
 use lightning::offers::payer_proof::{
 	PaidBolt12Invoice as LdkPaidBolt12Invoice, PayerProof as LdkPayerProof,
 };
@@ -244,6 +244,27 @@ impl From<LdkAmount> for OfferAmount {
 	}
 }
 
+/// Quantity of items supported by an offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum OfferQuantity {
+	/// Up to `max` items, inclusive. Values returned by an offer always have a nonzero maximum.
+	Bounded { max: u64 },
+	/// One or more items, without an upper bound.
+	Unbounded,
+	/// A single item, without an explicit quantity in the invoice request.
+	One,
+}
+
+impl From<LdkQuantity> for OfferQuantity {
+	fn from(quantity: LdkQuantity) -> Self {
+		match quantity {
+			LdkQuantity::Bounded(max) => Self::Bounded { max: max.get() },
+			LdkQuantity::Unbounded => Self::Unbounded,
+			LdkQuantity::One => Self::One,
+		}
+	}
+}
+
 /// An `Offer` is a potentially long-lived proposal for payment of a good or service.
 ///
 /// An offer is a precursor to an [`InvoiceRequest`]. A merchant publishes an offer from which a
@@ -266,6 +287,11 @@ pub struct Offer {
 
 #[uniffi::export]
 impl Offer {
+	/// The quantity of items supported by the offer.
+	pub fn supported_quantity(&self) -> OfferQuantity {
+		self.inner.supported_quantity().into()
+	}
+
 	/// Features pertaining to the offer.
 	pub fn offer_features(&self) -> Arc<OfferFeatures> {
 		Arc::new(self.inner.offer_features().clone().into())
@@ -608,6 +634,11 @@ pub struct Bolt12Invoice {
 
 #[uniffi::export]
 impl Bolt12Invoice {
+	/// The quantity supported by the originating offer, or `None` for a refund invoice.
+	pub fn supported_quantity(&self) -> Option<OfferQuantity> {
+		self.inner.supported_quantity().map(OfferQuantity::from)
+	}
+
 	/// Features of the originating offer, or `None` for a refund invoice.
 	pub fn offer_features(&self) -> Option<Arc<OfferFeatures>> {
 		self.inner.offer_features().map(|features| Arc::new(features.clone().into()))
@@ -860,6 +891,11 @@ pub struct StaticInvoice {
 
 #[uniffi::export]
 impl StaticInvoice {
+	/// The quantity of items supported by the offer.
+	pub fn supported_quantity(&self) -> OfferQuantity {
+		self.inner.supported_quantity().into()
+	}
+
 	/// Features pertaining to the originating offer.
 	pub fn offer_features(&self) -> Arc<OfferFeatures> {
 		Arc::new(self.inner.offer_features().clone().into())
@@ -3207,6 +3243,7 @@ mod tests {
 				.description("Static invoice description".to_string())
 				.issuer("Static invoice issuer".to_string())
 				.amount_msats(1000)
+				.supported_quantity(Quantity::Bounded(NonZeroU64::new(10).unwrap()))
 				.chain(Network::Regtest)
 				.absolute_expiry(
 					(SystemTime::now() + Duration::from_secs(3600))
@@ -3244,6 +3281,10 @@ mod tests {
 			assert_eq!(wrapped.offer_features().inner, *invoice.offer_features());
 			assert_eq!(wrapped.invoice_features().inner, *invoice.invoice_features());
 			assert_eq!(wrapped.offer_id(), invoice.offer_id());
+			assert_eq!(
+				wrapped.supported_quantity(),
+				if with_details { OfferQuantity::Bounded { max: 10 } } else { OfferQuantity::One }
+			);
 			assert_eq!(wrapped.invoice_description(), invoice.description().map(|v| v.to_string()));
 			assert_eq!(wrapped.issuer(), invoice.issuer().map(|v| v.to_string()));
 			assert_eq!(wrapped.amount(), invoice.amount().map(OfferAmount::from));
@@ -3438,6 +3479,34 @@ mod tests {
 		let invoice_str = wrapped_invoice.to_string();
 		let parsed_invoice: LdkBolt11Invoice = invoice_str.parse().unwrap();
 		assert_eq!(ldk_invoice.payment_hash(), parsed_invoice.payment_hash(),);
+	}
+
+	#[test]
+	fn test_offer_quantities() {
+		use uniffi::{Lift, Lower};
+
+		let (fixture, _) = create_test_offer();
+		for (quantity, expected) in [
+			(Quantity::One, OfferQuantity::One),
+			(Quantity::Unbounded, OfferQuantity::Unbounded),
+			(Quantity::Bounded(NonZeroU64::new(1).unwrap()), OfferQuantity::Bounded { max: 1 }),
+			(
+				Quantity::Bounded(NonZeroU64::new(u64::MAX).unwrap()),
+				OfferQuantity::Bounded { max: u64::MAX },
+			),
+		] {
+			let offer = OfferBuilder::new(fixture.issuer_signing_pubkey().unwrap())
+				.supported_quantity(quantity)
+				.build()
+				.unwrap();
+			let wrapped = Offer::from_str(&offer.to_string()).unwrap();
+			let actual = wrapped.supported_quantity();
+			assert_eq!(actual, expected);
+			assert_eq!(wrapped.expects_quantity(), expected != OfferQuantity::One);
+			let lowered = <OfferQuantity as Lower<crate::UniFfiTag>>::lower(actual);
+			let lifted = <OfferQuantity as Lift<crate::UniFfiTag>>::try_lift(lowered).unwrap();
+			assert_eq!(lifted, expected);
+		}
 	}
 
 	#[test]
@@ -3638,6 +3707,7 @@ mod tests {
 
 		assert!(ldk_invoice.is_for_refund());
 		assert_eq!(wrapped_invoice.offer_id(), None);
+		assert_eq!(wrapped_invoice.supported_quantity(), None);
 		assert_eq!(wrapped_invoice.payer_metadata(), ldk_invoice.payer_metadata());
 
 		assert_eq!(
@@ -3803,6 +3873,7 @@ mod tests {
 			.unwrap();
 		let wrapped = Bolt12Invoice::from_str(&hex_utils::to_string(&invoice.encode())).unwrap();
 		assert_eq!(wrapped.offer_id(), Some(offer.id()));
+		assert_eq!(wrapped.supported_quantity(), Some(OfferQuantity::One));
 		assert_eq!(wrapped.offer_features().unwrap().inner, *offer.offer_features());
 		assert_eq!(wrapped.invoice_request_features().inner, *request.invoice_request_features());
 		assert_eq!(wrapped.invoice_features().inner, *invoice.invoice_features());
