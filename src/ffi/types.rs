@@ -634,6 +634,21 @@ pub struct Bolt12Invoice {
 
 #[uniffi::export]
 impl Bolt12Invoice {
+	/// Whether the invoice was created in response to an invoice request created from an offer.
+	pub fn is_for_offer(&self) -> bool {
+		self.inner.is_for_offer()
+	}
+
+	/// Whether the invoice was created in response to a refund.
+	pub fn is_for_refund(&self) -> bool {
+		self.inner.is_for_refund()
+	}
+
+	/// The 64-byte Schnorr signature over [`Self::signable_hash`], verified with [`Self::signing_pubkey`].
+	pub fn signature(&self) -> Vec<u8> {
+		self.inner.signature().as_ref().to_vec()
+	}
+
 	/// The quantity supported by the originating offer, or `None` for a refund invoice.
 	pub fn supported_quantity(&self) -> Option<OfferQuantity> {
 		self.inner.supported_quantity().map(OfferQuantity::from)
@@ -891,6 +906,11 @@ pub struct StaticInvoice {
 
 #[uniffi::export]
 impl StaticInvoice {
+	/// The 64-byte Schnorr signature of the invoice, verified with [`Self::signing_pubkey`].
+	pub fn signature(&self) -> Vec<u8> {
+		self.inner.signature().as_ref().to_vec()
+	}
+
 	/// The quantity of items supported by the offer.
 	pub fn supported_quantity(&self) -> OfferQuantity {
 		self.inner.supported_quantity().into()
@@ -3276,8 +3296,11 @@ mod tests {
 
 	#[test]
 	fn test_static_invoice_properties() {
+		use bitcoin::secp256k1::schnorr::Signature;
+
 		for with_details in [false, true] {
 			let (invoice, wrapped) = create_test_static_invoice(with_details);
+			assert_eq!(Signature::from_slice(&wrapped.signature()).unwrap(), invoice.signature());
 			assert_eq!(wrapped.offer_features().inner, *invoice.offer_features());
 			assert_eq!(wrapped.invoice_features().inner, *invoice.invoice_features());
 			assert_eq!(wrapped.offer_id(), invoice.offer_id());
@@ -3695,6 +3718,15 @@ mod tests {
 		assert_eq!(ldk_refund.payer_note().map(|p| p.to_string()), wrapped_refund.payer_note());
 	}
 
+	fn check_bolt12_invoice_signature(invoice: &Bolt12Invoice) {
+		use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
+
+		let signature = Signature::from_slice(&invoice.signature()).unwrap();
+		let message = Message::from_digest(invoice.signable_hash().try_into().unwrap());
+		let (pubkey, _) = invoice.signing_pubkey().x_only_public_key();
+		Secp256k1::verification_only().verify_schnorr(&signature, &message, &pubkey).unwrap();
+	}
+
 	#[test]
 	fn test_bolt12_invoice_properties() {
 		let (ldk_invoice, wrapped_invoice) = create_test_bolt12_invoice();
@@ -3706,6 +3738,9 @@ mod tests {
 		assert_eq!(wrapped_invoice.invoice_features().inner, *ldk_invoice.invoice_features());
 
 		assert!(ldk_invoice.is_for_refund());
+		assert!(wrapped_invoice.is_for_refund());
+		assert!(!wrapped_invoice.is_for_offer());
+		check_bolt12_invoice_signature(&wrapped_invoice);
 		assert_eq!(wrapped_invoice.offer_id(), None);
 		assert_eq!(wrapped_invoice.supported_quantity(), None);
 		assert_eq!(wrapped_invoice.payer_metadata(), ldk_invoice.payer_metadata());
@@ -3873,6 +3908,9 @@ mod tests {
 			.unwrap();
 		let wrapped = Bolt12Invoice::from_str(&hex_utils::to_string(&invoice.encode())).unwrap();
 		assert_eq!(wrapped.offer_id(), Some(offer.id()));
+		assert!(wrapped.is_for_offer());
+		assert!(!wrapped.is_for_refund());
+		check_bolt12_invoice_signature(&wrapped);
 		assert_eq!(wrapped.supported_quantity(), Some(OfferQuantity::One));
 		assert_eq!(wrapped.offer_features().unwrap().inner, *offer.offer_features());
 		assert_eq!(wrapped.invoice_request_features().inner, *request.invoice_request_features());
