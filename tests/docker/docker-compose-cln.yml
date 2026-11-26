@@ -68,6 +68,12 @@ services:
         "--bitcoin-rpcpassword=pass",
         "--regtest",
         "--experimental-splicing",
+        # lightningd polls bitcoind every 30 seconds unless told otherwise, and the override is a
+        # developer option. Developer mode also turns deprecated APIs off, which changes the
+        # `newaddr` and `close` responses the tests read, so they are turned back on.
+        "--developer",
+        "--allow-deprecated-apis=true",
+        "--dev-bitcoind-poll=1",
       ]
     ports:
       - "19846:19846"
