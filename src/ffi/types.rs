@@ -600,6 +600,11 @@ impl Bolt12Invoice {
 		invoice_str.parse()
 	}
 
+	/// Returns the originating offer's identifier, or `None` for a refund invoice.
+	pub fn offer_id(&self) -> Option<OfferId> {
+		self.inner.offer_id()
+	}
+
 	/// SHA256 hash of the payment preimage that will be given in return for paying the invoice.
 	pub fn payment_hash(&self) -> PaymentHash {
 		PaymentHash(self.inner.payment_hash().0)
@@ -702,6 +707,17 @@ impl Bolt12Invoice {
 	/// [`Refund`]: lightning::offers::refund::Refund
 	pub fn metadata(&self) -> Option<Vec<u8>> {
 		self.inner.metadata().cloned()
+	}
+
+	/// An unpredictable series of bytes from the payer.
+	///
+	/// From [`InvoiceRequest::payer_metadata`] or [`Refund::payer_metadata`].
+	/// This is distinct from the offer metadata returned by [`Self::metadata`].
+	///
+	/// [`InvoiceRequest::payer_metadata`]: lightning::offers::invoice_request::InvoiceRequest::payer_metadata
+	/// [`Refund::payer_metadata`]: lightning::offers::refund::Refund::payer_metadata
+	pub fn payer_metadata(&self) -> Vec<u8> {
+		self.inner.payer_metadata().to_vec()
 	}
 
 	/// The quantity of items requested or refunded for.
@@ -1461,6 +1477,11 @@ impl Bolt11Invoice {
 	/// Get the payment secret if one was included in the invoice
 	pub fn payment_secret(&self) -> PaymentSecret {
 		PaymentSecret(self.inner.payment_secret().0)
+	}
+
+	/// Returns the payment metadata blob, if one was included in the invoice.
+	pub fn payment_metadata(&self) -> Option<Vec<u8>> {
+		self.inner.payment_metadata().cloned()
 	}
 
 	/// Returns the amount if specified in the invoice as millisatoshis.
@@ -2860,6 +2881,33 @@ mod tests {
 	}
 
 	#[test]
+	fn test_bolt11_invoice_payment_metadata() {
+		use bitcoin::secp256k1::{Secp256k1, SecretKey};
+		use lightning_invoice::{Currency, InvoiceBuilder};
+
+		let secp_ctx = Secp256k1::new();
+		let key = SecretKey::from_slice(&[42; 32]).unwrap();
+		for metadata in [None, Some(vec![]), Some(vec![0, 0x80, 0xff])] {
+			let builder = InvoiceBuilder::new(Currency::Regtest)
+				.description("Test invoice".to_string())
+				.payment_hash(PaymentHash([2; 32]))
+				.payment_secret(PaymentSecret([3; 32]))
+				.duration_since_epoch(Duration::from_secs(1))
+				.min_final_cltv_expiry_delta(18);
+			let sign = |message: &bitcoin::secp256k1::Message| {
+				secp_ctx.sign_ecdsa_recoverable(message, &key)
+			};
+			let invoice = if let Some(bytes) = metadata.clone() {
+				builder.payment_metadata(bytes).build_signed(sign).unwrap()
+			} else {
+				builder.build_signed(sign).unwrap()
+			};
+			let wrapped = Bolt11Invoice::from_str(&invoice.to_string()).unwrap();
+			assert_eq!(wrapped.payment_metadata(), metadata);
+		}
+	}
+
+	#[test]
 	fn test_bolt11_invoice_description() {
 		let (ldk_invoice, wrapped_invoice) = create_test_bolt11_invoice();
 
@@ -3099,6 +3147,10 @@ mod tests {
 	fn test_bolt12_invoice_properties() {
 		let (ldk_invoice, wrapped_invoice) = create_test_bolt12_invoice();
 
+		assert!(ldk_invoice.is_for_refund());
+		assert_eq!(wrapped_invoice.offer_id(), None);
+		assert_eq!(wrapped_invoice.payer_metadata(), ldk_invoice.payer_metadata());
+
 		assert_eq!(
 			ldk_invoice.payment_hash().0.to_vec(),
 			wrapped_invoice.payment_hash().0.to_vec()
@@ -3219,6 +3271,52 @@ mod tests {
 		assert_eq!(ldk_invoice.encode(), wrapped_invoice.encode());
 
 		assert_eq!(ldk_invoice.signable_hash().to_vec(), wrapped_invoice.signable_hash());
+	}
+
+	#[test]
+	fn test_bolt12_invoice_offer_id_and_metadata() {
+		use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+		use lightning::ln::inbound_payment::ExpandedKey;
+		use lightning::offers::invoice::UnsignedBolt12Invoice;
+		use lightning::offers::nonce::Nonce;
+
+		let secp_ctx = Secp256k1::new();
+		let keys = Keypair::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap());
+		let offer = OfferBuilder::new(PublicKey::from(keys))
+			.amount_msats(1000)
+			.metadata(vec![0, 0x80, 0xff])
+			.unwrap()
+			.build()
+			.unwrap();
+		let request = offer
+			.request_invoice(
+				&ExpandedKey::new([43; 32]),
+				Nonce::try_from(&[44; 16][..]).unwrap(),
+				&secp_ctx,
+				PaymentId([45; 32]),
+			)
+			.unwrap()
+			.build_and_sign()
+			.unwrap();
+		let (fixture, _) = create_test_bolt12_invoice();
+		let invoice = request
+			.respond_with_no_std(
+				fixture.payment_paths().to_vec(),
+				PaymentHash([46; 32]),
+				Duration::from_secs(1),
+			)
+			.unwrap()
+			.build()
+			.unwrap()
+			.sign(|invoice: &UnsignedBolt12Invoice| {
+				Ok(secp_ctx.sign_schnorr_no_aux_rand(invoice.tagged_hash().as_digest(), &keys))
+			})
+			.unwrap();
+		let wrapped = Bolt12Invoice::from_str(&hex_utils::to_string(&invoice.encode())).unwrap();
+		assert_eq!(wrapped.offer_id(), Some(offer.id()));
+		assert_eq!(wrapped.payer_metadata(), request.payer_metadata());
+		assert_eq!(wrapped.metadata(), Some(vec![0, 0x80, 0xff]));
+		assert_ne!(wrapped.payer_metadata(), wrapped.metadata().unwrap());
 	}
 
 	#[test]
