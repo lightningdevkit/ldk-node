@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bitcoin::secp256k1::PublicKey;
 use lightning::util::persist::KVStore;
 use lightning::util::ser::{Readable, Writeable};
-use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum};
+use lightning::{impl_writeable_tlv_based, impl_writeable_tlv_based_enum_upgradable};
 use lightning_liquidity::lsps2::msgs::LSPS2OpeningFeeParams;
 use lightning_liquidity::lsps2::utils::compute_opening_fee;
 use tokio::sync::Mutex as AsyncMutex;
@@ -71,7 +71,7 @@ impl LeaseCacheTargetId {
 	}
 }
 
-impl_writeable_tlv_based_enum!(LeaseCacheTargetId,
+impl_writeable_tlv_based_enum_upgradable!(LeaseCacheTargetId,
 	(0, Fixed) => {
 		(1, amount_msat, required),
 	},
@@ -95,20 +95,56 @@ impl LeaseCacheTarget {
 	}
 }
 
-impl_writeable_tlv_based!(LeaseCacheTarget, {
-	(1, id, required),
+/// The persisted form of a [`LeaseCacheTarget`].
+///
+/// `id` is `None` if it was written with a [`LeaseCacheTargetId`] variant we don't know, in which
+/// case the target is dropped on read rather than failing to read all targets.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StoredLeaseCacheTarget {
+	id: Option<LeaseCacheTargetId>,
+	absolute_expiry: Option<u64>,
+	last_accessed: u64,
+}
+
+impl_writeable_tlv_based!(StoredLeaseCacheTarget, {
+	(1, id, upgradable_option),
 	(3, absolute_expiry, option),
 	(5, last_accessed, required),
 });
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LeaseCacheTargets {
-	targets: Vec<LeaseCacheTarget>,
+	targets: Vec<StoredLeaseCacheTarget>,
 }
 
 impl_writeable_tlv_based!(LeaseCacheTargets, {
 	(1, targets, required_vec),
 });
+
+impl LeaseCacheTargets {
+	fn into_targets(self) -> Vec<LeaseCacheTarget> {
+		self.targets
+			.into_iter()
+			.filter_map(|target| {
+				let StoredLeaseCacheTarget { id, absolute_expiry, last_accessed } = target;
+				Some(LeaseCacheTarget { id: id?, absolute_expiry, last_accessed })
+			})
+			.collect()
+	}
+}
+
+impl From<Vec<LeaseCacheTarget>> for LeaseCacheTargets {
+	fn from(targets: Vec<LeaseCacheTarget>) -> Self {
+		let targets =
+			targets
+				.into_iter()
+				.map(|LeaseCacheTarget { id, absolute_expiry, last_accessed }| {
+					StoredLeaseCacheTarget { id: Some(id), absolute_expiry, last_accessed }
+				})
+				.collect();
+		Self { targets }
+	}
+}
 
 #[derive(Clone)]
 pub(crate) struct LeaseCacheTargetState {
@@ -254,7 +290,7 @@ where
 	}
 
 	async fn persist_state(&self, state: &LeaseCacheTargetState) -> Result<(), Error> {
-		let data = LeaseCacheTargets { targets: state.targets() }.encode();
+		let data = LeaseCacheTargets::from(state.targets()).encode();
 		KVStore::write(
 			&*self.kv_store,
 			LSPS2_CACHE_TARGET_PERSISTENCE_PRIMARY_NAMESPACE,
@@ -284,15 +320,15 @@ where
 	)
 	.await
 	{
-		Ok(data) => LeaseCacheTargets::read(&mut &data[..]).map(|targets| targets.targets).map_err(
-			|error| {
+		Ok(data) => LeaseCacheTargets::read(&mut &data[..])
+			.map(LeaseCacheTargets::into_targets)
+			.map_err(|error| {
 				log_error!(logger, "Failed to deserialize LSPS2 lease cache targets: {}", error);
 				lightning::io::Error::new(
 					lightning::io::ErrorKind::InvalidData,
 					"Failed to deserialize LSPS2 lease cache targets",
 				)
-			},
-		),
+			}),
 		Err(error) if error.kind() == lightning::io::ErrorKind::NotFound => Ok(Vec::new()),
 		Err(error) => Err(error),
 	}
@@ -884,9 +920,62 @@ mod tests {
 	fn cache_targets_roundtrip() {
 		let target = cache_target(LeaseCacheTargetId::Fixed { amount_msat: 1_000 }, Some(42), 7);
 
-		let encoded = target.encode();
-		let decoded = LeaseCacheTarget::read(&mut &encoded[..]).unwrap();
-		assert_eq!(decoded, target);
+		let encoded = LeaseCacheTargets::from(vec![target.clone()]).encode();
+		let decoded = LeaseCacheTargets::read(&mut &encoded[..]).unwrap().into_targets();
+		assert_eq!(decoded, vec![target]);
+	}
+
+	#[test]
+	fn cache_targets_skip_unknown_odd_id_variant() {
+		use lightning::impl_writeable_tlv_based_enum;
+
+		#[derive(Clone, Copy)]
+		enum FutureTargetId {
+			Variable,
+			Future,
+		}
+		impl_writeable_tlv_based_enum!(FutureTargetId,
+			(2, Variable) => {},
+			(5, Future) => {},
+		);
+		struct FutureTarget {
+			id: FutureTargetId,
+			absolute_expiry: Option<u64>,
+			last_accessed: u64,
+		}
+		impl_writeable_tlv_based!(FutureTarget, {
+			(1, id, required),
+			(3, absolute_expiry, option),
+			(5, last_accessed, required),
+		});
+		struct FutureTargets {
+			targets: Vec<FutureTarget>,
+		}
+		impl_writeable_tlv_based!(FutureTargets, {
+			(1, targets, required_vec),
+		});
+
+		let encoded = FutureTargets {
+			targets: vec![
+				FutureTarget {
+					id: FutureTargetId::Future,
+					absolute_expiry: None,
+					last_accessed: 3,
+				},
+				FutureTarget {
+					id: FutureTargetId::Variable,
+					absolute_expiry: Some(42),
+					last_accessed: 7,
+				},
+			],
+		}
+		.encode();
+
+		let decoded = LeaseCacheTargets::read(&mut &encoded[..]).unwrap();
+		assert_eq!(
+			decoded.into_targets(),
+			vec![cache_target(LeaseCacheTargetId::Variable, Some(42), 7)]
+		);
 	}
 
 	#[tokio::test]
@@ -1022,7 +1111,7 @@ mod tests {
 				LSPS2_CACHE_TARGET_PERSISTENCE_PRIMARY_NAMESPACE,
 				LSPS2_CACHE_TARGET_PERSISTENCE_SECONDARY_NAMESPACE,
 				LSPS2_CACHE_TARGET_PERSISTENCE_KEY,
-				LeaseCacheTargets { targets }.encode(),
+				LeaseCacheTargets::from(targets).encode(),
 			)
 			.await
 			.unwrap();
@@ -1150,7 +1239,7 @@ mod tests {
 				LSPS2_CACHE_TARGET_PERSISTENCE_PRIMARY_NAMESPACE,
 				LSPS2_CACHE_TARGET_PERSISTENCE_SECONDARY_NAMESPACE,
 				LSPS2_CACHE_TARGET_PERSISTENCE_KEY,
-				LeaseCacheTargets { targets: targets.clone() }.encode(),
+				LeaseCacheTargets::from(targets.clone()).encode(),
 			)
 			.await
 			.unwrap();
@@ -1185,7 +1274,7 @@ mod tests {
 			))
 			.unwrap();
 		assert_eq!(
-			LeaseCacheTargets::read(&mut &data[..]).unwrap().targets,
+			LeaseCacheTargets::read(&mut &data[..]).unwrap().into_targets(),
 			targets,
 			"a dropped cache target was persisted as removed before its leases were removed"
 		);
