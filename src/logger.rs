@@ -257,10 +257,11 @@ impl LogWriter for Writer {
 					context,
 				);
 
-				open_log_file(file_path)
-					.expect("Failed to open log file")
-					.write_all(log.as_bytes())
-					.expect("Failed to write to log file")
+				if let Err(e) =
+					open_log_file(file_path).and_then(|mut file| file.write_all(log.as_bytes()))
+				{
+					eprintln!("ERROR: Failed to write to log file: {}", e);
+				}
 			},
 			Writer::LogFacadeWriter => {
 				let level = match record.level {
@@ -390,6 +391,19 @@ mod tests {
 		let mode = log_path.metadata().unwrap().permissions().mode();
 		assert_eq!(mode & 0o077, 0);
 		fs::remove_dir_all(log_dir).unwrap();
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn log_file_write_errors_do_not_panic() {
+		let log_dir = random_storage_path();
+		let log_path = log_dir.join("ldk_node.log");
+		let logger =
+			Logger::new_fs_writer(log_path.to_str().unwrap().to_string(), LogLevel::Info).unwrap();
+
+		fs::remove_dir_all(&log_dir).unwrap();
+		log_info!(logger, "Logging after the log directory was removed");
+		assert!(!log_path.exists());
 	}
 
 	/// A minimal log facade logger that captures log output for testing.
