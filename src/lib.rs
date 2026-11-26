@@ -1528,7 +1528,7 @@ impl Node {
 
 		let mut user_config = default_user_config(&self.config);
 		user_config.channel_handshake_config.announce_for_forwarding = announce_for_forwarding;
-		user_config.channel_config = (channel_config.unwrap_or_default()).clone().into();
+		user_config.channel_config.apply(&channel_config.unwrap_or_default().into());
 
 		// Unannounced channels rely on LDK's default of 100% inbound HTLC value-in-flight
 		// to support large initial payments via LSPS2.
@@ -2508,9 +2508,8 @@ impl Node {
 	/// [`NodeError::ChannelSplicingFailed`].
 	///
 	/// A splice of all on-chain funds (see [`Node::splice_in_with_all`]) has no amount to preserve:
-	/// the bump is paid by adding less to the channel, or, if the pending splice's maximum feerate
-	/// does not allow that or less than dust would be left to add, the splice is rebuilt from all
-	/// confirmed funds, including any confirmed since.
+	/// the bump is paid by adding less to the channel, or, if that would leave less than dust to
+	/// add, the splice is rebuilt from all confirmed funds, including any confirmed since.
 	///
 	/// If `min_fee_rate` is set, it will be used as the minimum feerate for the replacement instead
 	/// of a feerate estimate retrieved from the configured chain source. As with the estimate, we
@@ -2581,8 +2580,8 @@ impl Node {
 					None
 				},
 				Ok(contribution) => Some(contribution),
-				// LDK adjusts a contribution of manually selected inputs only up to its maximum
-				// feerate and never supplements it by coin selection.
+				// LDK adjusts a contribution of manually selected inputs only as far as its inputs
+				// can pay and never supplements it by coin selection.
 				Err(FundingContributionError::ManuallySelectedInputsInsufficient) => None,
 				Err(e) => {
 					log_error!(self.logger, "Failed to RBF channel: {}", e);
@@ -2790,10 +2789,10 @@ impl Node {
 			open_channels.iter().find(|c| c.user_channel_id == user_channel_id.0)
 		{
 			self.channel_manager
-				.update_channel_config(
+				.update_partial_channel_config(
 					&counterparty_node_id,
 					&[channel_details.channel_id],
-					&(channel_config).clone().into(),
+					&channel_config.into(),
 				)
 				.map_err(|_| Error::ChannelConfigUpdateFailed)
 		} else {
