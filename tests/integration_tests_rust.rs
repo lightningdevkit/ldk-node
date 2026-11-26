@@ -3306,6 +3306,27 @@ async fn connection_build_rejects_inbound_when_lightning_connections_disabled() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn connect_persist_does_not_overwrite_address_while_connected() {
+	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
+	let chain_source = random_chain_source(&bitcoind, &electrsd);
+	let (node_a, node_b) = setup_two_nodes(&chain_source, false, false);
+
+	let node_id_b = node_b.node_id();
+	let good_addr = node_b.listening_addresses().unwrap().into_iter().next().unwrap();
+	node_a.connect(node_id_b, good_addr.clone(), true).unwrap();
+
+	// Already connected, so this does not dial. A typo must not replace the working address.
+	let typo =
+		ldk_node::lightning::ln::msgs::SocketAddress::TcpIpV4 { addr: [127, 0, 0, 1], port: 1 };
+	node_a.connect(node_id_b, typo, true).unwrap();
+
+	// `list_peers` prefers the live socket address, so stop first and read the stored one.
+	node_a.stop().unwrap();
+	let stored = node_a.list_peers().into_iter().find(|p| p.node_id == node_id_b).unwrap();
+	assert_eq!(stored.address, good_addr);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn disconnect_reports_failure_to_remove_peer() {
 	let (bitcoind, electrsd) = setup_bitcoind_and_electrsd();
 	let chain_source = random_chain_source(&bitcoind, &electrsd);

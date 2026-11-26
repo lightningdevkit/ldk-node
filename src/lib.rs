@@ -1412,6 +1412,8 @@ impl Node {
 	/// Connect to a node on the peer-to-peer network.
 	///
 	/// If `persist` is set to `true`, we'll remember the peer and reconnect to it on restart.
+	/// A later `connect` with `persist` set updates the stored address only when this call dialed
+	/// `address`. If the peer is already connected, the stored address is left unchanged.
 	/// Outbound connection attempts fail with [`Error::ConnectionFailed`] if
 	/// [`Config::disable_lightning_connections`] is set to `true`.
 	pub fn connect(
@@ -1422,6 +1424,10 @@ impl Node {
 		}
 
 		let peer_info = PeerInfo { node_id, address };
+
+		// `connect_peer_if_necessary` returns `Ok(())` without dialing when the peer is already
+		// up, so that success must not replace a stored address we never dialed.
+		let already_connected = self.peer_manager.peer_by_node_id(&peer_info.node_id).is_some();
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
@@ -1436,10 +1442,22 @@ impl Node {
 		log_info!(self.logger, "Connected to peer {}@{}. ", peer_info.node_id, peer_info.address);
 
 		if persist {
-			self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
+			self.persist_dialed_peer(peer_info, !already_connected)?;
 		}
 
 		Ok(())
+	}
+
+	/// Persists `peer_info` after a connection attempt.
+	///
+	/// `replace_address` is set only when this call dialed `peer_info.address`. Otherwise the peer
+	/// is inserted if missing, so an address we never dialed cannot overwrite a working one.
+	fn persist_dialed_peer(&self, peer_info: PeerInfo, replace_address: bool) -> Result<(), Error> {
+		if replace_address {
+			self.runtime.block_on(self.peer_store.upsert_peer(peer_info))
+		} else {
+			self.runtime.block_on(self.peer_store.add_peer(peer_info))
+		}
 	}
 
 	/// Disconnects the peer with the given node id.
@@ -1475,6 +1493,7 @@ impl Node {
 		disable_counterparty_reserve: bool,
 	) -> Result<UserChannelId, Error> {
 		let peer_info = PeerInfo { node_id, address };
+		let already_connected = self.peer_manager.peer_by_node_id(&peer_info.node_id).is_some();
 
 		let con_node_id = peer_info.node_id;
 		let con_addr = peer_info.address.clone();
@@ -1584,7 +1603,7 @@ impl Node {
 					zero_reserve_string,
 					peer_info.node_id
 				);
-				self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
+				self.persist_dialed_peer(peer_info, !already_connected)?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
