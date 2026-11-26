@@ -53,8 +53,8 @@ pub use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
 };
 use lightning_types::features::{
-	ChannelTypeFeatures as LdkChannelTypeFeatures, InitFeatures as LdkInitFeatures,
-	NodeFeatures as LdkNodeFeatures,
+	ChannelFeatures as LdkChannelFeatures, ChannelTypeFeatures as LdkChannelTypeFeatures,
+	InitFeatures as LdkInitFeatures, NodeFeatures as LdkNodeFeatures,
 };
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
@@ -2259,6 +2259,32 @@ impl From<LdkNodeFeatures> for NodeFeatures {
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
 #[uniffi::export(Debug, Eq)]
+pub struct ChannelFeatures {
+	pub(crate) inner: LdkChannelFeatures,
+}
+
+#[uniffi::export]
+impl ChannelFeatures {
+	/// Constructs channel features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkChannelFeatures::from_be_bytes(bytes.to_vec()) }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation of these features.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.le_flags().iter().rev().copied().collect()
+	}
+}
+
+impl From<LdkChannelFeatures> for ChannelFeatures {
+	fn from(features: LdkChannelFeatures) -> Self {
+		Self { inner: features }
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
 pub struct ChannelTypeFeatures {
 	pub(crate) inner: LdkChannelTypeFeatures,
 }
@@ -2738,6 +2764,23 @@ mod tests {
 		let wrapped_invoice = Bolt12Invoice { inner: ldk_invoice.clone() };
 
 		(ldk_invoice, wrapped_invoice)
+	}
+
+	#[test]
+	fn all_networks_roundtrip_through_ffi() {
+		use uniffi::{Lift, Lower};
+
+		for network in [
+			Network::Bitcoin,
+			Network::Testnet,
+			Network::Testnet4,
+			Network::Signet,
+			Network::Regtest,
+		] {
+			let lowered = <Network as Lower<crate::UniFfiTag>>::lower(network);
+			let lifted = <Network as Lift<crate::UniFfiTag>>::try_lift(lowered).unwrap();
+			assert_eq!(lifted, network);
+		}
 	}
 
 	#[test]

@@ -62,6 +62,8 @@ impl NetworkGraph {
 #[cfg(feature = "uniffi")]
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ChannelInfo {
+	/// Protocol features of a channel communicated during its announcement.
+	pub features: Arc<crate::ffi::ChannelFeatures>,
 	/// Source node of the first direction of a channel
 	pub node_one: NodeId,
 	/// Details about the first direction of a channel
@@ -78,6 +80,7 @@ pub struct ChannelInfo {
 impl From<lightning::routing::gossip::ChannelInfo> for ChannelInfo {
 	fn from(value: lightning::routing::gossip::ChannelInfo) -> Self {
 		Self {
+			features: Arc::new(value.features.into()),
 			node_one: value.node_one,
 			one_to_two: value.one_to_two.map(|u| u.into()),
 			node_two: value.node_two,
@@ -152,9 +155,13 @@ impl From<lightning::routing::gossip::NodeInfo> for NodeInfo {
 #[cfg(feature = "uniffi")]
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct NodeAnnouncementInfo {
+	/// Protocol features the node announced support for.
+	pub features: Arc<crate::ffi::NodeFeatures>,
 	/// When the last known update to the node state was issued.
 	/// Value is opaque, as set in the announcement.
 	pub last_update: u32,
+	/// Color assigned to the node, as three bytes holding the red, green, and blue components.
+	pub rgb: Vec<u8>,
 	/// Moniker assigned to the node.
 	/// May be invalid or malicious (eg control chars),
 	/// should not be exposed to the user.
@@ -167,9 +174,71 @@ pub struct NodeAnnouncementInfo {
 impl From<lightning::routing::gossip::NodeAnnouncementInfo> for NodeAnnouncementInfo {
 	fn from(value: lightning::routing::gossip::NodeAnnouncementInfo) -> Self {
 		Self {
+			features: Arc::new(value.features().clone().into()),
 			last_update: value.last_update(),
+			rgb: value.rgb().to_vec(),
 			alias: value.alias().to_string(),
 			addresses: value.addresses().iter().cloned().collect(),
 		}
+	}
+}
+
+#[cfg(all(test, feature = "uniffi"))]
+mod tests {
+	use std::sync::Arc;
+
+	use bitcoin::Network;
+	use lightning::routing::gossip::{
+		NodeAlias, NodeAnnouncementDetails, NodeAnnouncementInfo as LdkNodeAnnouncementInfo, NodeId,
+	};
+	use lightning_types::features::{
+		ChannelFeatures as LdkChannelFeatures, NodeFeatures as LdkNodeFeatures,
+	};
+
+	use super::{NetworkGraph, NodeAnnouncementInfo};
+	use crate::ffi::ChannelFeatures;
+	use crate::logger::Logger;
+	use crate::types::Graph;
+
+	#[test]
+	fn channel_info_conversion_keeps_features() {
+		let graph = Arc::new(Graph::new(Network::Regtest, Arc::new(Logger::new_log_facade())));
+		let features = LdkChannelFeatures::from_be_bytes(vec![0x02, 0x00]);
+		graph
+			.add_channel_from_partial_announcement(
+				42,
+				None,
+				0,
+				features.clone(),
+				NodeId::from_slice(&[2; 33]).unwrap(),
+				NodeId::from_slice(&[3; 33]).unwrap(),
+			)
+			.unwrap();
+
+		let info = NetworkGraph::new(graph).channel(42).unwrap();
+
+		assert_eq!(info.features.inner, features);
+		assert_eq!(info.features.to_bytes(), vec![0x02, 0x00]);
+		assert_eq!(ChannelFeatures::from_bytes(&info.features.to_bytes()), *info.features);
+	}
+
+	#[test]
+	fn node_announcement_info_conversion_keeps_features_and_rgb() {
+		let mut features = LdkNodeFeatures::empty();
+		features.set_keysend_optional();
+		let rgb = [1, 2, 3];
+		let ldk_info = LdkNodeAnnouncementInfo::Local(NodeAnnouncementDetails {
+			features: features.clone(),
+			last_update: 42,
+			rgb,
+			alias: NodeAlias([0; 32]),
+			addresses: Vec::new(),
+		});
+
+		let info: NodeAnnouncementInfo = ldk_info.into();
+
+		assert_eq!(info.features.inner, features);
+		assert_eq!(info.rgb, rgb.to_vec());
+		assert_eq!(info.last_update, 42);
 	}
 }
