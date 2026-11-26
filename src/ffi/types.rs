@@ -832,7 +832,105 @@ pub struct StaticInvoice {
 
 #[uniffi::export]
 impl StaticInvoice {
-	/// The amount for a successful payment of the invoice, if specified.
+	/// Returns the originating offer's identifier.
+	pub fn offer_id(&self) -> OfferId {
+		self.inner.offer_id()
+	}
+
+	/// A complete description of the purpose of the originating offer.
+	///
+	/// From [`Offer::description`].
+	///
+	/// [`Offer::description`]: lightning::offers::offer::Offer::description
+	pub fn invoice_description(&self) -> Option<String> {
+		self.inner.description().map(|description| description.to_string())
+	}
+
+	/// The issuer of the originating offer.
+	///
+	/// From [`Offer::issuer`].
+	///
+	/// [`Offer::issuer`]: lightning::offers::offer::Offer::issuer
+	pub fn issuer(&self) -> Option<String> {
+		self.inner.issuer().map(|issuer| issuer.to_string())
+	}
+
+	/// Opaque bytes set by the originating offer.
+	///
+	/// From [`Offer::metadata`]; `None` if the offer did not set it.
+	///
+	/// [`Offer::metadata`]: lightning::offers::offer::Offer::metadata
+	pub fn metadata(&self) -> Option<Vec<u8>> {
+		self.inner.metadata().cloned()
+	}
+
+	/// Seconds since the Unix epoch when the invoice was created.
+	pub fn created_at(&self) -> u64 {
+		self.inner.created_at().as_secs()
+	}
+
+	/// Seconds after creation when the invoice expires and should no longer be paid.
+	pub fn relative_expiry(&self) -> u64 {
+		self.inner.relative_expiry().as_secs()
+	}
+
+	/// Whether the invoice has expired.
+	pub fn is_expired(&self) -> bool {
+		self.inner.is_expired()
+	}
+
+	/// Seconds since the Unix epoch when an invoice should no longer be requested.
+	///
+	/// From [`Offer::absolute_expiry`]. If `None`, the offer does not expire.
+	///
+	/// [`Offer::absolute_expiry`]: lightning::offers::offer::Offer::absolute_expiry
+	pub fn absolute_expiry_seconds(&self) -> Option<u64> {
+		self.inner.absolute_expiry().map(|expiry| expiry.as_secs())
+	}
+
+	/// Whether the originating offer has expired.
+	pub fn is_offer_expired(&self) -> bool {
+		self.inner.is_offer_expired()
+	}
+
+	/// The chain that must be used when paying the invoice, as a chain hash.
+	pub fn chain(&self) -> Vec<u8> {
+		self.inner.chain().to_bytes().to_vec()
+	}
+
+	/// A typically transient public key corresponding to the key used to sign the invoice.
+	///
+	/// This will be:
+	/// - [`Offer::issuer_signing_pubkey`] if it's `Some`, otherwise
+	/// - the final blinded node id from a [`BlindedMessagePath`] in [`Offer::paths`] if `None`.
+	///
+	/// [`Offer::issuer_signing_pubkey`]: lightning::offers::offer::Offer::issuer_signing_pubkey
+	/// [`BlindedMessagePath`]: lightning::blinded_path::message::BlindedMessagePath
+	/// [`Offer::paths`]: lightning::offers::offer::Offer::paths
+	pub fn signing_pubkey(&self) -> PublicKey {
+		self.inner.signing_pubkey()
+	}
+
+	/// The public key used by the recipient to sign invoices.
+	///
+	/// From [`Offer::issuer_signing_pubkey`] and may be `None`.
+	///
+	/// [`Offer::issuer_signing_pubkey`]: lightning::offers::offer::Offer::issuer_signing_pubkey
+	pub fn issuer_signing_pubkey(&self) -> Option<PublicKey> {
+		self.inner.issuer_signing_pubkey()
+	}
+
+	/// Fallback addresses for paying the invoice on-chain, in order of most-preferred to
+	/// least-preferred.
+	pub fn fallback_addresses(&self) -> Vec<Address> {
+		self.inner.fallbacks()
+	}
+
+	/// The minimum amount required for a successful payment of a single item.
+	///
+	/// From [`Offer::amount`]; `None` if the offer did not set it.
+	///
+	/// [`Offer::amount`]: lightning::offers::offer::Offer::amount
 	pub fn amount(&self) -> Option<OfferAmount> {
 		self.inner.amount().map(|amount| amount.into())
 	}
@@ -2785,6 +2883,87 @@ mod tests {
 		let wrapped_invoice = Bolt12Invoice { inner: ldk_invoice.clone() };
 
 		(ldk_invoice, wrapped_invoice)
+	}
+
+	fn create_test_static_invoice(with_details: bool) -> (LdkStaticInvoice, StaticInvoice) {
+		use bitcoin::secp256k1::{Secp256k1, SecretKey};
+		use lightning::blinded_path::message::BlindedMessagePath;
+		use lightning::blinded_path::BlindedHop;
+		use lightning::ln::inbound_payment::ExpandedKey;
+		use lightning::offers::nonce::Nonce;
+		use lightning::offers::static_invoice::StaticInvoiceBuilder;
+
+		let secp_ctx = Secp256k1::new();
+		let node_id =
+			PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap());
+		let key = ExpandedKey::new([43; 32]);
+		let nonce = Nonce::try_from(&[44; 16][..]).unwrap();
+		let path = BlindedMessagePath::from_blinded_path(
+			node_id,
+			node_id,
+			vec![BlindedHop { blinded_node_id: node_id, encrypted_payload: vec![0; 32] }],
+		);
+		let mut offer_builder =
+			OfferBuilder::deriving_signing_pubkey(node_id, &key, nonce, &secp_ctx)
+				.path(path.clone());
+		if with_details {
+			offer_builder = offer_builder
+				.description("Static invoice description".to_string())
+				.issuer("Static invoice issuer".to_string())
+				.amount_msats(1000)
+				.chain(Network::Regtest)
+				.absolute_expiry(
+					(SystemTime::now() + Duration::from_secs(3600))
+						.duration_since(UNIX_EPOCH)
+						.unwrap(),
+				);
+		}
+		let offer = offer_builder.build().unwrap();
+		let (fixture, _) = create_test_bolt12_invoice();
+		let mut builder = StaticInvoiceBuilder::for_offer_using_derived_keys(
+			&offer,
+			fixture.payment_paths().to_vec(),
+			vec![path],
+			Duration::from_secs(1),
+			&key,
+			nonce,
+			&secp_ctx,
+		)
+		.unwrap();
+		if with_details {
+			builder = builder
+				.relative_expiry(42)
+				.fallback_v0_p2wpkh(&bitcoin::PublicKey::new(node_id).wpubkey_hash().unwrap());
+		}
+		let invoice = builder.build_and_sign(&secp_ctx).unwrap();
+		assert_eq!(invoice.offer_id(), offer.id());
+		let wrapped = StaticInvoice::from(invoice.clone());
+		(invoice, wrapped)
+	}
+
+	#[test]
+	fn test_static_invoice_properties() {
+		for with_details in [false, true] {
+			let (invoice, wrapped) = create_test_static_invoice(with_details);
+			assert_eq!(wrapped.offer_id(), invoice.offer_id());
+			assert_eq!(wrapped.invoice_description(), invoice.description().map(|v| v.to_string()));
+			assert_eq!(wrapped.issuer(), invoice.issuer().map(|v| v.to_string()));
+			assert_eq!(wrapped.amount(), invoice.amount().map(OfferAmount::from));
+			assert_eq!(wrapped.metadata(), invoice.metadata().cloned());
+			assert_eq!(wrapped.created_at(), 1);
+			assert_eq!(wrapped.relative_expiry(), invoice.relative_expiry().as_secs());
+			assert!(wrapped.is_expired());
+			assert_eq!(
+				wrapped.absolute_expiry_seconds(),
+				invoice.absolute_expiry().map(|v| v.as_secs())
+			);
+			assert!(!wrapped.is_offer_expired());
+			assert_eq!(wrapped.chain(), invoice.chain().to_bytes());
+			assert_eq!(wrapped.signing_pubkey(), invoice.signing_pubkey());
+			assert_eq!(wrapped.issuer_signing_pubkey(), invoice.issuer_signing_pubkey());
+			assert_eq!(wrapped.fallback_addresses(), invoice.fallbacks());
+			assert_eq!(wrapped.fallback_addresses().len(), usize::from(with_details));
+		}
 	}
 
 	#[test]
