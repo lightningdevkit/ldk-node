@@ -51,6 +51,9 @@ use crate::{Error, PersistedNodeMetrics};
 
 const CHAIN_POLLING_INTERVAL_SECS: u64 = 2;
 const CHAIN_POLLING_TIMEOUT_SECS: u64 = 10;
+// Bitcoin Core's mempool-based fee estimation can change estimates between blocks, so we also
+// refresh fee rate estimates periodically rather than only on new blocks.
+const FEE_RATE_REFRESH_INTERVAL_SECS: u64 = 30;
 
 type BitcoindSpvClient =
 	SpvClient<ChainPoller<Arc<BitcoindClient>, BitcoindClient>, Arc<ChainListener>>;
@@ -361,16 +364,15 @@ impl BitcoindChainSource {
 			tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
 		chain_polling_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-		let mut fee_rate_update_interval =
-			tokio::time::interval(Duration::from_secs(CHAIN_POLLING_INTERVAL_SECS));
-		// When starting up, we just blocked on updating, so skip the first tick.
-		fee_rate_update_interval.reset();
-		fee_rate_update_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
 		log_info!(self.logger, "Starting continuous polling for chain updates.");
 
-		// Start the polling loop.
-		let mut last_best_block_hash = None;
+		// Start the polling loop. We update fee rate estimates on the same tick right after polling
+		// for chain data, as using separate timers would allow chain polls taking longer than the
+		// polling interval to starve the fee rate updates.
+		let fee_rate_refresh_interval = Duration::from_secs(FEE_RATE_REFRESH_INTERVAL_SECS);
+		// We just updated fee rate estimates when initializing the wallets, so skip the initial update.
+		let mut last_best_block_hash = channel_manager.current_best_block().block_hash;
+		let mut last_fee_rate_update = Instant::now();
 		loop {
 			tokio::select! {
 				biased;
@@ -381,41 +383,43 @@ impl BitcoindChainSource {
 					);
 					return;
 				}
-				_ = chain_polling_interval.tick() => {
-					tokio::select! {
-						biased;
-						_ = stop_sync_receiver.changed() => {
-							log_trace!(
-								self.logger,
-								"Stopping polling for new chain data.",
-							);
-							return;
-						}
-						_ = self.poll_and_update_listeners(
-							Arc::clone(&onchain_wallet),
-							Arc::clone(&channel_manager),
-							Arc::clone(&offers_message_handler),
-							Arc::clone(&chain_monitor),
-							Arc::clone(&output_sweeper)
-						) => {}
-					}
+				_ = chain_polling_interval.tick() => {}
+			}
+
+			tokio::select! {
+				biased;
+				_ = stop_sync_receiver.changed() => {
+					log_trace!(
+						self.logger,
+						"Stopping polling for new chain data.",
+					);
+					return;
 				}
-				_ = fee_rate_update_interval.tick() => {
-					if last_best_block_hash != Some(channel_manager.current_best_block().block_hash) {
-						tokio::select! {
-							biased;
-							_ = stop_sync_receiver.changed() => {
-								log_trace!(
-									self.logger,
-									"Stopping polling for new chain data.",
-								);
-								return;
-							}
-							update_res = self.update_fee_rate_estimates() => {
-								if update_res.is_ok() {
-									last_best_block_hash = Some(channel_manager.current_best_block().block_hash);
-								}
-							}
+				_ = self.poll_and_update_listeners(
+					Arc::clone(&onchain_wallet),
+					Arc::clone(&channel_manager),
+					Arc::clone(&offers_message_handler),
+					Arc::clone(&chain_monitor),
+					Arc::clone(&output_sweeper)
+				) => {}
+			}
+
+			let current_best_block_hash = channel_manager.current_best_block().block_hash;
+			let fee_rate_refresh_due = last_fee_rate_update.elapsed() >= fee_rate_refresh_interval;
+			if last_best_block_hash != current_best_block_hash || fee_rate_refresh_due {
+				tokio::select! {
+					biased;
+					_ = stop_sync_receiver.changed() => {
+						log_trace!(
+							self.logger,
+							"Stopping polling for new chain data.",
+						);
+						return;
+					}
+					update_res = self.update_fee_rate_estimates() => {
+						if update_res.is_ok() {
+							last_best_block_hash = current_best_block_hash;
+							last_fee_rate_update = Instant::now();
 						}
 					}
 				}
