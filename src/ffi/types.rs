@@ -35,7 +35,7 @@ pub use lightning::ln::outbound_payment::Retry;
 pub use lightning::ln::types::ChannelId;
 use lightning::offers::invoice::Bolt12Invoice as LdkBolt12Invoice;
 pub use lightning::offers::offer::OfferId;
-use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer};
+use lightning::offers::offer::{Amount as LdkAmount, Offer as LdkOffer, Quantity as LdkQuantity};
 use lightning::offers::payer_proof::{
 	PaidBolt12Invoice as LdkPaidBolt12Invoice, PayerProof as LdkPayerProof,
 };
@@ -53,8 +53,11 @@ pub use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
 };
 use lightning_types::features::{
-	ChannelFeatures as LdkChannelFeatures, ChannelTypeFeatures as LdkChannelTypeFeatures,
-	InitFeatures as LdkInitFeatures, NodeFeatures as LdkNodeFeatures,
+	Bolt11InvoiceFeatures as LdkBolt11InvoiceFeatures,
+	Bolt12InvoiceFeatures as LdkBolt12InvoiceFeatures, ChannelFeatures as LdkChannelFeatures,
+	ChannelTypeFeatures as LdkChannelTypeFeatures, InitFeatures as LdkInitFeatures,
+	InvoiceRequestFeatures as LdkInvoiceRequestFeatures, NodeFeatures as LdkNodeFeatures,
+	OfferFeatures as LdkOfferFeatures,
 };
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
@@ -241,6 +244,27 @@ impl From<LdkAmount> for OfferAmount {
 	}
 }
 
+/// Quantity of items supported by an offer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum OfferQuantity {
+	/// Up to `max` items, inclusive. Values returned by an offer always have a nonzero maximum.
+	Bounded { max: u64 },
+	/// One or more items, without an upper bound.
+	Unbounded,
+	/// A single item, without an explicit quantity in the invoice request.
+	One,
+}
+
+impl From<LdkQuantity> for OfferQuantity {
+	fn from(quantity: LdkQuantity) -> Self {
+		match quantity {
+			LdkQuantity::Bounded(max) => Self::Bounded { max: max.get() },
+			LdkQuantity::Unbounded => Self::Unbounded,
+			LdkQuantity::One => Self::One,
+		}
+	}
+}
+
 /// An `Offer` is a potentially long-lived proposal for payment of a good or service.
 ///
 /// An offer is a precursor to an [`InvoiceRequest`]. A merchant publishes an offer from which a
@@ -263,6 +287,16 @@ pub struct Offer {
 
 #[uniffi::export]
 impl Offer {
+	/// The quantity of items supported by the offer.
+	pub fn supported_quantity(&self) -> OfferQuantity {
+		self.inner.supported_quantity().into()
+	}
+
+	/// Features pertaining to the offer.
+	pub fn offer_features(&self) -> Arc<OfferFeatures> {
+		Arc::new(self.inner.offer_features().clone().into())
+	}
+
 	#[uniffi::constructor]
 	pub fn from_str(offer_str: &str) -> Result<Self, Error> {
 		offer_str.parse()
@@ -481,6 +515,11 @@ pub struct Refund {
 
 #[uniffi::export]
 impl Refund {
+	/// Features pertaining to requesting an invoice for the refund.
+	pub fn features(&self) -> Arc<InvoiceRequestFeatures> {
+		Arc::new(self.inner.features().clone().into())
+	}
+
 	#[uniffi::constructor]
 	pub fn from_str(refund_str: &str) -> Result<Self, Error> {
 		refund_str.parse()
@@ -595,9 +634,49 @@ pub struct Bolt12Invoice {
 
 #[uniffi::export]
 impl Bolt12Invoice {
+	/// Whether the invoice was created in response to an invoice request created from an offer.
+	pub fn is_for_offer(&self) -> bool {
+		self.inner.is_for_offer()
+	}
+
+	/// Whether the invoice was created in response to a refund.
+	pub fn is_for_refund(&self) -> bool {
+		self.inner.is_for_refund()
+	}
+
+	/// The 64-byte Schnorr signature over [`Self::signable_hash`], verified with [`Self::signing_pubkey`].
+	pub fn signature(&self) -> Vec<u8> {
+		self.inner.signature().as_ref().to_vec()
+	}
+
+	/// The quantity supported by the originating offer, or `None` for a refund invoice.
+	pub fn supported_quantity(&self) -> Option<OfferQuantity> {
+		self.inner.supported_quantity().map(OfferQuantity::from)
+	}
+
+	/// Features of the originating offer, or `None` for a refund invoice.
+	pub fn offer_features(&self) -> Option<Arc<OfferFeatures>> {
+		self.inner.offer_features().map(|features| Arc::new(features.clone().into()))
+	}
+
+	/// Features pertaining to the originating invoice request or refund.
+	pub fn invoice_request_features(&self) -> Arc<InvoiceRequestFeatures> {
+		Arc::new(self.inner.invoice_request_features().clone().into())
+	}
+
+	/// Features pertaining to paying the invoice.
+	pub fn invoice_features(&self) -> Arc<Bolt12InvoiceFeatures> {
+		Arc::new(self.inner.invoice_features().clone().into())
+	}
+
 	#[uniffi::constructor]
 	pub fn from_str(invoice_str: &str) -> Result<Self, Error> {
 		invoice_str.parse()
+	}
+
+	/// Returns the originating offer's identifier, or `None` for a refund invoice.
+	pub fn offer_id(&self) -> Option<OfferId> {
+		self.inner.offer_id()
 	}
 
 	/// SHA256 hash of the payment preimage that will be given in return for paying the invoice.
@@ -702,6 +781,17 @@ impl Bolt12Invoice {
 	/// [`Refund`]: lightning::offers::refund::Refund
 	pub fn metadata(&self) -> Option<Vec<u8>> {
 		self.inner.metadata().cloned()
+	}
+
+	/// An unpredictable series of bytes from the payer.
+	///
+	/// From [`InvoiceRequest::payer_metadata`] or [`Refund::payer_metadata`].
+	/// This is distinct from the offer metadata returned by [`Self::metadata`].
+	///
+	/// [`InvoiceRequest::payer_metadata`]: lightning::offers::invoice_request::InvoiceRequest::payer_metadata
+	/// [`Refund::payer_metadata`]: lightning::offers::refund::Refund::payer_metadata
+	pub fn payer_metadata(&self) -> Vec<u8> {
+		self.inner.payer_metadata().to_vec()
 	}
 
 	/// The quantity of items requested or refunded for.
@@ -816,7 +906,125 @@ pub struct StaticInvoice {
 
 #[uniffi::export]
 impl StaticInvoice {
-	/// The amount for a successful payment of the invoice, if specified.
+	/// The 64-byte Schnorr signature of the invoice, verified with [`Self::signing_pubkey`].
+	pub fn signature(&self) -> Vec<u8> {
+		self.inner.signature().as_ref().to_vec()
+	}
+
+	/// The quantity of items supported by the offer.
+	pub fn supported_quantity(&self) -> OfferQuantity {
+		self.inner.supported_quantity().into()
+	}
+
+	/// Features pertaining to the originating offer.
+	pub fn offer_features(&self) -> Arc<OfferFeatures> {
+		Arc::new(self.inner.offer_features().clone().into())
+	}
+
+	/// Features pertaining to paying the invoice.
+	pub fn invoice_features(&self) -> Arc<Bolt12InvoiceFeatures> {
+		Arc::new(self.inner.invoice_features().clone().into())
+	}
+
+	/// Returns the originating offer's identifier.
+	pub fn offer_id(&self) -> OfferId {
+		self.inner.offer_id()
+	}
+
+	/// A complete description of the purpose of the originating offer.
+	///
+	/// From [`Offer::description`].
+	///
+	/// [`Offer::description`]: lightning::offers::offer::Offer::description
+	pub fn invoice_description(&self) -> Option<String> {
+		self.inner.description().map(|description| description.to_string())
+	}
+
+	/// The issuer of the originating offer.
+	///
+	/// From [`Offer::issuer`].
+	///
+	/// [`Offer::issuer`]: lightning::offers::offer::Offer::issuer
+	pub fn issuer(&self) -> Option<String> {
+		self.inner.issuer().map(|issuer| issuer.to_string())
+	}
+
+	/// Opaque bytes set by the originating offer.
+	///
+	/// From [`Offer::metadata`]; `None` if the offer did not set it.
+	///
+	/// [`Offer::metadata`]: lightning::offers::offer::Offer::metadata
+	pub fn metadata(&self) -> Option<Vec<u8>> {
+		self.inner.metadata().cloned()
+	}
+
+	/// Seconds since the Unix epoch when the invoice was created.
+	pub fn created_at(&self) -> u64 {
+		self.inner.created_at().as_secs()
+	}
+
+	/// Seconds after creation when the invoice expires and should no longer be paid.
+	pub fn relative_expiry(&self) -> u64 {
+		self.inner.relative_expiry().as_secs()
+	}
+
+	/// Whether the invoice has expired.
+	pub fn is_expired(&self) -> bool {
+		self.inner.is_expired()
+	}
+
+	/// Seconds since the Unix epoch when an invoice should no longer be requested.
+	///
+	/// From [`Offer::absolute_expiry`]. If `None`, the offer does not expire.
+	///
+	/// [`Offer::absolute_expiry`]: lightning::offers::offer::Offer::absolute_expiry
+	pub fn absolute_expiry_seconds(&self) -> Option<u64> {
+		self.inner.absolute_expiry().map(|expiry| expiry.as_secs())
+	}
+
+	/// Whether the originating offer has expired.
+	pub fn is_offer_expired(&self) -> bool {
+		self.inner.is_offer_expired()
+	}
+
+	/// The chain that must be used when paying the invoice, as a chain hash.
+	pub fn chain(&self) -> Vec<u8> {
+		self.inner.chain().to_bytes().to_vec()
+	}
+
+	/// A typically transient public key corresponding to the key used to sign the invoice.
+	///
+	/// This will be:
+	/// - [`Offer::issuer_signing_pubkey`] if it's `Some`, otherwise
+	/// - the final blinded node id from a [`BlindedMessagePath`] in [`Offer::paths`] if `None`.
+	///
+	/// [`Offer::issuer_signing_pubkey`]: lightning::offers::offer::Offer::issuer_signing_pubkey
+	/// [`BlindedMessagePath`]: lightning::blinded_path::message::BlindedMessagePath
+	/// [`Offer::paths`]: lightning::offers::offer::Offer::paths
+	pub fn signing_pubkey(&self) -> PublicKey {
+		self.inner.signing_pubkey()
+	}
+
+	/// The public key used by the recipient to sign invoices.
+	///
+	/// From [`Offer::issuer_signing_pubkey`] and may be `None`.
+	///
+	/// [`Offer::issuer_signing_pubkey`]: lightning::offers::offer::Offer::issuer_signing_pubkey
+	pub fn issuer_signing_pubkey(&self) -> Option<PublicKey> {
+		self.inner.issuer_signing_pubkey()
+	}
+
+	/// Fallback addresses for paying the invoice on-chain, in order of most-preferred to
+	/// least-preferred.
+	pub fn fallback_addresses(&self) -> Vec<Address> {
+		self.inner.fallbacks()
+	}
+
+	/// The minimum amount required for a successful payment of a single item.
+	///
+	/// From [`Offer::amount`]; `None` if the offer did not set it.
+	///
+	/// [`Offer::amount`]: lightning::offers::offer::Offer::amount
 	pub fn amount(&self) -> Option<OfferAmount> {
 		self.inner.amount().map(|amount| amount.into())
 	}
@@ -1441,6 +1649,11 @@ pub struct Bolt11Invoice {
 
 #[uniffi::export]
 impl Bolt11Invoice {
+	/// Invoice features, if included in the invoice.
+	pub fn features(&self) -> Option<Arc<Bolt11InvoiceFeatures>> {
+		self.inner.features().map(|features| Arc::new(features.clone().into()))
+	}
+
 	#[uniffi::constructor]
 	pub fn from_str(invoice_str: &str) -> Result<Self, Error> {
 		invoice_str.parse()
@@ -1461,6 +1674,11 @@ impl Bolt11Invoice {
 	/// Get the payment secret if one was included in the invoice
 	pub fn payment_secret(&self) -> PaymentSecret {
 		PaymentSecret(self.inner.payment_secret().0)
+	}
+
+	/// Returns the payment metadata blob, if one was included in the invoice.
+	pub fn payment_metadata(&self) -> Option<Vec<u8>> {
+		self.inner.payment_metadata().cloned()
 	}
 
 	/// Returns the amount if specified in the invoice as millisatoshis.
@@ -1959,6 +2177,184 @@ pub enum ClosureReason {
 		/// The required feerate we enforce.
 		required_feerate_sat_per_kw: u32,
 	},
+}
+
+/// Protocol features for BOLT11 invoices.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
+pub struct Bolt11InvoiceFeatures {
+	pub(crate) inner: LdkBolt11InvoiceFeatures,
+}
+
+#[uniffi::export]
+impl Bolt11InvoiceFeatures {
+	/// Constructs BOLT11 invoice features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkBolt11InvoiceFeatures::from_be_bytes(bytes.to_vec()) }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation, without a length prefix.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.le_flags().iter().rev().copied().collect()
+	}
+
+	/// Whether the invoice advertises support for `var_onion_optin`.
+	pub fn supports_variable_length_onion(&self) -> bool {
+		self.inner.supports_variable_length_onion()
+	}
+
+	/// Whether the invoice requires `var_onion_optin`.
+	pub fn requires_variable_length_onion(&self) -> bool {
+		self.inner.requires_variable_length_onion()
+	}
+
+	/// Whether the invoice advertises support for `payment_secret`.
+	pub fn supports_payment_secret(&self) -> bool {
+		self.inner.supports_payment_secret()
+	}
+
+	/// Whether the invoice requires `payment_secret`.
+	pub fn requires_payment_secret(&self) -> bool {
+		self.inner.requires_payment_secret()
+	}
+
+	/// Whether the invoice advertises support for `basic_mpp`.
+	pub fn supports_basic_mpp(&self) -> bool {
+		self.inner.supports_basic_mpp()
+	}
+
+	/// Whether the invoice requires `basic_mpp`.
+	pub fn requires_basic_mpp(&self) -> bool {
+		self.inner.requires_basic_mpp()
+	}
+
+	/// Whether the invoice advertises support for `payment_metadata`.
+	pub fn supports_payment_metadata(&self) -> bool {
+		self.inner.supports_payment_metadata()
+	}
+
+	/// Whether the invoice requires `payment_metadata`.
+	pub fn requires_payment_metadata(&self) -> bool {
+		self.inner.requires_payment_metadata()
+	}
+
+	/// Whether the invoice advertises support for `option_trampoline`.
+	pub fn supports_trampoline_routing(&self) -> bool {
+		self.inner.supports_trampoline_routing()
+	}
+
+	/// Whether the invoice requires `option_trampoline`.
+	pub fn requires_trampoline_routing(&self) -> bool {
+		self.inner.requires_trampoline_routing()
+	}
+}
+
+impl From<LdkBolt11InvoiceFeatures> for Bolt11InvoiceFeatures {
+	fn from(features: LdkBolt11InvoiceFeatures) -> Self {
+		Self { inner: features }
+	}
+}
+
+/// Protocol features for BOLT12 invoices.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
+pub struct Bolt12InvoiceFeatures {
+	pub(crate) inner: LdkBolt12InvoiceFeatures,
+}
+
+#[uniffi::export]
+impl Bolt12InvoiceFeatures {
+	/// Constructs BOLT12 invoice features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkBolt12InvoiceFeatures::from_be_bytes(bytes.to_vec()) }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation, without a length prefix.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.le_flags().iter().rev().copied().collect()
+	}
+
+	/// Whether the invoice advertises support for `basic_mpp`.
+	pub fn supports_basic_mpp(&self) -> bool {
+		self.inner.supports_basic_mpp()
+	}
+
+	/// Whether the invoice requires `basic_mpp`.
+	pub fn requires_basic_mpp(&self) -> bool {
+		self.inner.requires_basic_mpp()
+	}
+
+	/// Whether the invoice advertises support for `option_trampoline`.
+	pub fn supports_trampoline_routing(&self) -> bool {
+		self.inner.supports_trampoline_routing()
+	}
+
+	/// Whether the invoice requires `option_trampoline`.
+	pub fn requires_trampoline_routing(&self) -> bool {
+		self.inner.requires_trampoline_routing()
+	}
+}
+
+impl From<LdkBolt12InvoiceFeatures> for Bolt12InvoiceFeatures {
+	fn from(features: LdkBolt12InvoiceFeatures) -> Self {
+		Self { inner: features }
+	}
+}
+
+/// Protocol features for BOLT12 offers.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
+pub struct OfferFeatures {
+	pub(crate) inner: LdkOfferFeatures,
+}
+
+#[uniffi::export]
+impl OfferFeatures {
+	/// Constructs BOLT12 offer features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkOfferFeatures::from_be_bytes(bytes.to_vec()) }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation, without a length prefix.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.le_flags().iter().rev().copied().collect()
+	}
+}
+
+impl From<LdkOfferFeatures> for OfferFeatures {
+	fn from(features: LdkOfferFeatures) -> Self {
+		Self { inner: features }
+	}
+}
+
+/// Protocol features for BOLT12 invoice requests.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
+pub struct InvoiceRequestFeatures {
+	pub(crate) inner: LdkInvoiceRequestFeatures,
+}
+
+#[uniffi::export]
+impl InvoiceRequestFeatures {
+	/// Constructs BOLT12 invoice request features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkInvoiceRequestFeatures::from_be_bytes(bytes.to_vec()) }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation, without a length prefix.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.le_flags().iter().rev().copied().collect()
+	}
+}
+
+impl From<LdkInvoiceRequestFeatures> for InvoiceRequestFeatures {
+	fn from(features: LdkInvoiceRequestFeatures) -> Self {
+		Self { inner: features }
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
@@ -2691,7 +3087,82 @@ mod tests {
 			let init_features = InitFeatures::from_bytes(&bytes);
 			assert_eq!(init_features.to_bytes(), bytes);
 			assert_eq!(InitFeatures::from_bytes(&init_features.to_bytes()), init_features);
+
+			let features = Bolt11InvoiceFeatures::from_bytes(&bytes);
+			assert_eq!(features.to_bytes(), bytes);
+			assert_eq!(Bolt11InvoiceFeatures::from_bytes(&features.to_bytes()), features);
+
+			let features = Bolt12InvoiceFeatures::from_bytes(&bytes);
+			assert_eq!(features.to_bytes(), bytes);
+			assert_eq!(Bolt12InvoiceFeatures::from_bytes(&features.to_bytes()), features);
+
+			let features = OfferFeatures::from_bytes(&bytes);
+			assert_eq!(features.to_bytes(), bytes);
+			assert_eq!(OfferFeatures::from_bytes(&features.to_bytes()), features);
+
+			let features = InvoiceRequestFeatures::from_bytes(&bytes);
+			assert_eq!(features.to_bytes(), bytes);
+			assert_eq!(InvoiceRequestFeatures::from_bytes(&features.to_bytes()), features);
 		}
+	}
+
+	#[test]
+	fn test_invoice_feature_accessors() {
+		// Bolt11InvoiceFeatures: variable_length_onion, optional bit 9 and required bit 8.
+		let optional = Bolt11InvoiceFeatures::from_bytes(&[2, 0]);
+		let required = Bolt11InvoiceFeatures::from_bytes(&[1, 0]);
+		assert!(optional.supports_variable_length_onion());
+		assert!(!optional.requires_variable_length_onion());
+		assert!(required.supports_variable_length_onion());
+		assert!(required.requires_variable_length_onion());
+
+		// Bolt11InvoiceFeatures: payment_secret, optional bit 15 and required bit 14.
+		let optional = Bolt11InvoiceFeatures::from_bytes(&[128, 0]);
+		let required = Bolt11InvoiceFeatures::from_bytes(&[64, 0]);
+		assert!(optional.supports_payment_secret());
+		assert!(!optional.requires_payment_secret());
+		assert!(required.supports_payment_secret());
+		assert!(required.requires_payment_secret());
+
+		// Bolt11InvoiceFeatures: basic_mpp, optional bit 17 and required bit 16.
+		let optional = Bolt11InvoiceFeatures::from_bytes(&[2, 0, 0]);
+		let required = Bolt11InvoiceFeatures::from_bytes(&[1, 0, 0]);
+		assert!(optional.supports_basic_mpp());
+		assert!(!optional.requires_basic_mpp());
+		assert!(required.supports_basic_mpp());
+		assert!(required.requires_basic_mpp());
+
+		// Bolt11InvoiceFeatures: payment_metadata, optional bit 49 and required bit 48.
+		let optional = Bolt11InvoiceFeatures::from_bytes(&[2, 0, 0, 0, 0, 0, 0]);
+		let required = Bolt11InvoiceFeatures::from_bytes(&[1, 0, 0, 0, 0, 0, 0]);
+		assert!(optional.supports_payment_metadata());
+		assert!(!optional.requires_payment_metadata());
+		assert!(required.supports_payment_metadata());
+		assert!(required.requires_payment_metadata());
+
+		// Bolt11InvoiceFeatures: trampoline_routing, optional bit 57 and required bit 56.
+		let optional = Bolt11InvoiceFeatures::from_bytes(&[2, 0, 0, 0, 0, 0, 0, 0]);
+		let required = Bolt11InvoiceFeatures::from_bytes(&[1, 0, 0, 0, 0, 0, 0, 0]);
+		assert!(optional.supports_trampoline_routing());
+		assert!(!optional.requires_trampoline_routing());
+		assert!(required.supports_trampoline_routing());
+		assert!(required.requires_trampoline_routing());
+
+		// Bolt12InvoiceFeatures: basic_mpp, optional bit 17 and required bit 16.
+		let optional = Bolt12InvoiceFeatures::from_bytes(&[2, 0, 0]);
+		let required = Bolt12InvoiceFeatures::from_bytes(&[1, 0, 0]);
+		assert!(optional.supports_basic_mpp());
+		assert!(!optional.requires_basic_mpp());
+		assert!(required.supports_basic_mpp());
+		assert!(required.requires_basic_mpp());
+
+		// Bolt12InvoiceFeatures: trampoline_routing, optional bit 57 and required bit 56.
+		let optional = Bolt12InvoiceFeatures::from_bytes(&[2, 0, 0, 0, 0, 0, 0, 0]);
+		let required = Bolt12InvoiceFeatures::from_bytes(&[1, 0, 0, 0, 0, 0, 0, 0]);
+		assert!(optional.supports_trampoline_routing());
+		assert!(!optional.requires_trampoline_routing());
+		assert!(required.supports_trampoline_routing());
+		assert!(required.requires_trampoline_routing());
 	}
 
 	fn create_test_bolt11_invoice() -> (LdkBolt11Invoice, Bolt11Invoice) {
@@ -2766,6 +3237,97 @@ mod tests {
 		(ldk_invoice, wrapped_invoice)
 	}
 
+	fn create_test_static_invoice(with_details: bool) -> (LdkStaticInvoice, StaticInvoice) {
+		use bitcoin::secp256k1::{Secp256k1, SecretKey};
+		use lightning::blinded_path::message::BlindedMessagePath;
+		use lightning::blinded_path::BlindedHop;
+		use lightning::ln::inbound_payment::ExpandedKey;
+		use lightning::offers::nonce::Nonce;
+		use lightning::offers::static_invoice::StaticInvoiceBuilder;
+
+		let secp_ctx = Secp256k1::new();
+		let node_id =
+			PublicKey::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap());
+		let key = ExpandedKey::new([43; 32]);
+		let nonce = Nonce::try_from(&[44; 16][..]).unwrap();
+		let path = BlindedMessagePath::from_blinded_path(
+			node_id,
+			node_id,
+			vec![BlindedHop { blinded_node_id: node_id, encrypted_payload: vec![0; 32] }],
+		);
+		let mut offer_builder =
+			OfferBuilder::deriving_signing_pubkey(node_id, &key, nonce, &secp_ctx)
+				.path(path.clone());
+		if with_details {
+			offer_builder = offer_builder
+				.description("Static invoice description".to_string())
+				.issuer("Static invoice issuer".to_string())
+				.amount_msats(1000)
+				.supported_quantity(Quantity::Bounded(NonZeroU64::new(10).unwrap()))
+				.chain(Network::Regtest)
+				.absolute_expiry(
+					(SystemTime::now() + Duration::from_secs(3600))
+						.duration_since(UNIX_EPOCH)
+						.unwrap(),
+				);
+		}
+		let offer = offer_builder.build().unwrap();
+		let (fixture, _) = create_test_bolt12_invoice();
+		let mut builder = StaticInvoiceBuilder::for_offer_using_derived_keys(
+			&offer,
+			fixture.payment_paths().to_vec(),
+			vec![path],
+			Duration::from_secs(1),
+			&key,
+			nonce,
+			&secp_ctx,
+		)
+		.unwrap();
+		if with_details {
+			builder = builder
+				.relative_expiry(42)
+				.fallback_v0_p2wpkh(&bitcoin::PublicKey::new(node_id).wpubkey_hash().unwrap());
+		}
+		let invoice = builder.build_and_sign(&secp_ctx).unwrap();
+		assert_eq!(invoice.offer_id(), offer.id());
+		let wrapped = StaticInvoice::from(invoice.clone());
+		(invoice, wrapped)
+	}
+
+	#[test]
+	fn test_static_invoice_properties() {
+		use bitcoin::secp256k1::schnorr::Signature;
+
+		for with_details in [false, true] {
+			let (invoice, wrapped) = create_test_static_invoice(with_details);
+			assert_eq!(Signature::from_slice(&wrapped.signature()).unwrap(), invoice.signature());
+			assert_eq!(wrapped.offer_features().inner, *invoice.offer_features());
+			assert_eq!(wrapped.invoice_features().inner, *invoice.invoice_features());
+			assert_eq!(wrapped.offer_id(), invoice.offer_id());
+			assert_eq!(
+				wrapped.supported_quantity(),
+				if with_details { OfferQuantity::Bounded { max: 10 } } else { OfferQuantity::One }
+			);
+			assert_eq!(wrapped.invoice_description(), invoice.description().map(|v| v.to_string()));
+			assert_eq!(wrapped.issuer(), invoice.issuer().map(|v| v.to_string()));
+			assert_eq!(wrapped.amount(), invoice.amount().map(OfferAmount::from));
+			assert_eq!(wrapped.metadata(), invoice.metadata().cloned());
+			assert_eq!(wrapped.created_at(), 1);
+			assert_eq!(wrapped.relative_expiry(), invoice.relative_expiry().as_secs());
+			assert!(wrapped.is_expired());
+			assert_eq!(
+				wrapped.absolute_expiry_seconds(),
+				invoice.absolute_expiry().map(|v| v.as_secs())
+			);
+			assert!(!wrapped.is_offer_expired());
+			assert_eq!(wrapped.chain(), invoice.chain().to_bytes());
+			assert_eq!(wrapped.signing_pubkey(), invoice.signing_pubkey());
+			assert_eq!(wrapped.issuer_signing_pubkey(), invoice.issuer_signing_pubkey());
+			assert_eq!(wrapped.fallback_addresses(), invoice.fallbacks());
+			assert_eq!(wrapped.fallback_addresses().len(), usize::from(with_details));
+		}
+	}
+
 	#[test]
 	fn all_networks_roundtrip_through_ffi() {
 		use uniffi::{Lift, Lower};
@@ -2817,6 +3379,10 @@ mod tests {
 	#[test]
 	fn test_bolt11_invoice_basic_properties() {
 		let (ldk_invoice, wrapped_invoice) = create_test_bolt11_invoice();
+		assert_eq!(
+			wrapped_invoice.features().map(|f| f.inner.clone()),
+			ldk_invoice.features().cloned()
+		);
 
 		assert_eq!(
 			ldk_invoice.payment_hash().to_string(),
@@ -2857,6 +3423,33 @@ mod tests {
 		let future_time = Duration::from_secs(wrapped_invoice.seconds_since_epoch() + 10000);
 		assert!(!ldk_invoice.would_expire(future_time));
 		assert!(!wrapped_invoice.would_expire(future_time.as_secs()));
+	}
+
+	#[test]
+	fn test_bolt11_invoice_payment_metadata() {
+		use bitcoin::secp256k1::{Secp256k1, SecretKey};
+		use lightning_invoice::{Currency, InvoiceBuilder};
+
+		let secp_ctx = Secp256k1::new();
+		let key = SecretKey::from_slice(&[42; 32]).unwrap();
+		for metadata in [None, Some(vec![]), Some(vec![0, 0x80, 0xff])] {
+			let builder = InvoiceBuilder::new(Currency::Regtest)
+				.description("Test invoice".to_string())
+				.payment_hash(PaymentHash([2; 32]))
+				.payment_secret(PaymentSecret([3; 32]))
+				.duration_since_epoch(Duration::from_secs(1))
+				.min_final_cltv_expiry_delta(18);
+			let sign = |message: &bitcoin::secp256k1::Message| {
+				secp_ctx.sign_ecdsa_recoverable(message, &key)
+			};
+			let invoice = if let Some(bytes) = metadata.clone() {
+				builder.payment_metadata(bytes).build_signed(sign).unwrap()
+			} else {
+				builder.build_signed(sign).unwrap()
+			};
+			let wrapped = Bolt11Invoice::from_str(&invoice.to_string()).unwrap();
+			assert_eq!(wrapped.payment_metadata(), metadata);
+		}
 	}
 
 	#[test]
@@ -2912,8 +3505,37 @@ mod tests {
 	}
 
 	#[test]
+	fn test_offer_quantities() {
+		use uniffi::{Lift, Lower};
+
+		let (fixture, _) = create_test_offer();
+		for (quantity, expected) in [
+			(Quantity::One, OfferQuantity::One),
+			(Quantity::Unbounded, OfferQuantity::Unbounded),
+			(Quantity::Bounded(NonZeroU64::new(1).unwrap()), OfferQuantity::Bounded { max: 1 }),
+			(
+				Quantity::Bounded(NonZeroU64::new(u64::MAX).unwrap()),
+				OfferQuantity::Bounded { max: u64::MAX },
+			),
+		] {
+			let offer = OfferBuilder::new(fixture.issuer_signing_pubkey().unwrap())
+				.supported_quantity(quantity)
+				.build()
+				.unwrap();
+			let wrapped = Offer::from_str(&offer.to_string()).unwrap();
+			let actual = wrapped.supported_quantity();
+			assert_eq!(actual, expected);
+			assert_eq!(wrapped.expects_quantity(), expected != OfferQuantity::One);
+			let lowered = <OfferQuantity as Lower<crate::UniFfiTag>>::lower(actual);
+			let lifted = <OfferQuantity as Lift<crate::UniFfiTag>>::try_lift(lowered).unwrap();
+			assert_eq!(lifted, expected);
+		}
+	}
+
+	#[test]
 	fn test_offer() {
 		let (ldk_offer, wrapped_offer) = create_test_offer();
+		assert_eq!(wrapped_offer.offer_features().inner, *ldk_offer.offer_features());
 		match (ldk_offer.description(), wrapped_offer.offer_description()) {
 			(Some(ldk_desc), Some(wrapped_desc)) => {
 				assert_eq!(ldk_desc.to_string(), wrapped_desc);
@@ -3035,6 +3657,7 @@ mod tests {
 	#[test]
 	fn test_refund_properties() {
 		let (ldk_refund, wrapped_refund) = create_test_refund();
+		assert_eq!(wrapped_refund.features().inner, *ldk_refund.features());
 
 		assert_eq!(ldk_refund.description().to_string(), wrapped_refund.refund_description());
 		assert_eq!(ldk_refund.amount_msats(), wrapped_refund.amount_msats());
@@ -3095,9 +3718,32 @@ mod tests {
 		assert_eq!(ldk_refund.payer_note().map(|p| p.to_string()), wrapped_refund.payer_note());
 	}
 
+	fn check_bolt12_invoice_signature(invoice: &Bolt12Invoice) {
+		use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
+
+		let signature = Signature::from_slice(&invoice.signature()).unwrap();
+		let message = Message::from_digest(invoice.signable_hash().try_into().unwrap());
+		let (pubkey, _) = invoice.signing_pubkey().x_only_public_key();
+		Secp256k1::verification_only().verify_schnorr(&signature, &message, &pubkey).unwrap();
+	}
+
 	#[test]
 	fn test_bolt12_invoice_properties() {
 		let (ldk_invoice, wrapped_invoice) = create_test_bolt12_invoice();
+		assert!(wrapped_invoice.offer_features().is_none());
+		assert_eq!(
+			wrapped_invoice.invoice_request_features().inner,
+			*ldk_invoice.invoice_request_features()
+		);
+		assert_eq!(wrapped_invoice.invoice_features().inner, *ldk_invoice.invoice_features());
+
+		assert!(ldk_invoice.is_for_refund());
+		assert!(wrapped_invoice.is_for_refund());
+		assert!(!wrapped_invoice.is_for_offer());
+		check_bolt12_invoice_signature(&wrapped_invoice);
+		assert_eq!(wrapped_invoice.offer_id(), None);
+		assert_eq!(wrapped_invoice.supported_quantity(), None);
+		assert_eq!(wrapped_invoice.payer_metadata(), ldk_invoice.payer_metadata());
 
 		assert_eq!(
 			ldk_invoice.payment_hash().0.to_vec(),
@@ -3219,6 +3865,59 @@ mod tests {
 		assert_eq!(ldk_invoice.encode(), wrapped_invoice.encode());
 
 		assert_eq!(ldk_invoice.signable_hash().to_vec(), wrapped_invoice.signable_hash());
+	}
+
+	#[test]
+	fn test_bolt12_invoice_offer_id_and_metadata() {
+		use bitcoin::secp256k1::{Keypair, Secp256k1, SecretKey};
+		use lightning::ln::inbound_payment::ExpandedKey;
+		use lightning::offers::invoice::UnsignedBolt12Invoice;
+		use lightning::offers::nonce::Nonce;
+
+		let secp_ctx = Secp256k1::new();
+		let keys = Keypair::from_secret_key(&secp_ctx, &SecretKey::from_slice(&[42; 32]).unwrap());
+		let offer = OfferBuilder::new(PublicKey::from(keys))
+			.amount_msats(1000)
+			.metadata(vec![0, 0x80, 0xff])
+			.unwrap()
+			.build()
+			.unwrap();
+		let request = offer
+			.request_invoice(
+				&ExpandedKey::new([43; 32]),
+				Nonce::try_from(&[44; 16][..]).unwrap(),
+				&secp_ctx,
+				PaymentId([45; 32]),
+			)
+			.unwrap()
+			.build_and_sign()
+			.unwrap();
+		let (fixture, _) = create_test_bolt12_invoice();
+		let invoice = request
+			.respond_with_no_std(
+				fixture.payment_paths().to_vec(),
+				PaymentHash([46; 32]),
+				Duration::from_secs(1),
+			)
+			.unwrap()
+			.build()
+			.unwrap()
+			.sign(|invoice: &UnsignedBolt12Invoice| {
+				Ok(secp_ctx.sign_schnorr_no_aux_rand(invoice.tagged_hash().as_digest(), &keys))
+			})
+			.unwrap();
+		let wrapped = Bolt12Invoice::from_str(&hex_utils::to_string(&invoice.encode())).unwrap();
+		assert_eq!(wrapped.offer_id(), Some(offer.id()));
+		assert!(wrapped.is_for_offer());
+		assert!(!wrapped.is_for_refund());
+		check_bolt12_invoice_signature(&wrapped);
+		assert_eq!(wrapped.supported_quantity(), Some(OfferQuantity::One));
+		assert_eq!(wrapped.offer_features().unwrap().inner, *offer.offer_features());
+		assert_eq!(wrapped.invoice_request_features().inner, *request.invoice_request_features());
+		assert_eq!(wrapped.invoice_features().inner, *invoice.invoice_features());
+		assert_eq!(wrapped.payer_metadata(), request.payer_metadata());
+		assert_eq!(wrapped.metadata(), Some(vec![0, 0x80, 0xff]));
+		assert_ne!(wrapped.payer_metadata(), wrapped.metadata().unwrap());
 	}
 
 	#[test]
