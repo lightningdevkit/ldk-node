@@ -53,8 +53,11 @@ pub use lightning_liquidity::lsps1::msgs::{
 	LSPS1ChannelInfo, LSPS1OrderId, LSPS1OrderParams, LSPS1PaymentState,
 };
 use lightning_types::features::{
-	ChannelFeatures as LdkChannelFeatures, ChannelTypeFeatures as LdkChannelTypeFeatures,
-	InitFeatures as LdkInitFeatures, NodeFeatures as LdkNodeFeatures,
+	Bolt11InvoiceFeatures as LdkBolt11InvoiceFeatures,
+	Bolt12InvoiceFeatures as LdkBolt12InvoiceFeatures, ChannelFeatures as LdkChannelFeatures,
+	ChannelTypeFeatures as LdkChannelTypeFeatures, InitFeatures as LdkInitFeatures,
+	InvoiceRequestFeatures as LdkInvoiceRequestFeatures, NodeFeatures as LdkNodeFeatures,
+	OfferFeatures as LdkOfferFeatures,
 };
 pub use lightning_types::payment::{PaymentHash, PaymentPreimage, PaymentSecret};
 pub use lightning_types::string::UntrustedString;
@@ -263,6 +266,11 @@ pub struct Offer {
 
 #[uniffi::export]
 impl Offer {
+	/// Features pertaining to the offer.
+	pub fn offer_features(&self) -> Arc<OfferFeatures> {
+		Arc::new(self.inner.offer_features().clone().into())
+	}
+
 	#[uniffi::constructor]
 	pub fn from_str(offer_str: &str) -> Result<Self, Error> {
 		offer_str.parse()
@@ -481,6 +489,11 @@ pub struct Refund {
 
 #[uniffi::export]
 impl Refund {
+	/// Features pertaining to requesting an invoice for the refund.
+	pub fn features(&self) -> Arc<InvoiceRequestFeatures> {
+		Arc::new(self.inner.features().clone().into())
+	}
+
 	#[uniffi::constructor]
 	pub fn from_str(refund_str: &str) -> Result<Self, Error> {
 		refund_str.parse()
@@ -595,6 +608,21 @@ pub struct Bolt12Invoice {
 
 #[uniffi::export]
 impl Bolt12Invoice {
+	/// Features of the originating offer, or `None` for a refund invoice.
+	pub fn offer_features(&self) -> Option<Arc<OfferFeatures>> {
+		self.inner.offer_features().map(|features| Arc::new(features.clone().into()))
+	}
+
+	/// Features pertaining to the originating invoice request or refund.
+	pub fn invoice_request_features(&self) -> Arc<InvoiceRequestFeatures> {
+		Arc::new(self.inner.invoice_request_features().clone().into())
+	}
+
+	/// Features pertaining to paying the invoice.
+	pub fn invoice_features(&self) -> Arc<Bolt12InvoiceFeatures> {
+		Arc::new(self.inner.invoice_features().clone().into())
+	}
+
 	#[uniffi::constructor]
 	pub fn from_str(invoice_str: &str) -> Result<Self, Error> {
 		invoice_str.parse()
@@ -832,6 +860,16 @@ pub struct StaticInvoice {
 
 #[uniffi::export]
 impl StaticInvoice {
+	/// Features pertaining to the originating offer.
+	pub fn offer_features(&self) -> Arc<OfferFeatures> {
+		Arc::new(self.inner.offer_features().clone().into())
+	}
+
+	/// Features pertaining to paying the invoice.
+	pub fn invoice_features(&self) -> Arc<Bolt12InvoiceFeatures> {
+		Arc::new(self.inner.invoice_features().clone().into())
+	}
+
 	/// Returns the originating offer's identifier.
 	pub fn offer_id(&self) -> OfferId {
 		self.inner.offer_id()
@@ -1555,6 +1593,11 @@ pub struct Bolt11Invoice {
 
 #[uniffi::export]
 impl Bolt11Invoice {
+	/// Invoice features, if included in the invoice.
+	pub fn features(&self) -> Option<Arc<Bolt11InvoiceFeatures>> {
+		self.inner.features().map(|features| Arc::new(features.clone().into()))
+	}
+
 	#[uniffi::constructor]
 	pub fn from_str(invoice_str: &str) -> Result<Self, Error> {
 		invoice_str.parse()
@@ -2078,6 +2121,184 @@ pub enum ClosureReason {
 		/// The required feerate we enforce.
 		required_feerate_sat_per_kw: u32,
 	},
+}
+
+/// Protocol features for BOLT11 invoices.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
+pub struct Bolt11InvoiceFeatures {
+	pub(crate) inner: LdkBolt11InvoiceFeatures,
+}
+
+#[uniffi::export]
+impl Bolt11InvoiceFeatures {
+	/// Constructs BOLT11 invoice features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkBolt11InvoiceFeatures::from_be_bytes(bytes.to_vec()) }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation, without a length prefix.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.le_flags().iter().rev().copied().collect()
+	}
+
+	/// Whether the invoice advertises support for `var_onion_optin`.
+	pub fn supports_variable_length_onion(&self) -> bool {
+		self.inner.supports_variable_length_onion()
+	}
+
+	/// Whether the invoice requires `var_onion_optin`.
+	pub fn requires_variable_length_onion(&self) -> bool {
+		self.inner.requires_variable_length_onion()
+	}
+
+	/// Whether the invoice advertises support for `payment_secret`.
+	pub fn supports_payment_secret(&self) -> bool {
+		self.inner.supports_payment_secret()
+	}
+
+	/// Whether the invoice requires `payment_secret`.
+	pub fn requires_payment_secret(&self) -> bool {
+		self.inner.requires_payment_secret()
+	}
+
+	/// Whether the invoice advertises support for `basic_mpp`.
+	pub fn supports_basic_mpp(&self) -> bool {
+		self.inner.supports_basic_mpp()
+	}
+
+	/// Whether the invoice requires `basic_mpp`.
+	pub fn requires_basic_mpp(&self) -> bool {
+		self.inner.requires_basic_mpp()
+	}
+
+	/// Whether the invoice advertises support for `payment_metadata`.
+	pub fn supports_payment_metadata(&self) -> bool {
+		self.inner.supports_payment_metadata()
+	}
+
+	/// Whether the invoice requires `payment_metadata`.
+	pub fn requires_payment_metadata(&self) -> bool {
+		self.inner.requires_payment_metadata()
+	}
+
+	/// Whether the invoice advertises support for `option_trampoline`.
+	pub fn supports_trampoline_routing(&self) -> bool {
+		self.inner.supports_trampoline_routing()
+	}
+
+	/// Whether the invoice requires `option_trampoline`.
+	pub fn requires_trampoline_routing(&self) -> bool {
+		self.inner.requires_trampoline_routing()
+	}
+}
+
+impl From<LdkBolt11InvoiceFeatures> for Bolt11InvoiceFeatures {
+	fn from(features: LdkBolt11InvoiceFeatures) -> Self {
+		Self { inner: features }
+	}
+}
+
+/// Protocol features for BOLT12 invoices.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
+pub struct Bolt12InvoiceFeatures {
+	pub(crate) inner: LdkBolt12InvoiceFeatures,
+}
+
+#[uniffi::export]
+impl Bolt12InvoiceFeatures {
+	/// Constructs BOLT12 invoice features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkBolt12InvoiceFeatures::from_be_bytes(bytes.to_vec()) }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation, without a length prefix.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.le_flags().iter().rev().copied().collect()
+	}
+
+	/// Whether the invoice advertises support for `basic_mpp`.
+	pub fn supports_basic_mpp(&self) -> bool {
+		self.inner.supports_basic_mpp()
+	}
+
+	/// Whether the invoice requires `basic_mpp`.
+	pub fn requires_basic_mpp(&self) -> bool {
+		self.inner.requires_basic_mpp()
+	}
+
+	/// Whether the invoice advertises support for `option_trampoline`.
+	pub fn supports_trampoline_routing(&self) -> bool {
+		self.inner.supports_trampoline_routing()
+	}
+
+	/// Whether the invoice requires `option_trampoline`.
+	pub fn requires_trampoline_routing(&self) -> bool {
+		self.inner.requires_trampoline_routing()
+	}
+}
+
+impl From<LdkBolt12InvoiceFeatures> for Bolt12InvoiceFeatures {
+	fn from(features: LdkBolt12InvoiceFeatures) -> Self {
+		Self { inner: features }
+	}
+}
+
+/// Protocol features for BOLT12 offers.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
+pub struct OfferFeatures {
+	pub(crate) inner: LdkOfferFeatures,
+}
+
+#[uniffi::export]
+impl OfferFeatures {
+	/// Constructs BOLT12 offer features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkOfferFeatures::from_be_bytes(bytes.to_vec()) }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation, without a length prefix.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.le_flags().iter().rev().copied().collect()
+	}
+}
+
+impl From<LdkOfferFeatures> for OfferFeatures {
+	fn from(features: LdkOfferFeatures) -> Self {
+		Self { inner: features }
+	}
+}
+
+/// Protocol features for BOLT12 invoice requests.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
+#[uniffi::export(Debug, Eq)]
+pub struct InvoiceRequestFeatures {
+	pub(crate) inner: LdkInvoiceRequestFeatures,
+}
+
+#[uniffi::export]
+impl InvoiceRequestFeatures {
+	/// Constructs BOLT12 invoice request features from big-endian BOLT 9 encoded bytes.
+	#[uniffi::constructor]
+	pub fn from_bytes(bytes: &[u8]) -> Self {
+		Self { inner: LdkInvoiceRequestFeatures::from_be_bytes(bytes.to_vec()) }
+	}
+
+	/// Returns the BOLT 9 big-endian encoded representation, without a length prefix.
+	pub fn to_bytes(&self) -> Vec<u8> {
+		self.inner.le_flags().iter().rev().copied().collect()
+	}
+}
+
+impl From<LdkInvoiceRequestFeatures> for InvoiceRequestFeatures {
+	fn from(features: LdkInvoiceRequestFeatures) -> Self {
+		Self { inner: features }
+	}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Object)]
@@ -2810,7 +3031,82 @@ mod tests {
 			let init_features = InitFeatures::from_bytes(&bytes);
 			assert_eq!(init_features.to_bytes(), bytes);
 			assert_eq!(InitFeatures::from_bytes(&init_features.to_bytes()), init_features);
+
+			let features = Bolt11InvoiceFeatures::from_bytes(&bytes);
+			assert_eq!(features.to_bytes(), bytes);
+			assert_eq!(Bolt11InvoiceFeatures::from_bytes(&features.to_bytes()), features);
+
+			let features = Bolt12InvoiceFeatures::from_bytes(&bytes);
+			assert_eq!(features.to_bytes(), bytes);
+			assert_eq!(Bolt12InvoiceFeatures::from_bytes(&features.to_bytes()), features);
+
+			let features = OfferFeatures::from_bytes(&bytes);
+			assert_eq!(features.to_bytes(), bytes);
+			assert_eq!(OfferFeatures::from_bytes(&features.to_bytes()), features);
+
+			let features = InvoiceRequestFeatures::from_bytes(&bytes);
+			assert_eq!(features.to_bytes(), bytes);
+			assert_eq!(InvoiceRequestFeatures::from_bytes(&features.to_bytes()), features);
 		}
+	}
+
+	#[test]
+	fn test_invoice_feature_accessors() {
+		// Bolt11InvoiceFeatures: variable_length_onion, optional bit 9 and required bit 8.
+		let optional = Bolt11InvoiceFeatures::from_bytes(&[2, 0]);
+		let required = Bolt11InvoiceFeatures::from_bytes(&[1, 0]);
+		assert!(optional.supports_variable_length_onion());
+		assert!(!optional.requires_variable_length_onion());
+		assert!(required.supports_variable_length_onion());
+		assert!(required.requires_variable_length_onion());
+
+		// Bolt11InvoiceFeatures: payment_secret, optional bit 15 and required bit 14.
+		let optional = Bolt11InvoiceFeatures::from_bytes(&[128, 0]);
+		let required = Bolt11InvoiceFeatures::from_bytes(&[64, 0]);
+		assert!(optional.supports_payment_secret());
+		assert!(!optional.requires_payment_secret());
+		assert!(required.supports_payment_secret());
+		assert!(required.requires_payment_secret());
+
+		// Bolt11InvoiceFeatures: basic_mpp, optional bit 17 and required bit 16.
+		let optional = Bolt11InvoiceFeatures::from_bytes(&[2, 0, 0]);
+		let required = Bolt11InvoiceFeatures::from_bytes(&[1, 0, 0]);
+		assert!(optional.supports_basic_mpp());
+		assert!(!optional.requires_basic_mpp());
+		assert!(required.supports_basic_mpp());
+		assert!(required.requires_basic_mpp());
+
+		// Bolt11InvoiceFeatures: payment_metadata, optional bit 49 and required bit 48.
+		let optional = Bolt11InvoiceFeatures::from_bytes(&[2, 0, 0, 0, 0, 0, 0]);
+		let required = Bolt11InvoiceFeatures::from_bytes(&[1, 0, 0, 0, 0, 0, 0]);
+		assert!(optional.supports_payment_metadata());
+		assert!(!optional.requires_payment_metadata());
+		assert!(required.supports_payment_metadata());
+		assert!(required.requires_payment_metadata());
+
+		// Bolt11InvoiceFeatures: trampoline_routing, optional bit 57 and required bit 56.
+		let optional = Bolt11InvoiceFeatures::from_bytes(&[2, 0, 0, 0, 0, 0, 0, 0]);
+		let required = Bolt11InvoiceFeatures::from_bytes(&[1, 0, 0, 0, 0, 0, 0, 0]);
+		assert!(optional.supports_trampoline_routing());
+		assert!(!optional.requires_trampoline_routing());
+		assert!(required.supports_trampoline_routing());
+		assert!(required.requires_trampoline_routing());
+
+		// Bolt12InvoiceFeatures: basic_mpp, optional bit 17 and required bit 16.
+		let optional = Bolt12InvoiceFeatures::from_bytes(&[2, 0, 0]);
+		let required = Bolt12InvoiceFeatures::from_bytes(&[1, 0, 0]);
+		assert!(optional.supports_basic_mpp());
+		assert!(!optional.requires_basic_mpp());
+		assert!(required.supports_basic_mpp());
+		assert!(required.requires_basic_mpp());
+
+		// Bolt12InvoiceFeatures: trampoline_routing, optional bit 57 and required bit 56.
+		let optional = Bolt12InvoiceFeatures::from_bytes(&[2, 0, 0, 0, 0, 0, 0, 0]);
+		let required = Bolt12InvoiceFeatures::from_bytes(&[1, 0, 0, 0, 0, 0, 0, 0]);
+		assert!(optional.supports_trampoline_routing());
+		assert!(!optional.requires_trampoline_routing());
+		assert!(required.supports_trampoline_routing());
+		assert!(required.requires_trampoline_routing());
 	}
 
 	fn create_test_bolt11_invoice() -> (LdkBolt11Invoice, Bolt11Invoice) {
@@ -2945,6 +3241,8 @@ mod tests {
 	fn test_static_invoice_properties() {
 		for with_details in [false, true] {
 			let (invoice, wrapped) = create_test_static_invoice(with_details);
+			assert_eq!(wrapped.offer_features().inner, *invoice.offer_features());
+			assert_eq!(wrapped.invoice_features().inner, *invoice.invoice_features());
 			assert_eq!(wrapped.offer_id(), invoice.offer_id());
 			assert_eq!(wrapped.invoice_description(), invoice.description().map(|v| v.to_string()));
 			assert_eq!(wrapped.issuer(), invoice.issuer().map(|v| v.to_string()));
@@ -3017,6 +3315,10 @@ mod tests {
 	#[test]
 	fn test_bolt11_invoice_basic_properties() {
 		let (ldk_invoice, wrapped_invoice) = create_test_bolt11_invoice();
+		assert_eq!(
+			wrapped_invoice.features().map(|f| f.inner.clone()),
+			ldk_invoice.features().cloned()
+		);
 
 		assert_eq!(
 			ldk_invoice.payment_hash().to_string(),
@@ -3141,6 +3443,7 @@ mod tests {
 	#[test]
 	fn test_offer() {
 		let (ldk_offer, wrapped_offer) = create_test_offer();
+		assert_eq!(wrapped_offer.offer_features().inner, *ldk_offer.offer_features());
 		match (ldk_offer.description(), wrapped_offer.offer_description()) {
 			(Some(ldk_desc), Some(wrapped_desc)) => {
 				assert_eq!(ldk_desc.to_string(), wrapped_desc);
@@ -3262,6 +3565,7 @@ mod tests {
 	#[test]
 	fn test_refund_properties() {
 		let (ldk_refund, wrapped_refund) = create_test_refund();
+		assert_eq!(wrapped_refund.features().inner, *ldk_refund.features());
 
 		assert_eq!(ldk_refund.description().to_string(), wrapped_refund.refund_description());
 		assert_eq!(ldk_refund.amount_msats(), wrapped_refund.amount_msats());
@@ -3325,6 +3629,12 @@ mod tests {
 	#[test]
 	fn test_bolt12_invoice_properties() {
 		let (ldk_invoice, wrapped_invoice) = create_test_bolt12_invoice();
+		assert!(wrapped_invoice.offer_features().is_none());
+		assert_eq!(
+			wrapped_invoice.invoice_request_features().inner,
+			*ldk_invoice.invoice_request_features()
+		);
+		assert_eq!(wrapped_invoice.invoice_features().inner, *ldk_invoice.invoice_features());
 
 		assert!(ldk_invoice.is_for_refund());
 		assert_eq!(wrapped_invoice.offer_id(), None);
@@ -3493,6 +3803,9 @@ mod tests {
 			.unwrap();
 		let wrapped = Bolt12Invoice::from_str(&hex_utils::to_string(&invoice.encode())).unwrap();
 		assert_eq!(wrapped.offer_id(), Some(offer.id()));
+		assert_eq!(wrapped.offer_features().unwrap().inner, *offer.offer_features());
+		assert_eq!(wrapped.invoice_request_features().inner, *request.invoice_request_features());
+		assert_eq!(wrapped.invoice_features().inner, *invoice.invoice_features());
 		assert_eq!(wrapped.payer_metadata(), request.payer_metadata());
 		assert_eq!(wrapped.metadata(), Some(vec![0, 0x80, 0xff]));
 		assert_ne!(wrapped.payer_metadata(), wrapped.metadata().unwrap());
