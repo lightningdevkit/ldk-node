@@ -12,7 +12,8 @@ jobs:
     timeout-minutes: 30
     strategy:
       matrix:
-        # Keep these endpoints in sync with the supported range in Cargo.toml.
+        # The oldest release sqlite-thin can share a libsqlite3-sys with, and the newest
+        # release line entirely compiling on our MSRV.
         rusqlite: ["0.31.0", "0.39.0"]
     env:
       CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback

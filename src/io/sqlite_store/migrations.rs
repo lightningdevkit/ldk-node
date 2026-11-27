@@ -6,7 +6,7 @@
 // accordance with one or both of these licenses.
 
 use lightning::io;
-use rusqlite::Connection;
+use sqlite_thin::Connection;
 
 pub(super) fn migrate_schema(
 	connection: &mut Connection, kv_table_name: &str, mut from_version: u16, to_version: u16,
@@ -68,7 +68,7 @@ fn migrate_v1_to_v2(connection: &mut Connection, kv_table_name: &str) -> io::Res
 }
 
 fn migrate_v2_to_v3(connection: &mut Connection, kv_table_name: &str) -> io::Result<()> {
-	let map_err = |e: rusqlite::Error| -> io::Error {
+	let map_err = |e: sqlite_thin::Error| -> io::Error {
 		let msg = format!("Failed to migrate table {} from v2 to v3: {}", kv_table_name, e);
 		io::Error::new(io::ErrorKind::Other, msg)
 	};
@@ -166,7 +166,7 @@ mod tests {
 	use std::fs;
 
 	use lightning::util::persist::{KVStore, PaginatedKVStore};
-	use rusqlite::{named_params, Connection};
+	use sqlite_thin::{named_params, Connection};
 
 	use crate::io::sqlite_store::SqliteStore;
 	use crate::io::test_utils::{do_read_write_remove_list_persist, random_storage_path};
@@ -326,5 +326,103 @@ mod tests {
 
 		// Check we can continue to use the store just fine.
 		do_read_write_remove_list_persist(&store).await;
+	}
+
+	#[tokio::test]
+	async fn failed_schema_2_migration_rolls_back() {
+		let mut temp_path = random_storage_path();
+		temp_path.push("failed_schema_2_migration_rolls_back");
+
+		let db_file_name = "test_db".to_string();
+		let kv_table_name = "test_table".to_string();
+
+		let test_ns = "testspace";
+		let test_sub = "testsub";
+
+		fs::create_dir_all(temp_path.clone()).unwrap();
+		let mut db_file_path = temp_path.clone();
+		db_file_path.push(db_file_name.clone());
+
+		let read_state = |connection: &Connection| -> (u16, Vec<String>, i64) {
+			let user_version = connection
+				.query_row("SELECT user_version FROM pragma_user_version", [], |row| row.get(0))
+				.unwrap();
+			let mut stmt =
+				connection.prepare(&format!("PRAGMA table_info({})", kv_table_name)).unwrap();
+			let columns = stmt
+				.query_map([], |row| row.get::<_, String>(1))
+				.unwrap()
+				.collect::<Result<Vec<_>, _>>()
+				.unwrap();
+			let row_count = connection
+				.query_row(&format!("SELECT COUNT(*) FROM {}", kv_table_name), [], |row| row.get(0))
+				.unwrap();
+			(user_version, columns, row_count)
+		};
+
+		let connection = Connection::open(db_file_path.clone()).unwrap();
+		connection.pragma_update(None, "user_version", 2u16).unwrap();
+
+		let sql = format!(
+			"CREATE TABLE IF NOT EXISTS {} (
+				primary_namespace TEXT NOT NULL,
+				secondary_namespace TEXT DEFAULT \"\" NOT NULL,
+				key TEXT NOT NULL CHECK (key <> ''),
+				value BLOB, PRIMARY KEY ( primary_namespace, secondary_namespace, key )
+				);",
+			kv_table_name
+		);
+		connection.execute(&sql, []).unwrap();
+
+		for i in 0..3 {
+			let sql = format!(
+				"INSERT INTO {} (primary_namespace, secondary_namespace, key, value) VALUES (:ns, :sub, :key, :value);",
+				kv_table_name
+			);
+			connection
+				.execute(
+					&sql,
+					named_params! {
+						":ns": test_ns,
+						":sub": test_sub,
+						":key": format!("key_{}", i),
+						":value": vec![i as u8; 8],
+					},
+				)
+				.unwrap();
+		}
+
+		// The migration only creates its index after having altered the table, so that a
+		// pre-existing index of the same name makes it fail halfway through.
+		let sql =
+			format!("CREATE INDEX idx_{}_paginated ON {} (key)", kv_table_name, kv_table_name);
+		connection.execute(&sql, []).unwrap();
+
+		let state_before = read_state(&connection);
+		assert_eq!(state_before.0, 2);
+		assert!(!state_before.1.contains(&"sort_order".to_string()));
+		assert_eq!(state_before.2, 3);
+
+		assert!(SqliteStore::new(
+			temp_path.clone(),
+			Some(db_file_name.clone()),
+			Some(kv_table_name.clone())
+		)
+		.is_err());
+		assert_eq!(read_state(&connection), state_before);
+
+		// Once the conflict is resolved, the migration needs to be able to start over.
+		connection.execute(&format!("DROP INDEX idx_{}_paginated", kv_table_name), []).unwrap();
+		drop(connection);
+
+		let store = SqliteStore::new(temp_path, Some(db_file_name), Some(kv_table_name)).unwrap();
+		for i in 0..3 {
+			let key = format!("key_{}", i);
+			let data = KVStore::read(&store, test_ns, test_sub, &key).await.unwrap();
+			assert_eq!(data, vec![i as u8; 8]);
+		}
+		let response =
+			PaginatedKVStore::list_paginated(&store, test_ns, test_sub, None).await.unwrap();
+		assert_eq!(response.keys, vec!["key_2", "key_1", "key_0"]);
 	}
 }

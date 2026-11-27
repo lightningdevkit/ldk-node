@@ -52,7 +52,7 @@ chain-electrum = [
 	"lightning-transaction-sync/electrum-rustls-ring",
 ]
 chain-bitcoind = ["dep:lightning-block-sync"]
-storage-sqlite = ["dep:rusqlite"]
+storage-sqlite = ["dep:sqlite-thin"]
 storage-filesystem = ["dep:lightning-persister"]
 storage-vss = ["dep:vss-client", "dep:prost"]
 storage-postgres = ["dep:tokio-postgres", "dep:native-tls", "dep:postgres-native-tls"]
@@ -106,8 +106,7 @@ bdk_wallet = { version = "3.2.0", default-features = false, features = ["std", "
 
 bitreq = { version = "0.3", default-features = false, features = ["async-https", "json-using-serde"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-# rusqlite 0.40.0 and 0.40.1 do not compile on our MSRV.
-rusqlite = { version = ">=0.31.0, <0.40.0", features = ["bundled"], optional = true }
+sqlite-thin = { git = "https://github.com/thesimplekid/cdk", rev = "50b2688b0c0b78e55538935a795f83ad1f26c58a", features = ["bundled"], optional = true }
 bitcoin = "0.32.7"
 bip39 = { version = "3.0.0", features = ["rand"] }
 bip21 = { version = "0.5", features = ["std"], default-features = false, optional = true }
