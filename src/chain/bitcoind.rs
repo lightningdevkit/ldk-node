@@ -518,6 +518,10 @@ impl BitcoindChainSource {
 				log_trace!(self.logger, "Finished polling best tip in {}ms", elapsed_ms);
 				*self.latest_chain_tip.write().expect("lock") = Some(tip);
 			},
+			Ok((ChainTip::Better(tip), false)) => {
+				log_error!(self.logger, "Failed to sync to new chain tip at height {}", tip.height);
+				return Err(Error::TxSyncFailed);
+			},
 			Ok(_) => {},
 			Err(e) => {
 				log_error!(self.logger, "Failed to poll for chain data: {:?}", e);
