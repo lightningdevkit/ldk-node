@@ -19,13 +19,14 @@ use tokio_util::task::TaskTracker;
 use crate::config::{
 	BACKGROUND_TASK_SHUTDOWN_TIMEOUT_SECS, LDK_EVENT_HANDLER_SHUTDOWN_TIMEOUT_SECS,
 };
+use crate::error::Error;
 use crate::logger::{log_debug, log_error, log_trace, LdkLogger, Logger};
 
 pub(crate) struct Runtime {
 	mode: RuntimeMode,
 	background_tasks: Mutex<JoinSet<()>>,
 	cancellable_background_tasks: Mutex<CancellableBackgroundTasks>,
-	background_processor_task: Mutex<Option<JoinHandle<()>>>,
+	background_processor_task: Mutex<Option<JoinHandle<Result<(), lightning::io::Error>>>>,
 	logger: Arc<Logger>,
 }
 
@@ -156,7 +157,7 @@ impl Runtime {
 
 	pub fn spawn_background_processor_task<F>(&self, future: F)
 	where
-		F: Future<Output = ()> + Send + 'static,
+		F: Future<Output = Result<(), lightning::io::Error>> + Send + 'static,
 	{
 		let mut background_processor_task = self.background_processor_task.lock().expect("lock");
 		debug_assert!(background_processor_task.is_none(), "Expected no background processor_task");
@@ -238,7 +239,9 @@ impl Runtime {
 	///
 	/// Note this may find no task at all, as it's also reached when winding down a startup that
 	/// failed before spawning it.
-	pub fn wait_on_background_processor_task(&self) {
+	///
+	/// Returns [`Error::PersistenceFailed`] if the task failed or panicked.
+	pub fn wait_on_background_processor_task(&self) -> Result<(), Error> {
 		if let Some(background_processor_task) =
 			self.background_processor_task.lock().expect("lock").take()
 		{
@@ -256,17 +259,17 @@ impl Runtime {
 
 			match timeout_res {
 				Ok(stop_res) => match stop_res {
-					Ok(()) => {
+					Ok(Ok(())) => {
 						log_debug!(self.logger, "Stopped background processing of events.");
+					},
+					Ok(Err(e)) => {
+						log_error!(self.logger, "Background processing of events failed: {}", e);
+						return Err(Error::PersistenceFailed);
 					},
 					Err(e) => {
 						abort_handle.abort();
-						log_error!(
-							self.logger,
-							"Stopping event handling failed. This should never happen: {}",
-							e
-						);
-						panic!("Stopping event handling failed. This should never happen.");
+						log_error!(self.logger, "Background processing of events panicked: {}", e);
+						return Err(Error::PersistenceFailed);
 					},
 				},
 				Err(e) => {
@@ -275,6 +278,7 @@ impl Runtime {
 				},
 			}
 		}
+		Ok(())
 	}
 
 	#[cfg(tokio_unstable)]
@@ -474,7 +478,37 @@ mod tests {
 		let runtime = test_runtime();
 		runtime.abort_cancellable_background_tasks();
 		runtime.wait_on_background_tasks();
-		runtime.wait_on_background_processor_task();
+		assert!(runtime.wait_on_background_processor_task().is_ok());
+	}
+
+	#[test]
+	fn background_processor_success_is_reported_as_ok() {
+		let runtime = test_runtime();
+		runtime.spawn_background_processor_task(async { Ok(()) });
+		assert!(runtime.wait_on_background_processor_task().is_ok());
+	}
+
+	#[test]
+	fn background_processor_error_is_returned_instead_of_panicking() {
+		let runtime = test_runtime();
+		runtime.spawn_background_processor_task(async {
+			Err(lightning::io::Error::new(lightning::io::ErrorKind::Other, "persist failed"))
+		});
+		assert!(matches!(
+			runtime.wait_on_background_processor_task(),
+			Err(Error::PersistenceFailed)
+		));
+		assert!(runtime.wait_on_background_processor_task().is_ok());
+	}
+
+	#[test]
+	fn background_processor_panic_is_returned_instead_of_propagated() {
+		let runtime = test_runtime();
+		runtime.spawn_background_processor_task(async { panic!("background processor panicked") });
+		assert!(matches!(
+			runtime.wait_on_background_processor_task(),
+			Err(Error::PersistenceFailed)
+		));
 	}
 
 	#[test]
