@@ -110,7 +110,8 @@ impl<R: Router, ES: EntropySource> Router for LSPS2Router<R, ES> {
 					.network_graph
 					.read_only()
 					.node(&NodeId::from_pubkey(&channel.counterparty.node_id))
-					.is_some() && channel.counterparty.forwarding_info.is_some()
+					.is_some()
+				&& channel.counterparty.forwarding_info.is_some()
 		};
 		let direct_path_has_sufficient_liquidity = amount_msats.map_or(true, |amount_msats| {
 			if allow_mpp {
