@@ -1547,6 +1547,7 @@ impl Node {
 				.try_into()
 				.expect("a 16-byte slice should convert into a [u8; 16]"),
 		);
+		self.runtime.block_on(self.peer_store.add_peer(peer_info.clone()))?;
 
 		// Register the fee-rate override before creating the channel, as the
 		// `FundingGenerationReady` event may be handled before `create_channel` returns.
@@ -1584,7 +1585,6 @@ impl Node {
 					zero_reserve_string,
 					peer_info.node_id
 				);
-				self.runtime.block_on(self.peer_store.add_peer(peer_info))?;
 				Ok(UserChannelId(user_channel_id))
 			},
 			Err(e) => {
