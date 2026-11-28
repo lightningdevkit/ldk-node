@@ -551,6 +551,7 @@ impl Node {
 			for listener in listeners {
 				let logger = Arc::clone(&listening_logger);
 				let peer_mgr = Arc::clone(&peer_manager_connection_handler);
+				let listen_cm = Arc::clone(&self.connection_manager);
 				let mut stop_listen = self.stop_sender.subscribe();
 				let runtime = Arc::clone(&self.runtime);
 				self.runtime.spawn_cancellable_background_task(async move {
@@ -571,6 +572,9 @@ impl Node {
 										continue;
 									},
 								};
+								if listen_cm.connections_disabled() {
+									continue;
+								}
 								let peer_mgr = Arc::clone(&peer_mgr);
 								let logger = Arc::clone(&logger);
 								runtime.spawn_cancellable_background_task(async move {
@@ -816,8 +820,7 @@ impl Node {
 		let background_onion_messenger = Arc::clone(&self.onion_messenger);
 		let background_logger = Arc::clone(&self.logger);
 		let background_error_logger = Arc::clone(&self.logger);
-		let background_failure_stop_sender = self.stop_sender.clone();
-		let background_failure_peer_man = Arc::clone(&self.peer_manager);
+		let background_failure_cm = Arc::clone(&self.connection_manager);
 		let background_scorer = Arc::clone(&self.scorer);
 		let stop_bp = self.background_processor_stop_sender.subscribe();
 		let sleeper_logger = Arc::clone(&self.logger);
@@ -868,11 +871,10 @@ impl Node {
 			if let Err(e) = &res {
 				log_error!(
 					background_error_logger,
-					"Background processing of events failed, halting node activity: {}",
+					"Background processing of events failed, disconnecting all peers: {}",
 					e
 				);
-				let _ = background_failure_stop_sender.send(());
-				background_failure_peer_man.disconnect_all_peers();
+				background_failure_cm.disable_connections();
 			}
 
 			res

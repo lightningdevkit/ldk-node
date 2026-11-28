@@ -7,6 +7,7 @@
 
 use std::collections::hash_map::{self, HashMap};
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -57,7 +58,7 @@ where
 {
 	pending_connections: PendingConnections,
 	peer_manager: Arc<PeerManager>,
-	disable_lightning_connections: bool,
+	connections_disabled: AtomicBool,
 	tor_proxy_config: Option<TorConfig>,
 	keys_manager: Arc<KeysManager>,
 	logger: L,
@@ -76,7 +77,7 @@ where
 		Self {
 			pending_connections,
 			peer_manager,
-			disable_lightning_connections,
+			connections_disabled: AtomicBool::new(disable_lightning_connections),
 			tor_proxy_config,
 			keys_manager,
 			logger,
@@ -91,6 +92,16 @@ where
 		}
 
 		self.do_connect_peer(node_id, addr).await
+	}
+
+	/// Refuses any further peer connections and disconnects all connected peers.
+	pub(crate) fn disable_connections(&self) {
+		self.connections_disabled.store(true, Ordering::Release);
+		self.peer_manager.disconnect_all_peers();
+	}
+
+	pub(crate) fn connections_disabled(&self) -> bool {
+		self.connections_disabled.load(Ordering::Acquire)
 	}
 
 	pub(crate) fn disconnect_peer(&self, node_id: PublicKey) {
@@ -123,7 +134,7 @@ where
 	async fn do_connect_peer_internal(
 		&self, node_id: PublicKey, addr: SocketAddress,
 	) -> Result<(), Error> {
-		if self.disable_lightning_connections {
+		if self.connections_disabled() {
 			log_warn!(self.logger, "Lightning peer connections are disabled.");
 			return Err(Error::ConnectionFailed);
 		}
